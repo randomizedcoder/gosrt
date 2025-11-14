@@ -16,6 +16,19 @@ import (
 	"github.com/datarhei/gosrt/congestion/live"
 	"github.com/datarhei/gosrt/crypto"
 	"github.com/datarhei/gosrt/packet"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+const (
+	CHANNEL_SIZE = 1024
+
+	DEFAULT_RTT    = 100 * time.Millisecond
+	DEFAULT_RTTVAR = 50 * time.Millisecond
+
+	TICK_DURATION = 10 * time.Millisecond
+	ACK_INTERVAL  = 10_000
+	NAK_INTERVAL  = 20_000
 )
 
 // Conn is a SRT network connection.
@@ -69,6 +82,57 @@ type Conn interface {
 	Version() uint32
 }
 
+var (
+	pC = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: "connection",
+			Name:      "counts",
+			Help:      "gosrt connection counts",
+		},
+		[]string{"function", "type", "SocketId"},
+	)
+
+	pR = promauto.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Subsystem: "connection",
+			Name:      "rtt_seconds",
+			Help:      "gosrt rtt and rttvar in seconds",
+			Objectives: map[float64]float64{
+				0.1:  quantileError,
+				0.5:  quantileError,
+				0.99: quantileError,
+			},
+			MaxAge: summaryVecMaxAge,
+		},
+		[]string{"variable", "SocketId"},
+	)
+
+	// Channel blocking metrics
+	connectionChannelBlockedDuration = promauto.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Subsystem: "connection",
+			Name:      "channel_blocked_duration_seconds",
+			Help:      "Duration that channels were blocked (when send was not immediate)",
+			Objectives: map[float64]float64{
+				0.1:  quantileError,
+				0.5:  quantileError,
+				0.99: quantileError,
+			},
+			MaxAge: summaryVecMaxAge,
+		},
+		[]string{"channel", "SocketId"},
+	)
+
+	connectionChannelBlockedCount = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: "connection",
+			Name:      "channel_blocked_total",
+			Help:      "Total number of times channels were blocked",
+		},
+		[]string{"channel", "SocketId"},
+	)
+)
+
 type rtt struct {
 	rtt    float64 // microseconds
 	rttVar float64 // microseconds
@@ -76,7 +140,10 @@ type rtt struct {
 	lock sync.RWMutex
 }
 
-func (r *rtt) Recalculate(rtt time.Duration) {
+func (r *rtt) Recalculate(rtt time.Duration, socketId string) {
+
+	pR.WithLabelValues("RTT", socketId).Observe(rtt.Seconds())
+
 	// 4.10.  Round-Trip Time Estimation
 	lastRTT := float64(rtt.Microseconds())
 
@@ -85,6 +152,8 @@ func (r *rtt) Recalculate(rtt time.Duration) {
 
 	r.rtt = r.rtt*0.875 + lastRTT*0.125
 	r.rttVar = r.rttVar*0.75 + math.Abs(r.rtt-lastRTT)*0.25
+
+	pR.WithLabelValues("RTTVar", socketId).Observe(r.rttVar / 1e6)
 }
 
 func (r *rtt) RTT() float64 {
@@ -275,13 +344,13 @@ func newSRTConn(config srtConnConfig) *srtConn {
 
 	// 4.10.  Round-Trip Time Estimation
 	c.rtt = rtt{
-		rtt:    float64((100 * time.Millisecond).Microseconds()),
-		rttVar: float64((50 * time.Millisecond).Microseconds()),
+		rtt:    float64((DEFAULT_RTT).Microseconds()),
+		rttVar: float64((DEFAULT_RTTVAR).Microseconds()),
 	}
 
-	c.networkQueue = make(chan packet.Packet, 1024)
+	c.networkQueue = make(chan packet.Packet, CHANNEL_SIZE)
 
-	c.writeQueue = make(chan packet.Packet, 1024)
+	c.writeQueue = make(chan packet.Packet, CHANNEL_SIZE)
 	if c.version == 4 {
 		// libsrt-1.2.3 receiver doesn't like it when the payload is larger than 7*188 bytes.
 		// Here we just take a multiple of a mpegts chunk size.
@@ -291,7 +360,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		c.writeData = make([]byte, int(c.config.PayloadSize))
 	}
 
-	c.readQueue = make(chan packet.Packet, 1024)
+	c.readQueue = make(chan packet.Packet, CHANNEL_SIZE)
 
 	c.peerIdleTimeout = time.AfterFunc(c.config.PeerIdleTimeout, func() {
 		c.log("connection:close", func() string {
@@ -300,14 +369,14 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		go c.close()
 	})
 
-	c.tick = 10 * time.Millisecond
+	c.tick = TICK_DURATION
 
 	// 4.8.1.  Packet Acknowledgement (ACKs, ACKACKs) -> periodicACK = 10 milliseconds
 	// 4.8.2.  Packet Retransmission (NAKs) -> periodicNAK at least 20 milliseconds
 	c.recv = live.NewReceiver(live.ReceiveConfig{
 		InitialSequenceNumber: c.initialPacketSequenceNumber,
-		PeriodicACKInterval:   10_000,
-		PeriodicNAKInterval:   20_000,
+		PeriodicACKInterval:   ACK_INTERVAL,
+		PeriodicNAKInterval:   NACK_INTERVAL,
 		OnSendACK:             c.sendACK,
 		OnSendNAK:             c.sendNAK,
 		OnDeliver:             c.deliver,
@@ -384,6 +453,11 @@ func (c *srtConn) SocketId() uint32 {
 	return c.socketId
 }
 
+// socketIdString returns the socketId as a string for use in Prometheus labels
+func (c *srtConn) socketIdString() string {
+	return fmt.Sprintf("%d", c.socketId)
+}
+
 func (c *srtConn) PeerSocketId() uint32 {
 	return c.peerSocketId
 }
@@ -443,6 +517,9 @@ func (c *srtConn) ReadPacket() (packet.Packet, error) {
 }
 
 func (c *srtConn) Read(b []byte) (int, error) {
+
+	pC.WithLabelValues("Read", "start", c.socketIdString()).Inc()
+
 	if c.readBuffer.Len() != 0 {
 		return c.readBuffer.Read(b)
 	}
@@ -479,6 +556,9 @@ func (c *srtConn) WritePacket(p packet.Packet) error {
 }
 
 func (c *srtConn) Write(b []byte) (int, error) {
+
+	pC.WithLabelValues("Write", "start", c.socketIdString()).Inc()
+
 	c.writeBuffer.Write(b)
 
 	for {
@@ -500,7 +580,10 @@ func (c *srtConn) Write(b []byte) (int, error) {
 		case <-c.ctx.Done():
 			return 0, io.EOF
 		case c.writeQueue <- p:
+			// Non-blocked send
 		default:
+			// Blocked
+			pC.WithLabelValues("Write", "writeQueueBlocked", c.socketIdString()).Inc()
 			return 0, io.EOF
 		}
 
@@ -516,11 +599,18 @@ func (c *srtConn) Write(b []byte) (int, error) {
 
 // push puts a packet on the network queue. This is where packets go that came in from the network.
 func (c *srtConn) push(p packet.Packet) {
+
+	pC.WithLabelValues("push", "start", c.socketIdString()).Inc()
+
 	// Non-blocking write to the network queue
 	select {
 	case <-c.ctx.Done():
+		return
 	case c.networkQueue <- p:
+		// Non-blocked send
 	default:
+		// Blocked
+		pC.WithLabelValues("push", "networkQueueBlocked", c.socketIdString()).Inc()
 		c.log("connection:error", func() string { return "network queue is full" })
 	}
 }
@@ -546,7 +636,9 @@ func (c *srtConn) pop(p packet.Packet) {
 		c.cryptoLock.Lock()
 		if c.crypto != nil {
 			p.Header().KeyBaseEncryptionFlag = c.keyBaseEncryption
-			c.crypto.EncryptOrDecryptPayload(p.Data(), p.Header().KeyBaseEncryptionFlag, p.Header().PacketSequenceNumber.Val())
+			if !p.Header().RetransmittedPacketFlag {
+				c.crypto.EncryptOrDecryptPayload(p.Data(), p.Header().KeyBaseEncryptionFlag, p.Header().PacketSequenceNumber.Val())
+			}
 
 			c.kmPreAnnounceCountdown--
 			c.kmRefreshCountdown--
@@ -594,6 +686,7 @@ func (c *srtConn) networkQueueReader(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case p := <-c.networkQueue:
+			pC.WithLabelValues("networkQueueReader", "dequeue", c.socketIdString()).Inc()
 			c.handlePacket(p)
 		}
 	}
@@ -611,6 +704,7 @@ func (c *srtConn) writeQueueReader(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case p := <-c.writeQueue:
+			pC.WithLabelValues("writeQueueReader", "dequeue", c.socketIdString()).Inc()
 			// Put the packet into the send congestion control
 			c.snd.Push(p)
 		}
@@ -619,11 +713,18 @@ func (c *srtConn) writeQueueReader(ctx context.Context) {
 
 // deliver writes the packets to the read queue in order to be consumed by the Read function.
 func (c *srtConn) deliver(p packet.Packet) {
+
+	pC.WithLabelValues("deliver", "start", c.socketIdString()).Inc()
+
 	// Non-blocking write to the read queue
 	select {
 	case <-c.ctx.Done():
+		return
 	case c.readQueue <- p:
+		// Non-blocked send
 	default:
+		// Blocked
+		pC.WithLabelValues("deliver", "readQueueBlocked", c.socketIdString()).Inc()
 		c.log("connection:error", func() string { return "readQueue was blocking, dropping packet" })
 	}
 }
@@ -632,7 +733,11 @@ func (c *srtConn) deliver(p packet.Packet) {
 // respective handler. If it is a data packet it will be put into congestion control for
 // receiving. The packet will be decrypted if required.
 func (c *srtConn) handlePacket(p packet.Packet) {
+
+	pC.WithLabelValues("handlePacket", "start", c.socketIdString()).Inc()
+
 	if p == nil {
+		pC.WithLabelValues("handlePacket", "nil", c.socketIdString()).Inc()
 		return
 	}
 
@@ -642,16 +747,22 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 
 	if header.IsControlPacket {
 		if header.ControlType == packet.CTRLTYPE_KEEPALIVE {
+			pC.WithLabelValues("handlePacket", "keepalive", c.socketIdString()).Inc()
 			c.handleKeepAlive(p)
 		} else if header.ControlType == packet.CTRLTYPE_SHUTDOWN {
+			pC.WithLabelValues("handlePacket", "shutdown", c.socketIdString()).Inc()
 			c.handleShutdown(p)
 		} else if header.ControlType == packet.CTRLTYPE_NAK {
+			pC.WithLabelValues("handlePacket", "nak", c.socketIdString()).Inc()
 			c.handleNAK(p)
 		} else if header.ControlType == packet.CTRLTYPE_ACK {
+			pC.WithLabelValues("handlePacket", "ack", c.socketIdString()).Inc()
 			c.handleACK(p)
 		} else if header.ControlType == packet.CTRLTYPE_ACKACK {
+			pC.WithLabelValues("handlePacket", "ackack", c.socketIdString()).Inc()
 			c.handleACKACK(p)
 		} else if header.ControlType == packet.CTRLTYPE_USER {
+			pC.WithLabelValues("handlePacket", "user", c.socketIdString()).Inc()
 			c.log("connection:recv:ctrl:user", func() string {
 				return fmt.Sprintf("got CTRLTYPE_USER packet, subType: %s", header.SubType)
 			})
@@ -675,6 +786,7 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	}
 
 	if header.PacketSequenceNumber.Gt(c.debug.expectedRcvPacketSequenceNumber) {
+		pC.WithLabelValues("handlePacket", "lost_packets", c.socketIdString()).Inc()
 		c.log("connection:error", func() string {
 			return fmt.Sprintf("recv lost packets. got: %d, expected: %d (%d)\n", header.PacketSequenceNumber.Val(), c.debug.expectedRcvPacketSequenceNumber.Val(), c.debug.expectedRcvPacketSequenceNumber.Distance(header.PacketSequenceNumber))
 		})
@@ -690,6 +802,7 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	// its message number equal to 0. This value isn't normally used in SRT (message
 	// numbers start from 1, increment to a maximum, and then roll back to 1)."
 	if header.MessageNumber == 0 {
+		pC.WithLabelValues("handlePacket", "fec_filter", c.socketIdString()).Inc()
 		c.log("connection:filter", func() string { return "dropped FEC filter control packet" })
 		return
 	}
@@ -698,10 +811,12 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	if !c.tsbpdWrapPeriod {
 		if header.Timestamp > packet.MAX_TIMESTAMP-(30*1000000) {
 			c.tsbpdWrapPeriod = true
+			pC.WithLabelValues("handlePacket", "wrap_period_started", c.socketIdString()).Inc()
 			c.log("connection:tsbpd", func() string { return "TSBPD wrapping period started" })
 		}
 	} else {
 		if header.Timestamp >= (30*1000000) && header.Timestamp <= (60*1000000) {
+			pC.WithLabelValues("handlePacket", "wrap_period_finished", c.socketIdString()).Inc()
 			c.tsbpdWrapPeriod = false
 			c.tsbpdTimeBaseOffset += uint64(packet.MAX_TIMESTAMP) + 1
 			c.log("connection:tsbpd", func() string { return "TSBPD wrapping period finished" })
@@ -771,6 +886,8 @@ func (c *srtConn) handleShutdown(p packet.Packet) {
 // handleACK forwards the acknowledge sequence number to the congestion control and
 // returns a ACKACK (on a full ACK). The RTT is also updated in case of a full ACK.
 func (c *srtConn) handleACK(p packet.Packet) {
+	pC.WithLabelValues("handleACK", "count", "start", c.socketIdString()).Inc()
+
 	c.log("control:recv:ACK:dump", func() string { return p.Dump() })
 
 	c.statisticsLock.Lock()
@@ -783,6 +900,7 @@ func (c *srtConn) handleACK(p packet.Packet) {
 		c.statisticsLock.Lock()
 		c.statistics.pktRecvInvalid++
 		c.statisticsLock.Unlock()
+		pC.WithLabelValues("handleACK", "invalid_ack", c.socketIdString()).Inc()
 		c.log("control:recv:ACK:error", func() string { return fmt.Sprintf("invalid ACK: %s", err) })
 		return
 	}
@@ -806,6 +924,9 @@ func (c *srtConn) handleACK(p packet.Packet) {
 
 // handleNAK forwards the lost sequence number to the congestion control.
 func (c *srtConn) handleNAK(p packet.Packet) {
+
+	pC.WithLabelValues("handleNAK", "start", c.socketIdString()).Inc()
+
 	c.log("control:recv:NAK:dump", func() string { return p.Dump() })
 
 	c.statisticsLock.Lock()
@@ -830,6 +951,9 @@ func (c *srtConn) handleNAK(p packet.Packet) {
 
 // handleACKACK updates the RTT and NAK interval for the congestion control.
 func (c *srtConn) handleACKACK(p packet.Packet) {
+
+	pC.WithLabelValues("handleACKACK", "start", c.socketIdString()).Inc()
+
 	c.ackLock.Lock()
 
 	c.statisticsLock.Lock()
@@ -863,7 +987,11 @@ func (c *srtConn) handleACKACK(p packet.Packet) {
 
 // recalculateRTT recalculates the RTT based on a full ACK exchange
 func (c *srtConn) recalculateRTT(rtt time.Duration) {
-	c.rtt.Recalculate(rtt)
+	socketId := c.socketIdString()
+
+	pC.WithLabelValues("recalculateRTT", "start", socketId).Inc()
+
+	c.rtt.Recalculate(rtt, socketId)
 
 	c.log("connection:rtt", func() string {
 		return fmt.Sprintf("RTT=%.0fus RTTVar=%.0fus NAKInterval=%.0fms", c.rtt.RTT(), c.rtt.RTTVar(), c.rtt.NAKInterval()/1000)

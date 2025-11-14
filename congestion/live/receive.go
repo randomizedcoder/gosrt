@@ -10,6 +10,44 @@ import (
 	"github.com/datarhei/gosrt/circular"
 	"github.com/datarhei/gosrt/congestion"
 	"github.com/datarhei/gosrt/packet"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	// Receiver-level Prometheus metrics
+	receiverCounts = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: "congestion_receiver",
+			Name:      "counts",
+			Help:      "gosrt congestion receiver counts",
+		},
+		[]string{"function", "variable", "type"},
+	)
+
+	receiverDurations = promauto.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Subsystem: "congestion_receiver",
+			Name:      "durations_seconds",
+			Help:      "gosrt congestion receiver function durations in seconds",
+			Objectives: map[float64]float64{
+				0.1:  quantileError,
+				0.5:  quantileError,
+				0.99: quantileError,
+			},
+			MaxAge: summaryVecMaxAge,
+		},
+		[]string{"function", "variable", "type"},
+	)
+
+	receiverLinkCapacity = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: "congestion_receiver",
+			Name:      "link_capacity_packets_per_second",
+			Help:      "Estimated link capacity in packets per second from probe measurements",
+		},
+		[]string{},
+	)
 )
 
 // ReceiveConfig is the configuration for the liveRecv congestion control
@@ -132,6 +170,13 @@ func (r *receiver) Flush() {
 }
 
 func (r *receiver) Push(pkt packet.Packet) {
+
+	startTime := time.Now()
+	defer func() {
+		receiverDurations.WithLabelValues("Push", "duration", "complete").Observe(time.Since(startTime).Seconds())
+	}()
+	receiverCounts.WithLabelValues("Push", "count", "start").Inc()
+
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
@@ -147,12 +192,15 @@ func (r *receiver) Push(pkt packet.Packet) {
 		if probe == 0 {
 			r.probeTime = time.Now()
 			r.probeNextSeq = pkt.Header().PacketSequenceNumber.Inc()
+			receiverCounts.WithLabelValues("Push", "link_capacity_probe", "start").Inc()
 		} else if probe == 1 && pkt.Header().PacketSequenceNumber.Equals(r.probeNextSeq) && !r.probeTime.IsZero() && pkt.Len() != 0 {
 			// The time between packets scaled to a fully loaded packet
 			diff := float64(time.Since(r.probeTime).Microseconds()) * (packet.MAX_PAYLOAD_SIZE / float64(pkt.Len()))
 			if diff != 0 {
 				// Here we're doing an average of the measurements.
 				r.avgLinkCapacity = 0.875*r.avgLinkCapacity + 0.125*1_000_000/diff
+				receiverLinkCapacity.WithLabelValues().Set(r.avgLinkCapacity)
+				receiverCounts.WithLabelValues("Push", "link_capacity_probe", "measured").Inc()
 			}
 		} else {
 			r.probeTime = time.Time{}
@@ -189,6 +237,7 @@ func (r *receiver) Push(pkt packet.Packet) {
 
 		r.statistics.PktDrop++
 		r.statistics.ByteDrop += pktLen
+		receiverCounts.WithLabelValues("Push", "packets_belated", "count").Inc()
 
 		return
 	}
@@ -197,6 +246,7 @@ func (r *receiver) Push(pkt packet.Packet) {
 		// Already acknowledged, ignoring
 		r.statistics.PktDrop++
 		r.statistics.ByteDrop += pktLen
+		receiverCounts.WithLabelValues("Push", "packets_already_acked", "count").Inc()
 
 		return
 	}
@@ -204,6 +254,7 @@ func (r *receiver) Push(pkt packet.Packet) {
 	if pkt.Header().PacketSequenceNumber.Equals(r.maxSeenSequenceNumber.Inc()) {
 		// In order, the packet we expected
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
+		receiverCounts.WithLabelValues("Push", "packets_in_order", "count").Inc()
 	} else if pkt.Header().PacketSequenceNumber.Lte(r.maxSeenSequenceNumber) {
 		// Out of order, is it a missing piece? put it in the correct position
 		for e := r.packetList.Front(); e != nil; e = e.Next() {
@@ -213,6 +264,7 @@ func (r *receiver) Push(pkt packet.Packet) {
 				// Already received (has been sent more than once), ignoring
 				r.statistics.PktDrop++
 				r.statistics.ByteDrop += pktLen
+				receiverCounts.WithLabelValues("Push", "packets_duplicate", "count").Inc()
 
 				break
 			} else if p.Header().PacketSequenceNumber.Gt(pkt.Header().PacketSequenceNumber) {
@@ -224,6 +276,7 @@ func (r *receiver) Push(pkt packet.Packet) {
 				r.statistics.ByteUnique += pktLen
 
 				r.packetList.InsertBefore(pkt, e)
+				receiverCounts.WithLabelValues("Push", "packets_out_of_order", "count").Inc()
 
 				break
 			}
@@ -238,6 +291,7 @@ func (r *receiver) Push(pkt packet.Packet) {
 		len := uint64(pkt.Header().PacketSequenceNumber.Distance(r.maxSeenSequenceNumber))
 		r.statistics.PktLoss += len
 		r.statistics.ByteLoss += len * uint64(r.avgPayloadSize)
+		receiverCounts.WithLabelValues("Push", "packets_gap_detected", "count").Add(float64(len))
 
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
 	}
@@ -252,6 +306,12 @@ func (r *receiver) Push(pkt packet.Packet) {
 }
 
 func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
+
+	startTime := time.Now()
+	defer func() {
+		receiverDurations.WithLabelValues("periodicACK", "duration", "complete").Observe(time.Since(startTime).Seconds())
+	}()
+
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
@@ -259,10 +319,12 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	if now-r.lastPeriodicACK < r.periodicACKInterval {
 		if r.nPackets >= 64 {
 			lite = true // Send light ACK
+			receiverCounts.WithLabelValues("periodicACK", "light_ack", "count").Inc()
 		} else {
 			return
 		}
 	}
+	receiverCounts.WithLabelValues("periodicACK", "count", "start").Inc()
 
 	minPktTsbpdTime, maxPktTsbpdTime := uint64(0), uint64(0)
 	ackSequenceNumber := r.lastACKSequenceNumber
@@ -318,12 +380,21 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 }
 
 func (r *receiver) periodicNAK(now uint64) (ok bool, from, to circular.Number) {
+
+	startTime := time.Now()
 	r.lock.RLock()
 	defer r.lock.RUnlock()
 
 	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
 		return
 	}
+
+	receiverCounts.WithLabelValues("periodicNAK", "count", "start").Inc()
+	defer func() {
+		receiverDurations.WithLabelValues("periodicNAK", "duration", "complete").Observe(time.Since(startTime).Seconds())
+	}()
+
+	list := []circular.Number{}
 
 	// Send a periodic NAK
 
@@ -359,17 +430,27 @@ func (r *receiver) periodicNAK(now uint64) (ok bool, from, to circular.Number) {
 }
 
 func (r *receiver) Tick(now uint64) {
+
+	startTime := time.Now()
+	defer func() {
+		receiverDurations.WithLabelValues("Tick", "duration", "complete").Observe(time.Since(startTime).Seconds())
+	}()
+	receiverCounts.WithLabelValues("Tick", "count", "start").Inc()
+
 	if ok, sequenceNumber, lite := r.periodicACK(now); ok {
 		r.sendACK(sequenceNumber, lite)
+		receiverCounts.WithLabelValues("Tick", "ack_sent", "count").Inc()
 	}
 
 	if ok, from, to := r.periodicNAK(now); ok {
 		r.sendNAK(from, to)
+		receiverCounts.WithLabelValues("Tick", "nak_sent", "count").Inc()
 	}
 
 	// Deliver packets whose PktTsbpdTime is ripe
 	r.lock.Lock()
 	removeList := make([]*list.Element, 0, r.packetList.Len())
+	packetsDelivered := 0
 	for e := r.packetList.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
 
@@ -381,9 +462,13 @@ func (r *receiver) Tick(now uint64) {
 
 			r.deliver(p)
 			removeList = append(removeList, e)
+			packetsDelivered++
 		} else {
 			break
 		}
+	}
+	if packetsDelivered > 0 {
+		receiverCounts.WithLabelValues("Tick", "packets_delivered", "count").Add(float64(packetsDelivered))
 	}
 
 	for _, e := range removeList {
