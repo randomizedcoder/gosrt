@@ -891,7 +891,6 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	packetSendTime := c.start.Add(time.Duration(unwrappedTimestampMicroseconds) * time.Microsecond)
 	receiveTime := time.Now()
 	oneWayLatency := receiveTime.Sub(packetSendTime)
-	pOWL.WithLabelValues(c.socketIdString()).Observe(oneWayLatency.Seconds())
 	if header.RetransmittedPacketFlag {
 		pOWL.WithLabelValues("retransmitted", c.socketIdString()).Observe(oneWayLatency.Seconds())
 	} else {
@@ -952,7 +951,7 @@ func (c *srtConn) handleShutdown(p packet.Packet) {
 // handleACK forwards the acknowledge sequence number to the congestion control and
 // returns a ACKACK (on a full ACK). The RTT is also updated in case of a full ACK.
 func (c *srtConn) handleACK(p packet.Packet) {
-	pC.WithLabelValues("handleACK", "count", "start", c.socketIdString()).Inc()
+	pC.WithLabelValues("handleACK", "start", c.socketIdString()).Inc()
 
 	c.log("control:recv:ACK:dump", func() string { return p.Dump() })
 

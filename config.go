@@ -202,10 +202,10 @@ var defaultConfig Config = Config{
 	Passphrase:            "",
 	PayloadSize:           MAX_PAYLOAD_SIZE,
 	PBKeylen:              16,
-	PeerIdleTimeout:       2 * time.Second,
-	PeerLatency:           120 * time.Millisecond,
+	PeerIdleTimeout:       2 * time.Second,        // 30 seconds
+	PeerLatency:           120 * time.Millisecond, // 3 seconds
 	ReceiverBufferSize:    0,
-	ReceiverLatency:       120 * time.Millisecond,
+	ReceiverLatency:       120 * time.Millisecond, // 3 seconds
 	SendBufferSize:        0,
 	SendDropDelay:         1 * time.Second,
 	StreamId:              "",

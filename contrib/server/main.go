@@ -9,21 +9,62 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"time"
 
 	srt "github.com/datarhei/gosrt"
 	"github.com/pkg/profile"
 )
 
+var (
+	// Server flags
+	addr        = flag.String("addr", "", "address to listen on")
+	app         = flag.String("app", "", "path prefix for streamid")
+	token       = flag.String("token", "", "token query param for streamid")
+	passphrase  = flag.String("passphrase", "", "passphrase for de- and enrcypting the data")
+	logtopics   = flag.String("logtopics", "", "topics for the log output")
+	profileMode = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+
+	// Config flags
+	congestion            = flag.String("congestion", "", "type of congestion control. 'live' or 'file'")
+	connectionTimeout     = flag.String("connectionTimeout", "", "connection timeout (e.g., '3s', '500ms')")
+	driftTracer           = flag.Bool("driftTracer", true, "enable drift tracer")
+	enforcedEncryption    = flag.Bool("enforcedEncryption", true, "reject connection if parties set different passphrase")
+	fc                    = flag.Uint("fc", 0, "flow control window size (packets)")
+	groupConnect          = flag.Bool("groupConnect", false, "accept group connections")
+	groupStabilityTimeout = flag.String("groupStabilityTimeout", "", "group stability timeout (e.g., '1s', '500ms')")
+	inputBW               = flag.Int64("inputBW", 0, "input bandwidth (bytes)")
+	iptos                 = flag.Int("iptos", 0, "IP socket type of service")
+	ipttl                 = flag.Int("ipttl", 0, "IP socket time to live option")
+	ipv6Only              = flag.Int("ipv6Only", 0, "allow only IPv6")
+	kmPreAnnounce         = flag.Uint64("kmPreAnnounce", 0, "duration of Stream Encryption key switchover (packets)")
+	kmRefreshRate         = flag.Uint64("kmRefreshRate", 0, "stream encryption key refresh rate (packets)")
+	latency               = flag.String("latency", "", "maximum accepted transmission latency (e.g., '120ms', '1s')")
+	lossMaxTTL            = flag.Uint("lossMaxTTL", 0, "packet reorder tolerance")
+	maxBW                 = flag.Int64("maxBW", 0, "bandwidth limit (bytes/s)")
+	messageAPI            = flag.Bool("messageAPI", false, "enable SRT message mode")
+	minInputBW            = flag.Int64("minInputBW", 0, "minimum input bandwidth")
+	minVersion            = flag.Uint("minVersion", 0, "minimum SRT library version of a peer")
+	mss                   = flag.Uint("mss", 0, "MTU size")
+	nakReport             = flag.Bool("nakReport", true, "enable periodic NAK reports")
+	overheadBW            = flag.Int64("overheadBW", 0, "limit bandwidth overhead (percents)")
+	packetFilter          = flag.String("packetFilter", "", "set up the packet filter")
+	payloadSize           = flag.Uint("payloadSize", 0, "maximum payload size (bytes)")
+	pbKeylen              = flag.Int("pbKeylen", 0, "crypto key length in bytes")
+	peerIdleTimeout       = flag.String("peerIdleTimeout", "", "peer idle timeout (e.g., '2s', '500ms')")
+	peerLatency           = flag.String("peerLatency", "", "minimum receiver latency to be requested by sender (e.g., '120ms', '1s')")
+	receiverBufferSize    = flag.Uint("receiverBufferSize", 0, "receiver buffer size (bytes)")
+	receiverLatency       = flag.String("receiverLatency", "", "receiver-side latency (e.g., '120ms', '1s')")
+	sendBufferSize        = flag.Uint("sendBufferSize", 0, "sender buffer size (bytes)")
+	sendDropDelay         = flag.String("sendDropDelay", "", "sender's delay before dropping packets (e.g., '1s', '500ms')")
+	streamId              = flag.String("streamId", "", "stream ID (settable in caller mode only, visible on the listener peer)")
+	tooLatePacketDrop     = flag.Bool("tooLatePacketDrop", true, "drop too late packets")
+	transmissionType      = flag.String("transmissionType", "", "transmission type. 'live' or 'file'")
+	tsbpdMode             = flag.Bool("tsbpdMode", true, "timestamp-based packet delivery mode")
+	allowPeerIpChange     = flag.Bool("allowPeerIpChange", false, "if a new IP starts sending data on an existing socket id, allow it")
+)
+
 // server is an implementation of the Server framework
 type server struct {
-	// Configuration parameter taken from the Config
-	addr       string
-	app        string
-	token      string
-	passphrase string
-	logtopics  string
-	profile    string
-
 	server *srt.Server
 
 	// Map of publishing channels and a lock to serialize
@@ -33,10 +74,6 @@ type server struct {
 }
 
 func (s *server) ListenAndServe() error {
-	if len(s.app) == 0 {
-		s.app = "/"
-	}
-
 	return s.server.ListenAndServe()
 }
 
@@ -44,27 +81,37 @@ func (s *server) Shutdown() {
 	s.server.Shutdown()
 }
 
-func main() {
-	s := server{
-		channels: make(map[string]srt.PubSub),
+func parseDuration(s string, defaultVal time.Duration) time.Duration {
+	if s == "" {
+		return defaultVal
 	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultVal
+	}
+	return d
+}
 
-	flag.StringVar(&s.addr, "addr", "", "address to listen on")
-	flag.StringVar(&s.app, "app", "", "path prefix for streamid")
-	flag.StringVar(&s.token, "token", "", "token query param for streamid")
-	flag.StringVar(&s.passphrase, "passphrase", "", "passphrase for de- and enrcypting the data")
-	flag.StringVar(&s.logtopics, "logtopics", "", "topics for the log output")
-	flag.StringVar(&s.profile, "profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
-
+func main() {
 	flag.Parse()
 
-	if len(s.addr) == 0 {
+	// Track which flags were explicitly set
+	setFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		setFlags[f.Name] = true
+	})
+
+	if len(*addr) == 0 {
 		fmt.Fprintf(os.Stderr, "Provide a listen address with -addr\n")
 		os.Exit(1)
 	}
 
+	s := server{
+		channels: make(map[string]srt.PubSub),
+	}
+
 	var p func(*profile.Profile)
-	switch s.profile {
+	switch *profileMode {
 	case "cpu":
 		p = profile.CPUProfile
 	case "mem":
@@ -92,22 +139,132 @@ func main() {
 
 	config := srt.DefaultConfig()
 
-	if len(s.logtopics) != 0 {
-		config.Logger = srt.NewLogger(strings.Split(s.logtopics, ","))
+	// Apply flag values to config
+	if *congestion != "" {
+		config.Congestion = *congestion
+	}
+	if *connectionTimeout != "" {
+		config.ConnectionTimeout = parseDuration(*connectionTimeout, config.ConnectionTimeout)
+	}
+	if setFlags["driftTracer"] {
+		config.DriftTracer = *driftTracer
+	}
+	if setFlags["enforcedEncryption"] {
+		config.EnforcedEncryption = *enforcedEncryption
+	}
+	if *fc != 0 {
+		config.FC = uint32(*fc)
+	}
+	if setFlags["groupConnect"] {
+		config.GroupConnect = *groupConnect
+	}
+	if *groupStabilityTimeout != "" {
+		config.GroupStabilityTimeout = parseDuration(*groupStabilityTimeout, config.GroupStabilityTimeout)
+	}
+	if *inputBW != 0 {
+		config.InputBW = *inputBW
+	}
+	if *iptos != 0 {
+		config.IPTOS = *iptos
+	}
+	if *ipttl != 0 {
+		config.IPTTL = *ipttl
+	}
+	if *ipv6Only != 0 {
+		config.IPv6Only = *ipv6Only
+	}
+	if *kmPreAnnounce != 0 {
+		config.KMPreAnnounce = *kmPreAnnounce
+	}
+	if *kmRefreshRate != 0 {
+		config.KMRefreshRate = *kmRefreshRate
+	}
+	if *latency != "" {
+		config.Latency = parseDuration(*latency, config.Latency)
+	}
+	if *lossMaxTTL != 0 {
+		config.LossMaxTTL = uint32(*lossMaxTTL)
+	}
+	if *maxBW != 0 {
+		config.MaxBW = *maxBW
+	}
+	if setFlags["messageAPI"] {
+		config.MessageAPI = *messageAPI
+	}
+	if *minInputBW != 0 {
+		config.MinInputBW = *minInputBW
+	}
+	if *minVersion != 0 {
+		config.MinVersion = uint32(*minVersion)
+	}
+	if *mss != 0 {
+		config.MSS = uint32(*mss)
+	}
+	if setFlags["nakReport"] {
+		config.NAKReport = *nakReport
+	}
+	if *overheadBW != 0 {
+		config.OverheadBW = *overheadBW
+	}
+	if *packetFilter != "" {
+		config.PacketFilter = *packetFilter
+	}
+	if *passphrase != "" {
+		config.Passphrase = *passphrase
+	}
+	if *payloadSize != 0 {
+		config.PayloadSize = uint32(*payloadSize)
+	}
+	if *pbKeylen != 0 {
+		config.PBKeylen = *pbKeylen
+	}
+	if *peerIdleTimeout != "" {
+		config.PeerIdleTimeout = parseDuration(*peerIdleTimeout, config.PeerIdleTimeout)
+	}
+	if *peerLatency != "" {
+		config.PeerLatency = parseDuration(*peerLatency, config.PeerLatency)
+	}
+	if *receiverBufferSize != 0 {
+		config.ReceiverBufferSize = uint32(*receiverBufferSize)
+	}
+	if *receiverLatency != "" {
+		config.ReceiverLatency = parseDuration(*receiverLatency, config.ReceiverLatency)
+	}
+	if *sendBufferSize != 0 {
+		config.SendBufferSize = uint32(*sendBufferSize)
+	}
+	if *sendDropDelay != "" {
+		config.SendDropDelay = parseDuration(*sendDropDelay, config.SendDropDelay)
+	}
+	if *streamId != "" {
+		config.StreamId = *streamId
+	}
+	if setFlags["tooLatePacketDrop"] {
+		config.TooLatePacketDrop = *tooLatePacketDrop
+	}
+	if *transmissionType != "" {
+		config.TransmissionType = *transmissionType
+	}
+	if setFlags["tsbpdMode"] {
+		config.TSBPDMode = *tsbpdMode
+	}
+	if setFlags["allowPeerIpChange"] {
+		config.AllowPeerIpChange = *allowPeerIpChange
 	}
 
-	config.KMPreAnnounce = 200
-	config.KMRefreshRate = 10000
+	if len(*logtopics) != 0 {
+		config.Logger = srt.NewLogger(strings.Split(*logtopics, ","))
+	}
 
 	s.server = &srt.Server{
-		Addr:            s.addr,
+		Addr:            *addr,
 		HandleConnect:   s.handleConnect,
 		HandlePublish:   s.handlePublish,
 		HandleSubscribe: s.handleSubscribe,
 		Config:          &config,
 	}
 
-	fmt.Fprintf(os.Stderr, "Listening on %s\n", s.addr)
+	fmt.Fprintf(os.Stderr, "Listening on %s\n", *addr)
 
 	go func() {
 		if config.Logger == nil {
@@ -151,7 +308,7 @@ func (s *server) handleConnect(req srt.ConnRequest) srt.ConnType {
 		mode = srt.PUBLISH
 		channel = "/" + client.String()
 
-		req.SetPassphrase(s.passphrase)
+		req.SetPassphrase(*passphrase)
 	} else if req.Version() == 5 {
 		streamId := req.StreamId()
 		path := streamId
@@ -169,26 +326,30 @@ func (s *server) handleConnect(req srt.ConnRequest) srt.ConnType {
 		}
 
 		if req.IsEncrypted() {
-			if err := req.SetPassphrase(s.passphrase); err != nil {
+			if err := req.SetPassphrase(*passphrase); err != nil {
 				s.log("CONNECT", "FORBIDDEN", u.Path, err.Error(), client)
 				return srt.REJECT
 			}
 		}
 
 		// Check the token
-		token := u.Query().Get("token")
-		if len(s.token) != 0 && s.token != token {
-			s.log("CONNECT", "FORBIDDEN", u.Path, "invalid token ("+token+")", client)
+		tokenValue := u.Query().Get("token")
+		if len(*token) != 0 && *token != tokenValue {
+			s.log("CONNECT", "FORBIDDEN", u.Path, "invalid token ("+tokenValue+")", client)
 			return srt.REJECT
 		}
 
 		// Check the app patch
-		if !strings.HasPrefix(u.Path, s.app) {
-			s.log("CONNECT", "FORBIDDEN", u.Path, "invalid app", client)
+		appPath := *app
+		if len(appPath) == 0 {
+			appPath = "/"
+		}
+		if !strings.HasPrefix(u.Path, appPath) {
+			s.log("CONNECT", "FORBIDDEN", u.Path, "invalid app ", client)
 			return srt.REJECT
 		}
 
-		if len(strings.TrimPrefix(u.Path, s.app)) == 0 {
+		if len(strings.TrimPrefix(u.Path, appPath)) == 0 {
 			s.log("CONNECT", "INVALID", u.Path, "stream name not provided", client)
 			return srt.REJECT
 		}
