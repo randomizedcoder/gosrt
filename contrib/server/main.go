@@ -92,53 +92,9 @@ func parseDuration(s string, defaultVal time.Duration) time.Duration {
 	return d
 }
 
-func main() {
-	flag.Parse()
-
-	// Track which flags were explicitly set
-	setFlags := make(map[string]bool)
-	flag.Visit(func(f *flag.Flag) {
-		setFlags[f.Name] = true
-	})
-
-	if len(*addr) == 0 {
-		fmt.Fprintf(os.Stderr, "Provide a listen address with -addr\n")
-		os.Exit(1)
-	}
-
-	s := server{
-		channels: make(map[string]srt.PubSub),
-	}
-
-	var p func(*profile.Profile)
-	switch *profileMode {
-	case "cpu":
-		p = profile.CPUProfile
-	case "mem":
-		p = profile.MemProfile
-	case "allocs":
-		p = profile.MemProfileAllocs
-	case "heap":
-		p = profile.MemProfileHeap
-	case "rate":
-		p = profile.MemProfileRate(2048)
-	case "mutex":
-		p = profile.MutexProfile
-	case "block":
-		p = profile.BlockProfile
-	case "thread":
-		p = profile.ThreadcreationProfile
-	case "trace":
-		p = profile.TraceProfile
-	default:
-	}
-
-	if p != nil {
-		defer profile.Start(profile.ProfilePath("."), profile.NoShutdownHook, p).Stop()
-	}
-
-	config := srt.DefaultConfig()
-
+// applyConfigFlags applies command-line flag values to the config.
+// It only applies flags that were explicitly set or have non-zero/non-empty values.
+func applyConfigFlags(config *srt.Config, setFlags map[string]bool) {
 	// Apply flag values to config
 	if *congestion != "" {
 		config.Congestion = *congestion
@@ -252,9 +208,147 @@ func main() {
 		config.AllowPeerIpChange = *allowPeerIpChange
 	}
 
+	// Log config if "config" topic is enabled
+	if config.Logger != nil && config.Logger.HasTopic("config") {
+		config.Logger.Print("config", 0, 1, func() string {
+			return fmt.Sprintf("SRT Config:\n"+
+				"  Congestion: %s\n"+
+				"  ConnectionTimeout: %v\n"+
+				"  DriftTracer: %v\n"+
+				"  EnforcedEncryption: %v\n"+
+				"  FC: %d\n"+
+				"  GroupConnect: %v\n"+
+				"  GroupStabilityTimeout: %v\n"+
+				"  InputBW: %d\n"+
+				"  IPTOS: %d\n"+
+				"  IPTTL: %d\n"+
+				"  IPv6Only: %d\n"+
+				"  KMPreAnnounce: %d\n"+
+				"  KMRefreshRate: %d\n"+
+				"  Latency: %v\n"+
+				"  LossMaxTTL: %d\n"+
+				"  MaxBW: %d\n"+
+				"  MessageAPI: %v\n"+
+				"  MinInputBW: %d\n"+
+				"  MinVersion: %#x\n"+
+				"  MSS: %d\n"+
+				"  NAKReport: %v\n"+
+				"  OverheadBW: %d\n"+
+				"  PacketFilter: %s\n"+
+				"  Passphrase: %s\n"+
+				"  PayloadSize: %d\n"+
+				"  PBKeylen: %d\n"+
+				"  PeerIdleTimeout: %v\n"+
+				"  PeerLatency: %v\n"+
+				"  ReceiverBufferSize: %d\n"+
+				"  ReceiverLatency: %v\n"+
+				"  SendBufferSize: %d\n"+
+				"  SendDropDelay: %v\n"+
+				"  StreamId: %s\n"+
+				"  TooLatePacketDrop: %v\n"+
+				"  TransmissionType: %s\n"+
+				"  TSBPDMode: %v\n"+
+				"  AllowPeerIpChange: %v",
+				config.Congestion,
+				config.ConnectionTimeout,
+				config.DriftTracer,
+				config.EnforcedEncryption,
+				config.FC,
+				config.GroupConnect,
+				config.GroupStabilityTimeout,
+				config.InputBW,
+				config.IPTOS,
+				config.IPTTL,
+				config.IPv6Only,
+				config.KMPreAnnounce,
+				config.KMRefreshRate,
+				config.Latency,
+				config.LossMaxTTL,
+				config.MaxBW,
+				config.MessageAPI,
+				config.MinInputBW,
+				config.MinVersion,
+				config.MSS,
+				config.NAKReport,
+				config.OverheadBW,
+				config.PacketFilter,
+				func() string {
+					if config.Passphrase != "" {
+						return "***"
+					}
+					return ""
+				}(),
+				config.PayloadSize,
+				config.PBKeylen,
+				config.PeerIdleTimeout,
+				config.PeerLatency,
+				config.ReceiverBufferSize,
+				config.ReceiverLatency,
+				config.SendBufferSize,
+				config.SendDropDelay,
+				config.StreamId,
+				config.TooLatePacketDrop,
+				config.TransmissionType,
+				config.TSBPDMode,
+				config.AllowPeerIpChange)
+		})
+	}
+}
+
+func main() {
+	flag.Parse()
+
+	// Track which flags were explicitly set
+	setFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		setFlags[f.Name] = true
+	})
+
+	if len(*addr) == 0 {
+		fmt.Fprintf(os.Stderr, "Provide a listen address with -addr\n")
+		os.Exit(1)
+	}
+
+	s := server{
+		channels: make(map[string]srt.PubSub),
+	}
+
+	var p func(*profile.Profile)
+	switch *profileMode {
+	case "cpu":
+		p = profile.CPUProfile
+	case "mem":
+		p = profile.MemProfile
+	case "allocs":
+		p = profile.MemProfileAllocs
+	case "heap":
+		p = profile.MemProfileHeap
+	case "rate":
+		p = profile.MemProfileRate(2048)
+	case "mutex":
+		p = profile.MutexProfile
+	case "block":
+		p = profile.BlockProfile
+	case "thread":
+		p = profile.ThreadcreationProfile
+	case "trace":
+		p = profile.TraceProfile
+	default:
+	}
+
+	if p != nil {
+		defer profile.Start(profile.ProfilePath("."), profile.NoShutdownHook, p).Stop()
+	}
+
+	config := srt.DefaultConfig()
+
+	// Set up logger first so it can be used for config logging
 	if len(*logtopics) != 0 {
 		config.Logger = srt.NewLogger(strings.Split(*logtopics, ","))
 	}
+
+	// Apply flag values to config
+	applyConfigFlags(&config, setFlags)
 
 	s.server = &srt.Server{
 		Addr:            *addr,

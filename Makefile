@@ -45,6 +45,10 @@ client:
 server:
 	cd contrib/server && CGO_ENABLED=0 go build -o server -ldflags="-s -w" -a
 
+## server: Build server with debug symbols
+server-debug:
+	cd contrib/server && CGO_ENABLED=0 go build -o server-debug -gcflags="all=-N -l" -a
+
 ## run-server: Start the SRT server (default: :6001)
 run-server:
 	@echo "Starting SRT server on :6001..."
