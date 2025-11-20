@@ -1451,23 +1451,55 @@ send() method → marshal → WriteTo()/Write() syscall (blocking, mutex-protect
 send() method → marshal → PrepareSendMsg() → ring.Submit() → completion → cleanup
 ```
 
+**Key Benefits:**
+- **Eliminates mutex bottleneck**: Each `send()` gets its own buffer from `sync.Pool`, allowing concurrent sends
+- **No additional channels**: Direct ring access, no channel overhead
+- **Async I/O**: Multiple sends can be in-flight simultaneously
+- **Better performance**: Removes the single-threaded mutex serialization
+
 **Implementation Details:**
 
-1. **Send Method Replacement** (using existing payloadPool - NO COPY NEEDED):
+1. **Context Tracking with Map**:
+
+   **Why we need a map-based approach:**
+   - The submission queue and completion queue are separate - there's a delay between submission and completion
+   - When we submit, the kernel will copy the buffer data, but we must keep the buffer alive until completion confirms the copy is done
+   - We need to map from the completion's `UserData` (a `uint64`) back to our context
+   - Using unsafe pointers directly is risky - the context could be garbage collected
+   - A map with proper locking is safer and more explicit
+
+   ```go
+   // Minimal context - only what we need for cleanup
+   type sendContext struct {
+       packet packet.Packet      // To decommission if control packet
+       buffer *bytes.Buffer      // To return to pool
+   }
+
+   // In listener struct:
+   type listener struct {
+       // ... existing fields ...
+       ring        *giouring.Ring
+       sendContexts map[uint64]*sendContext  // Map from user_data to context
+       sendContextLock sync.Mutex            // Protects sendContexts map
+       nextSendID     uint64                 // Atomic counter for unique IDs
+   }
+   ```
+
+   **Why this approach:**
+   - **Unique IDs**: Each send gets a unique `uint64` ID (atomic counter)
+   - **Map lookup**: Store context in map, keyed by ID
+   - **Thread-safe**: Lock protects map during add/delete operations
+   - **Memory safe**: Context stays alive as long as it's in the map
+   - **Explicit lifecycle**: Clear when context is created (on submit) and destroyed (on completion)
+
+2. **Send Method Replacement** (using existing payloadPool - NO COPY NEEDED):
    ```go
    // Use existing payloadPool from packet.go - no new pool needed!
    // Import: "github.com/datarhei/gosrt/packet"
 
-   // Context to track send operations
-   type sendContext struct {
-       packet packet.Packet
-       buffer *bytes.Buffer  // Keep bytes.Buffer alive until send completes
-       msg    syscall.Msghdr
-       iovec  syscall.Iovec
-   }
-
    func (ln *listener) send(p packet.Packet) {
        // Get buffer from existing payloadPool (bytes.Buffer)
+       // NO MUTEX NEEDED for buffer access - each send() gets its own buffer!
        sendBuffer := payloadPool.Get() // From packet package
 
        // Marshal directly into the pooled buffer
@@ -1478,10 +1510,9 @@ send() method → marshal → PrepareSendMsg() → ring.Submit() → completion 
        }
 
        // Get the underlying slice - valid as long as buffer isn't modified
-       // We keep the buffer in sendContext so it stays alive
        bufferSlice := sendBuffer.Bytes()
 
-       // Prepare sendmsg for UDP with address
+       // Prepare sendmsg structures (local variables - don't need to keep alive)
        var iovec syscall.Iovec
        iovec.Base = &bufferSlice[0]
        iovec.SetLen(len(bufferSlice))
@@ -1493,75 +1524,325 @@ send() method → marshal → PrepareSendMsg() → ring.Submit() → completion 
        msg.Iov = &iovec
        msg.Iovlen = 1
 
-       // Create context to track buffer and packet
+       // Get unique ID for this send operation
+       sendID := atomic.AddUint64(&ln.nextSendID, 1)
+
+       // Create context - only store packet if it's a control packet
+       // Data packets don't need decommissioning here (handled by congestion control)
+       // This allows GC to free data packets sooner
        ctx := &sendContext{
-           packet: p,
-           buffer: sendBuffer,  // Keep bytes.Buffer alive
-           msg:    msg,
-           iovec:  iovec,
+           buffer: sendBuffer,  // Always need buffer to return to pool
+           packet: nil,         // Will be set only for control packets
        }
+
+       // Only store packet pointer if it's a control packet (needs decommissioning)
+       if p.Header().IsControlPacket {
+           ctx.packet = p
+       }
+       // For data packets, ctx.packet remains nil, allowing GC to free the packet
+
+       // Add to map BEFORE submission (protects context from GC)
+       ln.sendContextLock.Lock()
+       ln.sendContexts[sendID] = ctx
+       ln.sendContextLock.Unlock()
 
        sqe := ln.ring.GetSQE()
        if sqe == nil {
-           // Ring full, need to wait or handle
+           // Ring full - remove from map and clean up
+           ln.sendContextLock.Lock()
+           delete(ln.sendContexts, sendID)
+           ln.sendContextLock.Unlock()
            payloadPool.Put(sendBuffer)
-           p.Decommission()
-           return
-       }
-
-       sqe.PrepareSendMsg(fd, &msg, 0)
-       sqe.SetData(uint64(uintptr(unsafe.Pointer(ctx)))) // Store context pointer
-
-       ln.ring.Submit()
-
-       // Note: Completion handling in separate goroutine
-   }
-   ```
-
-   **Key Insight:**
-   - `bytes.Buffer.Bytes()` returns the underlying slice (see [Go docs](https://pkg.go.dev/bytes#Buffer.Bytes))
-   - The slice is valid as long as the buffer isn't modified
-   - We keep the `bytes.Buffer` in `sendContext`, so it stays alive until the send completes
-   - **No copy needed!** We use the slice directly from `Bytes()`
-   - The existing `payloadPool` from `packet.go` can be reused for sends
-
-2. **Send Completion Handler**:
-   ```go
-   go func() {
-       for {
-           cqe, err := ln.ring.WaitCQE()
-           if err != nil {
-               continue
-           }
-
-           ctx := (*sendContext)(unsafe.Pointer(uintptr(cqe.UserData)))
-           p := ctx.packet
-           buffer := ctx.buffer  // This is the *bytes.Buffer from payloadPool
-
-           // Return buffer to pool (payloadPool from packet.go)
-           payloadPool.Put(buffer)
-
-           if cqe.Res < 0 {
-               // Send error - packet may need retransmission
-           } else {
-               // Send successful
-           }
-
            if p.Header().IsControlPacket {
                p.Decommission()
            }
-
-           ln.ring.CQESeen(cqe)
+           return
        }
-   }()
+
+       // Submit the send operation
+       // IMPORTANT: The kernel reads from the buffer when it processes the submission queue entry,
+       // NOT during PrepareSendMsg(). We must keep the buffer alive until the completion queue
+       // entry confirms the kernel has finished reading.
+       sqe.PrepareSendMsg(fd, &msg, 0)
+       sqe.SetData(sendID)  // Store unique ID for map lookup
+
+       ln.ring.Submit()
+
+       // Function returns immediately - send is now async
+       // Completion handler will clean up buffer and packet (if control packet)
+   }
    ```
 
-3. **Changes Required**:
-   - Manual SQE preparation for sends
-   - `syscall.Msghdr` setup for UDP addresses
-   - Separate completion processing goroutine
-   - Manual ring submission and completion handling
-   - Unsafe pointer usage for packet tracking
+   **Key Points:**
+   - **No mutex for buffer access**: Each `send()` gets its own buffer from the pool, allowing concurrent sends
+   - **Map with lock**: Protects the context map during add (in `send()`) and delete (in completion handler)
+   - **Unique IDs**: Atomic counter ensures each send has a unique identifier for map lookup
+   - **Kernel reads during processing**: The kernel reads from the buffer when it processes the submission queue entry, NOT during `PrepareSendMsg()`
+   - **Buffer must stay alive**: We keep the buffer in the map until the completion queue entry confirms the kernel has finished reading
+   - **Optimized packet tracking**: Only control packets are stored in context (`ctx.packet != nil`); data packets have `ctx.packet == nil`, allowing GC to free them immediately after submission
+   - **Async submission**: Function returns immediately after submission, allowing concurrent sends
+   - **Explicit lifecycle**: Context is created on submit (added to map) and destroyed on completion (removed from map)
+
+3. **Send Completion Handler**:
+   ```go
+   // sendCompletionHandler processes io_uring send completions
+   // This is a named function (not anonymous) for clarity
+   func (ln *listener) sendCompletionHandler() {
+       defer func() {
+           ln.log("listen", func() string { return "left send completion handler loop" })
+       }()
+
+       for {
+           // Check for shutdown before blocking on WaitCQE
+           // Non-blocking select allows graceful shutdown
+           select {
+           case <-ln.doneChan:
+               // Shutdown requested - drain any pending completions and exit
+               ln.drainPendingCompletions()
+               return
+           default:
+               // Continue to wait for completions
+           }
+
+           cqe, err := ln.ring.WaitCQE()
+           if err != nil {
+               // Check if we're shutting down (WaitCQE might return error on shutdown)
+               if ln.isShutdown() {
+                   return
+               }
+               continue
+           }
+
+           // Get the unique ID from completion
+           sendID := cqe.UserData
+
+           // Look up context in map (with lock)
+           ln.sendContextLock.Lock()
+           ctx, exists := ln.sendContexts[sendID]
+           if !exists {
+               // Context not found (shouldn't happen, but handle gracefully)
+               ln.sendContextLock.Unlock()
+               ln.ring.CQESeen(cqe)
+               continue
+           }
+
+           // Remove from map immediately (we have the context now)
+           delete(ln.sendContexts, sendID)
+           ln.sendContextLock.Unlock()
+
+           // Now we can safely use the context
+           buffer := ctx.buffer
+
+           // Return buffer to pool (payloadPool from packet.go)
+           // Safe to do now - kernel has finished reading the data (confirmed by completion)
+           payloadPool.Put(buffer)
+
+           // Check send result
+           if cqe.Res < 0 {
+               // Send error - packet may need retransmission
+               // For data packets, congestion control will handle retransmission
+               // For control packets, they're decommissioned anyway
+           }
+
+           // Decommission control packets if present
+           // Data packets have ctx.packet == nil, so nothing to do
+           if ctx.packet != nil {
+               ctx.packet.Decommission()
+           }
+
+           // Mark completion as seen
+           ln.ring.CQESeen(cqe)
+       }
+   }
+
+   // drainPendingCompletions processes any remaining completions during shutdown
+   func (ln *listener) drainPendingCompletions() {
+       // Process any remaining completions in the queue
+       // Use PeekCQE to check if there are completions (non-blocking),
+       // then WaitCQE to actually consume them
+       for {
+           // Peek to check if there are completions (non-blocking)
+           peekCQE := ln.ring.PeekCQE()
+           if peekCQE == nil {
+               // No more completions in queue
+               break
+           }
+
+           // Actually wait for and consume the completion
+           // This will return immediately since we know there's one available
+           cqe, err := ln.ring.WaitCQE()
+           if err != nil {
+               // Error or no more completions
+               break
+           }
+
+           // Process the completion
+           sendID := cqe.UserData
+
+           ln.sendContextLock.Lock()
+           ctx, exists := ln.sendContexts[sendID]
+           if exists {
+               delete(ln.sendContexts, sendID)
+           }
+           ln.sendContextLock.Unlock()
+
+           if exists {
+               // Clean up context
+               payloadPool.Put(ctx.buffer)
+               if ctx.packet != nil {
+                   ctx.packet.Decommission()
+               }
+           }
+
+           // Mark completion as seen
+           ln.ring.CQESeen(cqe)
+       }
+   }
+   ```
+
+   **Graceful Shutdown:**
+   - **Non-blocking check**: Before calling `WaitCQE()`, we check `doneChan` with a non-blocking select
+     - If `doneChan` is closed (shutdown requested), we drain pending completions and exit
+     - Otherwise, we continue to wait for completions
+   - **Drain pending**: `drainPendingCompletions()` processes any remaining completions:
+     - Uses `PeekCQE()` to check if there are completions (non-blocking check)
+     - If a completion exists, calls `WaitCQE()` to actually consume it (returns immediately since we know one is available)
+     - Processes the completion and marks it as seen with `CQESeen()`
+     - Repeats until no more completions are available
+   - **Cleanup**: All contexts are cleaned up (buffers returned to pool, control packets decommissioned)
+   - **Pattern**: Matches the existing pattern - `doneChan` is closed in `Close()` (listen.go:398), and other goroutines check it similarly
+   - **Note**: `WaitCQE()` is blocking, so we check `doneChan` before each call. If shutdown happens while waiting, `WaitCQE()` may return an error, which we also check for.
+
+   **Optimization benefits:**
+   - **Data packets**: `ctx.packet == nil`, allowing GC to free the packet immediately after submission
+   - **Control packets**: `ctx.packet != nil`, kept alive until completion for decommissioning
+   - **Reduced memory pressure**: Data packets (which are the majority) don't need to stay alive until completion
+   - **Clearer code**: Named function makes the completion handler more explicit and testable
+
+   **Why the map-based approach is needed:**
+   - **Submission/Completion separation**: The submission queue and completion queue are separate - there's a delay between submission and completion
+   - **Kernel reads during processing**: The kernel reads from the buffer when it processes the submission queue entry, NOT during `PrepareSendMsg()`
+   - **Buffer must stay alive**: We must keep the buffer alive until the completion queue entry confirms the kernel has finished reading
+   - **Unique ID mapping**: We store a unique `uint64` ID in `sqe.SetData()`, which is returned in `cqe.UserData`
+   - **Map lookup**: Use the ID to look up the context in the map
+   - **Lock protection**: Lock protects the map during add (in `send()`) and delete (in completion handler)
+   - **Memory safety**: Context stays alive as long as it's in the map, preventing garbage collection
+   - **Explicit lifecycle**: Clear when context is created (on submit) and destroyed (on completion)
+
+   **Why not use unsafe pointers directly:**
+   - Unsafe pointers could become invalid if the context struct is garbage collected between submission and completion
+   - The map approach is safer and more explicit about memory management
+   - The lock overhead is minimal compared to the network I/O latency
+
+4. **Address Conversion Helper**:
+   ```go
+   // Helper to convert net.Addr to syscall sockaddr pointer
+   func sockaddrToPtr(addr net.Addr) (unsafe.Pointer, uint32) {
+       switch a := addr.(type) {
+       case *net.UDPAddr:
+           if a.IP.To4() != nil {
+               // IPv4
+               var sa syscall.RawSockaddrInet4
+               sa.Family = syscall.AF_INET
+               copy(sa.Addr[:], a.IP.To4())
+               sa.Port = htons(uint16(a.Port))
+               return unsafe.Pointer(&sa), syscall.SizeofSockaddrInet4
+           } else {
+               // IPv6
+               var sa syscall.RawSockaddrInet6
+               sa.Family = syscall.AF_INET6
+               copy(sa.Addr[:], a.IP)
+               sa.Port = htons(uint16(a.Port))
+               return unsafe.Pointer(&sa), syscall.SizeofSockaddrInet6
+           }
+       default:
+           return nil, 0
+       }
+   }
+   ```
+
+5. **Initialization** (in `Listen()` or `Dial()`):
+   ```go
+   // Initialize io_uring ring
+   ln.ring = giouring.NewRing()
+
+   // Ring size considerations:
+   // - Must be a power of 2 (256, 512, 1024, 2048, 4096, etc.)
+   // - Typical range: 256 to 8192 (kernel 5.1+), up to 65536 (kernel 5.19+)
+   // - Larger rings allow more in-flight operations but use more memory
+   // - Memory usage: ~(ring_size * 64 bytes) for submission queue + completion queue
+   // - For GoSRT: 1024-2048 is recommended for high-throughput scenarios
+   //   - 1024: ~128 KB memory, allows 1024 concurrent sends
+   //   - 2048: ~256 KB memory, allows 2048 concurrent sends
+   // - Smaller rings (256-512) are fine for low-throughput scenarios
+   ringSize := 1024  // Or make configurable via Config
+   err := ln.ring.QueueInit(ringSize, 0) // ring size, flags
+   if err != nil {
+       return nil, err
+   }
+
+   // Initialize send context tracking
+   ln.sendContexts = make(map[uint64]*sendContext)
+   ln.nextSendID = 0  // Start from 0, first send will be 1
+
+   // Start completion handler goroutine (named function for clarity)
+   go ln.sendCompletionHandler()
+   ```
+
+   **Ring Size Selection Guidelines:**
+
+   - **Ring size must be a power of 2**: 256, 512, 1024, 2048, 4096, 8192, etc.
+   - **Kernel limits**:
+     - Kernel 5.1-5.18: Typically up to 8192 entries
+     - Kernel 5.19+: Up to 65536 entries (with IORING_SETUP_SINGLE_ISSUER flag)
+     - Practical limit is often lower due to memory constraints
+   - **Memory usage**: Approximately `ring_size * 64 bytes` for both submission and completion queues
+     - 256 entries: ~32 KB
+     - 1024 entries: ~128 KB
+     - 2048 entries: ~256 KB
+     - 4096 entries: ~512 KB
+
+   **Choosing the right size:**
+
+   - **For GoSRT (high send throughput)**: 1024-2048 is recommended
+     - Allows 1024-2048 concurrent in-flight sends
+     - Balances memory usage with throughput capacity
+     - Prevents ring full conditions under high load
+   - **For low-throughput scenarios**: 256-512 is sufficient
+     - Lower memory footprint
+     - Still allows reasonable concurrency
+   - **Considerations**:
+     - **Ring full condition**: If `GetSQE()` returns `nil`, the ring is full
+       - This means you have `ring_size` operations already in-flight
+       - Larger rings reduce the chance of this happening
+     - **Memory vs. throughput trade-off**: Larger rings use more memory but allow more concurrency
+     - **Per-connection rings**: If each connection has its own ring, smaller sizes (256-512) may be appropriate
+     - **Shared ring (listener/dialer)**: Larger sizes (1024-2048) are better since all connections share it
+
+   **Downsides of larger rings (1024-2048):**
+   - **Memory usage**: More memory per ring (128-256 KB per ring)
+   - **Cache effects**: Larger rings may have worse cache locality
+   - **Over-provisioning**: If you never have that many concurrent sends, memory is wasted
+   - **For GoSRT**: These downsides are minimal compared to the benefit of avoiding ring full conditions
+
+   **Recommendation for GoSRT:**
+   - **Start with 1024**: Good balance for most use cases
+   - **Increase to 2048** if you see ring full conditions under load
+   - **Make configurable**: Add `RingSize` to `Config` struct to allow tuning per deployment
+
+6. **Changes Required**:
+   - Remove `sndMutex` from listener/dialer (no longer needed - replaced by `sendContextLock`)
+   - Remove `sndData` buffer from listener/dialer (use `payloadPool` instead)
+   - Add `ring *giouring.Ring` to listener/dialer
+   - Add `sendContexts map[uint64]*sendContext` to listener/dialer
+   - Add `sendContextLock sync.Mutex` to listener/dialer
+   - Add `nextSendID uint64` (atomic counter) to listener/dialer
+   - Initialize ring and map in `Listen()`/`Dial()`
+   - Start completion handler goroutine in `Listen()`/`Dial()`
+   - Replace `WriteTo()`/`Write()` with `PrepareSendMsg()` + `ring.Submit()`
+   - Move packet decommissioning to completion handler
+   - Handle ring full condition (when `GetSQE()` returns nil)
+   - Clean up map and ring on shutdown
 
 #### Advantages of giouring Approach
 
@@ -1573,9 +1854,10 @@ send() method → marshal → PrepareSendMsg() → ring.Submit() → completion 
 #### Disadvantages of giouring Approach
 
 - **More code changes**: Requires manual ring management
-- **Complexity**: More boilerplate code, unsafe pointers
+- **Complexity**: More boilerplate code (map management, lock handling)
 - **Error handling**: Manual error handling from CQE results
-- **Buffer management**: More complex buffer lifecycle management
+- **Buffer management**: Requires map-based tracking with locks (but still simpler than channels)
+- **Lock overhead**: Map operations require locking, but this is minimal compared to network I/O latency
 
 ---
 
