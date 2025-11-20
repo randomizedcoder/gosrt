@@ -3,6 +3,14 @@ SHORTCOMMIT := $(shell echo $(COMMIT) | head -c 7)
 
 all: build
 
+## build: Build client and server binaries
+build: client server
+
+## clean: Remove built binaries
+clean:
+	rm -f ./contrib/client/client*
+	rm -f ./contrib/server/server*
+
 ## test: Run all tests
 test:
 	go test -race -coverprofile=/dev/null -covermode=atomic -v ./...
@@ -41,6 +49,10 @@ lint:
 client:
 	cd contrib/client && CGO_ENABLED=0 go build -o client -ldflags="-s -w" -a
 
+## client: Build client with debug symbols
+client-debug:
+	cd contrib/client && CGO_ENABLED=0 go build -o client-debug -gcflags="all=-N -l" -a
+
 ## server: Build import binary
 server:
 	cd contrib/server && CGO_ENABLED=0 go build -o server -ldflags="-s -w" -a
@@ -76,7 +88,9 @@ docker:
 logtopics:
 	grep -ERho 'log\("([^"]+)' *.go | sed -E -e 's/log\("//' | sort -u
 
-.PHONY: help test fuzz vet fmt vendor commit coverage lint client server update logtopics run-server metrics
+.PHONY: all build clean help test fuzz vet fmt vendor commit coverage lint \
+	client client-debug server server-debug update tidy logtopics \
+	run-server metrics docker
 
 ## help: Show all commands
 help: Makefile
