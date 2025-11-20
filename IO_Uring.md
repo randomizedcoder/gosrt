@@ -251,21 +251,15 @@ The following criteria will be used to evaluate the libraries:
 | Features | Comprehensive | Good (missing some advanced) | giouring |
 | Go Idioms | Low-level | High-level, idiomatic | iouring-go |
 
-## Recommendation
+## Recommendation (Initial Evaluation)
 
-**For GoSRT, iouring-go appears to be the better initial choice** for the following reasons:
+**Note**: This section reflects the initial evaluation. The final decision is documented in the "Recommendation" section below, which selects **giouring** as the implementation library.
 
-1. **Ease of Integration**: The high-level API with channels aligns well with GoSRT's existing channel-based packet handling
-2. **UDP Support**: Simple `Recvfrom`/`Sendto` APIs match GoSRT's UDP-based protocol
-3. **Go Idioms**: More idiomatic Go code, easier to maintain
-4. **Sufficient Features**: Has all features needed for initial io_uring implementation (UDP send/recv)
-
-**However, giouring should be considered** if:
-- Maximum performance is critical and the extra complexity is acceptable
-- Advanced features like buffer rings are needed for optimization
-- Fine-grained control over io_uring parameters is required
-
-**Migration Path**: Start with iouring-go for easier implementation and validation. If performance profiling shows bottlenecks, consider migrating specific hot paths to giouring for optimization.
+**Initial evaluation notes**:
+- iouring-go offers easier integration with channel-based APIs
+- giouring offers maximum performance and avoids additional channel overhead
+- Profiling identified channel blocking as a major bottleneck (see "Blocking Channel Operations" section)
+- **Decision**: giouring selected to avoid introducing more channels and optimize the send path bottleneck
 
 ---
 
@@ -960,7 +954,9 @@ The io_uring integration should:
 
 Two implementation approaches are considered, one for each library:
 
-### Approach 1: iouring-go (Channel-Based Integration)
+### Approach 1: iouring-go (Channel-Based Integration) - NOT SELECTED
+
+**Note**: This approach was evaluated but not selected. giouring was chosen instead to avoid introducing additional channels. This section is retained for reference.
 
 **Philosophy**: Leverage iouring-go's channel-based API to integrate seamlessly with GoSRT's existing channel architecture.
 
@@ -1248,7 +1244,9 @@ send() method → marshal → submit Sendto()/Send() → io_uring completion →
 
 ---
 
-### Approach 2: giouring (Low-Level Integration)
+### Approach 2: giouring (Low-Level Integration) - SELECTED
+
+**This is the selected approach for implementation.**
 
 **Philosophy**: Use giouring's low-level API for maximum control and performance, managing the io_uring ring directly.
 
@@ -1959,35 +1957,390 @@ send() method → marshal → PrepareSendMsg() → ring.Submit() → completion 
 
 ## Recommendation
 
-**For initial implementation: iouring-go** is recommended because:
-1. **Minimal disruption**: Fits existing channel-based architecture
-2. **Faster development**: Less code to write and maintain
-3. **Easier testing**: Channel-based completion is easier to test
-4. **Good enough performance**: Channel overhead is minimal compared to network I/O
+**Selected Library: giouring**
 
-**Future optimization**: If profiling shows bottlenecks, consider migrating specific hot paths to giouring for maximum performance.
+After evaluation, **giouring** has been selected for the io_uring implementation because:
+
+1. **Avoids additional channels**: giouring provides direct ring access without requiring channel-based completion handling, which aligns with the goal of reducing channel overhead identified in profiling
+2. **Maximum performance**: Pure Go implementation with no cgo overhead, direct syscall access, and full access to advanced io_uring features
+3. **Send path optimization priority**: The send path has been identified as a bottleneck (see "Blocking Channel Operations" section), and giouring's direct ring access provides the best optimization opportunity
+4. **No channel overhead**: Unlike iouring-go which introduces channels for completion handling, giouring allows direct completion processing without additional channel hops
+5. **Future-proof**: Full access to advanced features (buffer rings, multishot, fixed files) for future optimizations
+
+**Implementation Strategy**: Start with Phase 1 (send path) to address the identified bottleneck, then proceed to Phase 2 (receive path) for complete io_uring integration.
 
 ## Implementation Plan
 
-1. **Phase 1**: Implement receive path with iouring-go
-   - Replace ReadFrom() goroutine
-   - Add buffer pool
-   - Test with existing packet processing
+1. **Phase 1**: Implement transmit path with giouring
+   - Replace WriteTo()/Write() in send() with io_uring
+   - Add completion handler goroutine
+   - Implement context tracking for buffer/packet lifecycle
+   - Verify packet ordering and error handling
 
-2. **Phase 2**: Implement transmit path with iouring-go
-   - Replace WriteTo()/Write() in send()
-   - Add completion handler
-   - Verify packet ordering
+2. **Phase 2**: Implement receive path with giouring
+   - Replace ReadFrom() goroutine with io_uring
+   - Add buffer pool for receive buffers
+   - Implement direct routing to per-connection channels (eliminate rcvQueue)
+   - Test with existing packet processing
 
 3. **Phase 3**: Performance testing and optimization
    - Benchmark against current implementation
    - Profile and identify bottlenecks
-   - Consider giouring for hot paths if needed
+   - Tune ring sizes and buffer pool sizes
+   - Optimize hot paths based on profiling data
 
 4. **Phase 4**: Advanced features (optional)
-   - Buffer rings for zero-copy
-   - Multishot receives
+   - Buffer rings for zero-copy receives
+   - Multishot receives for reduced syscall overhead
    - Fixed files for socket management
+
+## Detailed Implementation Plan
+
+This section provides step-by-step instructions for implementing the io_uring integration using giouring, following the optimized design described in this document.
+
+### Phase 1: Transmit Path Implementation
+
+#### Step 1.1: Add Dependencies and Imports
+
+1. **Add giouring dependency**:
+   ```bash
+   go get github.com/pawelgaczynski/giouring@latest
+   ```
+
+2. **Update imports in `listen.go` and `dial.go`**:
+   ```go
+   import (
+       "github.com/pawelgaczynski/giouring"
+       "golang.org/x/sys/unix"
+       "sync/atomic"
+       // ... existing imports
+   )
+   ```
+
+#### Step 1.2: Update Listener/Dialer Struct
+
+1. **Add io_uring fields to `listener` struct** (listen.go):
+   ```go
+   type listener struct {
+       // ... existing fields ...
+
+       // io_uring for async I/O
+       ring            *giouring.Ring
+       sendContexts    map[uint64]*sendContext
+       sendContextLock sync.Mutex
+       nextSendID      uint64  // atomic counter
+   }
+   ```
+
+2. **Add sendContext type** (in listen.go or a new file):
+   ```go
+   type sendContext struct {
+       packet packet.Packet  // Only set for control packets (nil for data packets)
+       buffer *bytes.Buffer  // Buffer from payloadPool to return
+   }
+   ```
+
+3. **Repeat for `dialer` struct** (dial.go) with the same fields.
+
+#### Step 1.3: Implement Address Conversion Helper
+
+1. **Create `sockaddrToPtr()` function** (in listen.go or a new helper file):
+   - Use the implementation from the "Address Conversion Helper" section
+   - Uses `golang.org/x/sys/unix.SockaddrInet4` and `SockaddrInet6`
+   - Returns `(unsafe.Pointer, uint32, error)`
+
+2. **Add error handling** for unsupported address types
+
+#### Step 1.4: Initialize io_uring Ring
+
+1. **Update `Listen()` function** (listen.go):
+   - After creating UDP connection, initialize ring:
+     ```go
+     ln.ring = giouring.NewRing()
+     ringSize := 1024  // Or from config
+     err := ln.ring.QueueInit(ringSize, 0)
+     if err != nil {
+         return nil, fmt.Errorf("failed to initialize io_uring: %w", err)
+     }
+     ```
+   - Initialize `sendContexts` map: `ln.sendContexts = make(map[uint64]*sendContext)`
+   - Initialize `nextSendID`: `ln.nextSendID = 0`
+
+2. **Start completion handler goroutine**:
+   ```go
+   go ln.sendCompletionHandler()
+   ```
+
+3. **Repeat for `Dial()` function** (dial.go)
+
+#### Step 1.5: Implement Send Completion Handler
+
+1. **Create `sendCompletionHandler()` method** (listen.go):
+   - Named function (not anonymous) for clarity
+   - Loop with non-blocking select on `doneChan` for graceful shutdown
+   - Call `ring.WaitCQE()` to get completions
+   - Look up context in `sendContexts` map using `cqe.UserData`
+   - Return buffer to `payloadPool`
+   - Decommission control packets (if `ctx.packet != nil`)
+   - Handle errors from `cqe.Res`
+   - Call `ring.CQESeen(cqe)` to mark completion as seen
+
+2. **Implement `drainPendingCompletions()` helper**:
+   - Use `PeekCQE()` to check for pending completions
+   - Use `WaitCQE()` to consume them
+   - Process and clean up all pending contexts
+
+3. **Repeat for dialer** (dial.go)
+
+#### Step 1.6: Replace send() Method
+
+1. **Update `send()` method** (listen.go):
+   - Remove `sndMutex` usage (no longer needed)
+   - Remove `sndData` buffer (use `payloadPool` instead)
+   - Get buffer from `payloadPool`: `sendBuffer := payloadPool.Get()`
+   - Marshal packet into buffer: `p.Marshal(sendBuffer)`
+   - Get buffer slice: `bufferSlice := sendBuffer.Bytes()`
+   - Create `syscall.Iovec` and `syscall.Msghdr` structures
+   - Call `sockaddrToPtr()` to get address pointer
+   - Generate unique send ID: `sendID := atomic.AddUint64(&ln.nextSendID, 1)`
+   - Create `sendContext` (only store packet if control packet)
+   - Add context to map (with lock)
+   - Get SQE: `sqe := ln.ring.GetSQE()`
+   - Handle ring full condition (if `sqe == nil`)
+   - Prepare send: `sqe.PrepareSendMsg(fd, &msg, 0)`
+   - Set user data: `sqe.SetData(sendID)`
+   - Submit: `ln.ring.Submit()`
+   - Function returns immediately (async)
+
+2. **Handle ring full condition**:
+   - Options:
+     - Block until ring has space (poll for completion)
+     - Drop packet and log error
+     - Return error to caller
+   - Recommendation: Log warning and return error (caller can retry)
+
+3. **Repeat for dialer** (dial.go)
+
+#### Step 1.7: Update Shutdown/Cleanup
+
+1. **Update `Close()` method** (listen.go):
+   - Close `doneChan` (already done, but verify)
+   - Wait for completion handler to exit (optional: use sync.WaitGroup)
+   - Close ring: `ln.ring.Close()` (if giouring provides this)
+   - Clean up any remaining contexts in map
+
+2. **Verify graceful shutdown**:
+   - Completion handler should exit when `doneChan` is closed
+   - All pending completions should be drained
+   - All buffers should be returned to pool
+
+#### Step 1.8: Remove Obsolete Code
+
+1. **Remove `sndMutex` field** from listener/dialer structs
+2. **Remove `sndData` buffer** from listener/dialer structs
+3. **Update any code that referenced these fields**
+
+#### Step 1.9: Testing
+
+1. **Unit tests**:
+   - Test `sockaddrToPtr()` with IPv4 and IPv6 addresses
+   - Test ring initialization and cleanup
+   - Test send context creation and cleanup
+   - Test completion handler with mock completions
+
+2. **Integration tests**:
+   - Test basic send functionality
+   - Test high-throughput sends (verify no ring full conditions)
+   - Test error handling (invalid addresses, ring full, etc.)
+   - Test graceful shutdown (verify all completions processed)
+
+3. **Performance tests**:
+   - Benchmark send throughput vs. current implementation
+   - Profile memory usage (verify buffers are returned to pool)
+   - Check for goroutine leaks
+
+### Phase 2: Receive Path Implementation
+
+#### Step 2.1: Add Receive Buffer Pool
+
+1. **Create receive buffer pool** (in packet.go or new file):
+   - Follow the pattern from `payloadPool` (bytes.Buffer pool)
+   - Create a `[]byte` pool for receive buffers
+   - Pool should return buffers of size `config.MSS`
+
+2. **Add pool to listener/dialer structs**:
+   ```go
+   recvBufferPool *recvBufferPool  // or similar
+   ```
+
+#### Step 2.2: Update Receive Context Structure
+
+1. **Create receive context type**:
+   ```go
+   type recvContext struct {
+       buffer []byte
+       msg    syscall.Msghdr
+       rsa    syscall.RawSockaddrAny
+       iovec  syscall.Iovec
+   }
+   ```
+
+2. **Pre-allocate receive contexts** (in `Listen()`/`Dial()`):
+   - Create array/slice of `recvContext` (e.g., 64 contexts)
+   - Each context has its own buffer from pool
+   - Initialize `msghdr` structures for each context
+
+#### Step 2.3: Initialize Receive Ring (if separate from send)
+
+1. **Option A: Use same ring for send and receive**
+   - Simpler, but requires coordination
+   - Recommended for initial implementation
+
+2. **Option B: Separate ring for receives**
+   - More complex, but allows independent tuning
+   - Consider for future optimization
+
+#### Step 2.4: Implement Receive Completion Handler
+
+1. **Create receive completion handler**:
+   - Similar structure to send completion handler
+   - Process completions from ring
+   - Extract address from `msghdr` using helper function
+   - Parse packet: `packet.NewPacketFromData(addr, buffer[:cqe.Res])`
+   - Route packet directly to connection (eliminate rcvQueue):
+     - Look up connection in `ln.conns` using `sync.Map.Load()`
+     - Send to connection's `networkQueue` channel
+   - Re-submit receive request to maintain constant pending receives
+   - Handle errors and re-submit on error
+
+2. **Implement address extraction helper**:
+   - Convert `syscall.RawSockaddrAny` to `net.Addr`
+   - Use `golang.org/x/sys/unix.anyToSockaddr()` or similar
+   - Convert to `net.UDPAddr`
+
+#### Step 2.5: Replace ReadFrom() Goroutine
+
+1. **Remove existing `reader()` goroutine** (listen.go):
+   - Remove the goroutine that calls `ReadFrom()`
+   - Remove `rcvQueue` channel (no longer needed)
+
+2. **Initialize receive requests** (in `Listen()`/`Dial()`):
+   - Submit initial batch of receive requests (e.g., 64)
+   - Each request uses a pre-allocated context
+   - Set user data to context index
+
+3. **Start receive completion handler goroutine**:
+   - Handler maintains constant pending receives
+   - Re-submits on each completion
+
+#### Step 2.6: Update Connection Routing
+
+1. **Update packet routing**:
+   - Packets now routed directly in completion handler
+   - No intermediate `rcvQueue` channel
+   - Direct send to per-connection `networkQueue`
+
+2. **Handle handshake packets**:
+   - Route to `backlog` channel (if destination socket ID is 0)
+   - Use non-blocking send to avoid blocking completion handler
+
+#### Step 2.7: Testing
+
+1. **Unit tests**:
+   - Test receive buffer pool
+   - Test address extraction
+   - Test packet parsing from buffers
+   - Test connection routing
+
+2. **Integration tests**:
+   - Test basic receive functionality
+   - Test high-throughput receives
+   - Test packet routing to correct connections
+   - Test handshake packet handling
+   - Test error handling and re-submission
+
+3. **Performance tests**:
+   - Benchmark receive throughput vs. current implementation
+   - Verify reduced latency (no rcvQueue hop)
+   - Check for buffer leaks
+
+### Phase 3: Performance Testing and Optimization
+
+#### Step 3.1: Benchmarking
+
+1. **Create benchmark tests**:
+   - Compare io_uring vs. current implementation
+   - Test various packet sizes
+   - Test various connection counts
+   - Test under high load
+
+2. **Metrics to measure**:
+   - Throughput (packets/second, bytes/second)
+   - Latency (p50, p95, p99)
+   - CPU usage
+   - Memory usage
+   - Goroutine count
+
+#### Step 3.2: Profiling
+
+1. **CPU profiling**:
+   - Identify hot paths
+   - Check for unnecessary allocations
+   - Verify buffer pool effectiveness
+
+2. **Memory profiling**:
+   - Check for buffer leaks
+   - Verify pool usage
+   - Monitor GC pressure
+
+3. **Block profiling**:
+   - Verify reduced channel blocking
+   - Check for lock contention
+   - Identify any new bottlenecks
+
+#### Step 3.3: Tuning
+
+1. **Ring size tuning**:
+   - Start with 1024
+   - Increase if seeing ring full conditions
+   - Decrease if memory constrained
+
+2. **Buffer pool tuning**:
+   - Adjust pool size based on usage patterns
+   - Monitor pool hit rate
+
+3. **Goroutine tuning**:
+   - Verify optimal number of completion handlers
+   - Check for goroutine leaks
+
+### Phase 4: Advanced Features (Optional)
+
+#### Step 4.1: Buffer Rings (Zero-Copy Receives)
+
+1. **Research buffer ring setup**:
+   - Requires kernel 5.19+
+   - More complex setup
+   - Provides true zero-copy
+
+2. **Implementation**:
+   - Register buffer ring with kernel
+   - Use fixed buffers
+   - Eliminate buffer copying
+
+#### Step 4.2: Multishot Receives
+
+1. **Enable multishot mode**:
+   - Reduces syscall overhead
+   - Single submission can receive multiple packets
+   - Requires careful buffer management
+
+#### Step 4.3: Fixed Files
+
+1. **Register socket as fixed file**:
+   - Reduces per-operation overhead
+   - Useful for high-frequency operations
+
+---
 
 The following table summarizes the changes
 
