@@ -316,10 +316,100 @@ GoSRT uses a channel-based architecture to decouple network I/O from packet proc
 
 Additionally, the listener/dialer level uses:
 - **`rcvQueue`** (chan packet.Packet, buffer size 2048): Receives raw packets from the UDP socket before routing to connections
+- **`backlog`** (chan packet.Packet, buffer size 128): Queues handshake packets for connection acceptance
+
+### Blocking Channel Operations
+
+The following locations contain **blocking** channel read/write operations that can cause goroutines to block waiting for channel data. These are identified as potential bottlenecks in performance profiling:
+
+#### Connection-level Blocking Operations
+
+1. **`connection.go:550`** - `ReadPacket()` method
+   - **Operation**: `case p = <-c.readQueue:`
+   - **Blocking**: Blocks waiting for packets to be delivered to the read queue
+   - **Context**: Called by application `Read()` operations
+
+2. **`connection.go:536`** - `ticker()` method
+   - **Operation**: `case t := <-ticker.C:`
+   - **Blocking**: Blocks waiting for ticker events (10ms intervals)
+   - **Context**: Congestion control timing loop, runs per connection
+
+3. **`connection.go:738`** - `networkQueueReader()` method
+   - **Operation**: `case p := <-c.networkQueue:`
+   - **Blocking**: Blocks waiting for packets from network layer
+   - **Context**: Processes incoming packets for the connection
+   - **Profile Impact**: 16.50% of blocking time (473.20s)
+
+4. **`connection.go:756`** - `writeQueueReader()` method
+   - **Operation**: `case p := <-c.writeQueue:`
+   - **Blocking**: Blocks waiting for packets from application writes
+   - **Context**: Processes outgoing packets for congestion control
+   - **Profile Impact**: 16.68% of blocking time (478.29s)
+
+#### Listener-level Blocking Operations
+
+5. **`listen.go:346`** - `Accept2()` method
+   - **Operation**: `case p := <-ln.backlog:`
+   - **Blocking**: Blocks waiting for handshake packets in backlog queue
+   - **Context**: Server connection acceptance loop
+   - **Profile Impact**: Part of `Server.Serve()` blocking (8.58% total, 246.03s)
+
+6. **`listen.go:465`** - `reader()` method
+   - **Operation**: `case p := <-ln.rcvQueue:`
+   - **Blocking**: Blocks waiting for packets from network receive queue
+   - **Context**: Routes received packets to appropriate connections
+   - **Profile Impact**: Part of `Server.Serve()` blocking
+
+#### Dialer-level Blocking Operations
+
+7. **`dial.go:273`** - `reader()` method
+   - **Operation**: `case p := <-dl.rcvQueue:`
+   - **Blocking**: Blocks waiting for packets from network receive queue
+   - **Context**: Processes received packets for client connections
+
+### Block Profile Analysis
+
+Performance profiling shows that channel blocking is a significant bottleneck:
+
+```
+File: server-debug
+Type: delay
+Time: 2025-11-20 08:51:22 PST
+
+(pprof) top -cum runtime.selectgo
+Showing nodes accounting for 2620.68s, 91.37% of 2868.08s total
+
+      flat  flat%   sum%        cum   cum%
+  2620.68s 91.37% 91.37%   2620.68s 91.37%  runtime.selectgo
+         0     0%  91.37%    478.29s 16.68%  github.com/datarhei/gosrt.(*srtConn).writeQueueReader
+         0     0%  91.37%    478.29s 16.68%  github.com/datarhei/gosrt.newSRTConn.gowrap2
+         0     0%  91.37%    478.02s 16.67%  github.com/datarhei/gosrt.(*Server).Serve.func1
+         0     0%  91.37%    478.02s 16.67%  github.com/datarhei/gosrt.(*Server).Serve.gowrap1
+         0     0%  91.37%    473.20s 16.50%  github.com/datarhei/gosrt.(*srtConn).networkQueueReader
+         0     0%  91.37%    473.20s 16.50%  github.com/datarhei/gosrt.newSRTConn.gowrap1
+         0     0%  91.37%    464.96s 16.21%  github.com/datarhei/gosrt.(*srtConn).ticker
+         0     0%  91.37%    464.96s 16.21%  github.com/datarhei/gosrt.newSRTConn.gowrap3
+         0     0%  91.37%    246.03s  8.58%  github.com/datarhei/gosrt.(*Server).ListenAndServe
+```
+
+**Key Findings:**
+- **91.37%** of blocking time is spent in `runtime.selectgo` (channel select operations)
+- **writeQueueReader**: 16.68% of blocking time (478.29s) - waiting for application writes
+- **networkQueueReader**: 16.50% of blocking time (473.20s) - waiting for network packets
+- **ticker**: 16.21% of blocking time (464.96s) - waiting for ticker events
+- **Server.Serve**: 8.58% of blocking time (246.03s) - includes `Accept2()` blocking on backlog
+
+**Implications for io_uring:**
+- Channel blocking indicates that packet processing may be faster than network I/O
+- io_uring's asynchronous I/O could reduce blocking by allowing more concurrent operations
+- However, channel operations will still be necessary for packet routing and processing
+- The bottleneck may shift from network I/O blocking to channel contention if io_uring increases throughput
 
 ### Network Receive Flow
 
 Packets flow from the network socket through multiple stages of processing:
+
+#### Current Implementation (with rcvQueue)
 
 ```
 Network Socket (UDP)
@@ -327,38 +417,43 @@ Network Socket (UDP)
     | [ReadFrom() syscall - blocking]
     v
 Listener/Dialer Goroutine
-    | (listen.go:225, dial.go:145)
+    | (listen.go:282-320, dial.go:170-211)
     | - Reads into buffer
     | - Parses packet with packet.NewPacketFromData()
+    | - Non-blocking send to rcvQueue
     |
     v
 rcvQueue Channel (2048 buffer)
-    | (listen.go:247, dial.go:167)
+    | (listen.go:265, dial.go:167)
+    | - Buffers packets between network reader and router
     |
     v
 Listener reader() Goroutine
-    | (listen.go:375)
+    | (listen.go:454-512, dial.go:259-303)
+    | - Blocks on rcvQueue (listen.go:465, dial.go:273)
     | - Routes packets to correct connection
-    | - Looks up connection in ln.conns map using DestinationSocketId
-    | - Validates destination socket ID and peer address
+    | - Looks up connection in ln.conns sync.Map using DestinationSocketId (listen.go:487)
+    | - Validates destination socket ID and peer address (listen.go:499-505)
+    | - Handles handshake packets (DestinationSocketId == 0) → backlog channel
     |
     v
 conn.push() method
-    | (connection.go:518)
-    | - Non-blocking send
+    | (connection.go:651-666)
+    | - Non-blocking send to connection's networkQueue
     |
     v
 networkQueue Channel (1024 buffer)
-    | (connection.go:522)
+    | (connection.go:738)
     |
     v
 networkQueueReader() Goroutine
-    | (connection.go:589)
+    | (connection.go:728-743)
+    | - Blocks on networkQueue (connection.go:738)
     | - Processes packets sequentially
     |
     v
 handlePacket() method
-    | (connection.go:636)
+    | (connection.go:785+)
     | - Handles control packets (ACK, NAK, etc.)
     | - For data packets: calls recv.Push()
     |
@@ -372,16 +467,16 @@ Congestion Control Receiver
     |
     v
 deliver() method
-    | (connection.go:623)
+    | (connection.go:765-780)
     | - Non-blocking send
     |
     v
 readQueue Channel (1024 buffer)
-    | (connection.go:627)
+    | (connection.go:550)
     |
     v
 Application Read
-    | (connection.go:421, 445)
+    | (connection.go:545-567, 569-590)
     | - ReadPacket() or Read()
 ```
 
@@ -389,10 +484,64 @@ Application Read
 - The `ReadFrom()` syscall blocks in a dedicated goroutine, allowing other operations to continue
 - Packets are parsed immediately after reading from the socket
 - The `rcvQueue` acts as a buffer between the socket reader and connection router
-- **Connection Routing**: The listener maintains a map `conns map[uint32]*srtConn` (listen.go:126) that maps destination socket IDs to connection objects. The `reader()` goroutine looks up the connection using `p.Header().DestinationSocketId` (listen.go:405) and calls `conn.push(p)` to route the packet to that connection's `networkQueue` channel
+- **Connection Routing**: The listener maintains a `sync.Map` `conns` (listen.go:133) that maps destination socket IDs to connection objects. The `reader()` goroutine looks up the connection using `p.Header().DestinationSocketId` (listen.go:487) and calls `conn.push(p)` to route the packet to that connection's `networkQueue` channel
 - Each connection has its own `networkQueue` channel, ensuring packets are processed sequentially per connection
 - Congestion control handles reordering, loss detection, and flow control
 - The `readQueue` buffers packets ready for application consumption
+
+#### Potential Optimization: Eliminate rcvQueue
+
+**Proposed Flow (direct routing):**
+
+```
+Network Socket (UDP)
+    |
+    | [ReadFrom() syscall - blocking]
+    v
+Listener/Dialer Goroutine
+    | (listen.go:282-320, dial.go:170-211)
+    | - Reads into buffer
+    | - Parses packet with packet.NewPacketFromData()
+    | - **Immediately routes packet:**
+    |   - If DestinationSocketId == 0: send to backlog (handshake)
+    |   - Else: lookup connection in sync.Map (listen.go:487)
+    |   - Validate peer address (listen.go:499-505)
+    |   - Call conn.push() directly
+    |
+    v
+networkQueue Channel (1024 buffer) [per connection]
+    | (connection.go:738)
+    |
+    v
+[Rest of flow remains the same...]
+```
+
+**Benefits of eliminating rcvQueue:**
+1. **Reduced latency**: One less channel hop and goroutine context switch
+2. **Lower memory**: Eliminates 2048-buffer channel per listener/dialer
+3. **Simpler code**: One less goroutine to manage
+4. **Better for io_uring**: With async I/O, the completion handler can do routing directly without an intermediate queue
+
+**Considerations:**
+1. **Routing performance**: The routing logic is fast:
+   - `sync.Map.Load()` is O(1) average case (read-heavy workload, already optimized)
+   - String comparison for peer validation is fast
+   - `conn.push()` is non-blocking (won't block the network reader)
+2. **Blocking risk**: If routing logic becomes slow, it could delay the network reader. However:
+   - Current routing logic is simple and fast
+   - `conn.push()` uses non-blocking channel send (select with default)
+   - Even if a connection's `networkQueue` is full, other connections aren't affected
+3. **Handshake packets**: Special handling for `DestinationSocketId == 0` packets (send to `backlog`) can be done in the network reader goroutine
+4. **Error handling**: Parse errors already handled in network reader; routing errors (unknown destination) can be handled there too
+
+**Implementation for io_uring:**
+With io_uring, this optimization becomes even more attractive:
+- The receive completion handler runs in a separate goroutine (not blocking on syscall)
+- It can immediately do the routing without needing an intermediate queue
+- This reduces latency and eliminates the `rcvQueue` entirely for the io_uring path
+
+**Recommendation:**
+This optimization is viable and recommended, especially for the io_uring implementation. The routing logic is fast enough that it won't block the network reader, and eliminating the intermediate queue reduces latency and memory usage.
 
 ### Network Transmit Flow
 
@@ -400,60 +549,191 @@ Packets flow from application writes through congestion control to the network:
 
 ```
 Application Write
-    | (connection.go:481, 467)
+    | (connection.go:608-648)
     | - Write() or WritePacket()
-    | - Creates packet with timestamp
+    | - Creates packet with timestamp (PktTsbpdTime)
     |
     v
-writeQueue Channel (1024 buffer)
-    | (connection.go:502)
-    | - Non-blocking send
+writeQueue Channel (1024 buffer) [PER CONNECTION]
+    | (connection.go:413, 632)
+    | - Non-blocking send (select with default)
+    | - **If full: returns io.EOF, packet is dropped** (connection.go:634-637)
+    | - Each connection has its own writeQueue
     |
     v
-writeQueueReader() Goroutine
-    | (connection.go:606)
-    | - Processes packets sequentially
+writeQueueReader() Goroutine [PER CONNECTION]
+    | (connection.go:747-762)
+    | - Blocks on writeQueue (connection.go:756)
+    | - Processes packets sequentially per connection
+    | - Calls c.snd.Push(p) to add to congestion control
     |
     v
 Congestion Control Sender
     | (congestion/live/send.go)
-    | - snd.Push(): Assigns sequence numbers
-    | - OnTick(): Rate limiting, calls OnDeliver callback
+    | - snd.Push(): Assigns sequence numbers, adds to packetList
+    | - OnTick() (every 10ms):
+    |   * Checks packets where PktTsbpdTime <= now
+    |   * Calls OnDeliver callback (c.pop) for ready packets
+    |   * Rate limiting is **time-based**, not bandwidth-based:
+    |     - Packets are scheduled by their PktTsbpdTime timestamp
+    |     - Rate determined by packet send period (pktSndPeriod)
+    |     - pktSndPeriod = (avgPayloadSize + 16) * 1_000_000 / maxBW (microseconds)
+    |     - Default maxBW = 128 MB/s (1 Gbit/s)
+    |   * Drops packets that are too old (PktTsbpdTime + dropThreshold <= now)
+    |   * Statistics tracked: PktDrop, PktLoss, estimatedInputBW, estimatedSentBW
     |
     v
 pop() method
-    | (connection.go:541)
+    | (connection.go:681-726)
     | - Sets destination address/socket ID
     | - Encrypts packet if needed
-    | - Calls onSend() callback
+    | - Calls onSend() callback (no channels used here)
     |
     v
 onSend() callback
-    | (connection.go:585)
+    | (connection.go:725)
     | - Set to listener.send() or dialer.send()
+    | - Direct function call, no channels
     |
     v
 Listener/Dialer send() method
-    | (listen.go:427, dial.go:258)
-    | - Marshals packet to bytes
-    | - Mutex-protected write
+    | (listen.go:514-557, dial.go:307-336)
+    | - **Mutex protects sndData buffer during marshaling** (listen.go:522, dial.go:311)
+    | - Mutex is NOT protecting the socket write itself
+    | - Multiple connections share the same sndData buffer for marshaling
+    | - Without mutex: concurrent marshaling would corrupt the shared buffer
+    | - Marshals packet to bytes using shared sndData buffer
     |
     v
 Network Socket (UDP)
     | [WriteTo() or Write() syscall - blocking]
-    | (listen.go:444, dial.go:275)
+    | (listen.go:551, dial.go:328)
+    | - Kernel handles socket-level concurrency
+    | - Mutex is released before syscall, so it doesn't block socket writes
     |
     v
 Network Wire
 ```
 
 **Key Points:**
-- Application writes are non-blocking (channel send with default case)
-- The `writeQueue` buffers packets before congestion control
-- Congestion control handles sequence numbering, rate limiting, and retransmission
-- The `pop()` method handles encryption and packet finalization
-- The `onSend()` callback allows different send paths for listener vs dialer
-- The actual syscall is synchronous and mutex-protected to ensure packet ordering
+
+1. **writeQueue is per connection**: Each `srtConn` has its own `writeQueue` channel (connection.go:413), ensuring packets from different connections don't interfere with each other.
+
+2. **Non-blocking send with packet drops**: When `writeQueue` is full, the application write returns `io.EOF` and the packet is dropped (connection.go:634-637). This prevents blocking but can cause data loss if the application writes faster than packets can be processed. The drop is tracked via Prometheus metrics (`connectionChannelBlockedCount`).
+
+3. **Rate limiting mechanism**:
+   - **Time-based scheduling**: Packets are sent when their `PktTsbpdTime` timestamp arrives, not based on explicit bandwidth limits
+   - **Packet send period**: Calculated as `(avgPayloadSize + 16) * 1_000_000 / maxBW` microseconds
+   - **Default rate**: 128 MB/s (1 Gbit/s) maximum bandwidth
+   - **Rate determination**: The `pktSndPeriod` determines the minimum time between packets, effectively limiting the send rate
+   - **Drop detection**: Packets older than `PktTsbpdTime + dropThreshold` are dropped and tracked in statistics (`PktDrop`, `PktLoss`)
+   - **Statistics**: Congestion control tracks `estimatedInputBW`, `estimatedSentBW`, and `pktLossRate` for monitoring
+
+4. **No channels after congestion control**: After `OnDeliver` callback (which calls `pop()`), there are no more channels. The `pop()` method directly calls `onSend()` callback, which directly calls `listener.send()` or `dialer.send()`. This is a direct function call chain, not channel-based.
+
+5. **Mutex purpose**: The `sndMutex` (listen.go:193, dial.go:76) protects the **shared `sndData` buffer** during marshaling, not the socket write itself. This is necessary because:
+   - Multiple connections (goroutines) can call `send()` concurrently
+   - All connections on the same listener/dialer share the same `sndData` buffer
+   - Without the mutex, concurrent marshaling would corrupt the buffer
+   - The mutex is released **before** the syscall, so it doesn't block socket writes
+   - The kernel handles socket-level concurrency internally
+   - **For io_uring**: This mutex can be removed since each send operation will use its own pooled buffer, eliminating the shared buffer issue
+
+6. **Examining `send()` function and `Decommission()` flow**:
+
+   The `send()` function comment states: *"This function must be synchronous in order to allow to safely call Packet.Decommission() afterward."* (listen.go:514, dial.go:305)
+
+   **Understanding `Decommission()`**:
+   - `Decommission()` returns the packet's payload buffer to `payloadPool` (packet/packet.go:309-316)
+   - It sets `p.payload = nil` to prevent reuse
+   - Once decommissioned, the packet should not be used
+
+   **Why "synchronous" is required**:
+   - **Control packets**: Decommissioned immediately after `WriteTo()`/`Write()` completes (listen.go:545, dial.go:334)
+     - Control packets are never retransmitted, so safe to decommission immediately
+   - **Data packets**: NOT decommissioned in `send()` - they remain in congestion control for potential retransmission
+     - Data packets are decommissioned later when ACK'd or dropped (congestion/live/send.go:257, 311)
+
+   **The mutex does NOT protect `Decommission()`**:
+   - The mutex only protects the shared `sndData` buffer during marshaling
+   - `Decommission()` is called on the packet object, which is per-packet and thread-safe
+   - The "synchronous" requirement ensures the syscall completes before decommissioning, so the packet data remains valid during the write
+   - With blocking syscalls, this is naturally synchronous - the function doesn't return until the write completes
+
+   **For async io_uring**:
+   - The send becomes asynchronous, so we can't decommission immediately
+   - `Decommission()` must be moved to the completion handler
+   - The packet and buffer must be kept alive until the completion handler runs
+   - This is why the io_uring design keeps the packet and buffer in the completion info
+
+7. **sync.Pool optimization analysis**:
+
+   **Current approach (shared buffer)**:
+   ```go
+   // Single shared buffer per listener/dialer
+   sndData bytes.Buffer  // shared across all connections
+   sndMutex sync.Mutex   // protects sndData
+
+   func (ln *listener) send(p packet.Packet) {
+       ln.sndMutex.Lock()           // Serialize access to shared buffer
+       defer ln.sndMutex.Unlock()
+       ln.sndData.Reset()
+       p.Marshal(&ln.sndData)       // Marshal into shared buffer
+       buffer := ln.sndData.Bytes() // Get slice
+       ln.pc.WriteTo(buffer, ...)   // Write (blocking)
+       // Mutex released here, but write already completed
+   }
+   ```
+
+   **Proposed sync.Pool approach**:
+   ```go
+   // Pool of buffers shared across all connections
+   var sendBufferPool = &sync.Pool{
+       New: func() interface{} {
+           return new(bytes.Buffer)
+       },
+   }
+
+   func (ln *listener) send(p packet.Packet) {
+       // Get buffer from pool (no lock needed - sync.Pool is thread-safe)
+       sendBuffer := sendBufferPool.Get().(*bytes.Buffer)
+       defer func() {
+           sendBuffer.Reset()
+           sendBufferPool.Put(sendBuffer)  // Return to pool
+       }()
+
+       // Marshal into pooled buffer (no lock needed - each send() has its own buffer)
+       if err := p.Marshal(sendBuffer); err != nil {
+           p.Decommission()
+           return
+       }
+
+       buffer := sendBuffer.Bytes()  // Get slice
+       ln.pc.WriteTo(buffer, ...)    // Write (blocking)
+       // Buffer stays alive until defer executes
+   }
+   ```
+
+   **Benefits of sync.Pool approach**:
+   - **No mutex needed**: Each `send()` call gets its own buffer from the pool
+   - **Concurrent sends**: Multiple connections can send simultaneously without blocking
+   - **Buffer reuse**: Buffers are recycled, reducing allocations
+   - **Better performance**: Eliminates mutex contention on the hot path
+
+   **Considerations**:
+   - **Buffer lifetime**: The buffer must stay alive until the write completes
+     - With blocking syscalls: defer ensures buffer stays alive until function returns
+     - With async io_uring: buffer must be kept in completion info until completion handler runs
+   - **Pool sizing**: The pool will automatically grow/shrink based on demand
+   - **Memory usage**: More buffers in use concurrently, but they're recycled
+
+   **Answer: Yes, the lock can be removed with sync.Pool**:
+   - Each `send()` gets its own buffer from the pool
+   - No shared state to protect
+   - `sync.Pool.Get()` and `Put()` are already thread-safe
+   - The only requirement is keeping the buffer alive until the write completes (or completion handler runs for io_uring)
+
+   **This is exactly what the io_uring design does**: Uses `payloadPool` (which is a sync.Pool) for send buffers, eliminating the need for `sndMutex`.
 
 ### Connection Routing Details
 
@@ -606,6 +886,8 @@ The syscalls interface with channels as follows:
 - **Processing**: Connection's `networkQueueReader()` processes packets and eventually delivers to `readQueue`
 - **Application**: Application reads from `readQueue` via `ReadPacket()` or `Read()`
 
+**Note**: For io_uring implementation, we can optimize by eliminating `rcvQueue` and routing directly from the completion handler (see "Potential Optimization: Eliminate rcvQueue" section above).
+
 **Transmit Side:**
 - **Application**: Application writes to `writeQueue` (non-blocking)
 - **Channel Read**: `writeQueueReader()` reads from `writeQueue` and feeds congestion control
@@ -690,13 +972,19 @@ The iouring-go approach introduces a completion handler goroutine that processes
 
 **Current Flow:**
 ```
-ReadFrom() syscall (blocking) → parse → rcvQueue channel
+ReadFrom() syscall (blocking) → parse → rcvQueue channel → reader() goroutine → route to connection's networkQueue
 ```
 
-**io_uring Flow:**
+**io_uring Flow (Optimized - Direct Routing):**
 ```
-Submit Recvfrom() → io_uring completion → completion channel → parse → rcvQueue channel
+Submit Recvfrom() → io_uring completion → completion handler → parse → route directly to connection's networkQueue
 ```
+
+**Note**: The io_uring implementation will eliminate the `rcvQueue` intermediate step. The completion handler will:
+1. Parse the packet
+2. Look up the connection in `sync.Map` using `DestinationSocketId`
+3. Route directly to the connection's `networkQueue` (or `backlog` for handshake packets)
+This reduces latency by eliminating one channel hop and one goroutine context switch.
 
 **Implementation Details:**
 
@@ -773,20 +1061,53 @@ Submit Recvfrom() → io_uring completion → completion channel → parse → r
                n := result.ReturnValue0().(int)
                addr := result.ReturnValue1().(net.Addr)
 
-               // Parse and queue (existing logic)
+               // Parse packet
                // Note: NewPacketFromData will copy the data into its own buffer
                p, err := packet.NewPacketFromData(addr, buffer[:n])
 
                // Return buffer to pool immediately after copying
                recvPool.Put(buffer)
 
-               if err == nil {
-                   select {
-                   case ln.rcvQueue <- p:
-                   default:
-                       // queue full
+               if err != nil {
+                   continue
+               }
+
+               // Route packet directly to connection (eliminating rcvQueue)
+               // This is the optimization: do routing in completion handler instead of separate goroutine
+               if p.Header().DestinationSocketId == 0 {
+                   // Handshake packet - send to backlog
+                   if p.Header().IsControlPacket && p.Header().ControlType == packet.CTRLTYPE_HANDSHAKE {
+                       select {
+                       case ln.backlog <- p:
+                       default:
+                           // backlog full, drop packet
+                       }
+                   }
+                   continue
+               }
+
+               // Look up connection and route directly
+               val, ok := ln.conns.Load(p.Header().DestinationSocketId)
+               if !ok {
+                   // Unknown destination, drop packet
+                   continue
+               }
+
+               conn := val.(*srtConn)
+               if conn == nil {
+                   continue
+               }
+
+               // Validate peer address if configured
+               if !ln.config.AllowPeerIpChange {
+                   if p.Header().Addr.String() != conn.RemoteAddr().String() {
+                       // Peer IP mismatch, drop packet
+                       continue
                    }
                }
+
+               // Route directly to connection's networkQueue (non-blocking)
+               conn.push(p)
 
                // Submit new recv to maintain constant pending count
                // This ensures there are always ~64 pending receives in the ring
@@ -815,7 +1136,8 @@ Submit Recvfrom() → io_uring completion → completion channel → parse → r
    - Replace the `ReadFrom()` goroutine with io_uring submission/completion loop
    - Add buffer pool management
    - Handle timeouts via io_uring timeout requests instead of `SetReadDeadline()`
-   - Keep existing `rcvQueue` and `reader()` goroutine unchanged
+   - **Eliminate `rcvQueue` and `reader()` goroutine**: Route packets directly from completion handler to connection's `networkQueue`
+   - This optimization reduces latency by eliminating one channel hop and one goroutine context switch
 
 #### Transmit Path Design
 
@@ -938,13 +1260,15 @@ The giouring approach requires manual management of the submission and completio
 
 **Current Flow:**
 ```
-ReadFrom() syscall (blocking) → parse → rcvQueue channel
+ReadFrom() syscall (blocking) → parse → rcvQueue channel → reader() goroutine → route to connection's networkQueue
 ```
 
-**io_uring Flow:**
+**io_uring Flow (Optimized - Direct Routing):**
 ```
-Submit RecvMsg() → ring.Submit() → ring.WaitCQE() → parse → rcvQueue channel
+Submit RecvMsg() → ring.Submit() → ring.WaitCQE() → parse → route directly to connection's networkQueue
 ```
+
+**Note**: The io_uring implementation will eliminate the `rcvQueue` intermediate step. The completion handler will route packets directly to connections, reducing latency.
 
 **Implementation Details:**
 
@@ -1050,12 +1374,46 @@ Submit RecvMsg() → ring.Submit() → ring.WaitCQE() → parse → rcvQueue cha
            // Note: Buffer is reused in the same context, no need to return to pool
            // The buffer stays with the recvContext for the lifetime of the listener
 
-           if err == nil {
-               select {
-               case ln.rcvQueue <- p:
-               default:
+           if err != nil {
+               continue
+           }
+
+           // Route packet directly to connection (eliminating rcvQueue)
+           // This is the optimization: do routing in completion handler instead of separate goroutine
+           if p.Header().DestinationSocketId == 0 {
+               // Handshake packet - send to backlog
+               if p.Header().IsControlPacket && p.Header().ControlType == packet.CTRLTYPE_HANDSHAKE {
+                   select {
+                   case ln.backlog <- p:
+                   default:
+                       // backlog full, drop packet
+                   }
+               }
+               continue
+           }
+
+           // Look up connection and route directly
+           val, ok := ln.conns.Load(p.Header().DestinationSocketId)
+           if !ok {
+               // Unknown destination, drop packet
+               continue
+           }
+
+           conn := val.(*srtConn)
+           if conn == nil {
+               continue
+           }
+
+           // Validate peer address if configured
+           if !ln.config.AllowPeerIpChange {
+               if p.Header().Addr.String() != conn.RemoteAddr().String() {
+                   // Peer IP mismatch, drop packet
+                   continue
                }
            }
+
+           // Route directly to connection's networkQueue (non-blocking)
+           conn.push(p)
 
            // Re-submit recv for this buffer to maintain constant pending count
            sqe := ring.GetSQE()
