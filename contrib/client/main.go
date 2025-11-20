@@ -15,6 +15,7 @@ import (
 	"time"
 
 	srt "github.com/datarhei/gosrt"
+	"github.com/pkg/profile"
 )
 
 type stats struct {
@@ -70,22 +71,316 @@ func (s *stats) update(n uint64) {
 	s.total++
 }
 
+var (
+	// Client flags
+	from        = flag.String("from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
+	to          = flag.String("to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout)")
+	logtopics   = flag.String("logtopics", "", "topics for the log output")
+	profileMode = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	bufferSize  = flag.Int("bufferSize", 2048, "buffer size for reading and writing (bytes)")
+
+	// Config flags
+	congestion            = flag.String("congestion", "", "type of congestion control. 'live' or 'file'")
+	connectionTimeout     = flag.String("connectionTimeout", "", "connection timeout (e.g., '3s', '500ms')")
+	driftTracer           = flag.Bool("driftTracer", true, "enable drift tracer")
+	enforcedEncryption    = flag.Bool("enforcedEncryption", true, "reject connection if parties set different passphrase")
+	fc                    = flag.Uint("fc", 0, "flow control window size (packets)")
+	groupConnect          = flag.Bool("groupConnect", false, "accept group connections")
+	groupStabilityTimeout = flag.String("groupStabilityTimeout", "", "group stability timeout (e.g., '1s', '500ms')")
+	inputBW               = flag.Int64("inputBW", 0, "input bandwidth (bytes)")
+	iptos                 = flag.Int("iptos", 0, "IP socket type of service")
+	ipttl                 = flag.Int("ipttl", 0, "IP socket time to live option")
+	ipv6Only              = flag.Int("ipv6Only", 0, "allow only IPv6")
+	kmPreAnnounce         = flag.Uint64("kmPreAnnounce", 0, "duration of Stream Encryption key switchover (packets)")
+	kmRefreshRate         = flag.Uint64("kmRefreshRate", 0, "stream encryption key refresh rate (packets)")
+	latency               = flag.String("latency", "", "maximum accepted transmission latency (e.g., '120ms', '1s')")
+	lossMaxTTL            = flag.Uint("lossMaxTTL", 0, "packet reorder tolerance")
+	maxBW                 = flag.Int64("maxBW", 0, "bandwidth limit (bytes/s)")
+	messageAPI            = flag.Bool("messageAPI", false, "enable SRT message mode")
+	minInputBW            = flag.Int64("minInputBW", 0, "minimum input bandwidth")
+	minVersion            = flag.Uint("minVersion", 0, "minimum SRT library version of a peer")
+	mss                   = flag.Uint("mss", 0, "MTU size")
+	nakReport             = flag.Bool("nakReport", true, "enable periodic NAK reports")
+	overheadBW            = flag.Int64("overheadBW", 0, "limit bandwidth overhead (percents)")
+	packetFilter          = flag.String("packetFilter", "", "set up the packet filter")
+	passphrase            = flag.String("passphrase", "", "passphrase for de- and enrcypting the data")
+	payloadSize           = flag.Uint("payloadSize", 0, "maximum payload size (bytes)")
+	pbKeylen              = flag.Int("pbKeylen", 0, "crypto key length in bytes")
+	peerIdleTimeout       = flag.String("peerIdleTimeout", "", "peer idle timeout (e.g., '2s', '500ms')")
+	peerLatency           = flag.String("peerLatency", "", "minimum receiver latency to be requested by sender (e.g., '120ms', '1s')")
+	receiverBufferSize    = flag.Uint("receiverBufferSize", 0, "receiver buffer size (bytes)")
+	receiverLatency       = flag.String("receiverLatency", "", "receiver-side latency (e.g., '120ms', '1s')")
+	sendBufferSize        = flag.Uint("sendBufferSize", 0, "sender buffer size (bytes)")
+	sendDropDelay         = flag.String("sendDropDelay", "", "sender's delay before dropping packets (e.g., '1s', '500ms')")
+	streamId              = flag.String("streamId", "", "stream ID (settable in caller mode only, visible on the listener peer)")
+	tooLatePacketDrop     = flag.Bool("tooLatePacketDrop", true, "drop too late packets")
+	transmissionType      = flag.String("transmissionType", "", "transmission type. 'live' or 'file'")
+	tsbpdMode             = flag.Bool("tsbpdMode", true, "timestamp-based packet delivery mode")
+	allowPeerIpChange     = flag.Bool("allowPeerIpChange", false, "if a new IP starts sending data on an existing socket id, allow it")
+)
+
+func parseDuration(s string, defaultVal time.Duration) time.Duration {
+	if s == "" {
+		return defaultVal
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultVal
+	}
+	return d
+}
+
+// applyConfigFlags applies command-line flag values to the config.
+// It only applies flags that were explicitly set or have non-zero/non-empty values.
+func applyConfigFlags(config *srt.Config, setFlags map[string]bool) {
+	// Apply flag values to config
+	if *congestion != "" {
+		config.Congestion = *congestion
+	}
+	if *connectionTimeout != "" {
+		config.ConnectionTimeout = parseDuration(*connectionTimeout, config.ConnectionTimeout)
+	}
+	if setFlags["driftTracer"] {
+		config.DriftTracer = *driftTracer
+	}
+	if setFlags["enforcedEncryption"] {
+		config.EnforcedEncryption = *enforcedEncryption
+	}
+	if *fc != 0 {
+		config.FC = uint32(*fc)
+	}
+	if setFlags["groupConnect"] {
+		config.GroupConnect = *groupConnect
+	}
+	if *groupStabilityTimeout != "" {
+		config.GroupStabilityTimeout = parseDuration(*groupStabilityTimeout, config.GroupStabilityTimeout)
+	}
+	if *inputBW != 0 {
+		config.InputBW = *inputBW
+	}
+	if *iptos != 0 {
+		config.IPTOS = *iptos
+	}
+	if *ipttl != 0 {
+		config.IPTTL = *ipttl
+	}
+	if *ipv6Only != 0 {
+		config.IPv6Only = *ipv6Only
+	}
+	if *kmPreAnnounce != 0 {
+		config.KMPreAnnounce = *kmPreAnnounce
+	}
+	if *kmRefreshRate != 0 {
+		config.KMRefreshRate = *kmRefreshRate
+	}
+	if *latency != "" {
+		config.Latency = parseDuration(*latency, config.Latency)
+	}
+	if *lossMaxTTL != 0 {
+		config.LossMaxTTL = uint32(*lossMaxTTL)
+	}
+	if *maxBW != 0 {
+		config.MaxBW = *maxBW
+	}
+	if setFlags["messageAPI"] {
+		config.MessageAPI = *messageAPI
+	}
+	if *minInputBW != 0 {
+		config.MinInputBW = *minInputBW
+	}
+	if *minVersion != 0 {
+		config.MinVersion = uint32(*minVersion)
+	}
+	if *mss != 0 {
+		config.MSS = uint32(*mss)
+	}
+	if setFlags["nakReport"] {
+		config.NAKReport = *nakReport
+	}
+	if *overheadBW != 0 {
+		config.OverheadBW = *overheadBW
+	}
+	if *packetFilter != "" {
+		config.PacketFilter = *packetFilter
+	}
+	if *passphrase != "" {
+		config.Passphrase = *passphrase
+	}
+	if *payloadSize != 0 {
+		config.PayloadSize = uint32(*payloadSize)
+	}
+	if *pbKeylen != 0 {
+		config.PBKeylen = *pbKeylen
+	}
+	if *peerIdleTimeout != "" {
+		config.PeerIdleTimeout = parseDuration(*peerIdleTimeout, config.PeerIdleTimeout)
+	}
+	if *peerLatency != "" {
+		config.PeerLatency = parseDuration(*peerLatency, config.PeerLatency)
+	}
+	if *receiverBufferSize != 0 {
+		config.ReceiverBufferSize = uint32(*receiverBufferSize)
+	}
+	if *receiverLatency != "" {
+		config.ReceiverLatency = parseDuration(*receiverLatency, config.ReceiverLatency)
+	}
+	if *sendBufferSize != 0 {
+		config.SendBufferSize = uint32(*sendBufferSize)
+	}
+	if *sendDropDelay != "" {
+		config.SendDropDelay = parseDuration(*sendDropDelay, config.SendDropDelay)
+	}
+	if *streamId != "" {
+		config.StreamId = *streamId
+	}
+	if setFlags["tooLatePacketDrop"] {
+		config.TooLatePacketDrop = *tooLatePacketDrop
+	}
+	if *transmissionType != "" {
+		config.TransmissionType = *transmissionType
+	}
+	if setFlags["tsbpdMode"] {
+		config.TSBPDMode = *tsbpdMode
+	}
+	if setFlags["allowPeerIpChange"] {
+		config.AllowPeerIpChange = *allowPeerIpChange
+	}
+
+	// Log config if "config" topic is enabled
+	if config.Logger != nil && config.Logger.HasTopic("config") {
+		config.Logger.Print("config", 0, 1, func() string {
+			return fmt.Sprintf("SRT Config:\n"+
+				"  Congestion: %s\n"+
+				"  ConnectionTimeout: %v\n"+
+				"  DriftTracer: %v\n"+
+				"  EnforcedEncryption: %v\n"+
+				"  FC: %d\n"+
+				"  GroupConnect: %v\n"+
+				"  GroupStabilityTimeout: %v\n"+
+				"  InputBW: %d\n"+
+				"  IPTOS: %d\n"+
+				"  IPTTL: %d\n"+
+				"  IPv6Only: %d\n"+
+				"  KMPreAnnounce: %d\n"+
+				"  KMRefreshRate: %d\n"+
+				"  Latency: %v\n"+
+				"  LossMaxTTL: %d\n"+
+				"  MaxBW: %d\n"+
+				"  MessageAPI: %v\n"+
+				"  MinInputBW: %d\n"+
+				"  MinVersion: %#x\n"+
+				"  MSS: %d\n"+
+				"  NAKReport: %v\n"+
+				"  OverheadBW: %d\n"+
+				"  PacketFilter: %s\n"+
+				"  Passphrase: %s\n"+
+				"  PayloadSize: %d\n"+
+				"  PBKeylen: %d\n"+
+				"  PeerIdleTimeout: %v\n"+
+				"  PeerLatency: %v\n"+
+				"  ReceiverBufferSize: %d\n"+
+				"  ReceiverLatency: %v\n"+
+				"  SendBufferSize: %d\n"+
+				"  SendDropDelay: %v\n"+
+				"  StreamId: %s\n"+
+				"  TooLatePacketDrop: %v\n"+
+				"  TransmissionType: %s\n"+
+				"  TSBPDMode: %v\n"+
+				"  AllowPeerIpChange: %v",
+				config.Congestion,
+				config.ConnectionTimeout,
+				config.DriftTracer,
+				config.EnforcedEncryption,
+				config.FC,
+				config.GroupConnect,
+				config.GroupStabilityTimeout,
+				config.InputBW,
+				config.IPTOS,
+				config.IPTTL,
+				config.IPv6Only,
+				config.KMPreAnnounce,
+				config.KMRefreshRate,
+				config.Latency,
+				config.LossMaxTTL,
+				config.MaxBW,
+				config.MessageAPI,
+				config.MinInputBW,
+				config.MinVersion,
+				config.MSS,
+				config.NAKReport,
+				config.OverheadBW,
+				config.PacketFilter,
+				func() string {
+					if config.Passphrase != "" {
+						return "***"
+					}
+					return ""
+				}(),
+				config.PayloadSize,
+				config.PBKeylen,
+				config.PeerIdleTimeout,
+				config.PeerLatency,
+				config.ReceiverBufferSize,
+				config.ReceiverLatency,
+				config.SendBufferSize,
+				config.SendDropDelay,
+				config.StreamId,
+				config.TooLatePacketDrop,
+				config.TransmissionType,
+				config.TSBPDMode,
+				config.AllowPeerIpChange)
+		})
+	}
+}
+
 func main() {
-	var from string
-	var to string
-	var logtopics string
-
-	flag.StringVar(&from, "from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
-	flag.StringVar(&to, "to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout)")
-	flag.StringVar(&logtopics, "logtopics", "", "topics for the log output")
-
 	flag.Parse()
 
-	var logger srt.Logger
+	// Track which flags were explicitly set
+	setFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		setFlags[f.Name] = true
+	})
 
-	if len(logtopics) != 0 {
-		logger = srt.NewLogger(strings.Split(logtopics, ","))
+	var p func(*profile.Profile)
+	switch *profileMode {
+	case "cpu":
+		p = profile.CPUProfile
+	case "mem":
+		p = profile.MemProfile
+	case "allocs":
+		p = profile.MemProfileAllocs
+	case "heap":
+		p = profile.MemProfileHeap
+	case "rate":
+		p = profile.MemProfileRate(2048)
+	case "mutex":
+		p = profile.MutexProfile
+	case "block":
+		p = profile.BlockProfile
+	case "thread":
+		p = profile.ThreadcreationProfile
+	case "trace":
+		p = profile.TraceProfile
+	default:
 	}
+
+	if p != nil {
+		defer profile.Start(profile.ProfilePath("."), profile.NoShutdownHook, p).Stop()
+	}
+
+	// Create default config and apply CLI flags
+	defaultConfig := srt.DefaultConfig()
+
+	// Set up logger first so it can be used for config logging
+	var logger srt.Logger
+	if len(*logtopics) != 0 {
+		logger = srt.NewLogger(strings.Split(*logtopics, ","))
+		defaultConfig.Logger = logger
+	}
+
+	// Apply flag values to default config
+	applyConfigFlags(&defaultConfig, setFlags)
 
 	go func() {
 		if logger == nil {
@@ -97,14 +392,24 @@ func main() {
 		}
 	}()
 
-	r, err := openReader(from, logger)
+	go func() {
+		if logger == nil {
+			return
+		}
+
+		for m := range logger.Listen() {
+			fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n", m.SocketId, m.Topic, m.File, m.Line, m.Message)
+		}
+	}()
+
+	r, err := openReader(*from, &defaultConfig, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: from: %v\n", err)
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	w, err := openWriter(to, logger)
+	w, err := openWriter(*to, &defaultConfig, logger, *bufferSize)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
 		flag.PrintDefaults()
@@ -114,7 +419,7 @@ func main() {
 	doneChan := make(chan error)
 
 	go func() {
-		buffer := make([]byte, 2048)
+		buffer := make([]byte, *bufferSize)
 
 		s := stats{}
 		s.init(200 * time.Millisecond)
@@ -182,7 +487,7 @@ func main() {
 	}
 }
 
-func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
+func openReader(addr string, defaultConfig *srt.Config, logger srt.Logger) (io.ReadCloser, error) {
 	if len(addr) == 0 {
 		return nil, fmt.Errorf("the address must not be empty")
 	}
@@ -220,7 +525,9 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 	}
 
 	if u.Scheme == "srt" {
-		config := srt.DefaultConfig()
+		// Start with default config (which includes CLI flags)
+		config := *defaultConfig
+		// Merge URL query parameters (they override CLI flags)
 		if err := config.UnmarshalQuery(u.RawQuery); err != nil {
 			return nil, err
 		}
@@ -279,7 +586,7 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("unsupported reader")
 }
 
-func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
+func openWriter(addr string, defaultConfig *srt.Config, logger srt.Logger, bufferSize int) (io.WriteCloser, error) {
 	if len(addr) == 0 {
 		return nil, fmt.Errorf("the address must not be empty")
 	}
@@ -289,7 +596,7 @@ func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
 			return nil, fmt.Errorf("stdout is not defined")
 		}
 
-		return NewNonblockingWriter(os.Stdout, 2048), nil
+		return NewNonblockingWriter(os.Stdout, bufferSize), nil
 	}
 
 	if strings.HasPrefix(addr, "file://") {
@@ -299,7 +606,7 @@ func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
 			return nil, err
 		}
 
-		return NewNonblockingWriter(file, 2048), nil
+		return NewNonblockingWriter(file, bufferSize), nil
 	}
 
 	u, err := url.Parse(addr)
@@ -308,7 +615,9 @@ func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
 	}
 
 	if u.Scheme == "srt" {
-		config := srt.DefaultConfig()
+		// Start with default config (which includes CLI flags)
+		config := *defaultConfig
+		// Merge URL query parameters (they override CLI flags)
 		if err := config.UnmarshalQuery(u.RawQuery); err != nil {
 			return nil, err
 		}
