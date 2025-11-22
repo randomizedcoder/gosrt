@@ -8,12 +8,17 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
+	"unsafe"
 
 	srtnet "github.com/datarhei/gosrt/net"
 	"github.com/datarhei/gosrt/packet"
+	"github.com/pawelgaczynski/giouring"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -70,7 +75,16 @@ var (
 const (
 	CHANNEL_SIZE_BACKLOG  = 128
 	CHANNEL_SIZE_RCVQUEUE = 2048
+
+	IOURING_RING_QUEUE_SIZE = 1024
 )
+
+// sendBufferPool is a sync.Pool for bytes.Buffer objects used in io_uring send operations
+var sendBufferPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
 
 // ConnType represents the kind of connection as returned
 // from the AcceptFunc. It is one of REJECT, PUBLISH, or SUBSCRIBE.
@@ -172,9 +186,16 @@ type Listener interface {
 	Addr() net.Addr
 }
 
+// sendContext tracks resources for async send operations
+type sendContext struct {
+	packet packet.Packet // Only set for control packets (nil for data packets)
+	buffer *bytes.Buffer // Buffer from payloadPool to return
+}
+
 // listener implements the Listener interface.
 type listener struct {
 	pc   *net.UDPConn
+	fd   int // File descriptor for io_uring operations
 	addr net.Addr
 
 	config Config
@@ -190,8 +211,13 @@ type listener struct {
 
 	rcvQueue chan packet.Packet
 
-	sndMutex sync.Mutex
-	sndData  bytes.Buffer
+	// io_uring for async I/O (send path)
+	ring            *giouring.Ring
+	sendContexts    map[uint64]*sendContext
+	sendContextLock sync.Mutex
+	nextSendID      uint64         // atomic counter
+	completionWg    sync.WaitGroup // WaitGroup to wait for completion handler to exit
+	submitLock      sync.Mutex     // Protects GetSQE() and Submit() calls (GetSQE is not thread-safe)
 
 	syncookie *srtnet.SYNCookie
 
@@ -257,6 +283,25 @@ func Listen(network, address string, config Config) (Listener, error) {
 		return nil, fmt.Errorf("listen: no local address")
 	}
 
+	// Get file descriptor for io_uring operations
+	rawConn, err := pc.SyscallConn()
+	if err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("listen: failed to get syscall conn: %w", err)
+	}
+	var fdErr error
+	err = rawConn.Control(func(fd uintptr) {
+		ln.fd = int(fd)
+	})
+	if err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("listen: failed to get file descriptor: %w", err)
+	}
+	if fdErr != nil {
+		ln.Close()
+		return nil, fmt.Errorf("listen: failed to get file descriptor: %w", fdErr)
+	}
+
 	ln.connReqs = make(map[uint32]*connRequest)
 	// conns sync.Map zero value is ready to use, no initialization needed
 
@@ -264,14 +309,37 @@ func Listen(network, address string, config Config) (Listener, error) {
 
 	ln.rcvQueue = make(chan packet.Packet, CHANNEL_SIZE_RCVQUEUE)
 
+	// Initialize doneChan early so it's available for goroutines and error handling
+	ln.doneChan = make(chan struct{})
+
+	// Initialize io_uring ring for async send operations
+	// Use larger ring size to handle high send rates without filling up
+	// Ring size must be power of 2, and larger rings allow more in-flight operations
+	ln.ring = giouring.NewRing()
+	ringSize := uint32(4096) // Increased from 1024 to handle high send rates
+	err = ln.ring.QueueInit(ringSize, 0)
+	if err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("listen: failed to initialize io_uring: %w", err)
+	}
+
+	// Initialize send context tracking
+	ln.sendContexts = make(map[uint64]*sendContext)
+	ln.nextSendID = 0
+
+	// Start send completion handler goroutine (doneChan must be initialized before this)
+	ln.completionWg.Add(1)
+	go func() {
+		defer ln.completionWg.Done()
+		ln.sendCompletionHandler()
+	}()
+
 	syncookie, err := srtnet.NewSYNCookie(ln.addr.String(), nil)
 	if err != nil {
 		ln.Close()
 		return nil, err
 	}
 	ln.syncookie = syncookie
-
-	ln.doneChan = make(chan struct{})
 
 	ln.start = time.Now()
 
@@ -395,7 +463,10 @@ func (ln *listener) markDone(err error) {
 		ln.lock.Lock()
 		defer ln.lock.Unlock()
 		ln.doneErr = err
-		close(ln.doneChan)
+		// doneChan may be nil if markDone is called during initialization before doneChan is created
+		if ln.doneChan != nil {
+			close(ln.doneChan)
+		}
 	})
 }
 
@@ -433,7 +504,28 @@ func (ln *listener) Close() {
 			return true // continue iteration
 		})
 
-		ln.stopReader()
+		// Stop reader if it was started (may be nil if Close() is called during initialization)
+		if ln.stopReader != nil {
+			ln.stopReader()
+		}
+
+		// Signal completion handler to exit by closing doneChan
+		// The completion handler will drain pending completions before exiting
+		// doneChan is now initialized early, but check for nil for safety
+		if ln.doneChan != nil {
+			ln.markDone(ErrListenerClosed)
+		}
+
+		// Wait for completion handler to exit before calling QueueExit()
+		// This prevents race conditions where QueueExit() is called while
+		// the completion handler is still accessing the ring
+		ln.completionWg.Wait()
+
+		// Only call QueueExit() if ring was successfully initialized
+		// (ring might be nil if QueueInit failed during initialization)
+		if ln.ring != nil {
+			ln.ring.QueueExit()
+		}
 
 		ln.log("listen", func() string { return "closing socket" })
 
@@ -511,38 +603,152 @@ func (ln *listener) reader(ctx context.Context) {
 	}
 }
 
-// Send a packet to the wire. This function must be synchronous in order to allow to safely call Packet.Decommission() afterward.
+// Send a packet to the wire using io_uring async I/O.
+// This function returns immediately after submitting to io_uring.
+// Packet decommissioning happens in the completion handler.
 func (ln *listener) send(p packet.Packet) {
-
 	startTime := time.Now()
 	defer func() {
 		lH.WithLabelValues("send", "duration", "complete").Observe(time.Since(startTime).Seconds())
 	}()
 
-	ln.sndMutex.Lock()
-	defer ln.sndMutex.Unlock()
+	// Get buffer from sendBufferPool (no mutex needed - each send gets its own buffer)
+	sendBuffer := sendBufferPool.Get().(*bytes.Buffer)
+	sendBuffer.Reset()
 
-	ln.sndData.Reset()
-
-	if err := p.Marshal(&ln.sndData); err != nil {
+	// Marshal packet into buffer
+	if err := p.Marshal(sendBuffer); err != nil {
+		sendBufferPool.Put(sendBuffer)
 		p.Decommission()
 		ln.log("packet:send:error", func() string { return "marshalling packet failed" })
 		lC.WithLabelValues("send", "marshal_error", "count").Inc()
 		return
 	}
 
-	buffer := ln.sndData.Bytes()
+	// Get the underlying slice - valid as long as buffer isn't modified
+	bufferSlice := sendBuffer.Bytes()
 
 	ln.log("packet:send:dump", func() string { return p.Dump() })
 
-	// Write the packet's contents to the wire
-	ln.pc.WriteTo(buffer, p.Header().Addr)
+	// Prepare sendmsg structures
+	var iovec syscall.Iovec
+	iovec.Base = &bufferSlice[0]
+	iovec.SetLen(len(bufferSlice))
 
+	var msg syscall.Msghdr
+	addrPtr, addrLen, err := sockaddrToPtr(p.Header().Addr)
+	if err != nil {
+		sendBufferPool.Put(sendBuffer)
+		ln.log("packet:send:error", func() string { return fmt.Sprintf("address conversion failed: %v", err) })
+		lC.WithLabelValues("send", "addr_error", "count").Inc()
+		return
+	}
+	msg.Name = (*byte)(addrPtr)
+	msg.Namelen = addrLen
+	msg.Iov = &iovec
+	msg.Iovlen = 1
+
+	// Get unique ID for this send operation
+	sendID := atomic.AddUint64(&ln.nextSendID, 1)
+
+	// Create context - only store packet if it's a control packet
+	// Data packets don't need decommissioning here (handled by congestion control)
+	// This allows GC to free data packets sooner
+	ctx := &sendContext{
+		buffer: sendBuffer, // Always need buffer to return to pool
+		packet: nil,        // Will be set only for control packets
+	}
+
+	// Only store packet pointer if it's a control packet (needs decommissioning)
+	if p.Header().IsControlPacket {
+		ctx.packet = p
+	}
+	// For data packets, ctx.packet remains nil, allowing GC to free the packet
+
+	// Add context to map (with lock)
+	ln.sendContextLock.Lock()
+	ln.sendContexts[sendID] = ctx
+	ln.sendContextLock.Unlock()
+
+	// Get SQE from ring
+	// Check space first - if GetSQE() returns nil but SQSpaceLeft() shows space,
+	// we may need to submit/flush pending entries first
+	if ln.ring.SQSpaceLeft() == 0 {
+		// No space available - try to wait for completions
+		spaceAvailable := false
+		for i := 0; i < 10; i++ {
+			time.Sleep(100 * time.Microsecond) // Wait 100us
+			if ln.ring.SQSpaceLeft() > 0 {
+				spaceAvailable = true
+				break
+			}
+		}
+
+		if !spaceAvailable {
+			// Still full after waiting - remove context and return buffer
+			ln.sendContextLock.Lock()
+			delete(ln.sendContexts, sendID)
+			ln.sendContextLock.Unlock()
+			sendBufferPool.Put(sendBuffer)
+			ln.log("packet:send:error", func() string {
+				return fmt.Sprintf("io_uring ring full (space left: %d, ready: %d)",
+					ln.ring.SQSpaceLeft(), ln.ring.SQReady())
+			})
+			lC.WithLabelValues("send", "ring_full", "count").Inc()
+			return
+		}
+	}
+
+	// Get SQE and submit - must be protected by mutex because GetSQE() is not thread-safe
+	// GetSQE() modifies sq.sqeTail without atomic operations, so concurrent calls cause corruption
+	ln.submitLock.Lock()
+	sqe := ln.ring.GetSQE()
+	if sqe == nil {
+		// GetSQE returned nil but we have space - try submitting to flush pending entries
+		// This can happen if we've prepared SQEs but haven't submitted them yet
+		_, _ = ln.ring.Submit() // Submit any pending entries
+		sqe = ln.ring.GetSQE()  // Try again
+
+		if sqe == nil {
+			// Still nil - remove context and return buffer
+			ln.submitLock.Unlock()
+			ln.sendContextLock.Lock()
+			delete(ln.sendContexts, sendID)
+			ln.sendContextLock.Unlock()
+			sendBufferPool.Put(sendBuffer)
+			ln.log("packet:send:error", func() string {
+				return fmt.Sprintf("io_uring GetSQE failed (space left: %d, ready: %d)",
+					ln.ring.SQSpaceLeft(), ln.ring.SQReady())
+			})
+			lC.WithLabelValues("send", "ring_full", "count").Inc()
+			return
+		}
+	}
+
+	// Prepare sendmsg operation
+	sqe.PrepareSendMsg(ln.fd, &msg, 0)
+	sqe.SetData64(sendID)
+
+	// Submit to io_uring (non-blocking)
+	// Note: We keep the lock during Submit() to ensure atomicity of GetSQE+Submit
+	_, err = ln.ring.Submit()
+	ln.submitLock.Unlock() // Always unlock, even on error
+
+	if err != nil {
+		// Submission failed - remove context and return buffer
+		ln.sendContextLock.Lock()
+		delete(ln.sendContexts, sendID)
+		ln.sendContextLock.Unlock()
+		sendBufferPool.Put(sendBuffer)
+		ln.log("packet:send:error", func() string { return fmt.Sprintf("io_uring submit failed: %v", err) })
+		lC.WithLabelValues("send", "submit_error", "count").Inc()
+		return
+	}
+
+	// Function returns immediately - completion will be handled asynchronously
 	packetType := "data"
 	if p.Header().IsControlPacket {
 		packetType = "control"
-		// Control packets can be decommissioned because they will not be sent again (data packets might be retransferred)
-		p.Decommission()
 	}
 	lC.WithLabelValues("send", "packets_sent", packetType).Inc()
 }
@@ -553,4 +759,190 @@ func (ln *listener) log(topic string, message func() string) {
 	}
 
 	ln.config.Logger.Print(topic, 0, 2, message)
+}
+
+// sockaddrToPtr converts net.Addr to syscall sockaddr pointer
+// Constructs raw sockaddr structures manually since sockaddr() method is unexported
+func sockaddrToPtr(addr net.Addr) (unsafe.Pointer, uint32, error) {
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		if a.IP.To4() != nil {
+			// IPv4
+			var sa unix.RawSockaddrInet4
+			sa.Family = unix.AF_INET
+			copy(sa.Addr[:], a.IP.To4())
+			// Port in network byte order (big-endian)
+			p := (*[2]byte)(unsafe.Pointer(&sa.Port))
+			p[0] = byte(a.Port >> 8)
+			p[1] = byte(a.Port)
+			return unsafe.Pointer(&sa), unix.SizeofSockaddrInet4, nil
+		} else {
+			// IPv6
+			var sa unix.RawSockaddrInet6
+			sa.Family = unix.AF_INET6
+			copy(sa.Addr[:], a.IP)
+			// Port in network byte order (big-endian)
+			p := (*[2]byte)(unsafe.Pointer(&sa.Port))
+			p[0] = byte(a.Port >> 8)
+			p[1] = byte(a.Port)
+			// Note: ZoneId handling for IPv6 link-local addresses
+			// If needed, can be extracted from a.Zone using net.InterfaceByName
+			return unsafe.Pointer(&sa), unix.SizeofSockaddrInet6, nil
+		}
+	default:
+		return nil, 0, fmt.Errorf("unsupported address type: %T", addr)
+	}
+}
+
+// sendCompletionHandler processes io_uring send completions
+// This is a named function (not anonymous) for clarity
+func (ln *listener) sendCompletionHandler() {
+	defer func() {
+		ln.log("listen", func() string { return "left send completion handler loop" })
+	}()
+
+	for {
+		// Check for shutdown before blocking on WaitCQE
+		// Non-blocking select allows graceful shutdown
+		select {
+		case <-ln.doneChan:
+			// Shutdown requested - drain any pending completions and exit
+			ln.drainPendingCompletions()
+			return
+		default:
+			// Continue to wait for completions
+		}
+
+		// Check if ring is still valid (might be nil if initialization failed)
+		if ln.ring == nil {
+			return
+		}
+
+		cqe, err := ln.ring.WaitCQE()
+		if err != nil {
+			// Check if we're shutting down (WaitCQE might return error on shutdown)
+			if ln.isShutdown() {
+				return
+			}
+			continue
+		}
+
+		// Get the unique ID from completion
+		sendID := cqe.UserData
+
+		// Look up context in map (with lock)
+		ln.sendContextLock.Lock()
+		ctx, exists := ln.sendContexts[sendID]
+		if !exists {
+			// Context not found (shouldn't happen, but handle gracefully)
+			ln.sendContextLock.Unlock()
+			if ln.ring != nil {
+				ln.ring.CQESeen(cqe)
+			}
+			continue
+		}
+
+		// Remove from map immediately (we have the context now)
+		delete(ln.sendContexts, sendID)
+		ln.sendContextLock.Unlock()
+
+		// Now we can safely use the context
+		buffer := ctx.buffer
+		bufferLen := len(buffer.Bytes()) // Get buffer length for size check
+
+		// Check send result first (before returning buffer)
+		// cqe.Res contains the number of bytes sent on success, or negative errno on error
+		if cqe.Res < 0 {
+			// Send error - convert negative errno to error
+			errno := syscall.Errno(-cqe.Res)
+			ln.log("packet:send:error", func() string {
+				return fmt.Sprintf("io_uring send error for ID %d: %v (errno: %d)", sendID, errno, cqe.Res)
+			})
+			lC.WithLabelValues("send", "io_uring_error", "count").Inc()
+
+			// For critical errors, log more details
+			if errno == syscall.EBADF {
+				ln.log("packet:send:error", func() string {
+					return fmt.Sprintf("io_uring send EBADF - file descriptor %d may be invalid", ln.fd)
+				})
+			} else if errno == syscall.EMSGSIZE {
+				// Message too long - packet exceeds MTU or socket buffer size
+				ln.log("packet:send:error", func() string {
+					return fmt.Sprintf("io_uring send EMSGSIZE - packet size %d bytes exceeds MTU (MSS: %d)",
+						bufferLen, ln.config.MSS)
+				})
+			}
+		} else if int(cqe.Res) != bufferLen {
+			// Partial send - this shouldn't happen with UDP, but log it
+			ln.log("packet:send:warning", func() string {
+				return fmt.Sprintf("io_uring partial send: sent %d of %d bytes", cqe.Res, bufferLen)
+			})
+		}
+
+		// Return buffer to sendBufferPool
+		// Safe to do now - kernel has finished reading the data (confirmed by completion)
+		sendBufferPool.Put(buffer)
+
+		// Decommission control packets if present
+		// Data packets have ctx.packet == nil, so nothing to do
+		if ctx.packet != nil {
+			ctx.packet.Decommission()
+		}
+
+		// Mark completion as seen (ring might have been closed, so check)
+		if ln.ring != nil {
+			ln.ring.CQESeen(cqe)
+		}
+	}
+}
+
+// drainPendingCompletions processes any remaining completions during shutdown
+func (ln *listener) drainPendingCompletions() {
+	// Check if ring is still valid (might be nil if initialization failed)
+	if ln.ring == nil {
+		return
+	}
+
+	// Process any remaining completions in the queue
+	// Use PeekCQE to check if there are completions (non-blocking),
+	// then WaitCQE to actually consume them
+	for {
+		// Peek to check if there are completions (non-blocking)
+		peekCQE, err := ln.ring.PeekCQE()
+		if err != nil || peekCQE == nil {
+			// No more completions in queue
+			break
+		}
+
+		// Actually wait for and consume the completion
+		// This will return immediately since we know there's one available
+		cqe, err := ln.ring.WaitCQE()
+		if err != nil {
+			// Error or no more completions (ring might have been closed)
+			break
+		}
+
+		// Process the completion
+		sendID := cqe.UserData
+
+		ln.sendContextLock.Lock()
+		ctx, exists := ln.sendContexts[sendID]
+		if exists {
+			delete(ln.sendContexts, sendID)
+		}
+		ln.sendContextLock.Unlock()
+
+		if exists {
+			// Clean up context
+			sendBufferPool.Put(ctx.buffer)
+			if ctx.packet != nil {
+				ctx.packet.Decommission()
+			}
+		}
+
+		// Mark completion as seen (ring might have been closed, so check)
+		if ln.ring != nil {
+			ln.ring.CQESeen(cqe)
+		}
+	}
 }

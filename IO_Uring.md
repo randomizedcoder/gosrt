@@ -251,6 +251,366 @@ The following criteria will be used to evaluate the libraries:
 | Features | Comprehensive | Good (missing some advanced) | giouring |
 | Go Idioms | Low-level | High-level, idiomatic | iouring-go |
 
+---
+
+## CGO Build Issue and Fix
+
+### Problem: giouring Requires CGO Despite "No cgo" Claim
+
+**Issue**: The `giouring` library's README states "**giouring** is a Go port of the [liburing](https://github.com/axboe/liburing) library. It is written entirely in Go. **No cgo.**" However, when attempting to build GoSRT with `CGO_ENABLED=0` (as required by the GoSRT build system), the build fails with:
+
+```
+link: github.com/pawelgaczynski/giouring: invalid reference to syscall.munmap
+```
+
+**Root Cause**: The `giouring` library uses `//go:linkname` directives in `linked.go` to link directly to `syscall.mmap` and `syscall.munmap`:
+
+```go
+//go:linkname mmap syscall.mmap
+func mmap(addr uintptr, length uintptr, prot int, flags int, fd int, offset int64) (xaddr uintptr, err error)
+
+//go:linkname munmap syscall.munmap
+func munmap(addr uintptr, length uintptr) (err error)
+```
+
+These functions (`syscall.mmap` and `syscall.munmap`) are **only available when CGO is enabled**. When `CGO_ENABLED=0`, the Go standard library's `syscall` package does not include these functions, causing the linker error.
+
+**Why This Matters**: GoSRT builds with `CGO_ENABLED=0` for several reasons:
+- Smaller binary size
+- Faster builds
+- Better cross-compilation support
+- Static linking (no dynamic library dependencies)
+- Compatibility with minimal container images (e.g., `FROM scratch`)
+
+### Solution: Patch giouring to Use golang.org/x/sys/unix
+
+To make `giouring` work with `CGO_ENABLED=0`, we patched it to use `golang.org/x/sys/unix.MmapPtr` and `golang.org/x/sys/unix.MunmapPtr` instead of the standard library `syscall` functions. These functions work correctly without CGO.
+
+#### Changes Made to giouring:
+
+1. **Updated `linked.go`**: Removed the `//go:linkname` directives (file now contains only a comment explaining it's intentionally empty).
+
+2. **Updated `sys.go`**: Modified `sysMmap()` and `sysMunmap()` to use `golang.org/x/sys/unix`:
+   ```go
+   import "golang.org/x/sys/unix"
+
+   func sysMmap(addr, length uintptr, prot, flags, fd int, offset int64) (unsafe.Pointer, error) {
+       // Use golang.org/x/sys/unix.MmapPtr which works with CGO_ENABLED=0
+       ptr, err := unix.MmapPtr(fd, offset, unsafe.Pointer(addr), length, prot, flags)
+       if err != nil {
+           return nil, err
+       }
+       return ptr, nil
+   }
+
+   func sysMunmap(addr, length uintptr) error {
+       // Use golang.org/x/sys/unix.MunmapPtr which works with CGO_ENABLED=0
+       return unix.MunmapPtr(unsafe.Pointer(addr), length)
+   }
+
+   // mmap is a wrapper that matches the old signature for direct calls in setup.go
+   func mmap(addr, length uintptr, prot, flags, fd int, offset int64) (uintptr, error) {
+       ptr, err := sysMmap(addr, length, prot, flags, fd, offset)
+       if err != nil {
+           return 0, err
+       }
+       return uintptr(ptr), nil
+   }
+   ```
+
+3. **Updated `go.mod`**: Changed `golang.org/x/sys` dependency from `v0.10.0` to `v0.38.0` (which includes `MmapPtr` and `MunmapPtr` functions).
+
+#### Changes Made to GoSRT:
+
+1. **Updated `go.mod`**: Added a `replace` directive to use the local patched `giouring` directory:
+   ```go
+   replace github.com/pawelgaczynski/giouring => ../giouring
+   ```
+
+2. **Updated vendor directory**: Ran `go mod vendor` to sync the vendor directory with the replace directive.
+
+### Verification
+
+After applying these changes:
+- ✅ `giouring` builds successfully with `CGO_ENABLED=0`
+- ✅ GoSRT builds successfully with `CGO_ENABLED=0`
+- ✅ All existing functionality preserved
+- ✅ No performance impact (same underlying syscalls, just different Go API)
+
+### Maintenance Notes
+
+**Important**: The patched `giouring` is located at `../giouring` (relative to the GoSRT repository). When updating dependencies or working with this codebase:
+
+1. **Do not run `go get -u github.com/pawelgaczynski/giouring`** - this would override the replace directive
+2. **Keep the `replace` directive in `go.mod`** - it's required for the build to work
+3. **If updating the patched giouring**: Make changes in `../giouring` and run `go mod vendor` in GoSRT
+4. **If giouring upstream fixes this**: We can remove the replace directive and use the upstream version
+
+### Future Considerations
+
+This issue should ideally be fixed upstream in `giouring`. The fix is straightforward and makes the library truly work without CGO, matching its README claim. Potential upstream fix:
+- Open an issue/PR with `giouring` to use `golang.org/x/sys/unix` instead of `syscall.mmap`/`syscall.munmap`
+- This would benefit all users who want to build with `CGO_ENABLED=0`
+
+---
+
+## io_uring vs Traditional Syscalls: Differences and Common Errors
+
+### Overview
+
+While io_uring uses the same underlying syscalls (`sendmsg`, `recvmsg`, etc.), there are important differences in how they're invoked and what requirements they have. This section documents observed errors and their causes.
+
+### Key Differences
+
+1. **Asynchronous Nature**: io_uring operations are submitted to a queue and completed asynchronously, requiring careful buffer lifecycle management.
+
+2. **Thread Safety**: The `GetSQE()` function in `giouring` is **not thread-safe**. It modifies `sq.sqeTail` without atomic operations, requiring external synchronization when called from multiple goroutines.
+
+3. **Buffer Lifetime**: Buffers must remain valid until the completion queue entry confirms the kernel has finished reading/writing. This is different from synchronous syscalls where the buffer is only needed during the syscall.
+
+4. **Error Reporting**: Errors are reported in completion queue entries (`cqe.Res`) as negative errno values, not as Go errors.
+
+5. **Ring State Management**: The submission queue has user-space and kernel-space state that must be kept in sync. The kernel head pointer (`sq.head`) is updated when entries are submitted and processed, while user-space tail (`sq.sqeTail`) is managed by the application.
+
+### Common Errors and Solutions
+
+#### 1. EINVAL (errno -22, "Invalid argument")
+
+**Symptoms**: `io_uring send error for ID X: invalid argument (errno: -22)`
+
+**Possible Causes**:
+- **Missing `Msghdr` fields**: io_uring may require additional fields to be set in `syscall.Msghdr` that aren't needed for traditional `sendmsg()` calls.
+- **Invalid file descriptor**: The file descriptor might not be valid for io_uring operations, or might need to be registered.
+- **Socket state**: The socket might need to be in a specific state (e.g., non-blocking mode) for io_uring.
+- **Address structure issues**: The `sockaddr` structure might have incorrect fields or alignment.
+
+**Investigation Steps**:
+1. Verify the file descriptor is valid and the socket is in the correct state
+2. Check if all required `Msghdr` fields are set (Name, Namelen, Iov, Iovlen)
+3. Verify the `sockaddr` structure is correctly constructed (family, address, port in network byte order)
+4. Compare with working traditional `sendmsg()` calls to identify differences
+
+**Current Status**: Resolved by using `PrepareSendMsg()` with raw sockaddr structures. When we attempted to switch to `PrepareSendto()` using `syscall.SockaddrInet4/6`, we encountered **EAFNOSUPPORT (errno -97)** errors, indicating that io_uring requires raw sockaddr structures with the `Family` field explicitly set. The current implementation using `PrepareSendMsg()` with `unix.RawSockaddrInet4/6` works correctly.
+
+##### Alternative Syscall Options: SendMsg vs Sendto vs Send
+
+The original GoSRT implementation used `net.UDPConn.WriteTo()`, which is a simple, high-level API that handles address conversion internally. When switching to io_uring, we chose `PrepareSendMsg()` which requires manually constructing `syscall.Msghdr` structures. This section explores the trade-offs between different io_uring send syscalls.
+
+**Available Options**:
+
+1. **`PrepareSendMsg()` (Current Implementation)**
+   - **What it does**: Wraps the `sendmsg()` syscall, which is the most flexible option
+   - **Requirements**:
+     - Must construct `syscall.Msghdr` structure
+     - Must set `Name` (sockaddr pointer), `Namelen` (address length)
+     - Must set `Iov` (iovec array pointer), `Iovlen` (number of iovecs)
+     - Supports scatter/gather I/O (multiple buffers in one send)
+   - **Pros**:
+     - Most flexible - supports multiple buffers (scatter/gather)
+     - Supports ancillary data (control messages) if needed in future
+     - Direct equivalent to `sendmsg()` syscall
+   - **Cons**:
+     - Most complex - requires constructing `Msghdr` and `Iovec` structures
+     - More error-prone - many fields must be set correctly
+     - Requires manual address conversion (`sockaddrToPtr()`)
+     - Potential source of EINVAL errors if fields are incorrect
+
+2. **`PrepareSendto()` (Simpler Alternative)**
+   - **What it does**: Wraps the `sendto()` syscall, which is simpler than `sendmsg()`
+   - **Requirements**:
+     - Takes buffer slice directly (no `Iovec` needed)
+     - Takes `*syscall.Sockaddr` pointer and length
+     - Simpler API - fewer structures to construct
+   - **Pros**:
+     - Simpler API - no `Msghdr` or `Iovec` construction needed
+     - Direct buffer slice - no need to create `Iovec` wrapper
+     - Still requires address conversion, but simpler overall
+     - Less error-prone - fewer fields to set incorrectly
+   - **Cons**:
+     - Still requires `syscall.Sockaddr` conversion (same as `SendMsg`)
+     - Doesn't support scatter/gather I/O (single buffer only)
+     - Doesn't support ancillary data (control messages)
+   - **Implementation Example**:
+     ```go
+     // Instead of:
+     var iovec syscall.Iovec
+     iovec.Base = &bufferSlice[0]
+     iovec.SetLen(len(bufferSlice))
+     var msg syscall.Msghdr
+     msg.Name = (*byte)(addrPtr)
+     msg.Namelen = addrLen
+     msg.Iov = &iovec
+     msg.Iovlen = 1
+     sqe.PrepareSendMsg(ln.fd, &msg, 0)
+
+     // Could use:
+     sockaddr, err := netAddrToSockaddr(p.Header().Addr) // Returns *syscall.Sockaddr
+     sqe.PrepareSendto(ln.fd, bufferSlice, 0, sockaddr, addrLen)
+     ```
+
+3. **`PrepareSend()` (Not Applicable)**
+   - **What it does**: Wraps the `send()` syscall
+   - **Requirements**: Socket must be connected (destination address set via `connect()`)
+   - **Pros**: Simplest API - no address needed
+   - **Cons**: **Not applicable for GoSRT listener** - the listener uses an unconnected UDP socket and sends to different addresses per packet
+   - **Note**: Could potentially be used for dialer (connected socket), but listener must use `Sendto` or `SendMsg`
+
+**Comparison Table**:
+
+| Feature | `SendMsg` (Current) | `Sendto` (Alternative) | `Send` (Not Applicable) |
+|---------|---------------------|------------------------|-------------------------|
+| **Complexity** | High (Msghdr + Iovec) | Medium (Sockaddr only) | Low (no address) |
+| **Address Required** | Yes (in Msghdr) | Yes (direct parameter) | No (must be connected) |
+| **Scatter/Gather** | Yes (multiple buffers) | No (single buffer) | No (single buffer) |
+| **Ancillary Data** | Yes (control messages) | No | No |
+| **Error Risk** | High (many fields) | Medium (fewer fields) | Low |
+| **Applicable to Listener** | Yes | Yes | No (unconnected socket) |
+
+**Recommendation**:
+
+**`PrepareSendMsg()` is the correct choice** for GoSRT's use case, despite being slightly more complex. Here's why:
+
+1. **EAFNOSUPPORT Error with PrepareSendto**: When we attempted to use `PrepareSendto()` with `syscall.SockaddrInet4/6`, we encountered EAFNOSUPPORT errors. This is because io_uring requires raw sockaddr structures with the `Family` field explicitly set, which `syscall.SockaddrInet4/6` doesn't expose in a way the kernel can read directly.
+
+2. **Raw Sockaddr Required**: The current implementation using `PrepareSendMsg()` with `unix.RawSockaddrInet4/6` works correctly because:
+   - We explicitly set `sa.Family = unix.AF_INET` or `unix.AF_INET6`
+   - The raw structures match the kernel ABI exactly
+   - The `Family` field is accessible to the kernel
+
+3. **Implementation Details**: While `PrepareSendMsg()` requires constructing `Msghdr` and `Iovec` structures, this is straightforward and well-understood. The address conversion using `sockaddrToPtr()` creates raw sockaddr structures with proper field initialization.
+
+**Current Implementation (Working)**:
+```go
+// Prepare sendmsg structures
+var iovec syscall.Iovec
+iovec.Base = &bufferSlice[0]
+iovec.SetLen(len(bufferSlice))
+
+var msg syscall.Msghdr
+addrPtr, addrLen, err := sockaddrToPtr(p.Header().Addr) // Returns raw sockaddr
+msg.Name = (*byte)(addrPtr)
+msg.Namelen = addrLen
+msg.Iov = &iovec
+msg.Iovlen = 1
+sqe.PrepareSendMsg(ln.fd, &msg, 0)
+```
+
+**Why PrepareSendto() Failed**:
+- `PrepareSendto()` expects `*syscall.Sockaddr` (pointer to interface)
+- `syscall.SockaddrInet4/6` doesn't expose the `Family` field in a way io_uring can use
+- The kernel needs the raw sockaddr structure with `Family` explicitly set
+- Attempting to use `PrepareSendto()` resulted in EAFNOSUPPORT errors
+
+**Conclusion**: `PrepareSendMsg()` with raw sockaddr structures is the correct approach for io_uring, even though it requires slightly more code. The complexity is manageable and the implementation is working correctly.
+
+#### 2. EAFNOSUPPORT (errno -97, "Address family not supported by protocol")
+
+**Symptoms**: `io_uring send error for ID X: address family not supported by protocol (errno: -97)`
+
+**Cause**: The address family in the sockaddr structure doesn't match the socket's address family, or the sockaddr structure is not correctly formatted for io_uring.
+
+**Possible Causes**:
+- **Missing Family field**: `syscall.SockaddrInet4/6` structures may not have the `Family` field explicitly set, which io_uring requires in the raw sockaddr structure
+- **Socket/Address mismatch**: The socket is IPv4-only but trying to send to an IPv6 address (or vice versa)
+- **Incorrect sockaddr format**: io_uring may require raw sockaddr structures (`unix.RawSockaddrInet4/6`) rather than Go's `syscall.SockaddrInet4/6` abstractions
+
+**Investigation**:
+- The original `sockaddrToPtr()` implementation used `unix.RawSockaddrInet4/6` with `Family` explicitly set (`sa.Family = unix.AF_INET`)
+- After switching to `PrepareSendto()`, we changed to use `syscall.SockaddrInet4/6`, which may not expose the `Family` field in a way that io_uring can use
+- Go's `syscall.SockaddrInet4/6` is an abstraction that may not directly map to the raw sockaddr structure format that io_uring expects
+
+**Potential Solution**:
+- Revert to using `unix.RawSockaddrInet4/6` structures with `Family` explicitly set
+- Or find a way to convert `syscall.SockaddrInet4/6` to raw sockaddr format with the family field set
+- Verify that the socket's address family matches the destination address family
+
+**Current Status**: Resolved. The error occurred when attempting to use `PrepareSendto()` with `syscall.SockaddrInet4/6`. The solution was to revert to `PrepareSendMsg()` with raw sockaddr structures (`unix.RawSockaddrInet4/6`) which explicitly set the `Family` field that io_uring requires. The current implementation works correctly.
+
+#### 3. EMSGSIZE (errno -90, "Message too long")
+
+**Symptoms**: `io_uring send error for ID X: message too long (errno: -90)`
+
+**Cause**: The UDP packet exceeds the MTU (typically 1500 bytes) or the socket's send buffer size.
+
+**Solution**: This is expected behavior for UDP. Packets that are too large will be rejected. The error is logged and processing continues. This is not a bug, but rather a network layer limitation.
+
+**Handling**: The error is logged with packet size and MSS information for debugging. No retry is attempted as the packet cannot be sent.
+
+#### 4. Ring Full / GetSQE() Returns Nil
+
+**Symptoms**:
+- `io_uring ring full (space left: X, ready: Y)`
+- `io_uring GetSQE failed (space left: X, ready: Y)` where `ready` is a huge number (e.g., 4289126608)
+
+**Root Cause**: **Race condition in `GetSQE()`**. The `giouring` library's `GetSQE()` function modifies `sq.sqeTail` without atomic operations or locks. When multiple goroutines call `GetSQE()` concurrently:
+1. Multiple goroutines read the same `sq.sqeTail` value
+2. All calculate the same `next` value
+3. All pass the space check
+4. All get SQEs at the same index (or overwrite each other)
+5. `sq.sqeTail` gets incremented multiple times, causing it to get out of sync
+
+**Solution**: **Protect `GetSQE()` and `Submit()` calls with a mutex**. The `GetSQE()` + `Submit()` sequence must be atomic to prevent corruption of the ring state.
+
+**Implementation**:
+```go
+// In listener struct:
+submitLock sync.Mutex // Protects GetSQE() and Submit() calls
+
+// In send() method:
+ln.submitLock.Lock()
+sqe := ln.ring.GetSQE()
+if sqe == nil {
+    // Handle error...
+}
+sqe.PrepareSendMsg(...)
+sqe.SetData64(...)
+_, err = ln.ring.Submit()
+ln.submitLock.Unlock()
+```
+
+**Performance Impact**: The mutex serializes submission, but this is necessary for correctness. The actual I/O operations remain asynchronous. The lock is held only briefly (during GetSQE + Prepare + Submit), so contention should be minimal.
+
+**Alternative Approaches** (not implemented):
+- Batch submissions: Collect multiple SQEs, then submit in batch (reduces lock contention)
+- Use atomic operations: Modify giouring to use atomic operations for `sq.sqeTail` (requires library changes)
+
+#### 4. Ring State Corruption (Huge `SQReady()` Values)
+
+**Symptoms**: `SQReady()` returns values much larger than the ring size (e.g., 4289126608 when ring size is 4096).
+
+**Cause**: This is a symptom of the race condition described above. When `sq.sqeTail` gets corrupted due to concurrent `GetSQE()` calls, `SQReady()` calculation (`sq.sqeTail - khead`) produces incorrect results.
+
+**Solution**: Fix the race condition by protecting `GetSQE()` calls with a mutex (see above).
+
+### Differences from Traditional Syscalls
+
+| Aspect | Traditional Syscalls | io_uring |
+|--------|---------------------|----------|
+| **Thread Safety** | Each syscall is independent | `GetSQE()` requires synchronization |
+| **Buffer Lifetime** | Buffer only needed during syscall | Buffer must stay alive until completion |
+| **Error Handling** | Immediate return value | Errors in completion queue entries |
+| **Concurrency** | Each call is independent | Shared ring requires coordination |
+| **State Management** | No shared state | Ring state (head/tail) must be synchronized |
+| **Blocking** | Syscall blocks until complete | Submission is non-blocking, completion is async |
+
+### Best Practices
+
+1. **Always protect `GetSQE()` calls**: Use a mutex or ensure single-threaded submission
+2. **Keep buffers alive**: Don't return buffers to pools until completion confirms kernel is done
+3. **Handle errors in completions**: Check `cqe.Res < 0` for errors, not just submission errors
+4. **Monitor ring state**: Log `SQSpaceLeft()` and `SQReady()` for debugging
+5. **Batch when possible**: Submit multiple SQEs in one `Submit()` call to reduce overhead
+
+### Future Improvements
+
+1. **Batched Submissions**: Instead of submitting one SQE at a time, collect multiple SQEs and submit in batches. This reduces lock contention and improves throughput.
+
+2. **Lock-Free Ring Access**: If `giouring` is updated to use atomic operations for `sq.sqeTail`, the mutex could be removed. However, this requires library changes.
+
+3. **Ring Size Tuning**: Make ring size configurable based on expected load. Larger rings allow more in-flight operations but use more memory.
+
+---
+
 ## Recommendation (Initial Evaluation)
 
 **Note**: This section reflects the initial evaluation. The final decision is documented in the "Recommendation" section below, which selects **giouring** as the implementation library.
@@ -1738,51 +2098,67 @@ send() method → marshal → PrepareSendMsg() → ring.Submit() → completion 
 
 4. **Address Conversion Helper**:
 
-   **Library Review and Recommendation:**
+   **Purpose**: Convert `net.Addr` (specifically `net.UDPAddr`) to `syscall` sockaddr structures for use with `io_uring` operations. The `io_uring` `PrepareSendMsg` API requires a `syscall.Msghdr` structure, which contains a `Name` field that must be a pointer to a raw sockaddr structure (`*syscall.RawSockaddrAny` or similar).
 
-   Converting `net.Addr` (specifically `net.UDPAddr`) to `syscall` sockaddr structures is required for `io_uring` operations. Several options were evaluated:
+   **Library Review and Evaluation:**
 
-   **Option 1: golang.org/x/sys/unix (RECOMMENDED)**
+   **Option 1: golang.org/x/sys/unix.SockaddrInet4/6 with sockaddr() method (ATTEMPTED - DID NOT WORK)**
    - **Library**: `golang.org/x/sys/unix` (already a dependency in `go.mod`)
    - **Types**: `SockaddrInet4` and `SockaddrInet6` implement the `Sockaddr` interface
-   - **Method**: `sockaddr() (ptr unsafe.Pointer, len _Socklen, err error)`
-   - **Advantages**:
-     - ✅ **Well-tested**: Part of the official Go extended standard library, maintained by the Go team
-     - ✅ **Already available**: Already in `go.mod` (`golang.org/x/sys v0.38.0`)
-     - ✅ **No unsafe code in application**: The `sockaddr()` method handles all unsafe pointer conversions internally
-     - ✅ **High performance**: Direct struct construction, minimal overhead
-     - ✅ **Type-safe**: Uses proper Go types (`SockaddrInet4`, `SockaddrInet6`) instead of raw structs
-     - ✅ **Cross-platform**: Works on Linux, BSD, and other Unix-like systems
-     - ✅ **Maintained**: Actively maintained as part of the Go project
-   - **Implementation**: Construct `SockaddrInet4` or `SockaddrInet6` from `net.UDPAddr`, then call `sockaddr()` to get the pointer and length
-   - **Performance**: Very high - just struct field assignment and a method call (the `sockaddr()` method is optimized and handles byte order conversion internally)
+   - **Method**: `sockaddr() (ptr unsafe.Pointer, len _Socklen, err error)` - **UNEXPORTED**
+   - **Why it didn't work**:
+     - ❌ **Method is unexported**: The `sockaddr()` method is lowercase (unexported) in the `Sockaddr` interface
+     - ❌ **Package-private**: The interface comment states "lowercase; only we can define Sockaddrs" - meaning only the `unix` package itself can call this method
+     - ❌ **Cannot access from outside**: Attempting to call `sa.sockaddr()` from our code results in a compile error: `sa.sockaddr undefined (cannot refer to unexported method sockaddr)`
+   - **Why it was attractive**:
+     - ✅ Well-tested library maintained by Go team
+     - ✅ Already a dependency
+     - ✅ Would have avoided unsafe code in our application
+     - ✅ Handles byte order conversion internally
+   - **Conclusion**: This approach cannot be used because the method is intentionally unexported to prevent external packages from calling it directly
 
-   **Option 2: Standard library `syscall` package**
+   **Option 2: golang.org/x/sys/unix.RawSockaddrInet4/6 (CURRENT IMPLEMENTATION)**
+   - **Library**: `golang.org/x/sys/unix` (already a dependency)
+   - **Types**: `unix.RawSockaddrInet4`, `unix.RawSockaddrInet6` (raw C structures)
+   - **Advantages**:
+     - ✅ **Already a dependency**: No new dependencies needed
+     - ✅ **Well-defined structures**: Raw sockaddr structures match kernel ABI
+     - ✅ **Direct access**: Can construct and use directly
+     - ✅ **Cross-platform**: Works on Linux, BSD, and other Unix-like systems
+   - **Disadvantages**:
+     - ❌ **Requires unsafe code**: Must use `unsafe.Pointer` to convert to pointer for `Msghdr.Name`
+     - ❌ **Manual byte order conversion**: Must manually convert port to network byte order (big-endian)
+     - ❌ **More error-prone**: Direct struct manipulation requires careful attention to field layout
+     - ❌ **Less type-safe**: Uses raw C structures directly
+   - **Implementation**: Manually construct `RawSockaddrInet4/6` structures, set fields, convert port to network byte order
+   - **Performance**: Very high - direct struct construction, minimal overhead
+   - **Status**: ✅ **Currently implemented** - this is what we're using
+
+   **Option 3: Standard library `syscall` package**
    - **Library**: `syscall` (standard library)
    - **Types**: `syscall.RawSockaddrInet4`, `syscall.RawSockaddrInet6`
    - **Advantages**:
-     - ✅ Part of standard library
+     - ✅ Part of standard library (no external dependency)
+     - ✅ Same raw structures as `golang.org/x/sys/unix`
    - **Disadvantages**:
-     - ❌ **Requires unsafe code**: Direct manipulation of `RawSockaddrInet4/6` structs requires `unsafe.Pointer` conversions
-     - ❌ **Manual byte order conversion**: Must manually handle `htons()` for port conversion
-     - ❌ **More error-prone**: Direct struct manipulation is more prone to bugs
-     - ❌ **Less type-safe**: Uses raw C structures directly
-   - **Performance**: High, but requires manual unsafe operations
+     - ❌ **Same issues as Option 2**: Requires unsafe code, manual byte order conversion
+     - ❌ **Platform-specific**: `syscall` package is platform-specific (different on Windows)
+     - ❌ **Deprecated on some platforms**: Go recommends using `golang.org/x/sys/unix` for new code
+   - **Comparison to Option 2**: Essentially the same as Option 2, but using standard library instead of `golang.org/x/sys/unix`. Since we already depend on `golang.org/x/sys/unix` for other features, Option 2 is preferred.
 
-   **Option 3: Custom helper function (current draft)**
-   - **Implementation**: Custom function with `unsafe.Pointer` and manual struct construction
-   - **Disadvantages**:
-     - ❌ **Requires unsafe code**: Uses `unsafe.Pointer` directly in application code
-     - ❌ **Not well-tested**: Custom code needs extensive testing
-     - ❌ **Maintenance burden**: Must maintain and test the conversion logic
-     - ❌ **Manual byte order**: Must implement `htons()` or similar
-   - **Performance**: High, but adds maintenance overhead
+   **Option 4: Third-party library (to be researched)**
+   - **Potential libraries to investigate**:
+     - Libraries that provide `net.Addr` to sockaddr conversion utilities
+     - io_uring-specific libraries that might have helper functions
+     - Network utility libraries
+   - **Status**: ⚠️ **Not yet researched** - would need to search for existing libraries
+   - **Considerations**:
+     - Would need to evaluate license compatibility
+     - Would need to assess maintenance status
+     - Would need to verify it avoids unsafe code (if that's a goal)
+     - Would add a new dependency
 
-   **Recommendation: Use `golang.org/x/sys/unix`**
-
-   The `golang.org/x/sys/unix` package provides the best balance of safety, performance, and maintainability. It's already a dependency, well-tested, and avoids unsafe code in our application.
-
-   **Implementation using golang.org/x/sys/unix:**
+   **Current Implementation (Option 2):**
    ```go
    import (
        "net"
@@ -1790,44 +2166,49 @@ send() method → marshal → PrepareSendMsg() → ring.Submit() → completion 
        "unsafe"
    )
 
-   // Helper to convert net.Addr to syscall sockaddr pointer
-   // Uses golang.org/x/sys/unix types to avoid unsafe code in application
+   // sockaddrToPtr converts net.Addr to syscall sockaddr pointer
+   // Constructs raw sockaddr structures manually since sockaddr() method is unexported
    func sockaddrToPtr(addr net.Addr) (unsafe.Pointer, uint32, error) {
        switch a := addr.(type) {
        case *net.UDPAddr:
            if a.IP.To4() != nil {
                // IPv4
-               sa := &unix.SockaddrInet4{
-                   Port: a.Port,
-               }
+               var sa unix.RawSockaddrInet4
+               sa.Family = unix.AF_INET
                copy(sa.Addr[:], a.IP.To4())
-
-               // sockaddr() handles all unsafe conversions internally
-               ptr, len, err := sa.sockaddr()
-               if err != nil {
-                   return nil, 0, err
-               }
-               return ptr, uint32(len), nil
+               // Port in network byte order (big-endian)
+               p := (*[2]byte)(unsafe.Pointer(&sa.Port))
+               p[0] = byte(a.Port >> 8)
+               p[1] = byte(a.Port)
+               return unsafe.Pointer(&sa), unix.SizeofSockaddrInet4, nil
            } else {
                // IPv6
-               sa := &unix.SockaddrInet6{
-                   Port: a.Port,
-               }
+               var sa unix.RawSockaddrInet6
+               sa.Family = unix.AF_INET6
                copy(sa.Addr[:], a.IP)
+               // Port in network byte order (big-endian)
+               p := (*[2]byte)(unsafe.Pointer(&sa.Port))
+               p[0] = byte(a.Port >> 8)
+               p[1] = byte(a.Port)
                // Note: ZoneId handling for IPv6 link-local addresses
                // If needed, can be extracted from a.Zone using net.InterfaceByName
-
-               ptr, len, err := sa.sockaddr()
-               if err != nil {
-                   return nil, 0, err
-               }
-               return ptr, uint32(len), nil
+               return unsafe.Pointer(&sa), unix.SizeofSockaddrInet6, nil
            }
        default:
            return nil, 0, fmt.Errorf("unsupported address type: %T", addr)
        }
    }
    ```
+
+   **Recommendation: Continue with Option 2 (Current Implementation)**
+
+   The current implementation using `golang.org/x/sys/unix.RawSockaddrInet4/6` is the most practical approach:
+   - Uses an existing, well-maintained dependency
+   - Provides direct access to the structures we need
+   - Minimal overhead (direct struct construction)
+   - Well-tested structures that match kernel ABI
+
+   **Future Consideration**: If a well-maintained library is found that provides this conversion without unsafe code, it could be evaluated as a replacement. However, the current implementation is straightforward and performant.
 
    **Performance Considerations:**
    - **Struct construction**: O(1) - just copying IP address bytes and setting port
@@ -1993,6 +2374,68 @@ After evaluation, **giouring** has been selected for the io_uring implementation
    - Buffer rings for zero-copy receives
    - Multishot receives for reduced syscall overhead
    - Fixed files for socket management
+
+## Phase 1 Implementation Progress
+
+This section tracks the progress of Phase 1 (Transmit Path Implementation) implementation.
+
+**Status**: 🟡 In Progress
+
+### Completed Steps
+- [x] Step 1.1: Add Dependencies and Imports
+- [x] Step 1.2: Update Listener/Dialer Struct
+- [x] Step 1.3: Implement Address Conversion Helper
+- [x] Step 1.4: Initialize io_uring Ring
+- [x] Step 1.5: Implement Send Completion Handler
+- [x] Step 1.6: Replace send() Method
+- [x] Step 1.7: Update Shutdown/Cleanup
+- [x] Step 1.8: Remove Obsolete Code
+- [ ] Step 1.9: Testing
+
+### Notes
+- Implementation started: 2025-01-XX
+- Current step: Step 1.9 (Testing)
+- **Implementation Status**: Steps 1.1-1.8 complete, ready for testing
+- **Step 1.1 Complete**: Added giouring dependency (`github.com/pawelgaczynski/giouring v0.0.0-20230826085535-69588b89acb9`)
+- **CGO Build Fix**: Fixed giouring to work with `CGO_ENABLED=0`. See the dedicated "CGO Build Issue and Fix" section above for complete details. Summary:
+  - Patched `giouring` to use `golang.org/x/sys/unix.MmapPtr`/`MunmapPtr` instead of `syscall.mmap`/`syscall.munmap`
+  - Updated `giouring/go.mod` to use `golang.org/x/sys v0.38.0`
+  - Added `replace` directive in `gosrt/go.mod` to use local patched `giouring` directory
+  - Updated vendor directory with `go mod vendor`
+- **Step 1.2 Complete**:
+  - Added `sendContext` type to track async send operations
+  - Added io_uring fields to `listener` struct: `ring`, `sendContexts`, `sendContextLock`, `nextSendID`
+  - Added `fd int` field to store file descriptor for io_uring operations
+  - Added necessary imports: `giouring`, `golang.org/x/sys/unix`, `sync/atomic`, `syscall`, `unsafe`
+- **Step 1.3 Complete**: Implemented `sockaddrToPtr()` helper function using `golang.org/x/sys/unix.RawSockaddrInet4/6` types (manually constructed due to unexported `sockaddr()` method)
+- **Step 1.4 Complete**:
+  - Initialized io_uring ring in `Listen()` function (ring size: 1024)
+  - Initialized `sendContexts` map and `nextSendID` counter
+  - Started `sendCompletionHandler()` goroutine
+  - Extracted file descriptor from `net.UDPConn` using `SyscallConn()` and `Control()`
+- **Step 1.5 Complete**:
+  - Implemented `sendCompletionHandler()` method with graceful shutdown support
+  - Implemented `drainPendingCompletions()` helper for shutdown cleanup
+  - Created `sendBufferPool` sync.Pool in listen.go for send buffers (keeps packet.go and listen.go isolated)
+  - Fixed port byte order conversion in `sockaddrToPtr()` to use network byte order (big-endian)
+  - Fixed `PeekCQE()` to handle two return values (CQE, error)
+- **Step 1.6 Complete**:
+  - Replaced `send()` method to use io_uring async I/O
+  - Removed `sndMutex` usage (no longer needed - each send gets its own buffer from pool)
+  - Uses `payloadPool` to get buffers instead of shared `sndData`
+  - Creates `syscall.Iovec` and `syscall.Msghdr` structures for `PrepareSendMsg`
+  - Generates unique send ID using `atomic.AddUint64`
+  - Only stores packet in context if it's a control packet (allows data packets to be GC'd sooner)
+  - Handles ring full condition (removes context and returns buffer on error)
+  - Function returns immediately after submission (async)
+- **Step 1.7 Complete**:
+  - Updated `Close()` method to signal completion handler via `markDone()` (closes `doneChan`)
+  - Completion handler will exit gracefully and drain pending completions
+  - Added `ring.QueueExit()` call to properly clean up io_uring ring resources
+- **Step 1.8 Complete**:
+  - Removed `sndMutex` and `sndData` fields from `listener` struct (no longer needed)
+
+---
 
 ## Detailed Implementation Plan
 

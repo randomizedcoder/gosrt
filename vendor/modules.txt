@@ -21,6 +21,9 @@ github.com/google/pprof/profile
 # github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
 ## explicit
 github.com/munnerz/goautoneg
+# github.com/pawelgaczynski/giouring v0.0.0-20230826085535-69588b89acb9 => ../giouring
+## explicit; go 1.24.0
+github.com/pawelgaczynski/giouring
 # github.com/pkg/profile v1.7.0
 ## explicit; go 1.13
 github.com/pkg/profile
@@ -94,3 +97,4 @@ google.golang.org/protobuf/types/known/timestamppb
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
+# github.com/pawelgaczynski/giouring => ../giouring

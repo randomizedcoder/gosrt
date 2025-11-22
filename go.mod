@@ -4,11 +4,14 @@ go 1.25.2
 
 require (
 	github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c
+	github.com/pawelgaczynski/giouring v0.0.0-20230826085535-69588b89acb9
 	github.com/pkg/profile v1.7.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.38.0
 )
+
+replace github.com/pawelgaczynski/giouring => ../giouring
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

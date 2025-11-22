@@ -61,6 +61,17 @@ server:
 server-debug:
 	cd contrib/server && CGO_ENABLED=0 go build -o server-debug -gcflags="all=-N -l" -a
 
+profile-server-trace:
+	@echo "Profiling server with block profile..."
+	@PROM_LISTEN=":9000" ./contrib/server/server-debug -profile trace -peerIdleTimeout 30s -peerLatency 3s -receiverLatency 3s -addr 172.16.40.46:6001 -logtopics "config"
+
+profile-server-block:
+	@echo "Profiling server with block profile..."
+	@PROM_LISTEN=":9000" ./contrib/server/server-debug -profile block -peerIdleTimeout 30s -peerLatency 3s -receiverLatency 3s -addr 172.16.40.46:6001 -logtopics "config"
+
+profile-server-block-http:
+	go tool pprof -http=0.0.0.0:6060 ./contrib/server/server-debug block.pprof
+
 ## run-server: Start the SRT server (default: :6001)
 run-server:
 	@echo "Starting SRT server on :6001..."
