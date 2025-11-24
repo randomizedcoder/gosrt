@@ -364,6 +364,8 @@ func (r *receiver) Tick(now uint64) {
 	if ok, sequenceNumber, lite := r.periodicACK(now); ok {
 		r.sendACK(sequenceNumber, lite)
 	}
+	// Note: periodicACK returns false when less than 10ms has passed since last ACK
+	// AND less than 64 packets have been received. This is normal behavior.
 
 	if list := r.periodicNAK(now); len(list) != 0 {
 		r.sendNAK(list)

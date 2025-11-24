@@ -297,6 +297,9 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		c.log("connection:close", func() string {
 			return fmt.Sprintf("no more data received from peer for %s. shutting down", c.config.PeerIdleTimeout)
 		})
+		c.log("connection:timeout:expired", func() string {
+			return fmt.Sprintf("peer idle timeout of %s expired, closing connection", c.config.PeerIdleTimeout)
+		})
 		go c.close()
 	})
 
@@ -644,6 +647,11 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 
 	if header.IsControlPacket {
 		if header.ControlType == packet.CTRLTYPE_KEEPALIVE {
+
+			c.log("connection:timeout:reset", func() string {
+				return fmt.Sprintf("peer idle timeout reset by keepalive packet, timeout=%s", c.config.PeerIdleTimeout)
+			})
+			// handleKeepAlive ALSO resets the idle timeout
 			c.handleKeepAlive(p)
 		} else if header.ControlType == packet.CTRLTYPE_SHUTDOWN {
 			c.handleShutdown(p)
@@ -754,6 +762,11 @@ func (c *srtConn) handleKeepAlive(p packet.Packet) {
 
 	c.peerIdleTimeout.Reset(c.config.PeerIdleTimeout)
 
+	c.log("connection:keepalive:timeout", func() string {
+		return fmt.Sprintf("peer idle timeout reset to %s", c.config.PeerIdleTimeout)
+	})
+
+	c.log("control:send:keepalive", func() string { return "sending keepalive" })
 	c.log("control:send:keepalive:dump", func() string { return p.Dump() })
 
 	c.pop(p)
@@ -790,6 +803,9 @@ func (c *srtConn) handleACK(p packet.Packet) {
 	}
 
 	c.log("control:recv:ACK:cif", func() string { return cif.String() })
+	c.log("control:recv:ACK:seqno", func() string {
+		return fmt.Sprintf("received ACK from peer: seqno=%d, lite=%v, rtt=%dus", cif.LastACKPacketSequenceNumber.Val(), cif.IsLite, cif.RTT)
+	})
 
 	c.snd.ACK(cif.LastACKPacketSequenceNumber)
 
@@ -1227,6 +1243,10 @@ func (c *srtConn) sendNAK(list []circular.Number) {
 
 // sendACK sends an ACK to the peer with the given sequence number.
 func (c *srtConn) sendACK(seq circular.Number, lite bool) {
+	c.log("connection:ack:send", func() string {
+		return fmt.Sprintf("sending ACK: seqno=%d, lite=%v", seq.Val(), lite)
+	})
+
 	p := packet.NewPacket(c.remoteAddr)
 
 	p.Header().IsControlPacket = true

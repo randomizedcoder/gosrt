@@ -441,7 +441,11 @@ func (ln *listener) send(p packet.Packet) {
 	ln.log("packet:send:dump", func() string { return p.Dump() })
 
 	// Write the packet's contents to the wire
-	ln.pc.WriteTo(buffer, p.Header().Addr)
+	if _, err := ln.pc.WriteTo(buffer, p.Header().Addr); err != nil {
+		ln.log("packet:send:error", func() string { return fmt.Sprintf("failed to write packet to network: %v", err) })
+		// Note: Statistics may have already been incremented before this point
+		// This is a known issue - statistics are incremented before transmission
+	}
 
 	if p.Header().IsControlPacket {
 		// Control packets can be decommissioned because they will not be sent again (data packets might be retransferred)

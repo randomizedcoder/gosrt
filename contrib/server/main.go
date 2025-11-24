@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"time"
 
 	srt "github.com/datarhei/gosrt"
 	"github.com/pkg/profile"
@@ -98,6 +99,7 @@ func main() {
 
 	config.KMPreAnnounce = 200
 	config.KMRefreshRate = 10000
+	config.PeerIdleTimeout = 90 * time.Second
 
 	s.server = &srt.Server{
 		Addr:            s.addr,
@@ -115,7 +117,7 @@ func main() {
 		}
 
 		for m := range config.Logger.Listen() {
-			fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n", m.SocketId, m.Topic, m.File, m.Line, m.Message)
+			fmt.Fprintf(os.Stderr, "%s %#08x %s (in %s:%d)\n%s \n", m.Time.Format("2006-01-02 15:04:05.000000000"), m.SocketId, m.Topic, m.File, m.Line, m.Message)
 		}
 	}()
 

@@ -93,7 +93,7 @@ func main() {
 		}
 
 		for m := range logger.Listen() {
-			fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n", m.SocketId, m.Topic, m.File, m.Line, m.Message)
+			fmt.Fprintf(os.Stderr, "%s %#08x %s (in %s:%d)\n%s \n", m.Time.Format("2006-01-02 15:04:05.000000000"), m.SocketId, m.Topic, m.File, m.Line, m.Message)
 		}
 	}()
 
