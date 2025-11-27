@@ -7,9 +7,13 @@ all: build
 test:
 	go test -race -coverprofile=/dev/null -covermode=atomic -v ./...
 
-## test-flags: Run flags tests
+## test-flags: Run flags tests (Go unit tests)
 test-flags:
 	CGO_ENABLED=0 go test -v ./contrib/common/
+
+## test-flags-integration: Run flags integration tests (bash script)
+test-flags-integration: client server
+	@./contrib/common/test_flags.sh
 
 ## fuzz: Run fuzz tests
 fuzz:
@@ -75,7 +79,7 @@ logtopics:
 	grep -ERho 'log\("([^"]+)' *.go | sed -E -e 's/log\("//' | sort -u
 
 # Testing targets
-.PHONY: test test-flags fuzz coverage
+.PHONY: test test-flags test-flags-integration fuzz coverage
 # Code quality targets
 .PHONY: vet fmt lint
 # Dependency management targets

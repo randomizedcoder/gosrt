@@ -76,11 +76,26 @@ var (
 	from      = flag.String("from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
 	to        = flag.String("to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout)")
 	logtopics = flag.String("logtopics", "", "topics for the log output")
+	testflags = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
 )
 
 func main() {
 	// Parse all flags (shared + client-specific)
 	common.ParseFlags()
+
+	// Test mode: print config and exit
+	if *testflags {
+		config := srt.DefaultConfig()
+		common.ApplyFlagsToConfig(&config)
+		// Print config as JSON
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+		os.Exit(0)
+	}
 
 	var logger srt.Logger
 

@@ -130,6 +130,12 @@ func parseTestFlags(args []string) {
 		panic(err)
 	}
 
+	// Build a map of all flag names for quick lookup
+	flagNames := make(map[string]bool)
+	testFlagSet.VisitAll(func(f *flag.Flag) {
+		flagNames[f.Name] = true
+	})
+
 	// Track which flags were set by checking the argument list
 	// This is necessary because flag.Visit() doesn't visit flags set to their default value
 	// (e.g., -drifttracer false when default is false)
@@ -138,20 +144,16 @@ func parseTestFlags(args []string) {
 		if len(arg) > 0 && arg[0] == '-' {
 			flagName := arg[1:] // Remove the leading '-'
 			// Handle flags with '=' (e.g., -flag=value)
-			if eqIdx := len(flagName); eqIdx > 0 {
-				for j := 0; j < len(flagName); j++ {
-					if flagName[j] == '=' {
-						flagName = flagName[:j]
-						break
-					}
+			for j := 0; j < len(flagName); j++ {
+				if flagName[j] == '=' {
+					flagName = flagName[:j]
+					break
 				}
 			}
-			// Check if this flag exists in our FlagSet and mark it as set
-			testFlagSet.VisitAll(func(f *flag.Flag) {
-				if f.Name == flagName {
-					FlagSet[f.Name] = true
-				}
-			})
+			// Check if this flag exists and mark it as set
+			if flagNames[flagName] {
+				FlagSet[flagName] = true
+			}
 		}
 	}
 
@@ -162,6 +164,8 @@ func parseTestFlags(args []string) {
 	})
 
 	// Copy values from test flags to the actual flag variables
+	// Only copy values for flags that were explicitly set (tracked in FlagSet)
+	// This ensures we only override flags that were provided in the test args
 	if FlagSet["congestion"] {
 		*Congestion = *testCongestion
 	}
@@ -600,6 +604,20 @@ func TestApplyFlagsToConfig_AllFlags(t *testing.T) {
 		"-groupstabtimeo", "5000",
 		"-allowpeeripchange", "true",
 	})
+
+	// Verify that flag values were copied correctly (debug check)
+	if *Latency != 150 {
+		t.Errorf("Flag *Latency should be 150, got %d", *Latency)
+	}
+	if *FC != 25600 {
+		t.Errorf("Flag *FC should be 25600, got %d", *FC)
+	}
+	if !FlagSet["latency"] {
+		t.Error("FlagSet should have 'latency'")
+	}
+	if !FlagSet["fc"] {
+		t.Error("FlagSet should have 'fc'")
+	}
 
 	config := srt.DefaultConfig()
 	ApplyFlagsToConfig(&config)

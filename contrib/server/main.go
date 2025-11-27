@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -53,6 +54,7 @@ var (
 	passphrase  = flag.String("passphrase", "", "passphrase for de- and enrcypting the data")
 	logtopics   = flag.String("logtopics", "", "topics for the log output")
 	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
 )
 
 func main() {
@@ -62,6 +64,24 @@ func main() {
 
 	// Parse all flags (shared + server-specific)
 	common.ParseFlags()
+
+	// Test mode: print config and exit
+	if *testflags {
+		config := srt.DefaultConfig()
+		common.ApplyFlagsToConfig(&config)
+		// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
+		if common.FlagSet["passphrase"] {
+			config.Passphrase = *passphrase
+		}
+		// Print config as JSON
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+		os.Exit(0)
+	}
 
 	// Set server fields from flags
 	s.addr = *addr
