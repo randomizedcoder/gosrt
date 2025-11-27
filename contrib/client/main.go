@@ -15,6 +15,7 @@ import (
 	"time"
 
 	srt "github.com/datarhei/gosrt"
+	"github.com/datarhei/gosrt/contrib/common"
 )
 
 type stats struct {
@@ -70,21 +71,21 @@ func (s *stats) update(n uint64) {
 	s.total++
 }
 
+var (
+	// Client-specific flags
+	from      = flag.String("from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
+	to        = flag.String("to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout)")
+	logtopics = flag.String("logtopics", "", "topics for the log output")
+)
+
 func main() {
-	var from string
-	var to string
-	var logtopics string
-
-	flag.StringVar(&from, "from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
-	flag.StringVar(&to, "to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout)")
-	flag.StringVar(&logtopics, "logtopics", "", "topics for the log output")
-
-	flag.Parse()
+	// Parse all flags (shared + client-specific)
+	common.ParseFlags()
 
 	var logger srt.Logger
 
-	if len(logtopics) != 0 {
-		logger = srt.NewLogger(strings.Split(logtopics, ","))
+	if len(*logtopics) != 0 {
+		logger = srt.NewLogger(strings.Split(*logtopics, ","))
 	}
 
 	go func() {
@@ -97,14 +98,14 @@ func main() {
 		}
 	}()
 
-	r, err := openReader(from, logger)
+	r, err := openReader(*from, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: from: %v\n", err)
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	w, err := openWriter(to, logger)
+	w, err := openWriter(*to, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
 		flag.PrintDefaults()
@@ -224,6 +225,8 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 		if err := config.UnmarshalQuery(u.RawQuery); err != nil {
 			return nil, err
 		}
+		// Apply CLI flags (they override URL query parameters)
+		common.ApplyFlagsToConfig(&config)
 		config.Logger = logger
 
 		mode := u.Query().Get("mode")
@@ -312,6 +315,8 @@ func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
 		if err := config.UnmarshalQuery(u.RawQuery); err != nil {
 			return nil, err
 		}
+		// Apply CLI flags (they override URL query parameters)
+		common.ApplyFlagsToConfig(&config)
 		config.Logger = logger
 
 		mode := u.Query().Get("mode")

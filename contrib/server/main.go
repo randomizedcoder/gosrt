@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	srt "github.com/datarhei/gosrt"
+	"github.com/datarhei/gosrt/contrib/common"
 	"github.com/pkg/profile"
 )
 
@@ -44,19 +45,31 @@ func (s *server) Shutdown() {
 	s.server.Shutdown()
 }
 
+var (
+	// Server-specific flags
+	addr        = flag.String("addr", "", "address to listen on")
+	app         = flag.String("app", "", "path prefix for streamid")
+	token       = flag.String("token", "", "token query param for streamid")
+	passphrase  = flag.String("passphrase", "", "passphrase for de- and enrcypting the data")
+	logtopics   = flag.String("logtopics", "", "topics for the log output")
+	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+)
+
 func main() {
 	s := server{
 		channels: make(map[string]srt.PubSub),
 	}
 
-	flag.StringVar(&s.addr, "addr", "", "address to listen on")
-	flag.StringVar(&s.app, "app", "", "path prefix for streamid")
-	flag.StringVar(&s.token, "token", "", "token query param for streamid")
-	flag.StringVar(&s.passphrase, "passphrase", "", "passphrase for de- and enrcypting the data")
-	flag.StringVar(&s.logtopics, "logtopics", "", "topics for the log output")
-	flag.StringVar(&s.profile, "profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	// Parse all flags (shared + server-specific)
+	common.ParseFlags()
 
-	flag.Parse()
+	// Set server fields from flags
+	s.addr = *addr
+	s.app = *app
+	s.token = *token
+	s.passphrase = *passphrase
+	s.logtopics = *logtopics
+	s.profile = *profileFlag
 
 	if len(s.addr) == 0 {
 		fmt.Fprintf(os.Stderr, "Provide a listen address with -addr\n")
@@ -64,7 +77,7 @@ func main() {
 	}
 
 	var p func(*profile.Profile)
-	switch s.profile {
+	switch *profileFlag {
 	case "cpu":
 		p = profile.CPUProfile
 	case "mem":
@@ -92,8 +105,16 @@ func main() {
 
 	config := srt.DefaultConfig()
 
-	if len(s.logtopics) != 0 {
-		config.Logger = srt.NewLogger(strings.Split(s.logtopics, ","))
+	// Apply CLI flags (shared flags)
+	common.ApplyFlagsToConfig(&config)
+
+	// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
+	if common.FlagSet["passphrase"] {
+		config.Passphrase = *passphrase
+	}
+
+	if len(*logtopics) != 0 {
+		config.Logger = srt.NewLogger(strings.Split(*logtopics, ","))
 	}
 
 	config.KMPreAnnounce = 200
