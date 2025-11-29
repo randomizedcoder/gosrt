@@ -7,6 +7,14 @@ all: build
 test:
 	go test -race -coverprofile=/dev/null -covermode=atomic -v ./...
 
+## test-flags: Run flags tests (Go unit tests)
+test-flags:
+	CGO_ENABLED=0 go test -v ./contrib/common/
+
+## test-flags-integration: Run flags integration tests (bash script)
+test-flags-integration: client server
+	@./contrib/common/test_flags.sh
+
 ## fuzz: Run fuzz tests
 fuzz:
 	go test -fuzz=Fuzz -run=^Fuzz ./packet -fuzztime 30s
@@ -41,9 +49,17 @@ lint:
 client:
 	cd contrib/client && CGO_ENABLED=0 go build -o client -ldflags="-s -w" -a
 
+## client-debug: Build client binary with debug symbols
+client-debug:
+	cd contrib/client && CGO_ENABLED=0 go build -o client-debug -a
+
 ## server: Build import binary
 server:
 	cd contrib/server && CGO_ENABLED=0 go build -o server -ldflags="-s -w" -a
+
+## server-debug: Build server binary with debug symbols
+server-debug:
+	cd contrib/server && CGO_ENABLED=0 go build -o server-debug -a
 
 ## coverage: Generate code coverage analysis
 coverage:
@@ -62,7 +78,16 @@ docker:
 logtopics:
 	grep -ERho 'log\("([^"]+)' *.go | sed -E -e 's/log\("//' | sort -u
 
-.PHONY: help test fuzz vet fmt vendor commit coverage lint client server update logtopics
+# Testing targets
+.PHONY: test test-flags test-flags-integration fuzz coverage
+# Code quality targets
+.PHONY: vet fmt lint
+# Dependency management targets
+.PHONY: update tidy vendor
+# Build targets
+.PHONY: client client-debug server server-debug
+# Other targets
+.PHONY: commit docker logtopics help
 
 ## help: Show all commands
 help: Makefile

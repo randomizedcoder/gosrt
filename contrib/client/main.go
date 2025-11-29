@@ -15,6 +15,12 @@ import (
 	"time"
 
 	srt "github.com/datarhei/gosrt"
+	"github.com/datarhei/gosrt/contrib/common"
+)
+
+const (
+	STATS_PERIOD = 200 * time.Millisecond
+	CHANNEL_SIZE = 2048
 )
 
 type stats struct {
@@ -70,21 +76,36 @@ func (s *stats) update(n uint64) {
 	s.total++
 }
 
+var (
+	// Client-specific flags
+	from      = flag.String("from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
+	to        = flag.String("to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout)")
+	logtopics = flag.String("logtopics", "", "topics for the log output")
+	testflags = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
+)
+
 func main() {
-	var from string
-	var to string
-	var logtopics string
+	// Parse all flags (shared + client-specific)
+	common.ParseFlags()
 
-	flag.StringVar(&from, "from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
-	flag.StringVar(&to, "to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout)")
-	flag.StringVar(&logtopics, "logtopics", "", "topics for the log output")
-
-	flag.Parse()
+	// Test mode: print config and exit
+	if *testflags {
+		config := srt.DefaultConfig()
+		common.ApplyFlagsToConfig(&config)
+		// Print config as JSON
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+		os.Exit(0)
+	}
 
 	var logger srt.Logger
 
-	if len(logtopics) != 0 {
-		logger = srt.NewLogger(strings.Split(logtopics, ","))
+	if len(*logtopics) != 0 {
+		logger = srt.NewLogger(strings.Split(*logtopics, ","))
 	}
 
 	go func() {
@@ -97,14 +118,14 @@ func main() {
 		}
 	}()
 
-	r, err := openReader(from, logger)
+	r, err := openReader(*from, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: from: %v\n", err)
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	w, err := openWriter(to, logger)
+	w, err := openWriter(*to, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
 		flag.PrintDefaults()
@@ -114,10 +135,10 @@ func main() {
 	doneChan := make(chan error)
 
 	go func() {
-		buffer := make([]byte, 2048)
+		buffer := make([]byte, CHANNEL_SIZE)
 
 		s := stats{}
-		s.init(200 * time.Millisecond)
+		s.init(STATS_PERIOD)
 
 		for {
 			n, err := r.Read(buffer)
@@ -224,6 +245,8 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 		if err := config.UnmarshalQuery(u.RawQuery); err != nil {
 			return nil, err
 		}
+		// Apply CLI flags (they override URL query parameters)
+		common.ApplyFlagsToConfig(&config)
 		config.Logger = logger
 
 		mode := u.Query().Get("mode")
@@ -234,24 +257,29 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 				return nil, err
 			}
 
-			conn, _, err := ln.Accept(func(req srt.ConnRequest) srt.ConnType {
-				if config.StreamId != req.StreamId() {
-					return srt.REJECT
+			for {
+				req, err := ln.Accept2()
+				if err != nil {
+					return nil, err
 				}
 
-				req.SetPassphrase(config.Passphrase)
+				if config.StreamId != req.StreamId() {
+					req.Reject(srt.REJ_PEER)
+					continue
+				}
 
-				return srt.PUBLISH
-			})
-			if err != nil {
-				return nil, err
+				if err := req.SetPassphrase(config.Passphrase); err != nil {
+					req.Reject(srt.REJ_BADSECRET)
+					continue
+				}
+
+				conn, err := req.Accept()
+				if err != nil {
+					continue
+				}
+
+				return conn, nil
 			}
-
-			if conn == nil {
-				return nil, fmt.Errorf("incoming connection rejected")
-			}
-
-			return conn, nil
 		} else if mode == "caller" {
 			conn, err := srt.Dial("srt", u.Host, config)
 			if err != nil {
@@ -312,6 +340,8 @@ func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
 		if err := config.UnmarshalQuery(u.RawQuery); err != nil {
 			return nil, err
 		}
+		// Apply CLI flags (they override URL query parameters)
+		common.ApplyFlagsToConfig(&config)
 		config.Logger = logger
 
 		mode := u.Query().Get("mode")
@@ -322,24 +352,29 @@ func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
 				return nil, err
 			}
 
-			conn, _, err := ln.Accept(func(req srt.ConnRequest) srt.ConnType {
-				if config.StreamId != req.StreamId() {
-					return srt.REJECT
+			for {
+				req, err := ln.Accept2()
+				if err != nil {
+					return nil, err
 				}
 
-				req.SetPassphrase(config.Passphrase)
+				if config.StreamId != req.StreamId() {
+					req.Reject(srt.REJ_PEER)
+					continue
+				}
 
-				return srt.SUBSCRIBE
-			})
-			if err != nil {
-				return nil, err
+				if err := req.SetPassphrase(config.Passphrase); err != nil {
+					req.Reject(srt.REJ_BADSECRET)
+					continue
+				}
+
+				conn, err := req.Accept()
+				if err != nil {
+					continue
+				}
+
+				return conn, nil
 			}
-
-			if conn == nil {
-				return nil, fmt.Errorf("incoming connection rejected")
-			}
-
-			return conn, nil
 		} else if mode == "caller" {
 			conn, err := srt.Dial("srt", u.Host, config)
 			if err != nil {

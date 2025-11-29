@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -11,7 +12,13 @@ import (
 	"sync"
 
 	srt "github.com/datarhei/gosrt"
+	"github.com/datarhei/gosrt/contrib/common"
 	"github.com/pkg/profile"
+)
+
+const (
+	KM_PRE_ANNOUNCE = 200
+	KM_REFRESH_RATE = 10000
 )
 
 // server is an implementation of the Server framework
@@ -44,19 +51,51 @@ func (s *server) Shutdown() {
 	s.server.Shutdown()
 }
 
+var (
+	// Server-specific flags
+	addr        = flag.String("addr", "", "address to listen on")
+	app         = flag.String("app", "", "path prefix for streamid")
+	token       = flag.String("token", "", "token query param for streamid")
+	passphrase  = flag.String("passphrase", "", "passphrase for de- and enrcypting the data")
+	logtopics   = flag.String("logtopics", "", "topics for the log output")
+	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
+	printConfig = flag.Bool("printconfig", false, "Print config")
+)
+
 func main() {
 	s := server{
 		channels: make(map[string]srt.PubSub),
 	}
 
-	flag.StringVar(&s.addr, "addr", "", "address to listen on")
-	flag.StringVar(&s.app, "app", "", "path prefix for streamid")
-	flag.StringVar(&s.token, "token", "", "token query param for streamid")
-	flag.StringVar(&s.passphrase, "passphrase", "", "passphrase for de- and enrcypting the data")
-	flag.StringVar(&s.logtopics, "logtopics", "", "topics for the log output")
-	flag.StringVar(&s.profile, "profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	// Parse all flags (shared + server-specific)
+	common.ParseFlags()
 
-	flag.Parse()
+	// Test mode: print config and exit
+	if *testflags {
+		config := srt.DefaultConfig()
+		common.ApplyFlagsToConfig(&config)
+		// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
+		if common.FlagSet["passphrase"] {
+			config.Passphrase = *passphrase
+		}
+		// Print config as JSON
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+		os.Exit(0)
+	}
+
+	// Set server fields from flags
+	s.addr = *addr
+	s.app = *app
+	s.token = *token
+	s.passphrase = *passphrase
+	s.logtopics = *logtopics
+	s.profile = *profileFlag
 
 	if len(s.addr) == 0 {
 		fmt.Fprintf(os.Stderr, "Provide a listen address with -addr\n")
@@ -64,7 +103,7 @@ func main() {
 	}
 
 	var p func(*profile.Profile)
-	switch s.profile {
+	switch *profileFlag {
 	case "cpu":
 		p = profile.CPUProfile
 	case "mem":
@@ -92,12 +131,29 @@ func main() {
 
 	config := srt.DefaultConfig()
 
-	if len(s.logtopics) != 0 {
-		config.Logger = srt.NewLogger(strings.Split(s.logtopics, ","))
+	// Apply CLI flags (shared flags)
+	common.ApplyFlagsToConfig(&config)
+
+	// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
+	if common.FlagSet["passphrase"] {
+		config.Passphrase = *passphrase
 	}
 
-	config.KMPreAnnounce = 200
-	config.KMRefreshRate = 10000
+	if len(*logtopics) != 0 {
+		config.Logger = srt.NewLogger(strings.Split(*logtopics, ","))
+	}
+
+	config.KMPreAnnounce = KM_PRE_ANNOUNCE
+	config.KMRefreshRate = KM_REFRESH_RATE
+
+	if *printConfig {
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+	}
 
 	s.server = &srt.Server{
 		Addr:            s.addr,

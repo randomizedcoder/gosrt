@@ -5,3 +5,6 @@
 *.html
 *.ts
 *.mp4
+server*
+client*
+*.pprof
