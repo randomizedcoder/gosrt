@@ -1,3 +1,6 @@
+//go:build unix || linux || darwin || freebsd || openbsd || netbsd || dragonfly || solaris || aix
+// +build unix linux darwin freebsd openbsd netbsd dragonfly solaris aix
+
 // MIT License
 //
 // Copyright (c) 2023 Paweł Gaczyński
@@ -24,12 +27,26 @@
 package giouring
 
 import (
+	"syscall"
 	// required for go:linkname
 	_ "unsafe"
 )
 
-//go:linkname mmap syscall.mmap
-func mmap(addr uintptr, length uintptr, prot int, flags int, fd int, offset int64) (xaddr uintptr, err error)
+// mmap and munmap are implemented using direct syscalls since syscall.mmap/munmap
+// don't exist in the standard library. We use the syscall numbers directly.
+func mmap(addr uintptr, length uintptr, prot int, flags int, fd int, offset int64) (xaddr uintptr, err error) {
+	r0, _, e1 := syscall.Syscall6(syscall.SYS_MMAP, addr, length, uintptr(prot), uintptr(flags), uintptr(fd), uintptr(offset))
+	xaddr = uintptr(r0)
+	if e1 != 0 {
+		err = e1
+	}
+	return
+}
 
-//go:linkname munmap syscall.munmap
-func munmap(addr uintptr, length uintptr) (err error)
+func munmap(addr uintptr, length uintptr) (err error) {
+	_, _, e1 := syscall.Syscall(syscall.SYS_MUNMAP, addr, length, 0)
+	if e1 != 0 {
+		err = e1
+	}
+	return
+}
