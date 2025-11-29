@@ -2,7 +2,31 @@
 
 package srt
 
-import "syscall"
+import (
+	"net"
+	"syscall"
+)
+
+// getUDPConnFD extracts the file descriptor from a net.UDPConn.
+// It duplicates the FD so the caller owns it and can use it independently.
+// The returned FD should be closed when no longer needed (though in practice,
+// it will be closed when the connection is closed).
+func getUDPConnFD(pc *net.UDPConn) (int, error) {
+	file, err := pc.File()
+	if err != nil {
+		return -1, err
+	}
+	defer file.Close()
+
+	fd := int(file.Fd())
+	// Duplicate the FD so we own it
+	dupFd, err := syscall.Dup(fd)
+	if err != nil {
+		return -1, err
+	}
+
+	return dupFd, nil
+}
 
 func ListenControl(config Config) func(network, address string, c syscall.RawConn) error {
 	return func(network, address string, c syscall.RawConn) error {

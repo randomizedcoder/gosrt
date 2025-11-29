@@ -172,6 +172,14 @@ type Config struct {
 
 	// if a new IP starts sending data on an existing socket id, allow it
 	AllowPeerIpChange bool
+
+	// Enable io_uring for per-connection send queues (requires Linux kernel 5.1+)
+	// When enabled, each connection uses its own io_uring ring for asynchronous sends
+	IoUringEnabled bool
+
+	// Size of the io_uring ring for per-connection send queues (must be power of 2, 16-1024)
+	// Default: 64. Smaller rings use less memory but may limit throughput per connection
+	IoUringSendRingSize int
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -213,6 +221,8 @@ var defaultConfig Config = Config{
 	TransmissionType:      "live",
 	TSBPDMode:             true,
 	AllowPeerIpChange:     false,
+	IoUringEnabled:       false,
+	IoUringSendRingSize:   64,
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
@@ -741,6 +751,17 @@ func (c *Config) Validate() error {
 
 	if !c.TSBPDMode {
 		return fmt.Errorf("config: TSBPDMode must be enabled")
+	}
+
+	// Validate io_uring configuration
+	if c.IoUringEnabled {
+		if c.IoUringSendRingSize < 16 || c.IoUringSendRingSize > 1024 {
+			return fmt.Errorf("config: IoUringSendRingSize must be between 16 and 1024")
+		}
+		// Check if ring size is a power of 2
+		if c.IoUringSendRingSize&(c.IoUringSendRingSize-1) != 0 {
+			return fmt.Errorf("config: IoUringSendRingSize must be a power of 2")
+		}
 	}
 
 	return nil

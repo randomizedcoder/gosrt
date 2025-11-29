@@ -40,7 +40,15 @@ Almost all functions and structures from [liburing](https://github.com/axboe/lib
 [das@l:~/Downloads/giouring]$
 ```
 
+We are going to use a fork of this library which is at: https://github.com/randomizedcoder/giouring
+
+The fork has been cloned locally into: ~/Downloads/srt/giouring
+
+
 ## iouring-go
+
+**NOT using iouring-go** This is because it uses channels
+
 This is a library that is a wrapper around the liburing library, and provides a higher-level API for using IO_Uring.
 https://github.com/Iceber/iouring-go
 
@@ -1363,6 +1371,369 @@ To eliminate lock contention, each connection can maintain its **own dedicated i
    - Receives are already demultiplexed by destination socket ID
    - Shared receive ring is more efficient for routing packets to connections
 
+### Implementation Plan: Per-Connection io_uring Send Queues
+
+This section outlines the step-by-step implementation plan for migrating from the shared mutex-based send path to per-connection io_uring send queues.
+
+#### Prerequisites
+
+1. **Dependencies**:
+   - Add `github.com/randomizedcoder/giouring` (fork) to `go.mod`
+   - Verify kernel version supports io_uring (5.1+)
+   - Ensure system has sufficient file descriptor limits for expected connection counts
+   - Note: Using fork at https://github.com/randomizedcoder/giouring for control over library changes
+
+2. **Code Review**:
+   - Review current `connection.go` structure and `srtConn` fields
+   - Review `listen.go` and `dial.go` send methods to understand current flow
+   - Review `packet/packet.go` to understand buffer pool structure
+   - Review `config.go` to identify where to add io_uring configuration options
+
+3. **Testing Infrastructure**:
+   - Ensure existing tests can run with io_uring enabled/disabled
+   - Plan for performance benchmarking before/after implementation
+   - Identify test scenarios for high connection counts
+
+#### Phase 1: Foundation and Infrastructure
+
+**Goal**: Set up the basic infrastructure without changing the send path.
+
+1. **Add Configuration Options** (`config.go`):
+   - Add `IoUringEnabled bool` flag to enable/disable io_uring
+   - Add `IoUringSendRingSize int` for per-connection ring size (default: 64)
+   - Add validation to ensure ring size is power of 2 and within reasonable bounds (16-1024)
+
+2. **Create Helper Functions** (`sockaddr.go`):
+   - Implement `convertUDPAddrToSockaddr()` function
+   - Add unit tests for IPv4 and IPv6 address conversion
+   - Verify unsafe pointer usage follows Go stdlib patterns
+
+3. **Update Connection Struct** (`connection.go`):
+   - Add io_uring-related fields to `srtConn` struct:
+     - `sendRing *giouring.Ring`
+     - `sendRingFd int`
+     - `sendSockaddr syscall.RawSockaddrAny`
+     - `sendSockaddrLen uint32`
+     - `sendBufferPool sync.Pool`
+     - `sendCompletions map[uint64]*sendCompletionInfo`
+     - `sendCompLock sync.RWMutex`
+     - `sendRequestID atomic.Uint64`
+     - `sendCompCtx context.Context`
+     - `sendCompCancel context.CancelFunc`
+     - `sendCompWg sync.WaitGroup`
+   - Add `sendCompletionInfo` struct definition
+   - Add necessary imports (`unsafe`, `sync/atomic`, `github.com/randomizedcoder/giouring`)
+
+4. **Socket FD Extraction**:
+   - Add method to extract file descriptor from `*net.UDPConn`
+   - Update connection initialization to accept and store socket FD
+   - Modify `listen.go` and `dial.go` to pass socket FD to connections
+
+**Deliverables**:
+- Configuration options added and tested
+- Helper functions implemented and tested
+- Struct fields added (not yet used)
+- Socket FD extraction working
+
+**Testing**:
+- Unit tests for `convertUDPAddrToSockaddr()`
+- Configuration validation tests
+- Verify struct compiles without errors
+
+#### Phase 2: Ring Initialization and Cleanup
+
+**Goal**: Initialize and clean up io_uring rings per connection.
+
+1. **Ring Initialization** (`connection.go` in `newSRTConn()`):
+   - Check if io_uring is enabled in config
+   - Create giouring ring with configured size
+   - Initialize ring with `QueueInit()`
+   - Handle initialization errors (panic for now, can be made graceful later)
+   - Store ring in connection struct
+
+2. **Pre-compute Sockaddr** (`connection.go` in `newSRTConn()`):
+   - Convert remote address to sockaddr structure once at connection creation
+   - Store in connection struct for reuse in all sends
+   - Handle both IPv4 and IPv6 addresses
+
+3. **Initialize Per-Connection Buffer Pool** (`connection.go` in `newSRTConn()`):
+   - Create `sync.Pool` for `*bytes.Buffer` instances
+   - Pool should allocate buffers of appropriate size (config.MSS)
+   - Store pool in connection struct
+
+4. **Initialize Completion Tracking** (`connection.go` in `newSRTConn()`):
+   - Initialize `sendCompletions` map
+   - Initialize atomic request ID counter
+   - Create context and cancel function for completion handler
+
+5. **Ring Cleanup** (`connection.go` in `close()`):
+   - Cancel completion handler context
+   - Wait for completion handler to finish (with timeout)
+   - Drain any remaining completions
+   - Call `QueueExit()` on ring
+   - Clean up completion map and return all buffers to pool
+
+**Deliverables**:
+- Rings are created and destroyed correctly
+- No resource leaks on connection close
+- Proper error handling for initialization failures
+
+**Testing**:
+- Create connections with io_uring enabled/disabled
+- Verify rings are created and closed correctly
+- Test connection close with pending operations
+- Memory leak testing (check for FD leaks)
+
+#### Phase 3: Completion Handler Implementation
+
+**Goal**: Implement the completion handler goroutine that processes send completions.
+
+1. **Completion Handler Function** (`connection.go`):
+   - Implement `sendCompletionHandler()` method
+   - Use `WaitCQE()` to wait for completions
+   - Handle context cancellation for graceful shutdown
+   - Look up completion info by request ID
+   - Process successful and failed sends
+   - Return buffers to per-connection pool
+   - Mark CQEs as seen
+
+2. **Drain Completions Function** (`connection.go`):
+   - Implement `drainCompletions()` method
+   - Use `PeekCQE()` for non-blocking completion retrieval
+   - Process remaining completions during shutdown
+   - Timeout after 5 seconds to prevent hanging
+
+3. **Start Completion Handler** (`connection.go` in `newSRTConn()`):
+   - Start completion handler goroutine after ring initialization
+   - Use `sync.WaitGroup` to track completion handler lifecycle
+
+**Deliverables**:
+- Completion handler processes completions correctly
+- Buffers are returned to pool
+- Graceful shutdown works
+
+**Testing**:
+- Unit tests for completion handler logic
+- Test completion handler shutdown
+- Test buffer pool lifecycle
+- Verify no goroutine leaks
+
+#### Phase 4: Send Method Implementation
+
+**Goal**: Replace the listener/dialer send path with per-connection io_uring sends.
+
+1. **Connection Send Method** (`connection.go`):
+   - Implement `send()` method on `srtConn`
+   - Get buffer from per-connection pool
+   - Marshal packet into buffer
+   - Decommission control packets immediately
+   - Generate unique request ID using atomic counter
+   - Prepare `syscall.Msghdr` and `syscall.Iovec` structures
+   - Store completion info in map
+   - Get SQE from ring (with retry logic)
+   - Prepare send operation with `PrepareSendMsg()`
+   - Submit to ring (with retry logic for transient errors)
+   - Handle submission failures (cleanup and return buffer)
+
+2. **Update onSend Callback** (`connection.go`):
+   - Change `onSend` to point to `c.send` instead of listener/dialer send
+   - Remove dependency on listener/dialer send methods
+
+3. **Error Handling**:
+   - Implement retry logic for `GetSQE()` (ring full)
+   - Implement retry logic for `Submit()` (transient errors)
+   - Clean up on all error paths (remove from map, return buffer)
+   - Log errors appropriately
+
+**Deliverables**:
+- Send method fully implemented
+- Error handling robust
+- No mutex needed for sends
+
+**Testing**:
+- Test send with various packet types
+- Test error handling (ring full, submission failures)
+- Test retry logic
+- Verify packets are sent correctly
+- Integration tests with real network
+
+#### Phase 5: Integration and Migration
+
+**Goal**: Integrate per-connection sends into the existing codebase and remove old send path.
+
+1. **Remove Old Send Path** (`listen.go`, `dial.go`):
+   - Remove `sndMutex` from listener and dialer structs
+   - Remove `send()` methods from listener and dialer (or make them no-ops)
+   - Update any remaining references to old send path
+
+2. **Update Connection Initialization**:
+   - Ensure socket FD is passed to connections
+   - Verify `onSend` callback is set correctly
+   - Test both listener and dialer connection creation
+
+3. **Feature Flag Integration**:
+   - Add runtime check for io_uring availability
+   - Fall back to old send path if io_uring unavailable (if desired)
+   - Or require io_uring and fail fast if unavailable
+
+4. **Code Cleanup**:
+   - Remove unused imports
+   - Remove dead code from old send path
+   - Update comments and documentation
+
+**Deliverables**:
+- Old send path removed
+- All connections use per-connection sends
+- Code is clean and well-documented
+
+**Testing**:
+- Full integration tests
+- Test with multiple concurrent connections
+- Test listener and dialer paths
+- Performance regression tests
+
+#### Phase 6: Performance Validation and Optimization
+
+**Goal**: Validate performance improvements and optimize as needed.
+
+1. **Benchmarking**:
+   - Create benchmarks comparing old vs new send path
+   - Measure throughput with varying connection counts (10, 100, 1000)
+   - Measure latency (p50, p95, p99)
+   - Measure CPU utilization
+   - Measure memory usage
+
+2. **Profiling**:
+   - Profile hot paths with `pprof`
+   - Identify any remaining bottlenecks
+   - Check for unnecessary allocations
+   - Verify cache efficiency
+
+3. **Optimization** (if needed):
+   - Adjust ring sizes based on profiling
+   - Optimize completion handler if needed
+   - Consider batch completion processing if beneficial
+   - Tune retry delays and counts
+
+4. **Stress Testing**:
+   - Test with maximum expected connection counts
+   - Test under high packet rate
+   - Test connection churn (frequent connect/disconnect)
+   - Test error conditions (network failures, etc.)
+
+**Deliverables**:
+- Performance benchmarks showing improvements
+- Profiling data
+- Optimizations applied (if needed)
+- Stress test results
+
+**Success Criteria**:
+- Throughput scales linearly with connection count
+- Latency is reduced, especially tail latency
+- CPU utilization is improved
+- No regressions in functionality
+
+#### Phase 7: Documentation and Finalization
+
+**Goal**: Document the implementation and finalize the feature.
+
+1. **Code Documentation**:
+   - Add godoc comments to all new functions
+   - Document struct fields
+   - Add inline comments for complex logic
+   - Update package-level documentation
+
+2. **User Documentation**:
+   - Update README with io_uring information
+   - Document configuration options
+   - Document system requirements (kernel version, FD limits)
+   - Add migration guide if needed
+
+3. **Testing Documentation**:
+   - Document test scenarios
+   - Document performance characteristics
+   - Document known limitations
+
+4. **Final Review**:
+   - Code review for all changes
+   - Security review (unsafe usage, resource limits)
+   - Performance review
+   - Documentation review
+
+**Deliverables**:
+- Complete documentation
+- Code review completed
+- Feature ready for production
+
+#### Implementation Checklist
+
+- [ ] **Phase 1: Foundation**
+  - [ ] Add configuration options
+  - [ ] Create `sockaddr.go` with helper functions
+  - [ ] Update `srtConn` struct with io_uring fields
+  - [ ] Implement socket FD extraction
+
+- [ ] **Phase 2: Ring Lifecycle**
+  - [ ] Implement ring initialization in `newSRTConn()`
+  - [ ] Implement sockaddr pre-computation
+  - [ ] Initialize per-connection buffer pool
+  - [ ] Implement ring cleanup in `close()`
+
+- [ ] **Phase 3: Completion Handler**
+  - [ ] Implement `sendCompletionHandler()`
+  - [ ] Implement `drainCompletions()`
+  - [ ] Start completion handler goroutine
+
+- [ ] **Phase 4: Send Method**
+  - [ ] Implement `c.send()` method
+  - [ ] Update `onSend` callback
+  - [ ] Implement error handling and retries
+
+- [ ] **Phase 5: Integration**
+  - [ ] Remove old send path from listener/dialer
+  - [ ] Remove `sndMutex`
+  - [ ] Update connection initialization
+  - [ ] Code cleanup
+
+- [ ] **Phase 6: Performance**
+  - [ ] Create benchmarks
+  - [ ] Run profiling
+  - [ ] Optimize based on results
+  - [ ] Stress testing
+
+- [ ] **Phase 7: Documentation**
+  - [ ] Code documentation
+  - [ ] User documentation
+  - [ ] Final review
+
+#### Risk Mitigation
+
+1. **Kernel Compatibility**:
+   - Check kernel version at startup
+   - Provide clear error messages if io_uring unavailable
+   - Consider fallback to old send path (optional)
+
+2. **Resource Limits**:
+   - Check FD limits before creating many connections
+   - Provide configuration guidance
+   - Monitor FD usage in production
+
+3. **Memory Usage**:
+   - Monitor memory usage with many connections
+   - Consider ring size tuning based on connection count
+   - Document memory requirements
+
+4. **Error Handling**:
+   - Comprehensive error handling at each phase
+   - Graceful degradation where possible
+   - Clear error messages for debugging
+
+5. **Testing Coverage**:
+   - Unit tests for each component
+   - Integration tests for full flow
+   - Performance tests to validate improvements
+   - Stress tests for edge cases
+
 ### Detailed Implementation: connection.go Updates
 
 This section describes the specific code changes required to implement per-connection io_uring send queues using **giouring** for maximum performance.
@@ -1385,7 +1756,7 @@ import (
     "time"
     "unsafe"  // Only used for msg.Name pointer conversion (required by syscall.Msghdr)
     "sync/atomic"
-    "github.com/pawelgaczynski/giouring"
+    "github.com/randomizedcoder/giouring"
 )
 ```
 

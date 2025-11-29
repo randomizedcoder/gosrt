@@ -9,6 +9,8 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/datarhei/gosrt/circular"
@@ -16,6 +18,7 @@ import (
 	"github.com/datarhei/gosrt/congestion/live"
 	"github.com/datarhei/gosrt/crypto"
 	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/giouring"
 )
 
 // Conn is a SRT network connection.
@@ -216,6 +219,34 @@ type srtConn struct {
 	// HSv4
 	stopHSRequests context.CancelFunc
 	stopKMRequests context.CancelFunc
+
+	// io_uring send queue (per-connection) - using giouring for high performance
+	sendRing   *giouring.Ring // Direct ring access, no channels
+	sendRingFd int            // File descriptor for the socket (not the ring)
+
+	// Pre-computed sockaddr for UDP sends (computed once at connection init, reused for all sends)
+	sendSockaddr    syscall.RawSockaddrAny // Pre-computed sockaddr structure
+	sendSockaddrLen uint32                 // Length of sockaddr structure
+
+	// Per-connection send buffer pool (eliminates lock contention)
+	sendBufferPool sync.Pool // Isolated pool per connection
+
+	// Completion tracking - minimal structure for performance
+	sendCompletions map[uint64]*sendCompletionInfo // Maps request ID to completion info
+	sendCompLock    sync.RWMutex                   // Protects sendCompletions map
+
+	// Atomic counter for generating unique request IDs
+	sendRequestID atomic.Uint64
+
+	// Completion handler goroutine lifecycle (giouring uses direct CQE polling)
+	sendCompCtx    context.Context
+	sendCompCancel context.CancelFunc
+	sendCompWg     sync.WaitGroup // Wait for completion handler to finish
+}
+
+// sendCompletionInfo stores minimal information needed for completion handling
+type sendCompletionInfo struct {
+	buffer *bytes.Buffer // Buffer to return to per-connection pool
 }
 
 type srtConnConfig struct {
@@ -236,6 +267,7 @@ type srtConnConfig struct {
 	onSend                      func(p packet.Packet)
 	onShutdown                  func(socketId uint32)
 	logger                      Logger
+	socketFd                    int // File descriptor for the UDP socket (for io_uring)
 }
 
 func newSRTConn(config srtConnConfig) *srtConn {
@@ -332,6 +364,52 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	})
 
 	c.ctx, c.cancelCtx = context.WithCancel(context.Background())
+
+	// Initialize io_uring send ring if enabled
+	if c.config.IoUringEnabled {
+		// Store socket FD
+		c.sendRingFd = config.socketFd
+
+		// Determine ring size (default: 64)
+		ringSize := uint32(64)
+		if c.config.IoUringSendRingSize > 0 {
+			ringSize = uint32(c.config.IoUringSendRingSize)
+		}
+
+		// Create io_uring ring using giouring
+		ring := giouring.NewRing()
+		err := ring.QueueInit(ringSize, 0) // ringSize entries, no flags
+		if err != nil {
+			// io_uring should be available - this is an unexpected error
+			c.log("connection:io_uring:error", func() string {
+				return fmt.Sprintf("failed to create io_uring ring: %v", err)
+			})
+			// Continue without io_uring - connection will fall back to regular sends
+		} else {
+			c.sendRing = ring
+
+			// Pre-compute sockaddr structure for UDP sends (reused for connection lifetime)
+			// The remote address is known and doesn't change during the connection
+			if c.remoteAddr != nil {
+				c.sendSockaddrLen = convertUDPAddrToSockaddr(c.remoteAddr, &c.sendSockaddr)
+			}
+
+			// Initialize per-connection send buffer pool (eliminates lock contention)
+			c.sendBufferPool = sync.Pool{
+				New: func() interface{} {
+					return new(bytes.Buffer)
+				},
+			}
+
+			// Initialize completion tracking
+			c.sendCompletions = make(map[uint64]*sendCompletionInfo)
+
+			// Create context for completion handler
+			c.sendCompCtx, c.sendCompCancel = context.WithCancel(context.Background())
+
+			// Note: Completion handler will be started in Phase 3
+		}
+	}
 
 	go c.networkQueueReader(c.ctx)
 	go c.writeQueueReader(c.ctx)
@@ -1407,6 +1485,50 @@ func (c *srtConn) close() {
 
 		c.cancelCtx()
 
+		// Clean up io_uring resources if enabled
+		if c.sendRing != nil {
+			c.log("connection:close", func() string { return "stopping io_uring completion handler" })
+
+			// Stop completion handler
+			if c.sendCompCancel != nil {
+				c.sendCompCancel()
+			}
+
+			// Wait for completion handler to finish (with timeout)
+			done := make(chan struct{})
+			go func() {
+				c.sendCompWg.Wait()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				// Completion handler finished
+			case <-time.After(5 * time.Second):
+				c.log("connection:close:warning", func() string {
+					return "timeout waiting for send completion handler"
+				})
+			}
+
+			// Drain any remaining completions
+			c.drainCompletions()
+
+			// Close io_uring ring
+			c.sendRing.QueueExit()
+			c.sendRing = nil
+
+			// Clean up any remaining completion info
+			c.sendCompLock.Lock()
+			for _, compInfo := range c.sendCompletions {
+				compInfo.buffer.Reset()
+				c.sendBufferPool.Put(compInfo.buffer)
+			}
+			c.sendCompletions = nil
+			c.sendCompLock.Unlock()
+
+			c.log("connection:close", func() string { return "io_uring ring closed" })
+		}
+
 		c.log("connection:close", func() string { return "flushing congestion" })
 
 		c.snd.Flush()
@@ -1418,6 +1540,24 @@ func (c *srtConn) close() {
 			c.onShutdown(c.socketId)
 		}()
 	})
+}
+
+// drainCompletions processes any remaining completions during shutdown.
+// This is a placeholder that will be fully implemented in Phase 3.
+func (c *srtConn) drainCompletions() {
+	if c.sendRing == nil {
+		return
+	}
+
+	// Basic implementation - will be enhanced in Phase 3
+	// For now, just clean up any pending completions in the map
+	c.sendCompLock.Lock()
+	for _, compInfo := range c.sendCompletions {
+		compInfo.buffer.Reset()
+		c.sendBufferPool.Put(compInfo.buffer)
+	}
+	c.sendCompletions = make(map[uint64]*sendCompletionInfo)
+	c.sendCompLock.Unlock()
 }
 
 func (c *srtConn) log(topic string, message func() string) {

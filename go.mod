@@ -1,6 +1,6 @@
 module github.com/datarhei/gosrt
 
-go 1.24.0
+go 1.25
 
 require (
 	github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c
