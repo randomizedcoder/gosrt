@@ -16,6 +16,11 @@ import (
 	"github.com/pkg/profile"
 )
 
+const (
+	KM_PRE_ANNOUNCE = 200
+	KM_REFRESH_RATE = 10000
+)
+
 // server is an implementation of the Server framework
 type server struct {
 	// Configuration parameter taken from the Config
@@ -55,6 +60,7 @@ var (
 	logtopics   = flag.String("logtopics", "", "topics for the log output")
 	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
 	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
+	printConfig = flag.Bool("printconfig", false, "Print config")
 )
 
 func main() {
@@ -137,8 +143,17 @@ func main() {
 		config.Logger = srt.NewLogger(strings.Split(*logtopics, ","))
 	}
 
-	config.KMPreAnnounce = 200
-	config.KMRefreshRate = 10000
+	config.KMPreAnnounce = KM_PRE_ANNOUNCE
+	config.KMRefreshRate = KM_REFRESH_RATE
+
+	if *printConfig {
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+	}
 
 	s.server = &srt.Server{
 		Addr:            s.addr,

@@ -18,6 +18,11 @@ import (
 	"github.com/datarhei/gosrt/contrib/common"
 )
 
+const (
+	STATS_PERIOD = 200 * time.Millisecond
+	CHANNEL_SIZE = 2048
+)
+
 type stats struct {
 	bprev  uint64
 	btotal uint64
@@ -130,10 +135,10 @@ func main() {
 	doneChan := make(chan error)
 
 	go func() {
-		buffer := make([]byte, 2048)
+		buffer := make([]byte, CHANNEL_SIZE)
 
 		s := stats{}
-		s.init(200 * time.Millisecond)
+		s.init(STATS_PERIOD)
 
 		for {
 			n, err := r.Read(buffer)
@@ -252,24 +257,29 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 				return nil, err
 			}
 
-			conn, _, err := ln.Accept(func(req srt.ConnRequest) srt.ConnType {
-				if config.StreamId != req.StreamId() {
-					return srt.REJECT
+			for {
+				req, err := ln.Accept2()
+				if err != nil {
+					return nil, err
 				}
 
-				req.SetPassphrase(config.Passphrase)
+				if config.StreamId != req.StreamId() {
+					req.Reject(srt.REJ_PEER)
+					continue
+				}
 
-				return srt.PUBLISH
-			})
-			if err != nil {
-				return nil, err
+				if err := req.SetPassphrase(config.Passphrase); err != nil {
+					req.Reject(srt.REJ_BADSECRET)
+					continue
+				}
+
+				conn, err := req.Accept()
+				if err != nil {
+					continue
+				}
+
+				return conn, nil
 			}
-
-			if conn == nil {
-				return nil, fmt.Errorf("incoming connection rejected")
-			}
-
-			return conn, nil
 		} else if mode == "caller" {
 			conn, err := srt.Dial("srt", u.Host, config)
 			if err != nil {
@@ -342,24 +352,29 @@ func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
 				return nil, err
 			}
 
-			conn, _, err := ln.Accept(func(req srt.ConnRequest) srt.ConnType {
-				if config.StreamId != req.StreamId() {
-					return srt.REJECT
+			for {
+				req, err := ln.Accept2()
+				if err != nil {
+					return nil, err
 				}
 
-				req.SetPassphrase(config.Passphrase)
+				if config.StreamId != req.StreamId() {
+					req.Reject(srt.REJ_PEER)
+					continue
+				}
 
-				return srt.SUBSCRIBE
-			})
-			if err != nil {
-				return nil, err
+				if err := req.SetPassphrase(config.Passphrase); err != nil {
+					req.Reject(srt.REJ_BADSECRET)
+					continue
+				}
+
+				conn, err := req.Accept()
+				if err != nil {
+					continue
+				}
+
+				return conn, nil
 			}
-
-			if conn == nil {
-				return nil, fmt.Errorf("incoming connection rejected")
-			}
-
-			return conn, nil
 		} else if mode == "caller" {
 			conn, err := srt.Dial("srt", u.Host, config)
 			if err != nil {

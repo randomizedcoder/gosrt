@@ -644,6 +644,7 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 
 	if header.IsControlPacket {
 		if header.ControlType == packet.CTRLTYPE_KEEPALIVE {
+			// handleKeepAlive ALSO resets the idle timeout
 			c.handleKeepAlive(p)
 		} else if header.ControlType == packet.CTRLTYPE_SHUTDOWN {
 			c.handleShutdown(p)
