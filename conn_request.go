@@ -419,6 +419,19 @@ func (req *connRequest) Accept() (Conn, error) {
 
 	req.config.Passphrase = req.passphrase
 
+	// Extract socket FD for io_uring (if enabled)
+	var socketFd int
+	if req.config.IoUringEnabled {
+		var err error
+		socketFd, err = getUDPConnFD(req.ln.pc)
+		if err != nil {
+			req.ln.log("connection:io_uring:error", func() string {
+				return fmt.Sprintf("failed to extract socket FD: %v", err)
+			})
+			// Continue without io_uring - will fall back to regular sends
+		}
+	}
+
 	// Create a new connection
 	conn := newSRTConn(srtConnConfig{
 		version:                     req.handshake.Version,
@@ -434,9 +447,10 @@ func (req *connRequest) Accept() (Conn, error) {
 		initialPacketSequenceNumber: req.handshake.InitialPacketSequenceNumber,
 		crypto:                      req.crypto,
 		keyBaseEncryption:           packet.EvenKeyEncrypted,
-		onSend:                      req.ln.send,
+		onSend:                      req.ln.send, // Fallback if io_uring disabled
 		onShutdown:                  req.ln.handleShutdown,
 		logger:                      req.config.Logger,
+		socketFd:                    socketFd,
 	})
 
 	req.ln.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })

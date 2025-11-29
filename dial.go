@@ -45,6 +45,8 @@ type dialer struct {
 
 	rcvQueue chan packet.Packet // for packets that come from the wire
 
+	// sndMutex is only used as fallback when io_uring is disabled or unavailable.
+	// When io_uring is enabled, each connection has its own send path without mutex.
 	sndMutex sync.Mutex
 	sndData  bytes.Buffer // for packets that go to the wire
 
@@ -112,7 +114,12 @@ func Dial(network, address string, config Config) (Conn, error) {
 	dl.conn = nil
 	dl.connChan = make(chan connResponse)
 
-	dl.rcvQueue = make(chan packet.Packet, 2048)
+	// Determine receive queue buffer size (default: 2048 if not configured)
+	rcvQueueSize := config.ReceiveQueueSize
+	if rcvQueueSize <= 0 {
+		rcvQueueSize = 2048
+	}
+	dl.rcvQueue = make(chan packet.Packet, rcvQueueSize)
 
 	dl.doneChan = make(chan error)
 
@@ -255,6 +262,8 @@ func (dl *dialer) reader(ctx context.Context) {
 }
 
 // Send a packet to the wire. This function must be synchronous in order to allow to safely call Packet.Decommission() afterward.
+// NOTE: This is a fallback method used only when io_uring is disabled or unavailable.
+// When io_uring is enabled, connections use their own per-connection send() method.
 func (dl *dialer) send(p packet.Packet) {
 	dl.sndMutex.Lock()
 	defer dl.sndMutex.Unlock()
@@ -496,6 +505,19 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			}
 		}
 
+		// Extract socket FD for io_uring (if enabled)
+		var socketFd int
+		if dl.config.IoUringEnabled {
+			var err error
+			socketFd, err = getUDPConnFD(dl.pc)
+			if err != nil {
+				dl.log("connection:io_uring:error", func() string {
+					return fmt.Sprintf("failed to extract socket FD: %v", err)
+				})
+				// Continue without io_uring - will fall back to regular sends
+			}
+		}
+
 		// Create a new connection
 		conn := newSRTConn(srtConnConfig{
 			version:                     cif.Version,
@@ -512,9 +534,10 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			initialPacketSequenceNumber: cif.InitialPacketSequenceNumber,
 			crypto:                      dl.crypto,
 			keyBaseEncryption:           packet.EvenKeyEncrypted,
-			onSend:                      dl.send,
+			onSend:                      dl.send, // Fallback if io_uring disabled
 			onShutdown:                  func(socketId uint32) { dl.Close() },
 			logger:                      dl.config.Logger,
+			socketFd:                    socketFd,
 		})
 
 		dl.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })

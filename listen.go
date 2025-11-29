@@ -130,6 +130,8 @@ type listener struct {
 
 	rcvQueue chan packet.Packet
 
+	// sndMutex is only used as fallback when io_uring is disabled or unavailable.
+	// When io_uring is enabled, each connection has its own send path without mutex.
 	sndMutex sync.Mutex
 	sndData  bytes.Buffer
 
@@ -195,7 +197,12 @@ func Listen(network, address string, config Config) (Listener, error) {
 
 	ln.backlog = make(chan packet.Packet, 128)
 
-	ln.rcvQueue = make(chan packet.Packet, 2048)
+	// Determine receive queue buffer size (default: 2048 if not configured)
+	rcvQueueSize := config.ReceiveQueueSize
+	if rcvQueueSize <= 0 {
+		rcvQueueSize = 2048
+	}
+	ln.rcvQueue = make(chan packet.Packet, rcvQueueSize)
 
 	syncookie, err := srtnet.NewSYNCookie(ln.addr.String(), nil)
 	if err != nil {
@@ -424,6 +431,8 @@ func (ln *listener) reader(ctx context.Context) {
 }
 
 // Send a packet to the wire. This function must be synchronous in order to allow to safely call Packet.Decommission() afterward.
+// NOTE: This is a fallback method used only when io_uring is disabled or unavailable.
+// When io_uring is enabled, connections use their own per-connection send() method.
 func (ln *listener) send(p packet.Packet) {
 	ln.sndMutex.Lock()
 	defer ln.sndMutex.Unlock()

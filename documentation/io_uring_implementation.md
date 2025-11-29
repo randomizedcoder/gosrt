@@ -6,9 +6,9 @@ This document tracks the implementation progress of the per-connection io_uring 
 
 ## Implementation Status
 
-**Current Phase**: Phase 2 - Ring Initialization and Cleanup (Completed)
+**Current Phase**: Phase 5 - Integration and Migration (Completed)
 
-**Overall Progress**: 29% (2/7 phases complete)
+**Overall Progress**: 71% (5/7 phases complete)
 
 ---
 
@@ -94,19 +94,117 @@ This document tracks the implementation progress of the per-connection io_uring 
 
 ## Phase 3: Completion Handler Implementation
 
-**Status**: Not Started
+**Status**: Completed
+
+**Goal**: Implement the completion handler goroutine that processes send completions.
+
+### Tasks
+
+- [x] **Completion Handler Function** (`connection.go`)
+  - [x] Implement `sendCompletionHandler()` method
+  - [x] Use `WaitCQE()` to wait for completions
+  - [x] Handle context cancellation for graceful shutdown
+  - [x] Look up completion info by request ID
+  - [x] Process successful and failed sends
+  - [x] Return buffers to per-connection pool
+  - [x] Mark CQEs as seen
+
+- [x] **Drain Completions Function** (`connection.go`)
+  - [x] Implement `drainCompletions()` method
+  - [x] Use `PeekCQE()` for non-blocking completion retrieval
+  - [x] Process remaining completions during shutdown
+  - [x] Timeout after 5 seconds to prevent hanging
+
+- [x] **Start Completion Handler** (`connection.go` in `newSRTConn()`)
+  - [x] Start completion handler goroutine after ring initialization
+  - [x] Use `sync.WaitGroup` to track completion handler lifecycle
+
+### Notes
+
+- Completion handler uses direct CQE polling via `WaitCQE()` for maximum performance
+- Handles all error conditions gracefully (EINTR, EAGAIN, EBADF)
+- Buffers are returned to pool after send completes
+- Control packets are already decommissioned in send path (Phase 4)
+- Data packets may be retransmitted by congestion control
 
 ---
 
 ## Phase 4: Send Method Implementation
 
-**Status**: Not Started
+**Status**: Completed
+
+**Goal**: Replace the listener/dialer send path with per-connection io_uring sends.
+
+### Tasks
+
+- [x] **Connection Send Method** (`connection.go`)
+  - [x] Implement `send()` method on `srtConn`
+  - [x] Get buffer from per-connection pool
+  - [x] Marshal packet into buffer
+  - [x] Decommission control packets immediately
+  - [x] Generate unique request ID using atomic counter
+  - [x] Prepare `syscall.Msghdr` and `syscall.Iovec` structures
+  - [x] Store completion info in map
+  - [x] Get SQE from ring (with retry logic)
+  - [x] Prepare send operation with `PrepareSendMsg()`
+  - [x] Submit to ring (with retry logic for transient errors)
+  - [x] Handle submission failures (cleanup and return buffer)
+
+- [x] **Update onSend Callback** (`connection.go`)
+  - [x] Change `onSend` to point to `c.send` when io_uring is enabled
+  - [x] Fallback handling if io_uring ring is not available
+
+- [x] **Error Handling**
+  - [x] Implement retry logic for `GetSQE()` (ring full)
+  - [x] Implement retry logic for `Submit()` (transient errors)
+  - [x] Clean up on all error paths (remove from map, return buffer)
+  - [x] Log errors appropriately
+
+### Notes
+
+- Send method uses pre-computed sockaddr structure for maximum efficiency
+- Control packets are decommissioned immediately (won't be retransmitted)
+- Data packets may be retransmitted by congestion control
+- Retry logic handles transient errors (EINTR, EAGAIN)
+- All buffers are properly cleaned up on error paths
 
 ---
 
 ## Phase 5: Integration and Migration
 
-**Status**: Not Started
+**Status**: Completed
+
+**Goal**: Integrate per-connection sends into the existing codebase and handle fallback scenarios.
+
+### Tasks
+
+- [x] **Socket FD Extraction and Passing**
+  - [x] Extract socket FD from UDP connection in `conn_request.go`
+  - [x] Extract socket FD from UDP connection in `dial.go`
+  - [x] Pass socket FD to `newSRTConn()` via `srtConnConfig`
+  - [x] Handle errors gracefully (fallback to regular sends if FD extraction fails)
+
+- [x] **Update Send Methods** (`listen.go`, `dial.go`)
+  - [x] Add comments indicating send methods are fallback-only
+  - [x] Keep `sndMutex` for fallback case (when io_uring disabled)
+  - [x] Add comments explaining mutex is only used as fallback
+
+- [x] **Connection Initialization**
+  - [x] Socket FD is passed to connections when io_uring enabled
+  - [x] `onSend` callback set to listener/dialer send (fallback)
+  - [x] `onSend` is overridden to connection's send when io_uring enabled
+
+- [x] **Code Cleanup**
+  - [x] Added appropriate comments explaining fallback behavior
+  - [x] Verified integration points
+
+### Notes
+
+- Listener/dialer send methods remain as fallback for when io_uring is disabled
+- `sndMutex` is kept for the fallback case (only used when io_uring unavailable)
+- When io_uring is enabled, `onSend` is overridden in `newSRTConn()` to use connection's send
+- Socket FD extraction happens at connection creation time
+- Graceful degradation: if FD extraction fails, connection continues without io_uring
 
 ---
 
@@ -142,4 +240,27 @@ This document tracks the implementation progress of the per-connection io_uring 
 - Initialized completion tracking structures
 - Implemented ring cleanup in `close()` method
 - Added placeholder `drainCompletions()` method (to be enhanced in Phase 3)
+
+### 2024-XX-XX - Phase 3 Completed
+- Implemented `sendCompletionHandler()` method with direct CQE polling
+- Implemented `drainCompletions()` method for graceful shutdown
+- Started completion handler goroutine in `newSRTConn()`
+- Added comprehensive error handling for all io_uring error conditions
+- Buffers are properly returned to per-connection pool after send completes
+
+### 2024-XX-XX - Phase 4 Completed
+- Implemented `send()` method on `srtConn` using io_uring
+- Updated `onSend` callback to use connection's send method when io_uring enabled
+- Added retry logic for `GetSQE()` and `Submit()` operations
+- Implemented comprehensive error handling and cleanup on all error paths
+- Uses pre-computed sockaddr structure for maximum efficiency
+- Control packets decommissioned immediately, data packets handled by congestion control
+
+### 2024-XX-XX - Phase 5 Completed
+- Extracted and passed socket FD from UDP connections to `newSRTConn()`
+- Updated connection creation in `conn_request.go` and `dial.go`
+- Added comments to send methods indicating they're fallback-only
+- Kept `sndMutex` for fallback case (when io_uring disabled)
+- Added comments explaining mutex usage
+- Verified integration points and graceful degradation
 

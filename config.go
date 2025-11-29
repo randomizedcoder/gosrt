@@ -180,6 +180,22 @@ type Config struct {
 	// Size of the io_uring ring for per-connection send queues (must be power of 2, 16-1024)
 	// Default: 64. Smaller rings use less memory but may limit throughput per connection
 	IoUringSendRingSize int
+
+	// Size of the network queue channel buffer (packets from network)
+	// Default: 1024. Larger buffers reduce packet drops but use more memory
+	NetworkQueueSize int
+
+	// Size of the write queue channel buffer (packets from application writes)
+	// Default: 1024. Larger buffers reduce write blocking but use more memory
+	WriteQueueSize int
+
+	// Size of the read queue channel buffer (packets ready for application reads)
+	// Default: 1024. Larger buffers reduce read blocking but use more memory
+	ReadQueueSize int
+
+	// Size of the receive queue channel buffer (packets from network before routing to connections)
+	// Used by listener and dialer. Default: 2048. Larger buffers reduce packet drops but use more memory
+	ReceiveQueueSize int
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -221,8 +237,12 @@ var defaultConfig Config = Config{
 	TransmissionType:      "live",
 	TSBPDMode:             true,
 	AllowPeerIpChange:     false,
-	IoUringEnabled:       false,
+	IoUringEnabled:        false,
 	IoUringSendRingSize:   64,
+	NetworkQueueSize:      1024,
+	WriteQueueSize:        1024,
+	ReadQueueSize:         1024,
+	ReceiveQueueSize:      2048,
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
