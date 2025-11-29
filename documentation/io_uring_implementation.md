@@ -6,9 +6,9 @@ This document tracks the implementation progress of the per-connection io_uring 
 
 ## Implementation Status
 
-**Current Phase**: Phase 5 - Integration and Migration (Completed)
+**Current Phase**: Phase 6 - Performance Validation and Optimization (In Progress)
 
-**Overall Progress**: 71% (5/7 phases complete)
+**Overall Progress**: 79% (5.5/7 phases complete - core implementation done, validation in progress)
 
 ---
 
@@ -210,7 +210,51 @@ This document tracks the implementation progress of the per-connection io_uring 
 
 ## Phase 6: Performance Validation and Optimization
 
-**Status**: Not Started
+**Status**: In Progress
+
+**Goal**: Validate performance improvements and optimize as needed.
+
+### Tasks
+
+- [x] **Benchmark Infrastructure**
+  - [x] Create benchmark test file (`connection_io_uring_bench_test.go`)
+  - [x] Add helper function to create test connections with/without io_uring
+  - [x] Add basic test cases for io_uring functionality
+  - [ ] Implement actual benchmarks comparing old vs new send path
+  - [ ] Measure throughput with varying connection counts (10, 100, 1000)
+  - [ ] Measure latency (p50, p95, p99)
+  - [ ] Measure CPU utilization
+  - [ ] Measure memory usage
+
+- [x] **Runtime io_uring Availability Check**
+  - [x] Create `io_uring_check.go` with `IoUringAvailable()` function
+  - [x] Check kernel version (requires Linux 5.1+)
+  - [x] Verify io_uring actually works by creating test ring
+  - [x] Add `IoUringKernelVersion()` helper function
+
+- [ ] **Profiling**
+  - [ ] Profile hot paths with `pprof`
+  - [ ] Identify any remaining bottlenecks
+  - [ ] Check for unnecessary allocations
+  - [ ] Verify cache efficiency
+
+- [ ] **Optimization** (if needed)
+  - [ ] Adjust ring sizes based on profiling
+  - [ ] Optimize completion handler if needed
+  - [ ] Consider batch completion processing if beneficial
+  - [ ] Tune retry delays and counts
+
+- [ ] **Stress Testing**
+  - [ ] Test with maximum expected connection counts
+  - [ ] Test under high packet rate
+  - [ ] Test connection churn (frequent connect/disconnect)
+  - [ ] Test error conditions (network failures, etc.)
+
+### Notes
+
+- Benchmark infrastructure created but benchmarks not yet implemented
+- Runtime availability check can be used for validation/documentation
+- Actual performance measurements will be done during testing phase
 
 ---
 
@@ -263,4 +307,11 @@ This document tracks the implementation progress of the per-connection io_uring 
 - Kept `sndMutex` for fallback case (when io_uring disabled)
 - Added comments explaining mutex usage
 - Verified integration points and graceful degradation
+
+### 2024-XX-XX - Phase 6 Started
+- Created benchmark infrastructure (`connection_io_uring_bench_test.go`)
+- Added helper functions for testing io_uring functionality
+- Created `io_uring_check.go` with runtime availability checking
+- Added `IoUringAvailable()` and `IoUringKernelVersion()` functions
+- Basic test cases added for validation
 

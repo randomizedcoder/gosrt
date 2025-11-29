@@ -12,14 +12,12 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/datarhei/gosrt/circular"
 	"github.com/datarhei/gosrt/congestion"
 	"github.com/datarhei/gosrt/congestion/live"
 	"github.com/datarhei/gosrt/crypto"
 	"github.com/datarhei/gosrt/packet"
-	"github.com/randomizedcoder/giouring"
 )
 
 // Conn is a SRT network connection.
@@ -222,8 +220,9 @@ type srtConn struct {
 	stopKMRequests context.CancelFunc
 
 	// io_uring send queue (per-connection) - using giouring for high performance
-	sendRing   *giouring.Ring // Direct ring access, no channels
-	sendRingFd int            // File descriptor for the socket (not the ring)
+	// Type is interface{} to allow conditional compilation (giouring.Ring on Linux, nil on others)
+	sendRing   interface{} // Direct ring access, no channels (type: *giouring.Ring on Linux)
+	sendRingFd int         // File descriptor for the socket (not the ring)
 
 	// Pre-computed sockaddr for UDP sends (computed once at connection init, reused for all sends)
 	sendSockaddr    syscall.RawSockaddrAny // Pre-computed sockaddr structure
@@ -379,56 +378,8 @@ func newSRTConn(config srtConnConfig) *srtConn {
 
 	c.ctx, c.cancelCtx = context.WithCancel(context.Background())
 
-	// Initialize io_uring send ring if enabled
-	if c.config.IoUringEnabled {
-		// Store socket FD
-		c.sendRingFd = config.socketFd
-
-		// Determine ring size (default: 64)
-		ringSize := uint32(64)
-		if c.config.IoUringSendRingSize > 0 {
-			ringSize = uint32(c.config.IoUringSendRingSize)
-		}
-
-		// Create io_uring ring using giouring
-		ring := giouring.NewRing()
-		err := ring.QueueInit(ringSize, 0) // ringSize entries, no flags
-		if err != nil {
-			// io_uring should be available - this is an unexpected error
-			c.log("connection:io_uring:error", func() string {
-				return fmt.Sprintf("failed to create io_uring ring: %v", err)
-			})
-			// Continue without io_uring - connection will fall back to regular sends
-		} else {
-			c.sendRing = ring
-
-			// Pre-compute sockaddr structure for UDP sends (reused for connection lifetime)
-			// The remote address is known and doesn't change during the connection
-			if c.remoteAddr != nil {
-				c.sendSockaddrLen = convertUDPAddrToSockaddr(c.remoteAddr, &c.sendSockaddr)
-			}
-
-			// Initialize per-connection send buffer pool (eliminates lock contention)
-			c.sendBufferPool = sync.Pool{
-				New: func() interface{} {
-					return new(bytes.Buffer)
-				},
-			}
-
-			// Initialize completion tracking
-			c.sendCompletions = make(map[uint64]*sendCompletionInfo)
-
-			// Create context for completion handler
-			c.sendCompCtx, c.sendCompCancel = context.WithCancel(context.Background())
-
-			// Start completion handler goroutine (polls CQEs directly)
-			c.sendCompWg.Add(1)
-			go c.sendCompletionHandler(c.sendCompCtx)
-
-			// Update onSend callback to use connection's io_uring send method
-			c.onSend = c.send
-		}
-	}
+	// Initialize io_uring send ring if enabled (Linux-specific)
+	c.initializeIoUring(config)
 
 	go c.networkQueueReader(c.ctx)
 	go c.writeQueueReader(c.ctx)
@@ -694,135 +645,8 @@ func (c *srtConn) send(p packet.Packet) {
 		return
 	}
 
-	// Get buffer from per-connection pool (no lock contention, no Reset on critical path!)
-	sendBuffer := c.sendBufferPool.Get().(*bytes.Buffer)
-
-	// Marshal packet into buffer
-	if err := p.Marshal(sendBuffer); err != nil {
-		sendBuffer.Reset() // Reset before putting back
-		c.sendBufferPool.Put(sendBuffer)
-		p.Decommission()
-		c.log("connection:send:error", func() string {
-			return fmt.Sprintf("marshalling packet failed: %v", err)
-		})
-		return
-	}
-
-	// Decommission control packets immediately (they won't be retransmitted)
-	if p.Header().IsControlPacket {
-		p.Decommission()
-	}
-	// Data packets are handled by congestion control (may be retransmitted)
-
-	// Get underlying slice (valid as long as buffer isn't modified)
-	bufferSlice := sendBuffer.Bytes()
-
-	// Generate unique request ID using atomic counter
-	requestID := c.sendRequestID.Add(1)
-
-	// Prepare syscall structures for UDP send
-	// The remote address is known and pre-computed at connection initialization
-	// Note: Even though the listener uses an unconnected UDP socket (shared across connections),
-	// each connection knows its remote address and it doesn't change, so we always use PrepareSendMsg
-	var iovec syscall.Iovec
-	iovec.Base = &bufferSlice[0]
-	iovec.SetLen(len(bufferSlice))
-
-	var msg syscall.Msghdr
-	// Use pre-computed sockaddr (computed once at connection init, reused for all sends)
-	// The sockaddr structure is stored in the connection and remains valid for its lifetime
-	msg.Name = (*byte)(unsafe.Pointer(&c.sendSockaddr))
-	msg.Namelen = c.sendSockaddrLen
-	msg.Iov = &iovec
-	msg.Iovlen = 1
-
-	// Create minimal completion info (only buffer - packet already decommissioned if control)
-	compInfo := &sendCompletionInfo{
-		buffer: sendBuffer, // Keep buffer alive until send completes
-	}
-
-	// Store completion info in map (protected by lock)
-	c.sendCompLock.Lock()
-	c.sendCompletions[requestID] = compInfo
-	c.sendCompLock.Unlock()
-
-	// Get SQE from ring with retry loop (ring may be temporarily full)
-	var sqe *giouring.SubmissionQueueEntry
-	const maxRetries = 3
-	for i := 0; i < maxRetries; i++ {
-		sqe = c.sendRing.GetSQE()
-		if sqe != nil {
-			break // Got an SQE, proceed
-		}
-
-		// Ring full - wait a bit and retry (completions may free up space)
-		if i < maxRetries-1 {
-			time.Sleep(100 * time.Microsecond)
-		}
-	}
-
-	if sqe == nil {
-		// Ring still full after retries - clean up
-		c.sendCompLock.Lock()
-		delete(c.sendCompletions, requestID)
-		c.sendCompLock.Unlock()
-
-		sendBuffer.Reset() // Reset before putting back
-		c.sendBufferPool.Put(sendBuffer)
-
-		c.log("connection:send:error", func() string {
-			return "io_uring ring full after retries"
-		})
-		return
-	}
-
-	// Prepare send operation
-	// Always use PrepareSendMsg with pre-computed address
-	// The remote address is known and doesn't change during the connection lifetime
-	sqe.PrepareSendMsg(c.sendRingFd, &msg, 0)
-
-	// Store request ID in user data for completion correlation
-	sqe.SetData64(requestID)
-
-	// Submit to ring with retry loop (may be temporarily unavailable)
-	// Retry for transient errors (EINTR, EAGAIN) similar to GetSQE retry logic
-	var err error
-	const maxSubmitRetries = 3
-	for i := 0; i < maxSubmitRetries; i++ {
-		_, err = c.sendRing.Submit()
-		if err == nil {
-			break // Submission successful
-		}
-
-		// Only retry transient errors (EINTR, EAGAIN)
-		if err != syscall.EINTR && err != syscall.EAGAIN {
-			// Fatal error - don't retry
-			break
-		}
-
-		// Transient error - wait and retry
-		if i < maxSubmitRetries-1 {
-			time.Sleep(100 * time.Microsecond) // Same delay as GetSQE retry
-		}
-	}
-
-	if err != nil {
-		// Submission failed - clean up
-		c.sendCompLock.Lock()
-		delete(c.sendCompletions, requestID)
-		c.sendCompLock.Unlock()
-
-		sendBuffer.Reset() // Reset before putting back
-		c.sendBufferPool.Put(sendBuffer)
-
-		c.log("connection:send:error", func() string {
-			return fmt.Sprintf("failed to submit send request: %v", err)
-		})
-		return
-	}
-
-	// Request submitted successfully
-	// Completion will be handled asynchronously by completion handler
+	// Call Linux-specific send implementation
+	c.sendIoUring(p)
 }
 
 // networkQueueReader reads the packets from the network queue in order to process them.
@@ -1676,7 +1500,7 @@ func (c *srtConn) close() {
 			c.drainCompletions()
 
 			// Close io_uring ring
-			c.sendRing.QueueExit()
+			// Ring cleanup handled by cleanupIoUring()
 			c.sendRing = nil
 
 			// Clean up any remaining completion info
@@ -1704,168 +1528,7 @@ func (c *srtConn) close() {
 	})
 }
 
-// drainCompletions processes any remaining completions during shutdown
-func (c *srtConn) drainCompletions() {
-	if c.sendRing == nil {
-		return
-	}
-
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
-
-	for {
-		select {
-		case <-timeout.C:
-			// Timeout - give up on remaining completions
-			c.log("connection:send:drain", func() string {
-				return "timeout draining completions"
-			})
-			return
-
-		default:
-			// Try to get completion (non-blocking)
-			cqe, err := c.sendRing.PeekCQE()
-			if err != nil {
-				if err == syscall.EAGAIN {
-					// No completions available - check if map is empty
-					c.sendCompLock.RLock()
-					empty := len(c.sendCompletions) == 0
-					c.sendCompLock.RUnlock()
-
-					if empty {
-						return // All completions processed
-					}
-
-					// Wait a bit before checking again
-					time.Sleep(10 * time.Millisecond)
-					continue
-				}
-
-				// Other error
-				c.log("connection:send:drain:error", func() string {
-					return fmt.Sprintf("error peeking completion: %v", err)
-				})
-				return
-			}
-
-			// Process completion
-			requestID := cqe.UserData
-
-			c.sendCompLock.Lock()
-			compInfo, exists := c.sendCompletions[requestID]
-			if !exists {
-				c.sendCompLock.Unlock()
-				c.sendRing.CQESeen(cqe)
-				continue
-			}
-			delete(c.sendCompletions, requestID)
-			c.sendCompLock.Unlock()
-
-			// Cleanup
-			compInfo.buffer.Reset() // Reset before putting back
-			c.sendBufferPool.Put(compInfo.buffer)
-
-			c.sendRing.CQESeen(cqe)
-		}
-	}
-}
-
-// sendCompletionHandler processes io_uring send completions using direct CQE polling
-func (c *srtConn) sendCompletionHandler(ctx context.Context) {
-	defer c.sendCompWg.Done()
-
-	for {
-		// Check for context cancellation first
-		select {
-		case <-ctx.Done():
-			// Connection closing - drain any remaining completions
-			c.drainCompletions()
-			return
-		default:
-		}
-
-		// WaitCQE blocks until a completion is available
-		// Note: giouring's WaitCQE doesn't support timeouts, so we handle
-		// context cancellation by checking before each WaitCQE call
-		cqe, err := c.sendRing.WaitCQE()
-		if err != nil {
-			// Check if context was cancelled while waiting
-			select {
-			case <-ctx.Done():
-				c.drainCompletions()
-				return
-			default:
-			}
-
-			// Handle different error conditions
-			if err == syscall.EBADF {
-				// Ring closed - connection is shutting down
-				return
-			}
-
-			// EINTR is normal (interrupted by signal), EAGAIN shouldn't occur with WaitCQE
-			// but handle gracefully if it does
-			if err != syscall.EAGAIN && err != syscall.EINTR {
-				c.log("connection:send:completion:error", func() string {
-					return fmt.Sprintf("error waiting for completion: %v", err)
-				})
-			}
-			continue // Retry WaitCQE
-		}
-
-		// Get request ID from completion user data
-		requestID := cqe.UserData
-
-		// Look up completion info
-		c.sendCompLock.Lock()
-		compInfo, exists := c.sendCompletions[requestID]
-		if !exists {
-			c.sendCompLock.Unlock()
-			c.log("connection:send:completion:error", func() string {
-				return fmt.Sprintf("completion for unknown request ID: %d", requestID)
-			})
-			c.sendRing.CQESeen(cqe)
-			continue
-		}
-
-		// Remove from map (no longer needed)
-		delete(c.sendCompletions, requestID)
-		c.sendCompLock.Unlock()
-
-		// Process completion
-		buffer := compInfo.buffer
-
-		// Check for send errors (CQE.Res < 0 indicates error)
-		if cqe.Res < 0 {
-			errno := -cqe.Res
-			c.log("connection:send:completion:error", func() string {
-				return fmt.Sprintf("send failed: %s (errno %d)", syscall.Errno(errno).Error(), errno)
-			})
-			// Packet may need retransmission (handled by congestion control)
-			// Don't decommission data packets - they might be retransmitted
-			// Note: Retry logic is handled by congestion control, not here
-		} else {
-			// Send successful
-			bytesSent := int(cqe.Res)
-			if bytesSent < len(buffer.Bytes()) {
-				// Partial send is unusual for UDP (datagrams should be atomic)
-				c.log("connection:send:completion:warning", func() string {
-					return fmt.Sprintf("partial send: %d/%d bytes", bytesSent, len(buffer.Bytes()))
-				})
-			}
-		}
-
-		// Mark CQE as seen (required by giouring)
-		c.sendRing.CQESeen(cqe)
-
-		// Return buffer to per-connection pool (Reset before Put - not on critical Get path!)
-		buffer.Reset()
-		c.sendBufferPool.Put(buffer)
-
-		// Note: Control packets were already decommissioned in send() path
-		// Data packets are handled by congestion control
-	}
-}
+// drainCompletions and sendCompletionHandler are defined in connection_linux.go
 
 func (c *srtConn) log(topic string, message func() string) {
 	c.logger.Print(topic, c.socketId, 2, message)
