@@ -364,12 +364,12 @@ func (ln *listener) submitRecvRequest() {
 func (ln *listener) prePopulateRecvRing() {
     initialPending := ln.config.IoUringRecvInitialPending
     if initialPending <= 0 {
-        // Default: ring size - 1 (leave one slot free)
+        // Default: full ring size (maximize pending receives)
         ringSize := ln.config.IoUringRecvRingSize
         if ringSize <= 0 {
             ringSize = 512 // Default ring size
         }
-        initialPending = ringSize - 1
+        initialPending = ringSize
     }
 
     // Submit initial batch of receives
@@ -693,7 +693,7 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 - **Batched Resubmission Only**: Only the resubmission of new read requests is batched - accumulates pending resubmits and submits in batches
 - **Configurable**: Batch size is configurable via `IoUringRecvBatchSize` (default: 256) - controls how many resubmissions to batch together
 - **Efficiency**: Instead of 1:1 (process 1, submit 1), uses 1:N (process 1 immediately, batch submit N) - reduces syscall overhead for resubmissions while maintaining low latency
-- **No Latency Impact**: Packets are processed immediately, and since we maintain constant pending receives (e.g., 511 for ring size 512), there are always many requests already queued
+- **No Latency Impact**: Packets are processed immediately, and since we maintain constant pending receives (e.g., 512 for ring size 512), there are always many requests already queued
 - **Maintains Pending Count**: Still maintains constant pending receives, just with fewer syscalls for resubmission
 - **Better Under Load**: Less expensive work between Go userland and OS for resubmissions, especially beneficial under high load
 
@@ -868,11 +868,11 @@ func (ln *listener) cleanupRecvRing() {
 1. **Add Configuration Options** (`config.go`):
    - Add `IoUringRecvEnabled bool` flag to enable/disable io_uring for receives
    - Add `IoUringRecvRingSize int` for receive ring size (default: 512, optimized for maximum performance)
-   - Add `IoUringRecvInitialPending int` for initial pending receives (default: 511, ring size - 1)
+   - Add `IoUringRecvInitialPending int` for initial pending receives (default: 512, full ring size)
    - Add `IoUringRecvBatchSize int` for resubmission batch size (default: 256, optimized for maximum performance)
-   - Add validation to ensure ring size is power of 2 and within reasonable bounds (64-1024)
-   - Add validation to ensure initial pending is reasonable (16-512, must be <= ring size)
-   - Add validation to ensure batch size is reasonable (1-512)
+   - Add validation to ensure ring size is power of 2 and within reasonable bounds (64-32768)
+   - Add validation to ensure initial pending is reasonable (16-32768, must be <= ring size)
+   - Add validation to ensure batch size is reasonable (1-32768)
 
 2. **Create Helper Functions**:
    - Implement `extractAddrFromRSA()` function in `sockaddr.go` or new file
@@ -910,7 +910,7 @@ func (ln *listener) cleanupRecvRing() {
    - Initialize completion tracking map (same pattern as send path)
    - Create context for completion handler (same pattern as send path)
    - Start completion handler goroutine (same pattern as send path)
-   - Pre-populate ring with initial pending receives (configurable, default: ring size - 1, e.g., 511 for ring size 512) using `prePopulateRecvRing()`
+   - Pre-populate ring with initial pending receives (configurable, default: full ring size, e.g., 512 for ring size 512) using `prePopulateRecvRing()`
 
 3. **Implement Ring Cleanup**:
    - Create `cleanupRecvRing()` method
@@ -1018,9 +1018,9 @@ type Config struct {
 
     // io_uring receive path configuration
     IoUringRecvEnabled      bool // Enable io_uring for receive operations
-    IoUringRecvRingSize     int  // Size of receive ring (must be power of 2, 64-1024, default: 512)
-    IoUringRecvInitialPending int // Initial pending receives at startup (default: ring size - 1, must be <= ring size)
-    IoUringRecvBatchSize    int  // Batch size for resubmitting read requests (default: 256, 1-512)
+    IoUringRecvRingSize     int  // Size of receive ring (must be power of 2, 64-32768, default: 512)
+    IoUringRecvInitialPending int // Initial pending receives at startup (default: ring size, must be <= ring size)
+    IoUringRecvBatchSize    int  // Batch size for resubmitting read requests (default: 256, 1-32768)
 }
 ```
 
@@ -1032,7 +1032,7 @@ defaultConfig := Config{
 
     IoUringRecvEnabled:      false, // Disabled by default (opt-in)
     IoUringRecvRingSize:     512,   // Default ring size (optimized for maximum performance)
-    IoUringRecvInitialPending: 511, // Default: ring size - 1 (leave one slot free)
+    IoUringRecvInitialPending: 512, // Default: full ring size (maximize pending receives)
     IoUringRecvBatchSize:    256,   // Default batch size (optimized for maximum performance)
 }
 ```
@@ -1049,16 +1049,16 @@ func (c *Config) Validate() error {
             return fmt.Errorf("IoUringRecvRingSize must be power of 2")
         }
 
-        // Must be within reasonable bounds
-        if c.IoUringRecvRingSize < 64 || c.IoUringRecvRingSize > 1024 {
-            return fmt.Errorf("IoUringRecvRingSize must be between 64 and 1024")
+        // Must be within reasonable bounds (io_uring supports up to 32K or more)
+        if c.IoUringRecvRingSize < 64 || c.IoUringRecvRingSize > 32768 {
+            return fmt.Errorf("IoUringRecvRingSize must be between 64 and 32768")
         }
     }
 
     if c.IoUringRecvInitialPending > 0 {
-        // Must be reasonable
-        if c.IoUringRecvInitialPending < 16 || c.IoUringRecvInitialPending > 512 {
-            return fmt.Errorf("IoUringRecvInitialPending must be between 16 and 512")
+        // Must be reasonable (can be up to ring size)
+        if c.IoUringRecvInitialPending < 16 || c.IoUringRecvInitialPending > 32768 {
+            return fmt.Errorf("IoUringRecvInitialPending must be between 16 and 32768")
         }
 
         // Must not exceed ring size
@@ -1069,9 +1069,9 @@ func (c *Config) Validate() error {
     }
 
     if c.IoUringRecvBatchSize > 0 {
-        // Must be reasonable
-        if c.IoUringRecvBatchSize < 1 || c.IoUringRecvBatchSize > 512 {
-            return fmt.Errorf("IoUringRecvBatchSize must be between 1 and 512")
+        // Must be reasonable (can be up to ring size for maximum batching)
+        if c.IoUringRecvBatchSize < 1 || c.IoUringRecvBatchSize > 32768 {
+            return fmt.Errorf("IoUringRecvBatchSize must be between 1 and 32768")
         }
     }
 
@@ -1082,11 +1082,11 @@ func (c *Config) Validate() error {
 ## Differences from Send Path
 
 1. **Shared Ring**: Receive uses one ring per listener/dialer (not per-connection like send path)
-2. **Constant Pending Receives**: We maintain a constant pool of pending receives (default: 511, ring size - 1) by batch resubmitting after processing completions. Send path only submits when there's a packet to send.
+2. **Constant Pending Receives**: We maintain a constant pool of pending receives (default: 512, full ring size) by batch resubmitting after processing completions. Send path only submits when there's a packet to send.
 3. **Batched Resubmission Only**: Receive path processes completions immediately (low latency) but batches resubmissions (reduced syscalls). This is a pure win - no latency impact since packets are processed immediately, only resubmission syscalls are batched.
 4. **Buffer Type**: Receive uses `[]byte` pool (fixed size MSS) - simpler and more efficient. Send path uses `bytes.Buffer` pool for variable-sized packet marshaling.
 5. **Buffer Lifecycle**: Receive buffers are returned to pool after each completion (no Reset() needed - kernel overwrites). Send path keeps buffers in completion map until send completes.
-6. **Pre-population**: Receive path pre-populates ring at startup with configurable pending receives (default: ring size - 1, e.g., 511 for ring size 512). Send path has no pre-population.
+6. **Pre-population**: Receive path pre-populates ring at startup with configurable pending receives (default: full ring size, e.g., 512 for ring size 512). Send path has no pre-population.
 7. **Address Handling**: Receive path uses `syscall.Msghdr` and `RawSockaddrAny` to get source address (send path uses pre-computed address).
 
 **Similarities (following same patterns):**
@@ -1100,18 +1100,635 @@ func (c *Config) Validate() error {
 
 ## Performance Considerations
 
-1. **Ring Size**: Larger rings (512-1024) can handle more bursts but use more memory. Default: 512 (optimized for maximum performance).
-2. **Initial Pending Count**: More initial pending receives improve throughput but use more buffers. Default: ring size - 1 (511 for default ring size of 512). Should be <= ring size.
-3. **Batch Size**: Controls how many resubmissions to batch together (default: 256). Larger batch sizes (256-512) reduce syscall overhead for resubmissions. Smaller batches have more syscall overhead but same latency. Since we process completions immediately (no batching of processing), latency is unaffected - only resubmission syscalls are batched.
+1. **Ring Size**: Larger rings (512-32768+) can handle more bursts but use more memory. Default: 512 (optimized for maximum performance). io_uring supports ring sizes up to 32K or more (must be power of 2). Very large rings (8K-32K) are useful for extremely high-throughput scenarios.
+2. **Initial Pending Count**: More initial pending receives improve throughput but use more buffers. Default: full ring size (512 for default ring size of 512). Should be <= ring size. No need to leave slots free since we batch resubmit.
+3. **Batch Size**: Controls how many resubmissions to batch together (default: 256). Larger batch sizes (256-32768) reduce syscall overhead for resubmissions. Smaller batches have more syscall overhead but same latency. Since we process completions immediately (no batching of processing), latency is unaffected - only resubmission syscalls are batched. For very large rings (8K-32K), larger batch sizes (1K-4K) can further reduce syscall overhead.
 4. **Buffer Size**: Must match `config.MSS` to avoid truncation
 5. **Batching Benefits**:
    - **Low Latency Processing**: Each completion is processed immediately (deserialize and queue to channel) - no batching of processing
    - **Batched Resubmission Only**: Only resubmission of new read requests is batched - accumulates pending resubmits and submits in batches
    - **Reduced Syscalls**: Instead of 1:1 (process 1 completion, submit 1 request), uses 1:N (process 1 immediately, batch submit N requests)
    - **Example**: With batch size 256, resubmitting 512 requests requires ~2 syscalls instead of 512, while processing latency remains minimal
-   - **No Latency Impact**: Packets are processed immediately as they arrive, and since we maintain constant pending receives (e.g., 511 for ring size 512), there are always many requests already queued
+   - **No Latency Impact**: Packets are processed immediately as they arrive, and since we maintain constant pending receives (e.g., 512 for ring size 512), there are always many requests already queued
    - **Better Under Load**: Reducing syscall overhead for resubmissions (1:256 ratio) means significantly less expensive work between Go userland and OS, which helps performance especially under high load
    - **Pure Win**: This is the essence of io_uring - queue up all read requests in advance, process completions immediately, and batch resubmissions
+
+## Error Handling
+
+Comprehensive error handling is critical for robust io_uring receive path implementation. This section documents all syscalls, possible error types, and appropriate handling strategies.
+
+### Error Handling Principles
+
+1. **Transient vs Fatal Errors**: Distinguish between transient errors (EINTR, EAGAIN) that should be retried and fatal errors that require cleanup
+2. **Consistent Retry Pattern**: Use retry loops with small delays (100μs) for transient errors, following the write path pattern
+3. **Resource Cleanup**: Always clean up resources (buffers, completion map entries) on error paths
+4. **Graceful Degradation**: Log errors appropriately but continue operation when possible
+5. **Shutdown Safety**: Handle EBADF (ring closed) gracefully during shutdown
+
+### Syscall Error Handling
+
+#### 1. Ring Initialization (`QueueInit`)
+
+**Syscall**: `ring.QueueInit(ringSize, flags)`
+
+**Possible Errors**:
+- `EINVAL`: Invalid ring size (not power of 2) or invalid flags
+- `EMFILE`: Too many open file descriptors
+- `ENOMEM`: Insufficient memory
+- `EFAULT`: Invalid memory address
+- `ENOSYS`: io_uring not supported by kernel (< 5.1)
+
+**Handling**:
+```go
+ring := giouring.NewRing()
+err := ring.QueueInit(ringSize, 0)
+if err != nil {
+    // Fatal error - cannot proceed with io_uring
+    // Fall back to regular ReadFrom() goroutine
+    ln.log("listen:recv:init:error", func() string {
+        return fmt.Sprintf("failed to initialize io_uring ring: %v", err)
+    })
+    // Continue without io_uring - connection will use ReadFrom()
+    return
+}
+```
+
+**Response**:
+- **Fatal**: All errors are fatal - cannot use io_uring
+- **Action**: Fall back to regular `ReadFrom()` goroutine
+- **No retry**: Ring initialization failures are not transient
+
+#### 2. Get Submission Queue Entry (`GetSQE`)
+
+**Syscall**: `ring.GetSQE()`
+
+**Possible Errors**:
+- Returns `nil`: Ring submission queue is full (not an error, but condition to handle)
+
+**Handling**:
+```go
+var sqe *giouring.SubmissionQueueEntry
+const maxRetries = 3
+for i := 0; i < maxRetries; i++ {
+    sqe = ring.GetSQE()
+    if sqe != nil {
+        break // Got an SQE, proceed
+    }
+
+    // Ring full - wait a bit and retry (completions may free up space)
+    if i < maxRetries-1 {
+        time.Sleep(100 * time.Microsecond)
+    }
+}
+
+if sqe == nil {
+    // Ring still full after retries - clean up
+    ln.recvCompLock.Lock()
+    delete(ln.recvCompletions, requestID)
+    ln.recvCompLock.Unlock()
+
+    ln.recvBufferPool.Put(buffer)
+
+    ln.log("listen:recv:error", func() string {
+        return "io_uring ring full after retries"
+    })
+    return
+}
+```
+
+**Response**:
+- **Transient**: Ring full is transient - completions may free up space
+- **Retry**: Retry up to 3 times with 100μs delay
+- **Fatal after retries**: If still full after retries, clean up and return
+- **Cleanup**: Remove from completion map, return buffer to pool
+
+#### 3. Submit Requests (`Submit`)
+
+**Syscall**: `ring.Submit()`
+
+**Possible Errors**:
+- `EINTR`: Interrupted by signal (transient)
+- `EAGAIN`: Ring temporarily unavailable (transient)
+- `EBADF`: Ring file descriptor is bad (fatal - ring closed)
+- `EFAULT`: Invalid memory address (fatal)
+- `EINVAL`: Invalid submission (fatal)
+
+**Handling**:
+```go
+var err error
+const maxSubmitRetries = 3
+for i := 0; i < maxSubmitRetries; i++ {
+    _, err = ring.Submit()
+    if err == nil {
+        break // Submission successful
+    }
+
+    // Only retry transient errors (EINTR, EAGAIN)
+    if err != syscall.EINTR && err != syscall.EAGAIN {
+        // Fatal error - don't retry
+        break
+    }
+
+    // Transient error - wait and retry
+    if i < maxSubmitRetries-1 {
+        time.Sleep(100 * time.Microsecond) // Same delay as GetSQE retry
+    }
+}
+
+if err != nil {
+    // Submission failed - clean up
+    ln.recvCompLock.Lock()
+    delete(ln.recvCompletions, requestID)
+    ln.recvCompLock.Unlock()
+
+    ln.recvBufferPool.Put(buffer)
+
+    ln.log("listen:recv:error", func() string {
+        return fmt.Sprintf("failed to submit receive request: %v", err)
+    })
+    return
+}
+```
+
+**Response**:
+- **Transient (EINTR, EAGAIN)**: Retry up to 3 times with 100μs delay
+- **Fatal (EBADF, EFAULT, EINVAL)**: Don't retry, clean up immediately
+- **Cleanup**: Remove from completion map, return buffer to pool
+- **Logging**: Log all errors for debugging
+
+#### 4. Peek Completion Queue Entry (`PeekCQE`)
+
+**Syscall**: `ring.PeekCQE()`
+
+**Possible Errors**:
+- `EAGAIN`: No completions available (not an error - expected condition)
+- `EBADF`: Ring file descriptor is bad (fatal - ring closed)
+- `EFAULT`: Invalid memory address (fatal)
+- `EINTR`: Interrupted by signal (transient)
+
+**Handling**:
+```go
+cqe, err := ring.PeekCQE()
+if err != nil {
+    if err == syscall.EAGAIN {
+        // No completions available - this is expected, not an error
+        // Fall back to WaitCQE() for blocking wait
+        return nil, nil // Signal to caller to use WaitCQE
+    }
+
+    // Check if context was cancelled
+    if ctx.Err() != nil {
+        return nil, nil
+    }
+
+    // Handle different error conditions
+    if err == syscall.EBADF {
+        // Ring closed - listener is shutting down
+        return nil, nil
+    }
+
+    // EINTR is normal (interrupted by signal)
+    if err != syscall.EINTR {
+        ln.log("listen:recv:completion:error", func() string {
+            return fmt.Sprintf("error peeking completion: %v", err)
+        })
+    }
+    return nil, nil
+}
+```
+
+**Response**:
+- **EAGAIN**: Not an error - expected when no completions available, fall back to `WaitCQE()`
+- **EBADF**: Fatal - ring closed, return nil
+- **EINTR**: Transient - can be ignored or retried
+- **Other errors**: Log and return nil
+
+#### 5. Wait for Completion Queue Entry (`WaitCQE`)
+
+**Syscall**: `ring.WaitCQE()`
+
+**Possible Errors**:
+- `EAGAIN`: Should not occur with WaitCQE (blocks until available), but handle gracefully
+- `EBADF`: Ring file descriptor is bad (fatal - ring closed)
+- `EINTR`: Interrupted by signal (transient - retry)
+- `EFAULT`: Invalid memory address (fatal)
+
+**Handling**:
+```go
+cqe, err := ring.WaitCQE()
+if err != nil {
+    // Check if context was cancelled
+    if ctx.Err() != nil {
+        return nil, nil
+    }
+
+    if err == syscall.EBADF {
+        // Ring closed - listener is shutting down
+        return nil, nil
+    }
+
+    // EAGAIN shouldn't occur with WaitCQE, but handle gracefully
+    // EINTR is normal (interrupted by signal)
+    if err != syscall.EAGAIN && err != syscall.EINTR {
+        ln.log("listen:recv:completion:error", func() string {
+            return fmt.Sprintf("error waiting for completion: %v", err)
+        })
+    }
+    return nil, nil // Retry on next loop iteration
+}
+```
+
+**Response**:
+- **EBADF**: Fatal - ring closed, return nil (handler will exit)
+- **EINTR**: Transient - retry on next loop iteration
+- **EAGAIN**: Unexpected but handle gracefully - retry
+- **Other errors**: Log and retry
+
+#### 6. Completion Result Errors (`CQE.Res`)
+
+**Error Source**: Completion Queue Entry result field (`cqe.Res`)
+
+**Possible Errors** (negative values indicate errors):
+- `-EAGAIN`: Resource temporarily unavailable (transient)
+- `-EINTR`: Interrupted by signal (transient)
+- `-ECONNREFUSED`: Connection refused (fatal for UDP - unlikely)
+- `-ENOBUFS`: No buffer space available (transient)
+- `-EMSGSIZE`: Message too large (fatal - buffer too small)
+- `-EINVAL`: Invalid argument (fatal)
+- `-EFAULT`: Bad address (fatal)
+
+**Handling**:
+```go
+// Check for receive errors
+if cqe.Res < 0 {
+    errno := -cqe.Res
+
+    // Handle specific errors
+    if errno == int(syscall.EAGAIN) || errno == int(syscall.EINTR) {
+        // Transient error - resubmit immediately
+        ring.CQESeen(cqe)
+        ln.recvBufferPool.Put(buffer)
+        return true // Needs resubmission
+    }
+
+    // Other errors - log but still resubmit to maintain pending count
+    ln.log("listen:recv:completion:error", func() string {
+        return fmt.Sprintf("receive failed: %s (errno %d)", syscall.Errno(errno).Error(), errno)
+    })
+
+    ring.CQESeen(cqe)
+    ln.recvBufferPool.Put(buffer)
+    return true // Still resubmit to maintain pending count
+}
+```
+
+**Response**:
+- **Transient (EAGAIN, EINTR)**: Resubmit immediately
+- **Fatal (EMSGSIZE, EINVAL, EFAULT)**: Log error but still resubmit to maintain pending count
+- **Always resubmit**: Even on errors, resubmit to maintain constant pending receives
+- **Cleanup**: Return buffer to pool, mark CQE as seen
+
+#### 7. Mark Completion as Seen (`CQESeen`)
+
+**Syscall**: `ring.CQESeen(cqe)`
+
+**Possible Errors**: None (void function in giouring)
+
+**Handling**: Always call after processing completion, even on errors
+
+```go
+// Mark CQE as seen (required by giouring)
+ring.CQESeen(cqe)
+```
+
+**Response**:
+- **Always required**: Must be called for every CQE, even on errors
+- **No error handling**: Function doesn't return errors
+
+#### 8. Close Ring (`QueueExit`)
+
+**Syscall**: `ring.QueueExit()`
+
+**Possible Errors**: None (void function in giouring)
+
+**Handling**: Called during cleanup, no error handling needed
+
+```go
+ring, ok := ln.recvRing.(*giouring.Ring)
+if ok {
+    ring.QueueExit()
+}
+```
+
+**Response**:
+- **No error handling**: Function doesn't return errors
+- **Safe to call**: Even if ring is already closed
+
+### Application-Level Error Handling
+
+#### 1. Unknown Request ID
+
+**Error**: Completion received for request ID not in completion map
+
+**Possible Causes**:
+- Race condition during shutdown
+- Map corruption (shouldn't happen with proper locking)
+- Duplicate request IDs (shouldn't happen with atomic counter)
+
+**Handling**:
+```go
+compInfo, exists := ln.recvCompletions[requestID]
+if !exists {
+    ln.recvCompLock.Unlock()
+    ln.log("listen:recv:completion:error", func() string {
+        return fmt.Sprintf("completion for unknown request ID: %d", requestID)
+    })
+    ring.CQESeen(cqe)
+    return nil // Skip this completion
+}
+```
+
+**Response**:
+- **Log error**: Log for debugging
+- **Mark CQE as seen**: Prevent ring from getting stuck
+- **Continue**: Don't crash, just skip this completion
+
+#### 2. Socket FD Extraction Errors
+
+**Error**: `getUDPConnFD()` fails
+
+**Possible Errors**:
+- `pc.File()` fails: Connection already closed or invalid
+- `syscall.Dup()` fails: `EMFILE` (too many FDs), `EBADF` (invalid FD), `ENOMEM` (out of memory)
+
+**Handling**:
+```go
+socketFd, err := getUDPConnFD(ln.pc)
+if err != nil {
+    ln.log("listen:recv:init:error", func() string {
+        return fmt.Sprintf("failed to extract socket FD: %v", err)
+    })
+    // Continue without io_uring - will fall back to regular ReadFrom()
+    return
+}
+```
+
+**Response**:
+- **Fatal**: Cannot use io_uring without valid socket FD
+- **Action**: Fall back to regular `ReadFrom()` goroutine
+- **No retry**: FD extraction failures are not transient
+- **Logging**: Log error for debugging
+
+#### 3. Address Extraction Errors
+
+**Error**: `extractAddrFromRSA()` fails
+
+**Possible Causes**:
+- Invalid `RawSockaddrAny` structure
+- Unsupported address family (not IPv4/IPv6)
+- Corrupted address data
+
+**Handling**:
+```go
+addr, err := extractAddrFromRSA(&compInfo.rsa)
+if err != nil {
+    // Address extraction failed - log and resubmit
+    ln.log("listen:recv:addr:error", func() string {
+        return fmt.Sprintf("failed to extract address: %v", err)
+    })
+    ring.CQESeen(cqe)
+    ln.recvBufferPool.Put(buffer)
+    return true // Needs resubmission
+}
+```
+
+**Response**:
+- **Log error**: Log address extraction errors for debugging
+- **Return buffer**: Always return buffer to pool
+- **Resubmit**: Resubmit to maintain pending count
+- **Continue**: Don't crash, just drop the packet with invalid address
+
+#### 4. Packet Deserialization Errors
+
+**Error**: `packet.NewPacketFromData()` fails
+
+**Possible Causes**:
+- Invalid packet format
+- Corrupted data
+- Truncated packet
+
+**Handling**:
+```go
+p, err := packet.NewPacketFromData(addr, bufferSlice)
+ln.recvBufferPool.Put(buffer) // Return buffer regardless
+
+if err != nil {
+    // Deserialization error - log and resubmit
+    ln.log("listen:recv:parse:error", func() string {
+        return fmt.Sprintf("failed to parse packet: %v", err)
+    })
+    ring.CQESeen(cqe)
+    return true // Needs resubmission
+}
+```
+
+**Response**:
+- **Log error**: Log parse errors for debugging
+- **Return buffer**: Always return buffer to pool
+- **Resubmit**: Resubmit to maintain pending count
+- **Continue**: Don't crash, just drop the invalid packet
+
+#### 5. Receive Queue Full
+
+**Error**: `rcvQueue` channel is full
+
+**Possible Causes**:
+- Application not reading packets fast enough
+- Burst of packets
+
+**Handling**:
+```go
+select {
+case ln.rcvQueue <- p:
+    // Success - packet queued
+default:
+    // Queue full - log and drop packet
+    ln.log("listen", func() string { return "receive queue is full" })
+    p.Decommission() // Clean up dropped packet
+}
+```
+
+**Response**:
+- **Non-blocking**: Use select with default to avoid blocking
+- **Log warning**: Log when queue is full
+- **Drop packet**: Decommission packet to free resources
+- **Continue**: Don't crash, just drop the packet
+
+#### 4. Ring Full During Batch Submission
+
+**Error**: `GetSQE()` returns nil during batch submission
+
+**Handling**:
+```go
+// Get SQE (with retry if needed)
+var sqe *giouring.SubmissionQueueEntry
+const maxRetries = 3
+for j := 0; j < maxRetries; j++ {
+    sqe = ring.GetSQE()
+    if sqe != nil {
+        break
+    }
+    if j < maxRetries-1 {
+        time.Sleep(100 * time.Microsecond)
+    }
+}
+
+if sqe == nil {
+    // Ring full - clean up this request and break (don't fail entire batch)
+    ln.recvCompLock.Lock()
+    delete(ln.recvCompletions, requestID)
+    ln.recvCompLock.Unlock()
+    ln.recvBufferPool.Put(buffer)
+    break // Continue with remaining requests in batch
+}
+```
+
+**Response**:
+- **Retry**: Retry up to 3 times with 100μs delay
+- **Partial batch**: If ring full, clean up this request and continue with remaining requests
+- **Don't fail entire batch**: Only fail the specific request that can't get SQE
+
+### Error Handling in Batch Operations
+
+#### Batch Submission Errors
+
+**Error**: `ring.Submit()` fails during batch submission
+
+**Handling**:
+```go
+// Batch submit all SQEs at once (single syscall)
+if len(sqes) > 0 {
+    _, err := ring.Submit()
+    if err != nil {
+        // Submission failed - clean up all requests in batch
+        ln.recvCompLock.Lock()
+        for i, requestID := range requestIDs {
+            delete(ln.recvCompletions, requestID)
+            ln.recvBufferPool.Put(compInfos[i].buffer)
+        }
+        ln.recvCompLock.Unlock()
+        ln.log("listen:recv:error", func() string {
+            return fmt.Sprintf("failed to submit receive batch: %v", err)
+        })
+    }
+}
+```
+
+**Response**:
+- **All-or-nothing**: If batch submit fails, clean up all requests in the batch
+- **Cleanup**: Remove all from completion map, return all buffers to pool
+- **Log error**: Log batch submission failure
+- **Continue**: Don't crash, just lose this batch of requests
+
+### Context Cancellation Handling
+
+**Error**: Context cancelled during operation
+
+**Possible Causes**:
+- Listener/dialer shutdown initiated
+- Application termination
+
+**Handling**:
+```go
+// Check context cancellation before blocking operations
+if ctx.Err() != nil {
+    ln.drainRecvCompletions()
+    // Flush any remaining pending resubmissions before exiting
+    if pendingResubmits > 0 {
+        ln.submitRecvRequestBatch(pendingResubmits)
+    }
+    return
+}
+
+// Check context cancellation after blocking operations
+cqe, err := ring.WaitCQE()
+if err != nil {
+    // Check if context was cancelled while waiting
+    if ctx.Err() != nil {
+        return nil, nil
+    }
+    // ... handle other errors
+}
+```
+
+**Response**:
+- **Graceful shutdown**: Drain completions, flush pending resubmissions, then exit
+- **No retry**: Context cancellation is intentional, don't retry
+- **Cleanup**: Ensure all resources are cleaned up before exiting
+
+### Shutdown and Cleanup Error Handling
+
+#### Drain Completions
+
+**Error**: Errors during drain (shutdown)
+
+**Handling**:
+```go
+cqe, err := ring.PeekCQE()
+if err != nil {
+    if err == syscall.EAGAIN {
+        // No completions available - check if map is empty
+        ln.recvCompLock.RLock()
+        empty := len(ln.recvCompletions) == 0
+        ln.recvCompLock.RUnlock()
+
+        if empty {
+            return // All completions processed
+        }
+
+        // Wait a bit before checking again
+        time.Sleep(10 * time.Millisecond)
+        continue
+    }
+
+    // Other error - log and give up
+    ln.log("listen:recv:drain:error", func() string {
+        return fmt.Sprintf("error peeking completion: %v", err)
+    })
+    return
+}
+```
+
+**Response**:
+- **EAGAIN**: Check if map is empty, wait and retry if not
+- **Other errors**: Log and give up (shutdown is best-effort)
+- **Timeout**: Use 5-second timeout to prevent infinite wait
+
+### Error Handling Summary Table
+
+| Operation | Transient Errors | Fatal Errors | Retry Strategy | Cleanup Required |
+|-----------|-----------------|-------------|----------------|------------------|
+| `QueueInit` | None | All | No retry | None |
+| `GetSQE` | Ring full (nil) | None | 3 retries, 100μs | Remove from map, return buffer |
+| `Submit` | EINTR, EAGAIN | EBADF, EFAULT, EINVAL | 3 retries, 100μs | Remove from map, return buffer |
+| `PeekCQE` | EINTR | EBADF, EFAULT | Retry on next iteration | None |
+| `WaitCQE` | EINTR, EAGAIN | EBADF, EFAULT | Retry on next iteration | None |
+| `CQE.Res < 0` | EAGAIN, EINTR | EMSGSIZE, EINVAL, EFAULT | Resubmit immediately | Return buffer, mark CQE seen |
+| `CQESeen` | None | None | N/A | N/A |
+| `QueueExit` | None | None | N/A | N/A |
+| `getUDPConnFD` | None | All | No retry | None |
+| `extractAddrFromRSA` | None | All | No retry | Return buffer, mark CQE seen |
+| Context Cancellation | N/A | N/A | No retry | Drain completions, flush resubmits |
+
+### Best Practices
+
+1. **Always Clean Up**: On any error path, clean up resources (buffers, map entries)
+2. **Log Appropriately**: Log errors for debugging, but don't spam logs with transient errors
+3. **Retry Transient Errors**: EINTR and EAGAIN are transient - retry with small delays
+4. **Don't Retry Fatal Errors**: EBADF, EFAULT, EINVAL are fatal - don't retry
+5. **Maintain Pending Count**: Even on errors, resubmit to maintain constant pending receives
+6. **Graceful Degradation**: Continue operation when possible, don't crash on recoverable errors
+7. **Shutdown Safety**: Handle EBADF gracefully during shutdown
 
 ## Future Optimizations
 
