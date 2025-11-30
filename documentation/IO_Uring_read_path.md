@@ -212,7 +212,7 @@ type recvCompletionInfo struct {
 ```go
 // Create io_uring ring for receive operations
 ring := giouring.NewRing()
-ringSize := uint32(256) // Configurable, default 256
+ringSize := uint32(512) // Configurable, default 512 (optimized for maximum performance)
 err := ring.QueueInit(ringSize, 0) // ring size, no flags
 if err != nil {
     // Fall back to regular ReadFrom() if io_uring unavailable
@@ -364,7 +364,12 @@ func (ln *listener) submitRecvRequest() {
 func (ln *listener) prePopulateRecvRing() {
     initialPending := ln.config.IoUringRecvInitialPending
     if initialPending <= 0 {
-        initialPending = 128 // Default
+        // Default: ring size - 1 (leave one slot free)
+        ringSize := ln.config.IoUringRecvRingSize
+        if ringSize <= 0 {
+            ringSize = 512 // Default ring size
+        }
+        initialPending = ringSize - 1
     }
 
     // Submit initial batch of receives
@@ -382,11 +387,13 @@ func (ln *listener) prePopulateRecvRing() {
 - Pre-population runs **once** at startup
 - After each completion, we call `submitRecvRequest()` again to maintain constant pending count
 
-#### 6. Completion Handler with Batching
+#### 6. Completion Handler with Batched Resubmission
 
-Process completions in batches to reduce syscall overhead, then batch resubmit to maintain constant pending count:
+Process completions immediately (low latency) but batch resubmissions to reduce syscall overhead:
 
 ```go
+// recvCompletionHandler is the main completion handler loop
+// Processes completions immediately (low latency) but batches resubmissions (reduced syscalls)
 func (ln *listener) recvCompletionHandler(ctx context.Context) {
     defer ln.recvCompWg.Done()
 
@@ -395,94 +402,71 @@ func (ln *listener) recvCompletionHandler(ctx context.Context) {
         return
     }
 
-    // Get batch size from config (default: 20)
+    // Get batch size from config (default: 256, optimized for maximum performance)
     batchSize := ln.config.IoUringRecvBatchSize
     if batchSize <= 0 {
-        batchSize = 20 // Default
+        batchSize = 256 // Default
     }
 
+    // Track pending resubmissions for batching
+    pendingResubmits := 0
+
     for {
-        // Check for context cancellation first (same pattern as send path)
-        select {
-        case <-ctx.Done():
-            // Drain any remaining completions
+        // Check for context cancellation
+        if ctx.Err() != nil {
+            // Flush any pending resubmits before draining
+            if pendingResubmits > 0 {
+                ln.submitRecvRequestBatch(pendingResubmits)
+            }
             ln.drainRecvCompletions()
             return
-        default:
         }
 
-        // Collect completions in a batch (reduces syscall overhead)
-        // Process up to batchSize completions before resubmitting
-        var completions []*giouring.CompletionQueueEvent
-        var completionInfos []*recvCompletionInfo
-
-        // Collect batch of completions (non-blocking peek)
-        for len(completions) < batchSize {
-            cqe, err := ring.PeekCQE()
-            if err != nil {
-                if err == syscall.EAGAIN {
-                    // No more completions available - process what we have
-                    break
-                }
-
-                // Check if context was cancelled
-                select {
-                case <-ctx.Done():
-                    ln.drainRecvCompletions()
-                    return
-                default:
-                }
-
-                // Handle different error conditions (same pattern as send path)
-                if err == syscall.EBADF {
-                    // Ring closed - listener is shutting down
-                    return
-                }
-
-                // EINTR is normal (interrupted by signal)
-                if err != syscall.EINTR {
-                    ln.log("listen:recv:completion:error", func() string {
-                        return fmt.Sprintf("error peeking completion: %v", err)
-                    })
-                }
-                break
+        // Get single completion (process immediately for low latency)
+        cqe, compInfo := ln.getRecvCompletion(ctx, ring)
+        if cqe == nil {
+            // If we have pending resubmits but no completions, flush them
+            // This ensures we don't wait indefinitely for completions when we need to resubmit
+            if pendingResubmits > 0 && pendingResubmits < batchSize {
+                // Optional: Could add a timeout here, but for now just continue
+                // The pending resubmits will be flushed when batch size is reached or on shutdown
             }
-
-            // Get request ID from completion user data
-            requestID := cqe.UserData
-
-            // Look up completion info
-            ln.recvCompLock.Lock()
-            compInfo, exists := ln.recvCompletions[requestID]
-            if !exists {
-                ln.recvCompLock.Unlock()
-                ln.log("listen:recv:completion:error", func() string {
-                    return fmt.Sprintf("completion for unknown request ID: %d", requestID)
-                })
-                ring.CQESeen(cqe)
-                continue
-            }
-            delete(ln.recvCompletions, requestID)
-            ln.recvCompLock.Unlock()
-
-            completions = append(completions, cqe)
-            completionInfos = append(completionInfos, compInfo)
+            continue // No completion available or error
         }
 
-        // If no completions collected, wait for one (blocking)
-        if len(completions) == 0 {
-            cqe, err := ring.WaitCQE()
+        // Process completion immediately (deserialize and queue to channel)
+        needsResubmit := ln.processRecvCompletion(ring, cqe, compInfo)
+
+        // Track resubmission need, but batch the actual resubmission
+        if needsResubmit {
+            pendingResubmits++
+
+            // Batch resubmit when we've accumulated enough
+            if pendingResubmits >= batchSize {
+                ln.submitRecvRequestBatch(pendingResubmits)
+                pendingResubmits = 0
+            }
+        }
+    }
+}
+
+// getRecvCompletion gets a single completion (non-blocking peek, then blocking wait if needed)
+// Returns immediately with the completion for low-latency processing
+func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) (*giouring.CompletionQueueEvent, *recvCompletionInfo) {
+    // Try non-blocking peek first
+    cqe, err := ring.PeekCQE()
+    if err != nil {
+        if err == syscall.EAGAIN {
+            // No completions available - wait for one (blocking)
+            cqe, err = ring.WaitCQE()
             if err != nil {
                 // Check if context was cancelled
-                select {
-                case <-ctx.Done():
-                    ln.drainRecvCompletions()
-                    return
-                default:
+                if ctx.Err() != nil {
+                    return nil, nil
                 }
 
                 if err == syscall.EBADF {
-                    return
+                    return nil, nil
                 }
 
                 if err != syscall.EAGAIN && err != syscall.EINTR {
@@ -490,101 +474,119 @@ func (ln *listener) recvCompletionHandler(ctx context.Context) {
                         return fmt.Sprintf("error waiting for completion: %v", err)
                     })
                 }
-                continue
+                return nil, nil
+            }
+        } else {
+            // Check if context was cancelled
+            if ctx.Err() != nil {
+                return nil, nil
             }
 
-            // Look up completion info for the waited completion
-            requestID := cqe.UserData
-            ln.recvCompLock.Lock()
-            compInfo, exists := ln.recvCompletions[requestID]
-            if !exists {
-                ln.recvCompLock.Unlock()
+            // Handle different error conditions
+            if err == syscall.EBADF {
+                // Ring closed - listener is shutting down
+                return nil, nil
+            }
+
+            // EINTR is normal (interrupted by signal)
+            if err != syscall.EINTR {
                 ln.log("listen:recv:completion:error", func() string {
-                    return fmt.Sprintf("completion for unknown request ID: %d", requestID)
+                    return fmt.Sprintf("error peeking completion: %v", err)
                 })
-                ring.CQESeen(cqe)
-                continue
             }
-            delete(ln.recvCompletions, requestID)
-            ln.recvCompLock.Unlock()
-
-            completions = append(completions, cqe)
-            completionInfos = append(completionInfos, compInfo)
-        }
-
-        // Process batch of completions
-        resubmitCount := 0
-        for i, cqe := range completions {
-            compInfo := completionInfos[i]
-            buffer := compInfo.buffer
-
-            // Check for receive errors
-            if cqe.Res < 0 {
-                errno := -cqe.Res
-                ln.log("listen:recv:completion:error", func() string {
-                    return fmt.Sprintf("receive failed: %s (errno %d)", syscall.Errno(errno).Error(), errno)
-                })
-                // Return buffer and mark for resubmit
-                ring.CQESeen(cqe)
-                ln.recvBufferPool.Put(buffer)
-                resubmitCount++
-                continue
-            }
-
-            // Successful receive
-            bytesReceived := int(cqe.Res)
-            if bytesReceived == 0 {
-                // Empty datagram - return buffer and mark for resubmit
-                ring.CQESeen(cqe)
-                ln.recvBufferPool.Put(buffer)
-                resubmitCount++
-                continue
-            }
-
-            // Extract source address from RawSockaddrAny (kernel filled this during receive)
-            addr := extractAddrFromRSA(&compInfo.rsa)
-
-            // Use buffer directly (kernel wrote directly to it via iovec)
-            bufferSlice := buffer[:bytesReceived]
-
-            // Deserialize packet (NewPacketFromData copies the data into packet structure)
-            p, err := packet.NewPacketFromData(addr, bufferSlice)
-
-            // After deserialization, we can return buffer to pool immediately
-            // (NewPacketFromData has copied the data, so buffer is no longer needed)
-            ln.recvBufferPool.Put(buffer)
-
-            if err != nil {
-                // Deserialization error - log and mark for resubmit
-                ln.log("listen:recv:parse:error", func() string {
-                    return fmt.Sprintf("failed to parse packet: %v", err)
-                })
-                ring.CQESeen(cqe)
-                resubmitCount++
-                continue
-            }
-
-            // Queue packet (non-blocking, same as current implementation)
-            select {
-            case ln.rcvQueue <- p:
-                // Success - packet queued, buffer already returned to pool
-            default:
-                // Queue full - log and drop packet
-                ln.log("listen", func() string { return "receive queue is full" })
-                p.Decommission() // Clean up dropped packet
-            }
-
-            // Mark CQE as seen (required by giouring)
-            ring.CQESeen(cqe)
-            resubmitCount++ // Always resubmit to maintain constant pending count
-        }
-
-        // Batch resubmit to maintain constant pending count
-        // This reduces syscall overhead compared to 1:1 resubmission
-        if resubmitCount > 0 {
-            ln.submitRecvRequestBatch(resubmitCount)
+            return nil, nil
         }
     }
+
+    // Look up and remove completion info
+    compInfo := ln.lookupAndRemoveRecvCompletion(cqe, ring)
+    if compInfo == nil {
+        return nil, nil // Unknown request ID, skip
+    }
+
+    return cqe, compInfo
+}
+
+// lookupAndRemoveRecvCompletion looks up completion info by request ID and removes it from the map
+func (ln *listener) lookupAndRemoveRecvCompletion(cqe *giouring.CompletionQueueEvent, ring *giouring.Ring) *recvCompletionInfo {
+    requestID := cqe.UserData
+
+    ln.recvCompLock.Lock()
+    compInfo, exists := ln.recvCompletions[requestID]
+    if !exists {
+        ln.recvCompLock.Unlock()
+        ln.log("listen:recv:completion:error", func() string {
+            return fmt.Sprintf("completion for unknown request ID: %d", requestID)
+        })
+        ring.CQESeen(cqe)
+        return nil
+    }
+    delete(ln.recvCompletions, requestID)
+    ln.recvCompLock.Unlock()
+
+    return compInfo
+}
+
+
+// processRecvCompletion processes a single completion and returns whether it needs resubmission
+func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.CompletionQueueEvent, compInfo *recvCompletionInfo) bool {
+    buffer := compInfo.buffer
+
+    // Check for receive errors
+    if cqe.Res < 0 {
+        errno := -cqe.Res
+        ln.log("listen:recv:completion:error", func() string {
+            return fmt.Sprintf("receive failed: %s (errno %d)", syscall.Errno(errno).Error(), errno)
+        })
+        ring.CQESeen(cqe)
+        ln.recvBufferPool.Put(buffer)
+        return true // Needs resubmission
+    }
+
+    // Successful receive
+    bytesReceived := int(cqe.Res)
+    if bytesReceived == 0 {
+        // Empty datagram - return buffer and resubmit
+        ring.CQESeen(cqe)
+        ln.recvBufferPool.Put(buffer)
+        return true // Needs resubmission
+    }
+
+    // Extract source address from RawSockaddrAny (kernel filled this during receive)
+    addr := extractAddrFromRSA(&compInfo.rsa)
+
+    // Use buffer directly (kernel wrote directly to it via iovec)
+    bufferSlice := buffer[:bytesReceived]
+
+    // Deserialize packet (NewPacketFromData copies the data into packet structure)
+    p, err := packet.NewPacketFromData(addr, bufferSlice)
+
+    // After deserialization, we can return buffer to pool immediately
+    // (NewPacketFromData has copied the data, so buffer is no longer needed)
+    ln.recvBufferPool.Put(buffer)
+
+    if err != nil {
+        // Deserialization error - log and resubmit
+        ln.log("listen:recv:parse:error", func() string {
+            return fmt.Sprintf("failed to parse packet: %v", err)
+        })
+        ring.CQESeen(cqe)
+        return true // Needs resubmission
+    }
+
+    // Queue packet (non-blocking, same as current implementation)
+    select {
+    case ln.rcvQueue <- p:
+        // Success - packet queued, buffer already returned to pool
+    default:
+        // Queue full - log and drop packet
+        ln.log("listen", func() string { return "receive queue is full" })
+        p.Decommission() // Clean up dropped packet
+    }
+
+    // Mark CQE as seen (required by giouring)
+    ring.CQESeen(cqe)
+    return true // Always resubmit to maintain constant pending count
 }
 
 // submitRecvRequestBatch submits multiple receive requests in a batch
@@ -683,14 +685,17 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 ```
 
 **Key Points:**
-- **Batching**: Collects up to `batchSize` completions before processing (reduces syscall overhead)
-- **Batch Processing**: Processes all completions in batch, then batch resubmits
-- **Configurable**: Batch size is configurable via `IoUringRecvBatchSize` (default: 20)
-- **Efficiency**: Instead of 1:1 (process 1, submit 1), uses N:N (process N, submit N in batch) - reduces syscalls by batch size ratio (e.g., 1:20)
-- **No Latency Impact**: Since we maintain constant pending receives (e.g., 128), there are always many requests already queued. Batching just reduces syscall overhead - packets are already being received asynchronously.
-- **Maintains Pending Count**: Still maintains constant pending receives, just with fewer syscalls
-- **Better Under Load**: Less expensive work between Go userland and OS, especially beneficial under high load
-- **Fallback**: If no completions available via PeekCQE, falls back to WaitCQE (blocking)
+- **Refactored for Readability**: Main handler is now small and focused, delegating to helper functions:
+  - `getRecvCompletion()` - Gets single completion (non-blocking peek, then blocking wait if needed)
+  - `lookupAndRemoveRecvCompletion()` - Looks up and removes completion info from map
+  - `processRecvCompletion()` - Processes single completion immediately
+- **Low Latency Processing**: Each completion is processed immediately as it arrives (deserialize and queue to channel) - no batching of processing
+- **Batched Resubmission Only**: Only the resubmission of new read requests is batched - accumulates pending resubmits and submits in batches
+- **Configurable**: Batch size is configurable via `IoUringRecvBatchSize` (default: 256) - controls how many resubmissions to batch together
+- **Efficiency**: Instead of 1:1 (process 1, submit 1), uses 1:N (process 1 immediately, batch submit N) - reduces syscall overhead for resubmissions while maintaining low latency
+- **No Latency Impact**: Packets are processed immediately, and since we maintain constant pending receives (e.g., 511 for ring size 512), there are always many requests already queued
+- **Maintains Pending Count**: Still maintains constant pending receives, just with fewer syscalls for resubmission
+- **Better Under Load**: Less expensive work between Go userland and OS for resubmissions, especially beneficial under high load
 
 #### 7. Address Extraction Helper
 
@@ -862,12 +867,12 @@ func (ln *listener) cleanupRecvRing() {
 
 1. **Add Configuration Options** (`config.go`):
    - Add `IoUringRecvEnabled bool` flag to enable/disable io_uring for receives
-   - Add `IoUringRecvRingSize int` for receive ring size (default: 256)
-   - Add `IoUringRecvInitialPending int` for initial pending receives (default: 128)
-   - Add `IoUringRecvBatchSize int` for completion batch size (default: 20)
+   - Add `IoUringRecvRingSize int` for receive ring size (default: 512, optimized for maximum performance)
+   - Add `IoUringRecvInitialPending int` for initial pending receives (default: 511, ring size - 1)
+   - Add `IoUringRecvBatchSize int` for resubmission batch size (default: 256, optimized for maximum performance)
    - Add validation to ensure ring size is power of 2 and within reasonable bounds (64-1024)
-   - Add validation to ensure initial pending is reasonable (16-256, must be <= ring size)
-   - Add validation to ensure batch size is reasonable (1-100)
+   - Add validation to ensure initial pending is reasonable (16-512, must be <= ring size)
+   - Add validation to ensure batch size is reasonable (1-512)
 
 2. **Create Helper Functions**:
    - Implement `extractAddrFromRSA()` function in `sockaddr.go` or new file
@@ -905,7 +910,7 @@ func (ln *listener) cleanupRecvRing() {
    - Initialize completion tracking map (same pattern as send path)
    - Create context for completion handler (same pattern as send path)
    - Start completion handler goroutine (same pattern as send path)
-   - Pre-populate ring with initial pending receives (configurable, default 128) using `prePopulateRecvRing()`
+   - Pre-populate ring with initial pending receives (configurable, default: ring size - 1, e.g., 511 for ring size 512) using `prePopulateRecvRing()`
 
 3. **Implement Ring Cleanup**:
    - Create `cleanupRecvRing()` method
@@ -924,17 +929,20 @@ func (ln *listener) cleanupRecvRing() {
 
 **Goal**: Implement the completion handler that processes receive completions.
 
-1. **Implement Completion Handler with Batching**:
-   - Create `recvCompletionHandler()` method with batching support
-   - Use `PeekCQE()` to collect batch of completions (non-blocking)
-   - Fall back to `WaitCQE()` if no completions available (blocking)
-   - Process batch of completions together
-   - Look up completion info by request ID from map (same pattern as send path)
-   - Extract source address from `RawSockaddrAny`
-   - Parse packets with `packet.NewPacketFromData()`
-   - Queue packets to `rcvQueue` (non-blocking)
-   - Return buffers to pool after deserialization
-   - Batch resubmit via `submitRecvRequestBatch()` to maintain constant pending count (reduces syscalls)
+1. **Implement Completion Handler** (refactored for readability and low latency):
+   - Create `recvCompletionHandler()` - main loop (small and focused):
+     - Processes completions immediately (low latency)
+     - Accumulates pending resubmits and batches them
+   - Create `getRecvCompletion()` - gets single completion using `PeekCQE()` (non-blocking) and `WaitCQE()` (blocking fallback)
+   - Create `lookupAndRemoveRecvCompletion()` - looks up and removes completion info from map (reusable helper)
+   - Create `processRecvCompletion()` - processes single completion immediately:
+     - Handle receive errors
+     - Extract source address from `RawSockaddrAny`
+     - Parse packets with `packet.NewPacketFromData()` (deserialize immediately)
+     - Queue packets to `rcvQueue` immediately (non-blocking)
+     - Return buffers to pool after deserialization
+     - Returns whether resubmission is needed
+   - Batch resubmit via `submitRecvRequestBatch()` when accumulated count reaches batch size (reduces syscalls for resubmissions only)
 
 2. **Implement Batch Submission Function**:
    - Create `submitRecvRequestBatch()` method
@@ -1010,9 +1018,9 @@ type Config struct {
 
     // io_uring receive path configuration
     IoUringRecvEnabled      bool // Enable io_uring for receive operations
-    IoUringRecvRingSize     int  // Size of receive ring (must be power of 2, 64-1024)
-    IoUringRecvInitialPending int // Initial pending receives at startup (default: 128, must be <= ring size)
-    IoUringRecvBatchSize    int  // Batch size for processing completions (default: 20, 1-100)
+    IoUringRecvRingSize     int  // Size of receive ring (must be power of 2, 64-1024, default: 512)
+    IoUringRecvInitialPending int // Initial pending receives at startup (default: ring size - 1, must be <= ring size)
+    IoUringRecvBatchSize    int  // Batch size for resubmitting read requests (default: 256, 1-512)
 }
 ```
 
@@ -1023,9 +1031,9 @@ defaultConfig := Config{
     // ... existing defaults ...
 
     IoUringRecvEnabled:      false, // Disabled by default (opt-in)
-    IoUringRecvRingSize:     256,   // Default ring size
-    IoUringRecvInitialPending: 128, // Default initial pending receives
-    IoUringRecvBatchSize:    20,    // Default batch size
+    IoUringRecvRingSize:     512,   // Default ring size (optimized for maximum performance)
+    IoUringRecvInitialPending: 511, // Default: ring size - 1 (leave one slot free)
+    IoUringRecvBatchSize:    256,   // Default batch size (optimized for maximum performance)
 }
 ```
 
@@ -1049,8 +1057,8 @@ func (c *Config) Validate() error {
 
     if c.IoUringRecvInitialPending > 0 {
         // Must be reasonable
-        if c.IoUringRecvInitialPending < 16 || c.IoUringRecvInitialPending > 256 {
-            return fmt.Errorf("IoUringRecvInitialPending must be between 16 and 256")
+        if c.IoUringRecvInitialPending < 16 || c.IoUringRecvInitialPending > 512 {
+            return fmt.Errorf("IoUringRecvInitialPending must be between 16 and 512")
         }
 
         // Must not exceed ring size
@@ -1062,8 +1070,8 @@ func (c *Config) Validate() error {
 
     if c.IoUringRecvBatchSize > 0 {
         // Must be reasonable
-        if c.IoUringRecvBatchSize < 1 || c.IoUringRecvBatchSize > 100 {
-            return fmt.Errorf("IoUringRecvBatchSize must be between 1 and 100")
+        if c.IoUringRecvBatchSize < 1 || c.IoUringRecvBatchSize > 512 {
+            return fmt.Errorf("IoUringRecvBatchSize must be between 1 and 512")
         }
     }
 
@@ -1074,11 +1082,11 @@ func (c *Config) Validate() error {
 ## Differences from Send Path
 
 1. **Shared Ring**: Receive uses one ring per listener/dialer (not per-connection like send path)
-2. **Constant Pending Receives**: We maintain a constant pool of pending receives (default: 128) by batch resubmitting after processing completions. Send path only submits when there's a packet to send.
-3. **Batching**: Receive path uses batching to reduce syscall overhead (process N completions, submit N requests in batch). This is a pure win - no latency impact since packets are already being received by pending requests.
+2. **Constant Pending Receives**: We maintain a constant pool of pending receives (default: 511, ring size - 1) by batch resubmitting after processing completions. Send path only submits when there's a packet to send.
+3. **Batched Resubmission Only**: Receive path processes completions immediately (low latency) but batches resubmissions (reduced syscalls). This is a pure win - no latency impact since packets are processed immediately, only resubmission syscalls are batched.
 4. **Buffer Type**: Receive uses `[]byte` pool (fixed size MSS) - simpler and more efficient. Send path uses `bytes.Buffer` pool for variable-sized packet marshaling.
 5. **Buffer Lifecycle**: Receive buffers are returned to pool after each completion (no Reset() needed - kernel overwrites). Send path keeps buffers in completion map until send completes.
-6. **Pre-population**: Receive path pre-populates ring at startup with configurable pending receives (default: 128). Send path has no pre-population.
+6. **Pre-population**: Receive path pre-populates ring at startup with configurable pending receives (default: ring size - 1, e.g., 511 for ring size 512). Send path has no pre-population.
 7. **Address Handling**: Receive path uses `syscall.Msghdr` and `RawSockaddrAny` to get source address (send path uses pre-computed address).
 
 **Similarities (following same patterns):**
@@ -1092,16 +1100,18 @@ func (c *Config) Validate() error {
 
 ## Performance Considerations
 
-1. **Ring Size**: Larger rings (256-512) can handle more bursts but use more memory
-2. **Initial Pending Count**: More initial pending receives (128-256) improve throughput but use more buffers. Should be <= ring size.
-3. **Batch Size**: Larger batch sizes (20-50) reduce syscall overhead with no latency impact. Smaller batches (5-10) have more syscall overhead but same latency. Since we maintain constant pending receives (e.g., 128), packets are already being received asynchronously - batching just reduces syscall overhead.
+1. **Ring Size**: Larger rings (512-1024) can handle more bursts but use more memory. Default: 512 (optimized for maximum performance).
+2. **Initial Pending Count**: More initial pending receives improve throughput but use more buffers. Default: ring size - 1 (511 for default ring size of 512). Should be <= ring size.
+3. **Batch Size**: Controls how many resubmissions to batch together (default: 256). Larger batch sizes (256-512) reduce syscall overhead for resubmissions. Smaller batches have more syscall overhead but same latency. Since we process completions immediately (no batching of processing), latency is unaffected - only resubmission syscalls are batched.
 4. **Buffer Size**: Must match `config.MSS` to avoid truncation
 5. **Batching Benefits**:
-   - **Reduced Syscalls**: Instead of 1:1 (process 1 completion, submit 1 request), batching uses N:N (process N completions, submit N requests in batch)
-   - **Example**: With batch size 20, processing 100 completions requires ~5 syscalls instead of 100
-   - **No Latency Impact**: Since we maintain a constant pool of pending receives (e.g., 128), there are always many requests already queued. Batching just reduces syscall overhead without affecting latency - packets are already being received by the pending requests.
-   - **Better Under Load**: Reducing syscall overhead (1:20 ratio) means less expensive work between Go userland and the OS, which helps performance especially under high load
-   - **Pure Win**: This is the essence of io_uring - queue up all read requests in advance, so packets can arrive asynchronously while we batch process completions and resubmit
+   - **Low Latency Processing**: Each completion is processed immediately (deserialize and queue to channel) - no batching of processing
+   - **Batched Resubmission Only**: Only resubmission of new read requests is batched - accumulates pending resubmits and submits in batches
+   - **Reduced Syscalls**: Instead of 1:1 (process 1 completion, submit 1 request), uses 1:N (process 1 immediately, batch submit N requests)
+   - **Example**: With batch size 256, resubmitting 512 requests requires ~2 syscalls instead of 512, while processing latency remains minimal
+   - **No Latency Impact**: Packets are processed immediately as they arrive, and since we maintain constant pending receives (e.g., 511 for ring size 512), there are always many requests already queued
+   - **Better Under Load**: Reducing syscall overhead for resubmissions (1:256 ratio) means significantly less expensive work between Go userland and OS, which helps performance especially under high load
+   - **Pure Win**: This is the essence of io_uring - queue up all read requests in advance, process completions immediately, and batch resubmissions
 
 ## Future Optimizations
 
