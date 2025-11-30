@@ -82,6 +82,12 @@ func parseTestFlags(args []string) {
 	*GroupConnect = false
 	*GroupStabTimeo = 0
 	*AllowPeerIpChange = false
+	*IoUringEnabled = false
+	*IoUringSendRingSize = 0
+	*NetworkQueueSize = 0
+	*WriteQueueSize = 0
+	*ReadQueueSize = 0
+	*ReceiveQueueSize = 0
 
 	// Create a new FlagSet for testing
 	testFlagSet := flag.NewFlagSet("test", flag.ContinueOnError)
@@ -124,6 +130,12 @@ func parseTestFlags(args []string) {
 	testGroupConnect := testFlagSet.Bool("groupconnect", false, "Accept group connections")
 	testGroupStabTimeo := testFlagSet.Int("groupstabtimeo", 0, "Group stability timeout in milliseconds")
 	testAllowPeerIpChange := testFlagSet.Bool("allowpeeripchange", false, "Allow new IP to send data on existing socket id")
+	testIoUringEnabled := testFlagSet.Bool("iouringenabled", false, "Enable io_uring for per-connection send queues (requires Linux kernel 5.1+)")
+	testIoUringSendRingSize := testFlagSet.Int("iouringsendringsize", 0, "Size of the io_uring ring for per-connection send queues (must be power of 2, 16-1024)")
+	testNetworkQueueSize := testFlagSet.Int("networkqueuesize", 0, "Size of the network queue channel buffer (packets from network)")
+	testWriteQueueSize := testFlagSet.Int("writequeuesize", 0, "Size of the write queue channel buffer (packets from application writes)")
+	testReadQueueSize := testFlagSet.Int("readqueuesize", 0, "Size of the read queue channel buffer (packets ready for application reads)")
+	testReceiveQueueSize := testFlagSet.Int("receivequeuesize", 0, "Size of the receive queue channel buffer (packets from network before routing to connections)")
 
 	// Parse the test arguments
 	if err := testFlagSet.Parse(args); err != nil {
@@ -273,6 +285,24 @@ func parseTestFlags(args []string) {
 	}
 	if FlagSet["allowpeeripchange"] {
 		*AllowPeerIpChange = *testAllowPeerIpChange
+	}
+	if FlagSet["iouringenabled"] {
+		*IoUringEnabled = *testIoUringEnabled
+	}
+	if FlagSet["iouringsendringsize"] {
+		*IoUringSendRingSize = *testIoUringSendRingSize
+	}
+	if FlagSet["networkqueuesize"] {
+		*NetworkQueueSize = *testNetworkQueueSize
+	}
+	if FlagSet["writequeuesize"] {
+		*WriteQueueSize = *testWriteQueueSize
+	}
+	if FlagSet["readqueuesize"] {
+		*ReadQueueSize = *testReadQueueSize
+	}
+	if FlagSet["receivequeuesize"] {
+		*ReceiveQueueSize = *testReceiveQueueSize
 	}
 }
 

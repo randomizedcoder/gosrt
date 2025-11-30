@@ -48,6 +48,16 @@ var (
 	GroupConnect       = flag.Bool("groupconnect", false, "Accept group connections")
 	GroupStabTimeo     = flag.Int("groupstabtimeo", 0, "Group stability timeout in milliseconds")
 	AllowPeerIpChange  = flag.Bool("allowpeeripchange", false, "Allow new IP to send data on existing socket id")
+
+	// io_uring configuration flags
+	IoUringEnabled     = flag.Bool("iouringenabled", false, "Enable io_uring for per-connection send queues (requires Linux kernel 5.1+)")
+	IoUringSendRingSize = flag.Int("iouringsendringsize", 0, "Size of the io_uring ring for per-connection send queues (must be power of 2, 16-1024)")
+
+	// Channel buffer size configuration flags
+	NetworkQueueSize  = flag.Int("networkqueuesize", 0, "Size of the network queue channel buffer (packets from network)")
+	WriteQueueSize    = flag.Int("writequeuesize", 0, "Size of the write queue channel buffer (packets from application writes)")
+	ReadQueueSize     = flag.Int("readqueuesize", 0, "Size of the read queue channel buffer (packets ready for application reads)")
+	ReceiveQueueSize  = flag.Int("receivequeuesize", 0, "Size of the receive queue channel buffer (packets from network before routing to connections)")
 )
 
 // ParseFlags parses command-line flags and populates FlagSet map
@@ -169,5 +179,23 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["allowpeeripchange"] {
 		config.AllowPeerIpChange = *AllowPeerIpChange
+	}
+	if FlagSet["iouringenabled"] {
+		config.IoUringEnabled = *IoUringEnabled
+	}
+	if FlagSet["iouringsendringsize"] {
+		config.IoUringSendRingSize = *IoUringSendRingSize
+	}
+	if FlagSet["networkqueuesize"] {
+		config.NetworkQueueSize = *NetworkQueueSize
+	}
+	if FlagSet["writequeuesize"] {
+		config.WriteQueueSize = *WriteQueueSize
+	}
+	if FlagSet["readqueuesize"] {
+		config.ReadQueueSize = *ReadQueueSize
+	}
+	if FlagSet["receivequeuesize"] {
+		config.ReceiveQueueSize = *ReceiveQueueSize
 	}
 }

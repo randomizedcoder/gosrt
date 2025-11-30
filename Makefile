@@ -78,6 +78,10 @@ docker:
 logtopics:
 	grep -ERho 'log\("([^"]+)' *.go | sed -E -e 's/log\("//' | sort -u
 
+## nix-shell: To resolve gcc
+nixshell:
+	nix-shell -p gcc pkg-config zlib
+
 # Testing targets
 .PHONY: test test-flags test-flags-integration fuzz coverage
 # Code quality targets
