@@ -78,7 +78,7 @@ docker:
 logtopics:
 	grep -ERho 'log\("([^"]+)' *.go | sed -E -e 's/log\("//' | sort -u
 
-## nix-shell: To resolve gcc
+## nix-shell: To resolve gcc linking when running go branchmark tests
 nixshell:
 	nix-shell -p gcc pkg-config zlib
 
