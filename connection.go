@@ -20,6 +20,12 @@ import (
 	"github.com/datarhei/gosrt/packet"
 )
 
+// controlPacketHandler is the function signature for control packet handlers
+type controlPacketHandler func(c *srtConn, p packet.Packet)
+
+// userPacketHandler is the function signature for CTRLTYPE_USER SubType handlers
+type userPacketHandler func(c *srtConn, p packet.Packet)
+
 // Conn is a SRT network connection.
 type Conn interface {
 	// Read reads data from the connection.
@@ -223,6 +229,10 @@ type srtConn struct {
 	stopHSRequests context.CancelFunc
 	stopKMRequests context.CancelFunc
 
+	// Control packet dispatch tables (initialized once, never modified, no locking needed)
+	controlHandlers map[packet.CtrlType]controlPacketHandler // Main control type handlers
+	userHandlers    map[packet.CtrlSubType]userPacketHandler // CTRLTYPE_USER SubType handlers
+
 	// io_uring send queue (per-connection) - using giouring for high performance
 	// Type is interface{} to allow conditional compilation (giouring.Ring on Linux, nil on others)
 	sendRing   interface{} // Direct ring access, no channels (type: *giouring.Ring on Linux)
@@ -383,6 +393,9 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	})
 
 	c.ctx, c.cancelCtx = context.WithCancel(context.Background())
+
+	// Initialize control packet dispatch tables (must be done before connection is used)
+	c.initializeControlHandlers()
 
 	// Initialize io_uring send ring if enabled (Linux-specific)
 	c.initializeIoUring(config)
@@ -714,6 +727,53 @@ func (c *srtConn) handlePacketDirect(p packet.Packet) {
 	c.handlePacket(p)
 }
 
+// initializeControlHandlers initializes the control packet dispatch tables.
+// This is called once during connection initialization and the maps are never modified,
+// so no locking is required for map access.
+func (c *srtConn) initializeControlHandlers() {
+	// Main control type handlers
+	c.controlHandlers = map[packet.CtrlType]controlPacketHandler{
+		packet.CTRLTYPE_KEEPALIVE: (*srtConn).handleKeepAlive,
+		packet.CTRLTYPE_SHUTDOWN:  (*srtConn).handleShutdown,
+		packet.CTRLTYPE_NAK:       (*srtConn).handleNAK,
+		packet.CTRLTYPE_ACK:       (*srtConn).handleACK,
+		packet.CTRLTYPE_ACKACK:    (*srtConn).handleACKACK,
+		packet.CTRLTYPE_USER:      (*srtConn).handleUserPacket, // Special handler for SubType dispatch
+	}
+
+	// CTRLTYPE_USER SubType handlers
+	c.userHandlers = map[packet.CtrlSubType]userPacketHandler{
+		packet.EXTTYPE_HSREQ: (*srtConn).handleHSRequest,
+		packet.EXTTYPE_HSRSP: (*srtConn).handleHSResponse,
+		packet.EXTTYPE_KMREQ: (*srtConn).handleKMRequest,
+		packet.EXTTYPE_KMRSP: (*srtConn).handleKMResponse,
+	}
+}
+
+// handleUserPacket dispatches CTRLTYPE_USER packets based on SubType
+func (c *srtConn) handleUserPacket(p packet.Packet) {
+	header := p.Header()
+
+	c.log("connection:recv:ctrl:user", func() string {
+		return fmt.Sprintf("got CTRLTYPE_USER packet, subType: %s", header.SubType)
+	})
+
+	// Lookup SubType handler
+	handler, ok := c.userHandlers[header.SubType]
+	if !ok {
+		// Unknown SubType - log and return gracefully
+		c.log("connection:recv:ctrl:user:unknown", func() string {
+			return fmt.Sprintf("unknown CTRLTYPE_USER SubType: %s", header.SubType)
+		})
+		return
+	}
+
+	// Call SubType handler
+	handler(c, p)
+}
+
+// handlePacket receives and processes a packet. For control packets, it uses
+// a dispatch table for O(1) lookup. The packet will be decrypted if required.
 func (c *srtConn) handlePacket(p packet.Packet) {
 	if p == nil {
 		return
@@ -724,37 +784,18 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	header := p.Header()
 
 	if header.IsControlPacket {
-		if header.ControlType == packet.CTRLTYPE_KEEPALIVE {
-			// handleKeepAlive ALSO resets the idle timeout
-			c.handleKeepAlive(p)
-		} else if header.ControlType == packet.CTRLTYPE_SHUTDOWN {
-			c.handleShutdown(p)
-		} else if header.ControlType == packet.CTRLTYPE_NAK {
-			c.handleNAK(p)
-		} else if header.ControlType == packet.CTRLTYPE_ACK {
-			c.handleACK(p)
-		} else if header.ControlType == packet.CTRLTYPE_ACKACK {
-			c.handleACKACK(p)
-		} else if header.ControlType == packet.CTRLTYPE_USER {
-			c.log("connection:recv:ctrl:user", func() string {
-				return fmt.Sprintf("got CTRLTYPE_USER packet, subType: %s", header.SubType)
+		// O(1) lookup in dispatch table (no locking needed - map is immutable)
+		handler, ok := c.controlHandlers[header.ControlType]
+		if !ok {
+			// Unknown control type - log and return gracefully
+			c.log("connection:recv:ctrl:unknown", func() string {
+				return fmt.Sprintf("unknown control packet type: %s", header.ControlType)
 			})
-
-			// HSv4 Extension
-			if header.SubType == packet.EXTTYPE_HSREQ {
-				c.handleHSRequest(p)
-			} else if header.SubType == packet.EXTTYPE_HSRSP {
-				c.handleHSResponse(p)
-			}
-
-			// 3.2.2.  Key Material
-			if header.SubType == packet.EXTTYPE_KMREQ {
-				c.handleKMRequest(p)
-			} else if header.SubType == packet.EXTTYPE_KMRSP {
-				c.handleKMResponse(p)
-			}
+			return
 		}
 
+		// Call handler
+		handler(c, p)
 		return
 	}
 
