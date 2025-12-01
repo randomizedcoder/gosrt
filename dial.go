@@ -339,7 +339,8 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 	p.Header().Timestamp = uint32(time.Since(dl.start).Microseconds())
 	p.Header().DestinationSocketId = 0 // must be 0 for handshake
 
-	if cif.HandshakeType == packet.HSTYPE_INDUCTION {
+	switch cif.HandshakeType {
+	case packet.HSTYPE_INDUCTION:
 		if cif.Version < 4 || cif.Version > 5 {
 			dl.connChan <- connResponse{
 				conn: nil,
@@ -449,7 +450,7 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 		dl.log("handshake:send:cif", func() string { return cif.String() })
 
 		dl.send(p)
-	} else if cif.HandshakeType == packet.HSTYPE_CONCLUSION {
+	case packet.HSTYPE_CONCLUSION:
 		if cif.Version < 4 || cif.Version > 5 {
 			dl.connChan <- connResponse{
 				conn: nil,
@@ -484,7 +485,9 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			}
 
 			// Check the required SRT flags
-			if !cif.SRTHS.SRTFlags.TSBPDSND || !cif.SRTHS.SRTFlags.TSBPDRCV || !cif.SRTHS.SRTFlags.TLPKTDROP || !cif.SRTHS.SRTFlags.PERIODICNAK || !cif.SRTHS.SRTFlags.REXMITFLG {
+			if !cif.SRTHS.SRTFlags.TSBPDSND || !cif.SRTHS.SRTFlags.TSBPDRCV ||
+				!cif.SRTHS.SRTFlags.TLPKTDROP || !cif.SRTHS.SRTFlags.PERIODICNAK || !cif.SRTHS.SRTFlags.REXMITFLG {
+
 				dl.sendShutdown(cif.SRTSocketId)
 
 				dl.connChan <- connResponse{
@@ -527,7 +530,8 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 
 				dl.connChan <- connResponse{
 					conn: nil,
-					err:  fmt.Errorf("effective MSS too small (%d bytes) to fit the minimal payload size (%d bytes)", dl.config.MSS, MIN_PAYLOAD_SIZE),
+					err: fmt.Errorf("effective MSS too small (%d bytes) to fit the minimal payload size (%d bytes)",
+						dl.config.MSS, MIN_PAYLOAD_SIZE),
 				}
 
 				return
@@ -575,7 +579,7 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			conn: conn,
 			err:  nil,
 		}
-	} else {
+	default:
 		var err error
 
 		if cif.HandshakeType.IsRejection() {
