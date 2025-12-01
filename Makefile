@@ -18,6 +18,29 @@ test-flags-integration: client server
 test-congestion-live:
 	go test -v ./congestion/live
 
+## test-packet-pool: Run packet pooling tests
+test-packet-pool:
+	go test -v ./packet -run TestPacketPool
+
+## test-packet: Run all packet tests
+test-packet:
+	go test -v ./packet
+
+## bench-packet: Run packet benchmarks
+bench-packet:
+	go test -bench=BenchmarkNewPacket -benchmem ./packet
+
+## bench-packet-all: Run all packet benchmarks
+bench-packet-all:
+	go test -bench=. -benchmem ./packet
+
+## bench-packet-pool: Run packet pooling benchmarks (with comparison)
+bench-packet-pool:
+	@echo "=== Packet Pooling Benchmarks ==="
+	go test -bench=BenchmarkNewPacket -benchmem -count=5 ./packet | tee /tmp/bench-packet-pool.txt
+	@echo ""
+	@echo "Results saved to /tmp/bench-packet-pool.txt"
+
 ## fuzz: Run fuzz tests
 fuzz:
 	go test -fuzz=Fuzz -run=^Fuzz ./packet -fuzztime 30s
@@ -86,7 +109,9 @@ nixshell:
 	nix-shell -p gcc pkg-config zlib
 
 # Testing targets
-.PHONY: test test-flags test-flags-integration fuzz coverage
+.PHONY: test test-flags test-flags-integration test-congestion-live test-packet-pool test-packet fuzz coverage
+# Benchmark targets
+.PHONY: bench-packet bench-packet-all bench-packet-pool
 # Code quality targets
 .PHONY: vet fmt lint
 # Dependency management targets

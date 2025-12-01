@@ -529,6 +529,70 @@ func TestShutdownString(t *testing.T) {
 	require.Greater(t, len(cif.String()), 0)
 }
 
+func TestPacketPoolReuse(t *testing.T) {
+	// Verify packets are reused from pool
+	addr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1234}
+
+	p1 := NewPacket(addr)
+	p1.Header().DestinationSocketId = 12345
+	p1.Header().Timestamp = 99999
+
+	// Store pointer to verify reuse
+	p1Ptr := p1.(*pkt)
+
+	p1.Decommission() // Resets fields and returns to pool
+
+	p2 := NewPacket(addr)
+	// Verify p2 is the same underlying struct (pointer comparison)
+	require.Equal(t, p1Ptr, p2.(*pkt), "packet should be reused from pool")
+	// Verify fields are properly reset (should be 0/defaults)
+	require.Equal(t, uint32(0), p2.Header().DestinationSocketId, "DestinationSocketId should be reset")
+	require.Equal(t, uint32(0), p2.Header().Timestamp, "Timestamp should be reset")
+	require.Equal(t, addr, p2.Header().Addr, "Addr should be set")
+}
+
+func TestPacketPoolResetInDecommission(t *testing.T) {
+	// Verify all fields are reset in Decommission() before Put()
+	addr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1234}
+
+	p := NewPacket(addr)
+	// Set various fields
+	p.Header().IsControlPacket = true
+	p.Header().ControlType = CTRLTYPE_ACK
+	p.Header().PktTsbpdTime = 123456
+	p.Header().DestinationSocketId = 999
+	p.Header().Timestamp = 888
+	p.Header().TypeSpecific = 777
+
+	p.Decommission() // Should reset all fields
+
+	// Get again from pool
+	p2 := NewPacket(addr)
+	require.False(t, p2.Header().IsControlPacket, "IsControlPacket should be reset")
+	require.Equal(t, CtrlType(0), p2.Header().ControlType, "ControlType should be reset")
+	require.Equal(t, uint64(0), p2.Header().PktTsbpdTime, "PktTsbpdTime should be reset")
+	require.Equal(t, uint32(0), p2.Header().DestinationSocketId, "DestinationSocketId should be reset")
+	require.Equal(t, uint32(0), p2.Header().Timestamp, "Timestamp should be reset")
+	require.Equal(t, uint32(0), p2.Header().TypeSpecific, "TypeSpecific should be reset")
+	require.Equal(t, addr, p2.Header().Addr, "Addr should be set")
+}
+
+func TestPacketPoolWithUnmarshal(t *testing.T) {
+	// Verify that Unmarshal() works correctly with pooled packets
+	addr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1234}
+	data, _ := hex.DecodeString("00000000c0000001000000000000000068656c6c6f20776f726c6421")
+
+	// Create and decommission a packet to populate pool
+	p1 := NewPacket(addr)
+	p1.Decommission()
+
+	// Create new packet from data (should use pooled packet)
+	p2, err := NewPacketFromData(addr, data)
+	require.NoError(t, err)
+	require.Equal(t, "hello world!", string(p2.Data()))
+	require.Equal(t, addr, p2.Header().Addr)
+}
+
 func BenchmarkNewPacket(b *testing.B) {
 	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
 

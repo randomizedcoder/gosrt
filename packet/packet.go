@@ -277,6 +277,23 @@ func (p *pool) Put(b *bytes.Buffer) {
 
 var payloadPool *pool = newPool()
 
+// packetPool pools pkt structs to reduce allocations in the hot path
+var packetPool = sync.Pool{
+	New: func() interface{} {
+		return &pkt{
+			header: PacketHeader{
+				// Initialize with safe defaults
+				PacketSequenceNumber:  circular.New(0, MAX_SEQUENCENUMBER),
+				PacketPositionFlag:    SinglePacket,
+				OrderFlag:             false,
+				KeyBaseEncryptionFlag: UnencryptedPacket,
+				MessageNumber:         1,
+			},
+			payload: nil, // Will be set from payloadPool
+		}
+	},
+}
+
 func NewPacketFromData(addr net.Addr, rawdata []byte) (Packet, error) {
 	p := NewPacket(addr)
 
@@ -291,28 +308,50 @@ func NewPacketFromData(addr net.Addr, rawdata []byte) (Packet, error) {
 }
 
 func NewPacket(addr net.Addr) Packet {
-	p := &pkt{
-		header: PacketHeader{
-			Addr:                  addr,
-			PacketSequenceNumber:  circular.New(0, MAX_SEQUENCENUMBER),
-			PacketPositionFlag:    SinglePacket,
-			OrderFlag:             false,
-			KeyBaseEncryptionFlag: UnencryptedPacket,
-			MessageNumber:         1,
-		},
-		payload: payloadPool.Get(),
-	}
+	// Get from pool (hot path - must be fast)
+	// Object is already clean from Decommission()
+	p := packetPool.Get().(*pkt)
+
+	// Only set the address (required parameter)
+	// All other fields are already reset from Decommission()
+	p.header.Addr = addr
+
+	// Get payload from pool (already resets in payloadPool.Get())
+	p.payload = payloadPool.Get()
 
 	return p
 }
 
 func (p *pkt) Decommission() {
 	if p.payload == nil {
+		// Already decommissioned or invalid - don't return to pool
 		return
 	}
 
+	// Reset all fields to safe defaults BEFORE returning to pool
+	// This ensures objects in pool are always clean and ready
+	// Reset happens in cold path (after processing), not hot path (during allocation)
+	p.header.Addr = nil
+	p.header.IsControlPacket = false
+	p.header.PktTsbpdTime = 0
+	p.header.ControlType = 0
+	p.header.SubType = 0
+	p.header.TypeSpecific = 0
+	p.header.PacketSequenceNumber = circular.New(0, MAX_SEQUENCENUMBER)
+	p.header.PacketPositionFlag = SinglePacket
+	p.header.OrderFlag = false
+	p.header.KeyBaseEncryptionFlag = UnencryptedPacket
+	p.header.RetransmittedPacketFlag = false
+	p.header.MessageNumber = 1
+	p.header.Timestamp = 0
+	p.header.DestinationSocketId = 0
+
+	// Return payload to pool (payloadPool.Get() already resets it)
 	payloadPool.Put(p.payload)
 	p.payload = nil
+
+	// Return packet struct to pool (now clean and ready for reuse)
+	packetPool.Put(p)
 }
 
 func (p pkt) String() string {
