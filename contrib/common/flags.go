@@ -50,18 +50,24 @@ var (
 	AllowPeerIpChange  = flag.Bool("allowpeeripchange", false, "Allow new IP to send data on existing socket id")
 
 	// io_uring configuration flags
-	IoUringEnabled     = flag.Bool("iouringenabled", false, "Enable io_uring for per-connection send queues (requires Linux kernel 5.1+)")
+	IoUringEnabled      = flag.Bool("iouringenabled", false, "Enable io_uring for per-connection send queues (requires Linux kernel 5.1+)")
 	IoUringSendRingSize = flag.Int("iouringsendringsize", 0, "Size of the io_uring ring for per-connection send queues (must be power of 2, 16-1024)")
 
 	// Channel buffer size configuration flags
-	NetworkQueueSize  = flag.Int("networkqueuesize", 0, "Size of the network queue channel buffer (packets from network)")
-	WriteQueueSize    = flag.Int("writequeuesize", 0, "Size of the write queue channel buffer (packets from application writes)")
-	ReadQueueSize     = flag.Int("readqueuesize", 0, "Size of the read queue channel buffer (packets ready for application reads)")
-	ReceiveQueueSize  = flag.Int("receivequeuesize", 0, "Size of the receive queue channel buffer (packets from network before routing to connections)")
+	NetworkQueueSize = flag.Int("networkqueuesize", 0, "Size of the network queue channel buffer (packets from network)")
+	WriteQueueSize   = flag.Int("writequeuesize", 0, "Size of the write queue channel buffer (packets from application writes)")
+	ReadQueueSize    = flag.Int("readqueuesize", 0, "Size of the read queue channel buffer (packets ready for application reads)")
+	ReceiveQueueSize = flag.Int("receivequeuesize", 0, "Size of the receive queue channel buffer (packets from network before routing to connections)")
 
 	// Packet reordering configuration flags
 	PacketReorderAlgorithm = flag.String("packetreorderalgorithm", "", "Packet reordering algorithm: 'list' (default, O(n) insertions) or 'btree' (O(log n) operations, better for large buffers)")
 	BTreeDegree            = flag.Int("btreedegree", 0, "B-tree degree for packet reordering (only used if packetreorderalgorithm='btree', default: 32)")
+
+	// io_uring receive configuration flags
+	IoUringRecvEnabled        = flag.Bool("iouringrecvenabled", false, "Enable io_uring for receive operations (requires Linux kernel 5.1+)")
+	IoUringRecvRingSize       = flag.Int("iouringrecvringsize", 0, "Size of the io_uring receive ring (must be power of 2, 64-32768)")
+	IoUringRecvInitialPending = flag.Int("iouringrecvinitialpending", 0, "Initial number of pending receive requests at startup (default: ring size)")
+	IoUringRecvBatchSize      = flag.Int("iouringrecvbatchsize", 0, "Batch size for resubmitting receive requests after completions (default: 256)")
 )
 
 // ParseFlags parses command-line flags and populates FlagSet map
@@ -207,5 +213,17 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["btreedegree"] {
 		config.BTreeDegree = *BTreeDegree
+	}
+	if FlagSet["iouringrecvenabled"] {
+		config.IoUringRecvEnabled = *IoUringRecvEnabled
+	}
+	if FlagSet["iouringrecvringsize"] {
+		config.IoUringRecvRingSize = *IoUringRecvRingSize
+	}
+	if FlagSet["iouringrecvinitialpending"] {
+		config.IoUringRecvInitialPending = *IoUringRecvInitialPending
+	}
+	if FlagSet["iouringrecvbatchsize"] {
+		config.IoUringRecvBatchSize = *IoUringRecvBatchSize
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	srtnet "github.com/datarhei/gosrt/net"
@@ -146,6 +147,17 @@ type listener struct {
 	doneChan chan struct{}
 	doneErr  error
 	doneOnce sync.Once
+
+	// io_uring receive path (Linux only)
+	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
+	recvRingFd      int                            // UDP socket file descriptor
+	recvBufferPool  sync.Pool                      // Pool of []byte buffers (fixed size: config.MSS)
+	recvCompletions map[uint64]*recvCompletionInfo // Maps request ID to completion info
+	recvCompLock    sync.Mutex                     // Protects recvCompletions map
+	recvRequestID   atomic.Uint64                  // Atomic counter for generating unique request IDs
+	recvCompCtx     context.Context                // Context for completion handler
+	recvCompCancel  context.CancelFunc             // Cancel function for completion handler
+	recvCompWg      sync.WaitGroup                 // WaitGroup for completion handler goroutine
 }
 
 // Listen returns a new listener on the SRT protocol on the address with
@@ -214,6 +226,13 @@ func Listen(network, address string, config Config) (Listener, error) {
 	ln.doneChan = make(chan struct{})
 
 	ln.start = time.Now()
+
+	// Initialize io_uring receive ring (if enabled)
+	// This is a no-op on non-Linux platforms
+	if err := ln.initializeIoUringRecv(); err != nil {
+		// Log error but don't fail - fall back to ReadFrom()
+		// Error is already logged in initializeIoUringRecv()
+	}
 
 	var readerCtx context.Context
 	readerCtx, ln.stopReader = context.WithCancel(context.Background())
@@ -362,6 +381,9 @@ func (ln *listener) Close() {
 		ln.lock.RUnlock()
 
 		ln.stopReader()
+
+		// Cleanup io_uring receive ring (if initialized)
+		ln.cleanupIoUringRecv()
 
 		ln.log("listen", func() string { return "closing socket" })
 

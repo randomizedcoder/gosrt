@@ -205,55 +205,75 @@ type Config struct {
 	// B-tree degree for packet reordering (only used if PacketReorderAlgorithm == "btree")
 	// Default: 32. Higher values use more memory but may reduce tree height
 	BTreeDegree int
+
+	// Enable io_uring for receive operations (requires Linux kernel 5.1+)
+	// When enabled, replaces blocking ReadFrom() with asynchronous io_uring RecvMsg
+	IoUringRecvEnabled bool
+
+	// Size of the io_uring receive ring (must be power of 2, 64-32768)
+	// Default: 512. Larger rings allow more pending receives but use more memory
+	IoUringRecvRingSize int
+
+	// Initial number of pending receive requests at startup
+	// Default: ring size (full ring). Must be <= IoUringRecvRingSize
+	IoUringRecvInitialPending int
+
+	// Batch size for resubmitting receive requests after completions
+	// Default: 256. Larger batches reduce syscall overhead but increase latency
+	IoUringRecvBatchSize int
 }
 
 // DefaultConfig is the default configuration for a SRT connection
 // if no individual configuration has been provided.
 var defaultConfig Config = Config{
-	Congestion:            "live",
-	ConnectionTimeout:     3 * time.Second,
-	DriftTracer:           true,
-	EnforcedEncryption:    true,
-	FC:                    25600,
-	GroupConnect:          false,
-	GroupStabilityTimeout: 0,
-	InputBW:               0,
-	IPTOS:                 0,
-	IPTTL:                 0,
-	IPv6Only:              -1,
-	KMPreAnnounce:         1 << 12,
-	KMRefreshRate:         1 << 24,
-	Latency:               -1,
-	LossMaxTTL:            0,
-	MaxBW:                 -1,
-	MessageAPI:            false,
-	MinVersion:            SRT_VERSION,
-	MSS:                   MAX_MSS_SIZE,
-	NAKReport:             true,
-	OverheadBW:            25,
-	PacketFilter:          "",
-	Passphrase:            "",
-	PayloadSize:           MAX_PAYLOAD_SIZE,
-	PBKeylen:              16,
-	PeerIdleTimeout:       2 * time.Second,
-	PeerLatency:           120 * time.Millisecond,
-	ReceiverBufferSize:    0,
-	ReceiverLatency:       120 * time.Millisecond,
-	SendBufferSize:        0,
-	SendDropDelay:         1 * time.Second,
-	StreamId:              "",
-	TooLatePacketDrop:     true,
-	TransmissionType:      "live",
-	TSBPDMode:             true,
-	AllowPeerIpChange:     false,
-	IoUringEnabled:        false,
-	IoUringSendRingSize:   64,
-	NetworkQueueSize:      1024,
-	WriteQueueSize:        1024,
-	ReadQueueSize:         1024,
-	ReceiveQueueSize:      2048,
-	PacketReorderAlgorithm: "list",
-	BTreeDegree:           32,
+	Congestion:                "live",
+	ConnectionTimeout:         3 * time.Second,
+	DriftTracer:               true,
+	EnforcedEncryption:        true,
+	FC:                        25600,
+	GroupConnect:              false,
+	GroupStabilityTimeout:     0,
+	InputBW:                   0,
+	IPTOS:                     0,
+	IPTTL:                     0,
+	IPv6Only:                  -1,
+	KMPreAnnounce:             1 << 12,
+	KMRefreshRate:             1 << 24,
+	Latency:                   -1,
+	LossMaxTTL:                0,
+	MaxBW:                     -1,
+	MessageAPI:                false,
+	MinVersion:                SRT_VERSION,
+	MSS:                       MAX_MSS_SIZE,
+	NAKReport:                 true,
+	OverheadBW:                25,
+	PacketFilter:              "",
+	Passphrase:                "",
+	PayloadSize:               MAX_PAYLOAD_SIZE,
+	PBKeylen:                  16,
+	PeerIdleTimeout:           2 * time.Second,
+	PeerLatency:               120 * time.Millisecond,
+	ReceiverBufferSize:        0,
+	ReceiverLatency:           120 * time.Millisecond,
+	SendBufferSize:            0,
+	SendDropDelay:             1 * time.Second,
+	StreamId:                  "",
+	TooLatePacketDrop:         true,
+	TransmissionType:          "live",
+	TSBPDMode:                 true,
+	AllowPeerIpChange:         false,
+	IoUringEnabled:            false,
+	IoUringSendRingSize:       64,
+	NetworkQueueSize:          1024,
+	WriteQueueSize:            1024,
+	ReadQueueSize:             1024,
+	ReceiveQueueSize:          2048,
+	PacketReorderAlgorithm:    "list",
+	BTreeDegree:               32,
+	IoUringRecvEnabled:        false,
+	IoUringRecvRingSize:       512,
+	IoUringRecvInitialPending: 512,
+	IoUringRecvBatchSize:      256,
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
@@ -784,7 +804,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: TSBPDMode must be enabled")
 	}
 
-	// Validate io_uring configuration
+	// Validate io_uring send configuration
 	if c.IoUringEnabled {
 		if c.IoUringSendRingSize < 16 || c.IoUringSendRingSize > 1024 {
 			return fmt.Errorf("config: IoUringSendRingSize must be between 16 and 1024")
@@ -792,6 +812,32 @@ func (c *Config) Validate() error {
 		// Check if ring size is a power of 2
 		if c.IoUringSendRingSize&(c.IoUringSendRingSize-1) != 0 {
 			return fmt.Errorf("config: IoUringSendRingSize must be a power of 2")
+		}
+	}
+
+	// Validate io_uring receive configuration
+	if c.IoUringRecvRingSize > 0 {
+		if c.IoUringRecvRingSize&(c.IoUringRecvRingSize-1) != 0 {
+			return fmt.Errorf("config: IoUringRecvRingSize must be a power of 2")
+		}
+		if c.IoUringRecvRingSize < 64 || c.IoUringRecvRingSize > 32768 {
+			return fmt.Errorf("config: IoUringRecvRingSize must be between 64 and 32768")
+		}
+	}
+
+	if c.IoUringRecvInitialPending > 0 {
+		if c.IoUringRecvInitialPending < 16 || c.IoUringRecvInitialPending > 32768 {
+			return fmt.Errorf("config: IoUringRecvInitialPending must be between 16 and 32768")
+		}
+		if c.IoUringRecvRingSize > 0 && c.IoUringRecvInitialPending > c.IoUringRecvRingSize {
+			return fmt.Errorf("config: IoUringRecvInitialPending (%d) must not exceed IoUringRecvRingSize (%d)",
+				c.IoUringRecvInitialPending, c.IoUringRecvRingSize)
+		}
+	}
+
+	if c.IoUringRecvBatchSize > 0 {
+		if c.IoUringRecvBatchSize < 1 || c.IoUringRecvBatchSize > 32768 {
+			return fmt.Errorf("config: IoUringRecvBatchSize must be between 1 and 32768")
 		}
 	}
 

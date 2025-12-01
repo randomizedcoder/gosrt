@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/datarhei/gosrt/circular"
@@ -57,6 +58,17 @@ type dialer struct {
 	stopReader context.CancelFunc
 
 	doneChan chan error
+
+	// io_uring receive path (Linux only)
+	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
+	recvRingFd      int                            // UDP socket file descriptor
+	recvBufferPool  sync.Pool                      // Pool of []byte buffers (fixed size: config.MSS)
+	recvCompletions map[uint64]*recvCompletionInfo // Maps request ID to completion info
+	recvCompLock    sync.Mutex                     // Protects recvCompletions map
+	recvRequestID   atomic.Uint64                  // Atomic counter for generating unique request IDs
+	recvCompCtx     context.Context                // Context for completion handler
+	recvCompCancel  context.CancelFunc             // Cancel function for completion handler
+	recvCompWg      sync.WaitGroup                 // WaitGroup for completion handler goroutine
 }
 
 type connResponse struct {
@@ -124,6 +136,13 @@ func Dial(network, address string, config Config) (Conn, error) {
 	dl.doneChan = make(chan error)
 
 	dl.start = time.Now()
+
+	// Initialize io_uring receive ring (if enabled)
+	// This is a no-op on non-Linux platforms
+	if err := dl.initializeIoUringRecv(); err != nil {
+		// Log error but don't fail - fall back to ReadFrom()
+		// Error is already logged in initializeIoUringRecv() (if logging available)
+	}
 
 	// create a new socket ID
 	dl.socketId, err = rand.Uint32()
@@ -706,6 +725,9 @@ func (dl *dialer) Close() error {
 		dl.connLock.RUnlock()
 
 		dl.stopReader()
+
+		// Cleanup io_uring receive ring (if initialized)
+		dl.cleanupIoUringRecv()
 
 		dl.log("dial", func() string { return "closing socket" })
 		dl.pc.Close()

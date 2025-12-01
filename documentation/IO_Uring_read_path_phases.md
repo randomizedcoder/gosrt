@@ -85,7 +85,7 @@ The IO_Uring read path implementation is a large undertaking that involves multi
 
 ### Phase 2: io_uring Read Path Foundation
 
-**Goal**: Replace blocking `ReadFrom()` syscalls with io_uring asynchronous receives.
+**Goal**: Establish infrastructure for io_uring-based asynchronous receives (ring initialization, buffer pools, completion tracking).
 
 **Scope:**
 - Add io_uring ring initialization in `listen.go` and `dial.go`
@@ -93,25 +93,31 @@ The IO_Uring read path implementation is a large undertaking that involves multi
 - Implement completion tracking (atomic counters, map)
 - Extract socket file descriptor
 - Platform-specific files (`listen_linux.go`, `listen_other.go`, `dial_linux.go`, `dial_other.go`)
+- Add configuration options (`IoUringRecvEnabled`, `IoUringRecvRingSize`, etc.)
+- Add CLI flags for configuration
 
 **Benefits:**
-- Eliminates blocking syscalls
-- Multiple pending receives simultaneously
-- Better CPU utilization
-- Foundation for further optimizations
+- Foundation for asynchronous receives
+- Infrastructure ready for Phase 3 (completion handler)
+- Multiple pending receives simultaneously (once Phase 3 is complete)
+- Better CPU utilization (once Phase 3 is complete)
 
 **Dependencies:**
 - None (independent of Phase 1)
 
 **Risk Level:** Medium
 
-**Estimated Effort:** 3-5 days
+**Estimated Effort:** 2-3 days (18 hours)
 
 **Deliverables:**
 - Ring initialization and cleanup
 - Buffer pool implementation
 - Completion tracking infrastructure
 - Platform-specific code separation
+- Configuration options and CLI flags
+- Comprehensive tests
+
+**Detailed Plan**: See `IO_Uring_read_path_phase2_plan.md` for step-by-step implementation guide.
 
 ---
 
