@@ -9,7 +9,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
+	"github.com/datarhei/gosrt/packet"
 	"github.com/randomizedcoder/giouring"
 )
 
@@ -57,8 +59,12 @@ func (dl *dialer) initializeIoUringRecv() error {
 	// Create context for completion handler
 	dl.recvCompCtx, dl.recvCompCancel = context.WithCancel(context.Background())
 
-	// Note: Completion handler will be started in Phase 3
-	// For now, we just set up the infrastructure
+	// Start completion handler goroutine
+	dl.recvCompWg.Add(1)
+	go dl.recvCompletionHandler(dl.recvCompCtx)
+
+	// Pre-populate ring with initial pending receives
+	dl.prePopulateRecvRing()
 
 	return nil
 }
@@ -106,5 +112,415 @@ func (dl *dialer) cleanupIoUringRecv() {
 	if dl.recvRingFd > 0 {
 		syscall.Close(dl.recvRingFd)
 		dl.recvRingFd = -1
+	}
+}
+
+// submitRecvRequest submits a new receive request to the ring
+func (dl *dialer) submitRecvRequest() {
+	ring, ok := dl.recvRing.(*giouring.Ring)
+	if !ok {
+		return
+	}
+
+	// Get buffer from pool (fixed size MSS, no setup needed)
+	buffer := dl.recvBufferPool.Get().([]byte)
+
+	// Setup iovec using buffer directly
+	var iovec syscall.Iovec
+	iovec.Base = &buffer[0]
+	iovec.SetLen(len(buffer))
+
+	// Setup msghdr for UDP (to get source address)
+	var msg syscall.Msghdr
+	var rsa syscall.RawSockaddrAny
+	msg.Name = (*byte)(unsafe.Pointer(&rsa))
+	msg.Namelen = uint32(syscall.SizeofSockaddrAny)
+	msg.Iov = &iovec
+	msg.Iovlen = 1
+
+	// Generate unique request ID
+	requestID := dl.recvRequestID.Add(1)
+
+	// Create completion info
+	compInfo := &recvCompletionInfo{
+		buffer: buffer,
+		rsa:    rsa,
+	}
+
+	// Store completion info in map
+	dl.recvCompLock.Lock()
+	dl.recvCompletions[requestID] = compInfo
+	dl.recvCompLock.Unlock()
+
+	// Get SQE from ring with retry loop
+	var sqe *giouring.SubmissionQueueEntry
+	const maxRetries = 3
+	for i := 0; i < maxRetries; i++ {
+		sqe = ring.GetSQE()
+		if sqe != nil {
+			break
+		}
+		if i < maxRetries-1 {
+			time.Sleep(100 * time.Microsecond)
+		}
+	}
+
+	if sqe == nil {
+		// Ring still full after retries - clean up
+		dl.recvCompLock.Lock()
+		delete(dl.recvCompletions, requestID)
+		dl.recvCompLock.Unlock()
+		dl.recvBufferPool.Put(buffer)
+		return
+	}
+
+	// Prepare recvmsg operation
+	sqe.PrepareRecvMsg(dl.recvRingFd, &msg, 0)
+	sqe.SetData64(requestID)
+
+	// Submit to ring with retry loop
+	var err error
+	const maxSubmitRetries = 3
+	for i := 0; i < maxSubmitRetries; i++ {
+		_, err = ring.Submit()
+		if err == nil {
+			break
+		}
+		if err != syscall.EINTR && err != syscall.EAGAIN {
+			break
+		}
+		if i < maxSubmitRetries-1 {
+			time.Sleep(100 * time.Microsecond)
+		}
+	}
+
+	if err != nil {
+		// Submission failed - clean up
+		dl.recvCompLock.Lock()
+		delete(dl.recvCompletions, requestID)
+		dl.recvCompLock.Unlock()
+		dl.recvBufferPool.Put(buffer)
+		return
+	}
+}
+
+// prePopulateRecvRing pre-populates ring with initial pending receives
+func (dl *dialer) prePopulateRecvRing() {
+	initialPending := dl.config.IoUringRecvInitialPending
+	if initialPending <= 0 {
+		ringSize := dl.config.IoUringRecvRingSize
+		if ringSize <= 0 {
+			ringSize = 512
+		}
+		initialPending = ringSize
+	}
+
+	for i := 0; i < initialPending; i++ {
+		dl.submitRecvRequest()
+	}
+}
+
+// lookupAndRemoveRecvCompletion looks up completion info by request ID and removes it from the map
+func (dl *dialer) lookupAndRemoveRecvCompletion(cqe *giouring.CompletionQueueEvent, ring *giouring.Ring) *recvCompletionInfo {
+	requestID := cqe.UserData
+
+	dl.recvCompLock.Lock()
+	compInfo, exists := dl.recvCompletions[requestID]
+	if !exists {
+		dl.recvCompLock.Unlock()
+		ring.CQESeen(cqe)
+		return nil
+	}
+	delete(dl.recvCompletions, requestID)
+	dl.recvCompLock.Unlock()
+
+	return compInfo
+}
+
+// processRecvCompletion processes a single completion
+func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.CompletionQueueEvent, compInfo *recvCompletionInfo) {
+	buffer := compInfo.buffer
+
+	// Check for receive errors
+	if cqe.Res < 0 {
+		// Dialer doesn't have log method, skip logging
+		ring.CQESeen(cqe)
+		dl.recvBufferPool.Put(buffer)
+		return
+	}
+
+	// Successful receive
+	bytesReceived := int(cqe.Res)
+	if bytesReceived == 0 {
+		ring.CQESeen(cqe)
+		dl.recvBufferPool.Put(buffer)
+		return
+	}
+
+	// Extract source address (for dialer, we use remoteAddr from config)
+	addr := dl.remoteAddr
+	if addr == nil {
+		// Fallback to extracting from RSA if remoteAddr not set
+		addr = extractAddrFromRSA(&compInfo.rsa)
+	}
+
+	// Use buffer directly
+	bufferSlice := buffer[:bytesReceived]
+
+	// Deserialize packet
+	p, err := packet.NewPacketFromData(addr, bufferSlice)
+
+	// Return buffer to pool
+	dl.recvBufferPool.Put(buffer)
+
+	if err != nil {
+		// Deserialization error - skip logging (no log method)
+		ring.CQESeen(cqe)
+		return
+	}
+
+	// Queue packet (non-blocking)
+	select {
+	case dl.rcvQueue <- p:
+		// Success
+	default:
+		// Queue full - drop packet
+		p.Decommission()
+	}
+
+	ring.CQESeen(cqe)
+}
+
+// getRecvCompletion gets a single completion (non-blocking peek, then blocking wait if needed)
+func (dl *dialer) getRecvCompletion(ctx context.Context, ring *giouring.Ring) (*giouring.CompletionQueueEvent, *recvCompletionInfo) {
+	// Try non-blocking peek first
+	cqe, err := ring.PeekCQE()
+	if err == nil {
+		compInfo := dl.lookupAndRemoveRecvCompletion(cqe, ring)
+		if compInfo == nil {
+			return nil, nil
+		}
+		return cqe, compInfo
+	}
+
+	// PeekCQE returned an error
+	if err != syscall.EAGAIN {
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		default:
+		}
+
+		if err == syscall.EBADF {
+			return nil, nil
+		}
+
+		if err != syscall.EINTR {
+			// Skip logging (no log method)
+		}
+		return nil, nil
+	}
+
+	// EAGAIN - wait for completion
+	select {
+	case <-ctx.Done():
+		return nil, nil
+	default:
+	}
+
+	cqe, err = ring.WaitCQE()
+	if err != nil {
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		default:
+		}
+
+		if err == syscall.EBADF {
+			return nil, nil
+		}
+
+		if err != syscall.EAGAIN && err != syscall.EINTR {
+			// Skip logging
+		}
+		return nil, nil
+	}
+
+	compInfo := dl.lookupAndRemoveRecvCompletion(cqe, ring)
+	if compInfo == nil {
+		return nil, nil
+	}
+
+	return cqe, compInfo
+}
+
+// submitRecvRequestBatch submits multiple receive requests in a batch
+func (dl *dialer) submitRecvRequestBatch(count int) {
+	ring, ok := dl.recvRing.(*giouring.Ring)
+	if !ok {
+		return
+	}
+
+	var sqes []*giouring.SubmissionQueueEntry
+	var compInfos []*recvCompletionInfo
+	var requestIDs []uint64
+
+	for i := 0; i < count; i++ {
+		buffer := dl.recvBufferPool.Get().([]byte)
+
+		var iovec syscall.Iovec
+		iovec.Base = &buffer[0]
+		iovec.SetLen(len(buffer))
+
+		var msg syscall.Msghdr
+		var rsa syscall.RawSockaddrAny
+		msg.Name = (*byte)(unsafe.Pointer(&rsa))
+		msg.Namelen = uint32(syscall.SizeofSockaddrAny)
+		msg.Iov = &iovec
+		msg.Iovlen = 1
+
+		requestID := dl.recvRequestID.Add(1)
+
+		compInfo := &recvCompletionInfo{
+			buffer: buffer,
+			rsa:    rsa,
+		}
+
+		dl.recvCompLock.Lock()
+		dl.recvCompletions[requestID] = compInfo
+		dl.recvCompLock.Unlock()
+
+		var sqe *giouring.SubmissionQueueEntry
+		const maxRetries = 3
+		for j := 0; j < maxRetries; j++ {
+			sqe = ring.GetSQE()
+			if sqe != nil {
+				break
+			}
+			if j < maxRetries-1 {
+				time.Sleep(100 * time.Microsecond)
+			}
+		}
+
+		if sqe == nil {
+			dl.recvCompLock.Lock()
+			delete(dl.recvCompletions, requestID)
+			dl.recvCompLock.Unlock()
+			dl.recvBufferPool.Put(buffer)
+			break
+		}
+
+		sqe.PrepareRecvMsg(dl.recvRingFd, &msg, 0)
+		sqe.SetData64(requestID)
+
+		sqes = append(sqes, sqe)
+		compInfos = append(compInfos, compInfo)
+		requestIDs = append(requestIDs, requestID)
+	}
+
+	if len(sqes) > 0 {
+		_, err := ring.Submit()
+		if err != nil {
+			dl.recvCompLock.Lock()
+			for i, requestID := range requestIDs {
+				delete(dl.recvCompletions, requestID)
+				dl.recvBufferPool.Put(compInfos[i].buffer)
+			}
+			dl.recvCompLock.Unlock()
+		}
+	}
+}
+
+// recvCompletionHandler is the main completion handler loop
+func (dl *dialer) recvCompletionHandler(ctx context.Context) {
+	defer dl.recvCompWg.Done()
+
+	ring, ok := dl.recvRing.(*giouring.Ring)
+	if !ok {
+		return
+	}
+
+	batchSize := dl.config.IoUringRecvBatchSize
+	if batchSize <= 0 {
+		batchSize = 256
+	}
+
+	pendingResubmits := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			if pendingResubmits > 0 {
+				dl.submitRecvRequestBatch(pendingResubmits)
+			}
+			dl.drainRecvCompletions()
+			return
+		default:
+		}
+
+		cqe, compInfo := dl.getRecvCompletion(ctx, ring)
+		if cqe == nil {
+			continue
+		}
+
+		dl.processRecvCompletion(ring, cqe, compInfo)
+
+		pendingResubmits++
+
+		if pendingResubmits >= batchSize {
+			dl.submitRecvRequestBatch(pendingResubmits)
+			pendingResubmits = 0
+		}
+	}
+}
+
+// drainRecvCompletions drains remaining completions during shutdown
+func (dl *dialer) drainRecvCompletions() {
+	ring, ok := dl.recvRing.(*giouring.Ring)
+	if !ok || ring == nil {
+		return
+	}
+
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case <-timeout.C:
+			return
+
+		default:
+			cqe, err := ring.PeekCQE()
+			if err != nil {
+				if err == syscall.EAGAIN {
+					dl.recvCompLock.Lock()
+					empty := len(dl.recvCompletions) == 0
+					dl.recvCompLock.Unlock()
+
+					if empty {
+						return
+					}
+
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				return
+			}
+
+			requestID := cqe.UserData
+
+			dl.recvCompLock.Lock()
+			compInfo, exists := dl.recvCompletions[requestID]
+			if !exists {
+				dl.recvCompLock.Unlock()
+				ring.CQESeen(cqe)
+				continue
+			}
+			delete(dl.recvCompletions, requestID)
+			dl.recvCompLock.Unlock()
+
+			dl.recvBufferPool.Put(compInfo.buffer)
+			ring.CQESeen(cqe)
+		}
 	}
 }
