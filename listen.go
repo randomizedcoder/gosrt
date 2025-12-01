@@ -229,53 +229,61 @@ func Listen(network, address string, config Config) (Listener, error) {
 
 	// Initialize io_uring receive ring (if enabled)
 	// This is a no-op on non-Linux platforms
+	ioUringInitialized := false
 	if err := ln.initializeIoUringRecv(); err != nil {
 		// Log error but don't fail - fall back to ReadFrom()
 		// Error is already logged in initializeIoUringRecv()
+	} else {
+		// Check if io_uring was actually initialized (enabled and successful)
+		ioUringInitialized = (ln.recvRing != nil)
 	}
 
 	var readerCtx context.Context
 	readerCtx, ln.stopReader = context.WithCancel(context.Background())
 	go ln.reader(readerCtx)
 
-	go func() {
-		buffer := make([]byte, config.MSS) // MTU size
+	// Only start ReadFrom() goroutine if io_uring is NOT enabled or failed to initialize
+	// When io_uring is enabled and initialized, the completion handler processes packets
+	if !ioUringInitialized {
+		go func() {
+			buffer := make([]byte, config.MSS) // MTU size
 
-		for {
-			if ln.isShutdown() {
-				ln.markDone(ErrListenerClosed)
-				return
-			}
-
-			ln.pc.SetReadDeadline(time.Now().Add(3 * time.Second))
-			n, addr, err := ln.pc.ReadFrom(buffer)
-			if err != nil {
-				if errors.Is(err, os.ErrDeadlineExceeded) {
-					continue
-				}
-
+			for {
 				if ln.isShutdown() {
 					ln.markDone(ErrListenerClosed)
 					return
 				}
 
-				ln.markDone(err)
-				return
-			}
+				ln.pc.SetReadDeadline(time.Now().Add(3 * time.Second))
+				n, addr, err := ln.pc.ReadFrom(buffer)
+				if err != nil {
+					if errors.Is(err, os.ErrDeadlineExceeded) {
+						continue
+					}
 
-			p, err := packet.NewPacketFromData(addr, buffer[:n])
-			if err != nil {
-				continue
-			}
+					if ln.isShutdown() {
+						ln.markDone(ErrListenerClosed)
+						return
+					}
 
-			// non-blocking
-			select {
-			case ln.rcvQueue <- p:
-			default:
-				ln.log("listen", func() string { return "receive queue is full" })
+					ln.markDone(err)
+					return
+				}
+
+				p, err := packet.NewPacketFromData(addr, buffer[:n])
+				if err != nil {
+					continue
+				}
+
+				// non-blocking
+				select {
+				case ln.rcvQueue <- p:
+				default:
+					ln.log("listen", func() string { return "receive queue is full" })
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return ln, nil
 }

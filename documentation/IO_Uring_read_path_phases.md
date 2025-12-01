@@ -160,21 +160,40 @@ The IO_Uring read path implementation is a large undertaking that involves multi
 
 ---
 
-### Phase 4: io_uring Integration
+### Phase 4: io_uring Integration ✅ COMPLETED
 
 **Goal**: Integrate io_uring into listener and dialer, replacing ReadFrom().
 
 **Scope:**
-- Update `Listen()` to initialize io_uring ring
-- Update `Dial()` to initialize io_uring ring
-- Replace `ReadFrom()` goroutine with io_uring completion handler
-- Maintain backward compatibility (fallback to ReadFrom if io_uring disabled)
-- Update cleanup to close rings
+- Update `Listen()` to conditionally start ReadFrom() goroutine
+- Update `Dial()` to conditionally start ReadFrom() goroutine
+- Replace `ReadFrom()` goroutine with io_uring completion handler when enabled
+- Maintain backward compatibility (fallback to ReadFrom if io_uring disabled or fails)
+- Ensure only one receive path is active at a time
 
 **Benefits:**
-- Complete replacement of blocking syscalls
-- Maintains backward compatibility
+- Complete replacement of blocking syscalls when io_uring enabled
+- Maintains backward compatibility (fallback to ReadFrom)
 - Can be enabled/disabled via configuration
+- No duplicate packet processing
+
+**Dependencies:**
+- Phase 2 (ring initialization) ✅
+- Phase 3 (completion handler) ✅
+
+**Risk Level:** Low
+
+**Estimated Effort:** 1 day
+
+**Deliverables:**
+- Conditional ReadFrom() goroutine start ✅
+- Single receive path active at a time ✅
+- Backward compatibility maintained ✅
+- Both listener and dialer updated ✅
+
+**Detailed Plan**: See `IO_Uring_read_path_phase4_plan.md` for implementation details.
+
+**Status**: ReadFrom() goroutines are now conditionally started only when io_uring is disabled or fails to initialize. When io_uring is enabled and successfully initialized, only the completion handler processes packets.
 
 **Dependencies:**
 - Phase 2 (ring initialization)

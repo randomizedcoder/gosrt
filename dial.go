@@ -139,9 +139,13 @@ func Dial(network, address string, config Config) (Conn, error) {
 
 	// Initialize io_uring receive ring (if enabled)
 	// This is a no-op on non-Linux platforms
+	ioUringInitialized := false
 	if err := dl.initializeIoUringRecv(); err != nil {
 		// Log error but don't fail - fall back to ReadFrom()
 		// Error is already logged in initializeIoUringRecv() (if logging available)
+	} else {
+		// Check if io_uring was actually initialized (enabled and successful)
+		ioUringInitialized = (dl.recvRing != nil)
 	}
 
 	// create a new socket ID
@@ -158,44 +162,48 @@ func Dial(network, address string, config Config) (Conn, error) {
 	}
 	dl.initialPacketSequenceNumber = circular.New(seqNum&packet.MAX_SEQUENCENUMBER, packet.MAX_SEQUENCENUMBER)
 
-	go func() {
-		buffer := make([]byte, MAX_MSS_SIZE) // MTU size
+	// Only start ReadFrom() goroutine if io_uring is NOT enabled or failed to initialize
+	// When io_uring is enabled and initialized, the completion handler processes packets
+	if !ioUringInitialized {
+		go func() {
+			buffer := make([]byte, MAX_MSS_SIZE) // MTU size
 
-		for {
-			if dl.isShutdown() {
-				dl.doneChan <- ErrClientClosed
-				return
-			}
-
-			pc.SetReadDeadline(time.Now().Add(3 * time.Second))
-			n, _, err := pc.ReadFrom(buffer)
-			if err != nil {
-				if errors.Is(err, os.ErrDeadlineExceeded) {
-					continue
-				}
-
+			for {
 				if dl.isShutdown() {
 					dl.doneChan <- ErrClientClosed
 					return
 				}
 
-				dl.doneChan <- err
-				return
-			}
+				pc.SetReadDeadline(time.Now().Add(3 * time.Second))
+				n, _, err := pc.ReadFrom(buffer)
+				if err != nil {
+					if errors.Is(err, os.ErrDeadlineExceeded) {
+						continue
+					}
 
-			p, err := packet.NewPacketFromData(dl.remoteAddr, buffer[:n])
-			if err != nil {
-				continue
-			}
+					if dl.isShutdown() {
+						dl.doneChan <- ErrClientClosed
+						return
+					}
 
-			// non-blocking
-			select {
-			case dl.rcvQueue <- p:
-			default:
-				dl.log("dial", func() string { return "receive queue is full" })
+					dl.doneChan <- err
+					return
+				}
+
+				p, err := packet.NewPacketFromData(dl.remoteAddr, buffer[:n])
+				if err != nil {
+					continue
+				}
+
+				// non-blocking
+				select {
+				case dl.rcvQueue <- p:
+				default:
+					dl.log("dial", func() string { return "receive queue is full" })
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	var readerCtx context.Context
 	readerCtx, dl.stopReader = context.WithCancel(context.Background())
