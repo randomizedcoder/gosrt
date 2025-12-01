@@ -13,12 +13,14 @@ import (
 
 // ReceiveConfig is the configuration for the liveRecv congestion control
 type ReceiveConfig struct {
-	InitialSequenceNumber circular.Number
-	PeriodicACKInterval   uint64 // microseconds
-	PeriodicNAKInterval   uint64 // microseconds
-	OnSendACK             func(seq circular.Number, light bool)
-	OnSendNAK             func(list []circular.Number)
-	OnDeliver             func(p packet.Packet)
+	InitialSequenceNumber  circular.Number
+	PeriodicACKInterval    uint64 // microseconds
+	PeriodicNAKInterval    uint64 // microseconds
+	OnSendACK              func(seq circular.Number, light bool)
+	OnSendNAK              func(list []circular.Number)
+	OnDeliver              func(p packet.Packet)
+	PacketReorderAlgorithm string // "list" (default) or "btree"
+	BTreeDegree            int     // B-tree degree (default: 32, only used if PacketReorderAlgorithm == "btree")
 }
 
 // receiver implements the Receiver interface
@@ -66,11 +68,24 @@ type receiver struct {
 
 // NewReceiver takes a ReceiveConfig and returns a new Receiver
 func NewReceiver(config ReceiveConfig) congestion.Receiver {
+	// Choose packet store implementation based on config
+	var store packetStore
+	if config.PacketReorderAlgorithm == "btree" {
+		degree := config.BTreeDegree
+		if degree <= 0 {
+			degree = 32 // Default btree degree
+		}
+		store = NewBTreePacketStore(degree)
+	} else {
+		// Default to list implementation
+		store = NewListPacketStore()
+	}
+
 	r := &receiver{
 		maxSeenSequenceNumber:       config.InitialSequenceNumber.Dec(),
 		lastACKSequenceNumber:       config.InitialSequenceNumber.Dec(),
 		lastDeliveredSequenceNumber: config.InitialSequenceNumber.Dec(),
-		packetStore:                 NewListPacketStore(),
+		packetStore:                 store,
 
 		periodicACKInterval: config.PeriodicACKInterval,
 		periodicNAKInterval: config.PeriodicNAKInterval,
