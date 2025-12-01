@@ -350,12 +350,14 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	// 4.8.1.  Packet Acknowledgement (ACKs, ACKACKs) -> periodicACK = 10 milliseconds
 	// 4.8.2.  Packet Retransmission (NAKs) -> periodicNAK at least 20 milliseconds
 	c.recv = live.NewReceiver(live.ReceiveConfig{
-		InitialSequenceNumber: c.initialPacketSequenceNumber,
-		PeriodicACKInterval:   10_000,
-		PeriodicNAKInterval:   20_000,
-		OnSendACK:             c.sendACK,
-		OnSendNAK:             c.sendNAK,
-		OnDeliver:             c.deliver,
+		InitialSequenceNumber:  c.initialPacketSequenceNumber,
+		PeriodicACKInterval:    10_000,
+		PeriodicNAKInterval:    20_000,
+		OnSendACK:              c.sendACK,
+		OnSendNAK:              c.sendNAK,
+		OnDeliver:              c.deliver,
+		PacketReorderAlgorithm: c.config.PacketReorderAlgorithm,
+		BTreeDegree:            c.config.BTreeDegree,
 	})
 
 	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second

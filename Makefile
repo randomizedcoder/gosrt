@@ -15,6 +15,9 @@ test-flags:
 test-flags-integration: client server
 	@./contrib/common/test_flags.sh
 
+test-congestion-live:
+	go test -v ./congestion/live
+
 ## fuzz: Run fuzz tests
 fuzz:
 	go test -fuzz=Fuzz -run=^Fuzz ./packet -fuzztime 30s

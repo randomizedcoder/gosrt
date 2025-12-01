@@ -196,6 +196,15 @@ type Config struct {
 	// Size of the receive queue channel buffer (packets from network before routing to connections)
 	// Used by listener and dialer. Default: 2048. Larger buffers reduce packet drops but use more memory
 	ReceiveQueueSize int
+
+	// Packet reordering algorithm for congestion control receiver
+	// "list" (default) uses container/list.List - simpler, O(n) insertions
+	// "btree" uses github.com/google/btree - better for large buffers/high reordering, O(log n) operations
+	PacketReorderAlgorithm string
+
+	// B-tree degree for packet reordering (only used if PacketReorderAlgorithm == "btree")
+	// Default: 32. Higher values use more memory but may reduce tree height
+	BTreeDegree int
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -243,6 +252,8 @@ var defaultConfig Config = Config{
 	WriteQueueSize:        1024,
 	ReadQueueSize:         1024,
 	ReceiveQueueSize:      2048,
+	PacketReorderAlgorithm: "list",
+	BTreeDegree:           32,
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.

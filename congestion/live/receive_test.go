@@ -624,3 +624,171 @@ func TestIssue67(t *testing.T) {
 
 	require.Equal(t, []uint32{1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 13, 13}, ackNumbers)
 }
+
+// TestListVsBTreeEquivalence verifies that list and btree implementations produce identical results
+func TestListVsBTreeEquivalence(t *testing.T) {
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Helper to create a receiver with specified algorithm
+	createReceiver := func(algorithm string) *receiver {
+		recv := NewReceiver(ReceiveConfig{
+			InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
+			PeriodicACKInterval:    10,
+			PeriodicNAKInterval:    20,
+			PacketReorderAlgorithm: algorithm,
+			BTreeDegree:            32,
+			OnSendACK:              func(seq circular.Number, light bool) {},
+			OnSendNAK:              func(list []circular.Number) {},
+			OnDeliver:              func(p packet.Packet) {},
+		})
+		return recv.(*receiver)
+	}
+
+	// Test 1: In-order packet insertion
+	t.Run("InOrderInsertion", func(t *testing.T) {
+		recvList := createReceiver("list")
+		recvBTree := createReceiver("btree")
+
+		for i := 0; i < 100; i++ {
+			pList := packet.NewPacket(addr)
+			pList.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+			pList.Header().PktTsbpdTime = uint64(i + 1)
+
+			pBTree := packet.NewPacket(addr)
+			pBTree.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+			pBTree.Header().PktTsbpdTime = uint64(i + 1)
+
+			recvList.Push(pList)
+			recvBTree.Push(pBTree)
+		}
+
+		require.Equal(t, recvList.packetStore.Len(), recvBTree.packetStore.Len())
+		require.Equal(t, recvList.maxSeenSequenceNumber.Val(), recvBTree.maxSeenSequenceNumber.Val())
+		require.Equal(t, recvList.lastACKSequenceNumber.Val(), recvBTree.lastACKSequenceNumber.Val())
+	})
+
+	// Test 2: Out-of-order packet insertion
+	t.Run("OutOfOrderInsertion", func(t *testing.T) {
+		recvList := createReceiver("list")
+		recvBTree := createReceiver("btree")
+
+		// Insert packets out of order: 0, 2, 1, 4, 3, 6, 5, ...
+		for i := 0; i < 50; i++ {
+			seq := uint32(i * 2)
+			if i > 0 {
+				seq = uint32((i-1)*2 + 1)
+			}
+
+			pList := packet.NewPacket(addr)
+			pList.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+			pList.Header().PktTsbpdTime = uint64(seq + 1)
+
+			pBTree := packet.NewPacket(addr)
+			pBTree.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+			pBTree.Header().PktTsbpdTime = uint64(seq + 1)
+
+			recvList.Push(pList)
+			recvBTree.Push(pBTree)
+		}
+
+		require.Equal(t, recvList.packetStore.Len(), recvBTree.packetStore.Len())
+		require.Equal(t, recvList.maxSeenSequenceNumber.Val(), recvBTree.maxSeenSequenceNumber.Val())
+	})
+
+	// Test 3: Duplicate packet handling
+	t.Run("DuplicateHandling", func(t *testing.T) {
+		recvList := createReceiver("list")
+		recvBTree := createReceiver("btree")
+
+		// Insert same packet twice
+		p1List := packet.NewPacket(addr)
+		p1List.Header().PacketSequenceNumber = circular.New(10, packet.MAX_SEQUENCENUMBER)
+		p1List.Header().PktTsbpdTime = 11
+
+		p1BTree := packet.NewPacket(addr)
+		p1BTree.Header().PacketSequenceNumber = circular.New(10, packet.MAX_SEQUENCENUMBER)
+		p1BTree.Header().PktTsbpdTime = 11
+
+		recvList.Push(p1List)
+		recvBTree.Push(p1BTree)
+
+		// Insert duplicate
+		p2List := packet.NewPacket(addr)
+		p2List.Header().PacketSequenceNumber = circular.New(10, packet.MAX_SEQUENCENUMBER)
+		p2List.Header().PktTsbpdTime = 11
+
+		p2BTree := packet.NewPacket(addr)
+		p2BTree.Header().PacketSequenceNumber = circular.New(10, packet.MAX_SEQUENCENUMBER)
+		p2BTree.Header().PktTsbpdTime = 11
+
+		recvList.Push(p2List)
+		recvBTree.Push(p2BTree)
+
+		require.Equal(t, recvList.packetStore.Len(), recvBTree.packetStore.Len())
+		require.Equal(t, recvList.statistics.PktDrop, recvBTree.statistics.PktDrop)
+	})
+
+	// Test 4: Iteration order
+	t.Run("IterationOrder", func(t *testing.T) {
+		recvList := createReceiver("list")
+		recvBTree := createReceiver("btree")
+
+		// Insert packets out of order
+		seqs := []uint32{5, 2, 8, 1, 9, 3, 7, 4, 6, 0}
+		for _, seq := range seqs {
+			pList := packet.NewPacket(addr)
+			pList.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+			pList.Header().PktTsbpdTime = uint64(seq + 100)
+
+			pBTree := packet.NewPacket(addr)
+			pBTree.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+			pBTree.Header().PktTsbpdTime = uint64(seq + 100)
+
+			recvList.Push(pList)
+			recvBTree.Push(pBTree)
+		}
+
+		// Collect packets in order
+		var listSeqs []uint32
+		recvList.packetStore.Iterate(func(p packet.Packet) bool {
+			listSeqs = append(listSeqs, p.Header().PacketSequenceNumber.Val())
+			return true
+		})
+
+		var btreeSeqs []uint32
+		recvBTree.packetStore.Iterate(func(p packet.Packet) bool {
+			btreeSeqs = append(btreeSeqs, p.Header().PacketSequenceNumber.Val())
+			return true
+		})
+
+		require.Equal(t, listSeqs, btreeSeqs, "Iteration order should be identical")
+	})
+
+	// Test 5: Min() operation
+	t.Run("MinOperation", func(t *testing.T) {
+		recvList := createReceiver("list")
+		recvBTree := createReceiver("btree")
+
+		// Insert packets out of order
+		seqs := []uint32{5, 2, 8, 1, 9, 3, 7, 4, 6, 0}
+		for _, seq := range seqs {
+			pList := packet.NewPacket(addr)
+			pList.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+			pList.Header().PktTsbpdTime = uint64(seq + 100)
+
+			pBTree := packet.NewPacket(addr)
+			pBTree.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+			pBTree.Header().PktTsbpdTime = uint64(seq + 100)
+
+			recvList.Push(pList)
+			recvBTree.Push(pBTree)
+		}
+
+		minList := recvList.packetStore.Min()
+		minBTree := recvBTree.packetStore.Min()
+
+		require.NotNil(t, minList)
+		require.NotNil(t, minBTree)
+		require.Equal(t, minList.Header().PacketSequenceNumber.Val(), minBTree.Header().PacketSequenceNumber.Val())
+	})
+}

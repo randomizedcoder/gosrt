@@ -848,5 +848,44 @@ If issues arise:
 - ✅ All tests passing (18/18 tests pass) - confirms interface abstraction works correctly
 
 **Next Steps**:
-- Proceed to Phase 3: Integration & Testing (when environment is properly configured)
+- Proceed to Phase 3: Integration & Testing
+
+### Phase 3: Integration & Testing ✅ COMPLETED
+
+**Status**: All tasks completed successfully.
+
+**Completed Tasks**:
+- ✅ Added equivalence tests (`TestListVsBTreeEquivalence`) comparing list vs btree behavior:
+  - In-order insertion
+  - Out-of-order insertion
+  - Duplicate handling
+  - Iteration order
+  - Min operation
+- ✅ Created `congestion/live/receive_bench_test.go` with performance benchmarks:
+  - `BenchmarkPushInOrder_List` / `BenchmarkPushInOrder_BTree`
+  - `BenchmarkPushOutOfOrder_List` / `BenchmarkPushOutOfOrder_BTree`
+  - `BenchmarkHas_List` / `BenchmarkHas_BTree`
+  - `BenchmarkIterate_List` / `BenchmarkIterate_BTree`
+  - `BenchmarkRemoveAll_List` / `BenchmarkRemoveAll_BTree`
+- ✅ Added `PacketReorderAlgorithm` and `BTreeDegree` fields to main `Config` struct in `config.go`
+- ✅ Updated `defaultConfig` to include defaults: `PacketReorderAlgorithm: "list"`, `BTreeDegree: 32`
+- ✅ Updated `connection.go` to pass config values to `NewReceiver()`
+- ✅ All tests passing (19/19 tests pass, including new equivalence test)
+
+**Files Created/Modified**:
+- `congestion/live/receive_test.go` (added `TestListVsBTreeEquivalence`)
+- `congestion/live/receive_bench_test.go` (new file, 246 lines with comprehensive benchmarks)
+- `config.go` (added `PacketReorderAlgorithm` and `BTreeDegree` fields)
+- `connection.go` (updated to pass config to receiver)
+
+**Verification**:
+- ✅ Code compiles successfully
+- ✅ All existing tests pass (18/18)
+- ✅ Equivalence test passes (5/5 sub-tests)
+- ✅ Configuration integration works correctly
+- ✅ Both list and btree implementations accessible via config
+
+**Next Steps**:
+- Phase 3 complete! The b-tree implementation is fully integrated and tested.
+- Future work: Run performance benchmarks to measure actual improvements in production scenarios
 

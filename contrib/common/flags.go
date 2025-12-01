@@ -58,6 +58,10 @@ var (
 	WriteQueueSize    = flag.Int("writequeuesize", 0, "Size of the write queue channel buffer (packets from application writes)")
 	ReadQueueSize     = flag.Int("readqueuesize", 0, "Size of the read queue channel buffer (packets ready for application reads)")
 	ReceiveQueueSize  = flag.Int("receivequeuesize", 0, "Size of the receive queue channel buffer (packets from network before routing to connections)")
+
+	// Packet reordering configuration flags
+	PacketReorderAlgorithm = flag.String("packetreorderalgorithm", "", "Packet reordering algorithm: 'list' (default, O(n) insertions) or 'btree' (O(log n) operations, better for large buffers)")
+	BTreeDegree            = flag.Int("btreedegree", 0, "B-tree degree for packet reordering (only used if packetreorderalgorithm='btree', default: 32)")
 )
 
 // ParseFlags parses command-line flags and populates FlagSet map
@@ -197,5 +201,11 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["receivequeuesize"] {
 		config.ReceiveQueueSize = *ReceiveQueueSize
+	}
+	if FlagSet["packetreorderalgorithm"] {
+		config.PacketReorderAlgorithm = *PacketReorderAlgorithm
+	}
+	if FlagSet["btreedegree"] {
+		config.BTreeDegree = *BTreeDegree
 	}
 }

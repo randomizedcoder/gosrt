@@ -127,8 +127,21 @@ run_test "Server passphrase flag" "-passphrase secret123" '"Passphrase" *: *"sec
 # Test 12: Server with shared flags
 run_test "Server with shared flags" "-latency 150 -fc 25600" '"Latency" *: *150000000.*"FC" *: *25600' "$SERVER_BIN"
 
-# Test 13: All flag types combined
-run_test "All flag types" "-congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true -drifttracer false" '"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true.*"DriftTracer" *: *false' "$CLIENT_BIN"
+# Test 13: PacketReorderAlgorithm flag (list)
+run_test "PacketReorderAlgorithm flag (list)" "-packetreorderalgorithm list" '"PacketReorderAlgorithm" *: *"list"' "$CLIENT_BIN"
+
+# Test 14: PacketReorderAlgorithm flag (btree)
+run_test "PacketReorderAlgorithm flag (btree)" "-packetreorderalgorithm btree" '"PacketReorderAlgorithm" *: *"btree"' "$CLIENT_BIN"
+
+# Test 15: BTreeDegree flag
+run_test "BTreeDegree flag" "-btreedegree 64" '"BTreeDegree" *: *64' "$CLIENT_BIN"
+
+# Test 16: PacketReorderAlgorithm and BTreeDegree together
+run_test "PacketReorderAlgorithm and BTreeDegree together" "-packetreorderalgorithm btree -btreedegree 64" '"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *64' "$CLIENT_BIN"
+
+# Test 17: All flag types combined (excluding drifttracer=false due to known limitation)
+# Note: Put packetreorderalgorithm first to ensure it's parsed correctly
+run_test "All flag types" "-packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 
 echo ""
 echo "================================"

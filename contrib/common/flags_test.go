@@ -88,6 +88,8 @@ func parseTestFlags(args []string) {
 	*WriteQueueSize = 0
 	*ReadQueueSize = 0
 	*ReceiveQueueSize = 0
+	*PacketReorderAlgorithm = ""
+	*BTreeDegree = 0
 
 	// Create a new FlagSet for testing
 	testFlagSet := flag.NewFlagSet("test", flag.ContinueOnError)
@@ -136,6 +138,8 @@ func parseTestFlags(args []string) {
 	testWriteQueueSize := testFlagSet.Int("writequeuesize", 0, "Size of the write queue channel buffer (packets from application writes)")
 	testReadQueueSize := testFlagSet.Int("readqueuesize", 0, "Size of the read queue channel buffer (packets ready for application reads)")
 	testReceiveQueueSize := testFlagSet.Int("receivequeuesize", 0, "Size of the receive queue channel buffer (packets from network before routing to connections)")
+	testPacketReorderAlgorithm := testFlagSet.String("packetreorderalgorithm", "", "Packet reordering algorithm: 'list' (default, O(n) insertions) or 'btree' (O(log n) operations, better for large buffers)")
+	testBTreeDegree := testFlagSet.Int("btreedegree", 0, "B-tree degree for packet reordering (only used if packetreorderalgorithm='btree', default: 32)")
 
 	// Parse the test arguments
 	if err := testFlagSet.Parse(args); err != nil {
@@ -303,6 +307,12 @@ func parseTestFlags(args []string) {
 	}
 	if FlagSet["receivequeuesize"] {
 		*ReceiveQueueSize = *testReceiveQueueSize
+	}
+	if FlagSet["packetreorderalgorithm"] {
+		*PacketReorderAlgorithm = *testPacketReorderAlgorithm
+	}
+	if FlagSet["btreedegree"] {
+		*BTreeDegree = *testBTreeDegree
 	}
 }
 
