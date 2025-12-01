@@ -1,7 +1,6 @@
 package live
 
 import (
-	"container/list"
 	"fmt"
 	"strings"
 	"sync"
@@ -27,7 +26,7 @@ type receiver struct {
 	maxSeenSequenceNumber       circular.Number
 	lastACKSequenceNumber       circular.Number
 	lastDeliveredSequenceNumber circular.Number
-	packetList                  *list.List
+	packetStore                 packetStore
 	lock                        sync.RWMutex
 
 	nPackets uint
@@ -71,7 +70,7 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		maxSeenSequenceNumber:       config.InitialSequenceNumber.Dec(),
 		lastACKSequenceNumber:       config.InitialSequenceNumber.Dec(),
 		lastDeliveredSequenceNumber: config.InitialSequenceNumber.Dec(),
-		packetList:                  list.New(),
+		packetStore:                 NewListPacketStore(),
 
 		periodicACKInterval: config.PeriodicACKInterval,
 		periodicNAKInterval: config.PeriodicNAKInterval,
@@ -128,7 +127,7 @@ func (r *receiver) Flush() {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	r.packetList = r.packetList.Init()
+	r.packetStore.Clear()
 }
 
 func (r *receiver) Push(pkt packet.Packet) {
@@ -206,27 +205,25 @@ func (r *receiver) Push(pkt packet.Packet) {
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
 	} else if pkt.Header().PacketSequenceNumber.Lte(r.maxSeenSequenceNumber) {
 		// Out of order, is it a missing piece? put it in the correct position
-		for e := r.packetList.Front(); e != nil; e = e.Next() {
-			p := e.Value.(packet.Packet)
+		if r.packetStore.Has(pkt.Header().PacketSequenceNumber) {
+			// Already received (has been sent more than once), ignoring
+			r.statistics.PktDrop++
+			r.statistics.ByteDrop += pktLen
+			return
+		}
 
-			if p.Header().PacketSequenceNumber == pkt.Header().PacketSequenceNumber {
-				// Already received (has been sent more than once), ignoring
-				r.statistics.PktDrop++
-				r.statistics.ByteDrop += pktLen
+		// Insert in correct position (packetStore handles ordering)
+		if r.packetStore.Insert(pkt) {
+			// Late arrival, this fills a gap
+			r.statistics.PktBuf++
+			r.statistics.PktUnique++
 
-				break
-			} else if p.Header().PacketSequenceNumber.Gt(pkt.Header().PacketSequenceNumber) {
-				// Late arrival, this fills a gap
-				r.statistics.PktBuf++
-				r.statistics.PktUnique++
-
-				r.statistics.ByteBuf += pktLen
-				r.statistics.ByteUnique += pktLen
-
-				r.packetList.InsertBefore(pkt, e)
-
-				break
-			}
+			r.statistics.ByteBuf += pktLen
+			r.statistics.ByteUnique += pktLen
+		} else {
+			// Duplicate (shouldn't happen after Has check, but be safe)
+			r.statistics.PktDrop++
+			r.statistics.ByteDrop += pktLen
 		}
 
 		return
@@ -251,7 +248,7 @@ func (r *receiver) Push(pkt packet.Packet) {
 	r.statistics.ByteBuf += pktLen
 	r.statistics.ByteUnique += pktLen
 
-	r.packetList.PushBack(pkt)
+	r.packetStore.Insert(pkt)
 }
 
 func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
@@ -270,40 +267,37 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	minPktTsbpdTime, maxPktTsbpdTime := uint64(0), uint64(0)
 	ackSequenceNumber := r.lastACKSequenceNumber
 
-	e := r.packetList.Front()
-	if e != nil {
-		p := e.Value.(packet.Packet)
-
-		minPktTsbpdTime = p.Header().PktTsbpdTime
-		maxPktTsbpdTime = p.Header().PktTsbpdTime
+	// Get first packet for initial timestamps
+	minPkt := r.packetStore.Min()
+	if minPkt != nil {
+		minPktTsbpdTime = minPkt.Header().PktTsbpdTime
+		maxPktTsbpdTime = minPkt.Header().PktTsbpdTime
 	}
 
 	// Find the sequence number up until we have all in a row.
 	// Where the first gap is (or at the end of the list) is where we can ACK to.
 
-	for e := r.packetList.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
-
+	r.packetStore.Iterate(func(p packet.Packet) bool {
 		// Skip packets that we already ACK'd.
 		if p.Header().PacketSequenceNumber.Lte(ackSequenceNumber) {
-			continue
+			return true // Continue
 		}
 
 		// If there are packets that should have been delivered by now, move forward.
 		if p.Header().PktTsbpdTime <= now {
 			ackSequenceNumber = p.Header().PacketSequenceNumber
-			continue
+			return true // Continue
 		}
 
 		// Check if the packet is the next in the row.
 		if p.Header().PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
 			ackSequenceNumber = p.Header().PacketSequenceNumber
 			maxPktTsbpdTime = p.Header().PktTsbpdTime
-			continue
+			return true // Continue
 		}
 
-		break
-	}
+		return false // Stop iteration
+	})
 
 	ok = true
 	sequenceNumber = ackSequenceNumber.Inc()
@@ -336,12 +330,10 @@ func (r *receiver) periodicNAK(now uint64) []circular.Number {
 
 	// Send a NAK for all gaps.
 	// Not all gaps might get announced because the size of the NAK packet is limited.
-	for e := r.packetList.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
-
+	r.packetStore.Iterate(func(p packet.Packet) bool {
 		// Skip packets that we already ACK'd.
 		if p.Header().PacketSequenceNumber.Lte(ackSequenceNumber) {
-			continue
+			return true // Continue
 		}
 
 		// If this packet is not in sequence, we stop here and report that gap.
@@ -353,7 +345,8 @@ func (r *receiver) periodicNAK(now uint64) []circular.Number {
 		}
 
 		ackSequenceNumber = p.Header().PacketSequenceNumber
-	}
+		return true // Continue
+	})
 
 	r.lastPeriodicNAK = now
 
@@ -371,27 +364,23 @@ func (r *receiver) Tick(now uint64) {
 
 	// Deliver packets whose PktTsbpdTime is ripe
 	r.lock.Lock()
-	removeList := make([]*list.Element, 0, r.packetList.Len())
-	for e := r.packetList.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
-
-		if p.Header().PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && p.Header().PktTsbpdTime <= now {
+	removed := r.packetStore.RemoveAll(
+		func(p packet.Packet) bool {
+			return p.Header().PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && p.Header().PktTsbpdTime <= now
+		},
+		func(p packet.Packet) {
 			r.statistics.PktBuf--
 			r.statistics.ByteBuf -= p.Len()
 
 			r.lastDeliveredSequenceNumber = p.Header().PacketSequenceNumber
 
 			r.deliver(p)
-			removeList = append(removeList, e)
-		} else {
-			break
-		}
-	}
-
-	for _, e := range removeList {
-		r.packetList.Remove(e)
-	}
+		},
+	)
 	r.lock.Unlock()
+
+	// removed count is available if needed for statistics
+	_ = removed
 
 	r.lock.Lock()
 	tdiff := now - r.rate.last // microseconds
@@ -427,11 +416,10 @@ func (r *receiver) String(t uint64) string {
 	b.WriteString(fmt.Sprintf("maxSeen=%d lastACK=%d lastDelivered=%d\n", r.maxSeenSequenceNumber.Val(), r.lastACKSequenceNumber.Val(), r.lastDeliveredSequenceNumber.Val()))
 
 	r.lock.RLock()
-	for e := r.packetList.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
-
+	r.packetStore.Iterate(func(p packet.Packet) bool {
 		b.WriteString(fmt.Sprintf("   %d @ %d (in %d)\n", p.Header().PacketSequenceNumber.Val(), p.Header().PktTsbpdTime, int64(p.Header().PktTsbpdTime)-int64(t)))
-	}
+		return true // Continue
+	})
 	r.lock.RUnlock()
 
 	return b.String()

@@ -474,11 +474,11 @@ func TestRecvFlush(t *testing.T) {
 		recv.Push(p)
 	}
 
-	require.Equal(t, 10, recv.packetList.Len())
+	require.Equal(t, 10, recv.packetStore.Len())
 
 	recv.Flush()
 
-	require.Equal(t, 0, recv.packetList.Len())
+	require.Equal(t, 0, recv.packetStore.Len())
 }
 
 func TestRecvPeriodicACKLite(t *testing.T) {

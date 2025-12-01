@@ -4,11 +4,11 @@ github.com/benburkert/openpgp/aes/keywrap
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
-# github.com/felixge/fgprof v0.9.3
+# github.com/felixge/fgprof v0.9.5
 ## explicit; go 1.14
 github.com/felixge/fgprof
-# github.com/google/pprof v0.0.0-20211214055906-6f57359322fd
-## explicit; go 1.14
+# github.com/google/pprof v0.0.0-20251114195745-4902fdda35c8
+## explicit; go 1.24.0
 github.com/google/pprof/profile
 # github.com/pkg/profile v1.7.0
 ## explicit; go 1.13
