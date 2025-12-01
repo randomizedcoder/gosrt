@@ -279,14 +279,21 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 		return
 	}
 
-	// Queue packet (non-blocking)
-	select {
-	case dl.rcvQueue <- p:
-		// Success
-	default:
-		// Queue full - drop packet
+	// Route directly (bypass channels) - Channel Bypass Optimization
+	// For dialer, we have a single connection
+	dl.connLock.RLock()
+	conn := dl.conn
+	dl.connLock.RUnlock()
+
+	if conn == nil {
+		// No connection yet - drop packet
+		ring.CQESeen(cqe)
 		p.Decommission()
+		return
 	}
+
+	// Direct call to handlePacket (blocking mutex - never drops packets)
+	conn.handlePacketDirect(p)
 
 	ring.CQESeen(cqe)
 }

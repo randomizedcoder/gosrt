@@ -183,6 +183,10 @@ type srtConn struct {
 	// Queue for packets that are coming from the network
 	networkQueue chan packet.Packet
 
+	// Per-connection mutex for handlePacket() serialization (used by io_uring direct routing)
+	// Ensures sequential processing per connection (same guarantee as channel-based approach)
+	handlePacketMutex sync.Mutex
+
 	// Queue for packets that are written with writePacket() and will be send to the network
 	writeQueue  chan packet.Packet
 	writeBuffer bytes.Buffer
@@ -699,6 +703,17 @@ func (c *srtConn) deliver(p packet.Packet) {
 // handlePacket checks the packet header. If it is a control packet it will forwarded to the
 // respective handler. If it is a data packet it will be put into congestion control for
 // receiving. The packet will be decrypted if required.
+// handlePacketDirect is called directly from io_uring completion handler
+// It uses a per-connection mutex to ensure sequential processing (same guarantee as channel-based approach)
+// The mutex is blocking to ensure no packets are dropped (never drop packets that successfully arrived from network)
+func (c *srtConn) handlePacketDirect(p packet.Packet) {
+	// Block until mutex available - never drop packets
+	c.handlePacketMutex.Lock()
+	defer c.handlePacketMutex.Unlock()
+
+	c.handlePacket(p)
+}
+
 func (c *srtConn) handlePacket(p packet.Packet) {
 	if p == nil {
 		return

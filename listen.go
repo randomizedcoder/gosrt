@@ -124,8 +124,8 @@ type listener struct {
 
 	backlog  chan packet.Packet
 	connReqs map[uint32]*connRequest
-	conns    map[uint32]*srtConn
-	lock     sync.RWMutex
+	conns    sync.Map     // key: uint32 (socketId), value: *srtConn
+	lock     sync.RWMutex // Used for doneErr and doneChan, not for conns
 
 	start time.Time
 
@@ -205,7 +205,7 @@ func Listen(network, address string, config Config) (Listener, error) {
 	}
 
 	ln.connReqs = make(map[uint32]*connRequest)
-	ln.conns = make(map[uint32]*srtConn)
+	// ln.conns is sync.Map - zero value is ready to use, no initialization needed
 
 	ln.backlog = make(chan packet.Packet, 128)
 
@@ -361,9 +361,8 @@ func (ln *listener) error() error {
 }
 
 func (ln *listener) handleShutdown(socketId uint32) {
-	ln.lock.Lock()
-	delete(ln.conns, socketId)
-	ln.lock.Unlock()
+	// sync.Map handles locking internally
+	ln.conns.Delete(socketId)
 }
 
 func (ln *listener) isShutdown() bool {
@@ -379,14 +378,15 @@ func (ln *listener) Close() {
 		ln.shutdown = true
 		ln.shutdownLock.Unlock()
 
-		ln.lock.RLock()
-		for _, conn := range ln.conns {
+		// sync.Map handles locking internally
+		ln.conns.Range(func(key, value interface{}) bool {
+			conn := value.(*srtConn)
 			if conn == nil {
-				continue
+				return true // continue iteration
 			}
 			conn.close()
-		}
-		ln.lock.RUnlock()
+			return true // continue iteration
+		})
 
 		ln.stopReader()
 
@@ -438,9 +438,12 @@ func (ln *listener) reader(ctx context.Context) {
 				break
 			}
 
-			ln.lock.RLock()
-			conn, ok := ln.conns[p.Header().DestinationSocketId]
-			ln.lock.RUnlock()
+			// sync.Map handles locking internally
+			val, ok := ln.conns.Load(p.Header().DestinationSocketId)
+			var conn *srtConn
+			if ok {
+				conn = val.(*srtConn)
+			}
 
 			if !ok || conn == nil {
 				// ignore the packet, we don't know the destination

@@ -393,15 +393,62 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		return // Always resubmit to maintain constant pending count
 	}
 
-	// Queue packet (non-blocking, same as current implementation)
-	select {
-	case ln.rcvQueue <- p:
-		// Success - packet queued, buffer already returned to pool
-	default:
-		// Queue full - log and drop packet
-		ln.log("listen", func() string { return "receive queue is full" })
-		p.Decommission() // Clean up dropped packet
+	// Route directly (bypass channels) - Channel Bypass Optimization
+	socketId := p.Header().DestinationSocketId
+
+	// Handle handshake packets (DestinationSocketId == 0)
+	if socketId == 0 {
+		if p.Header().IsControlPacket && p.Header().ControlType == packet.CTRLTYPE_HANDSHAKE {
+			select {
+			case ln.backlog <- p:
+				// Success - handshake packet queued to backlog
+			default:
+				ln.log("handshake:recv:error", func() string { return "backlog is full" })
+				p.Decommission() // Clean up dropped packet
+			}
+		} else {
+			// Non-handshake packet with socketId == 0 - drop it
+			p.Decommission()
+		}
+		ring.CQESeen(cqe)
+		return // Always resubmit to maintain constant pending count
 	}
+
+	// Lookup connection (sync.Map handles locking internally)
+	val, ok := ln.conns.Load(socketId)
+	if !ok {
+		// Unknown destination - drop packet
+		ln.log("listen:recv:error", func() string {
+			return fmt.Sprintf("unknown destination socket ID: %d", socketId)
+		})
+		ring.CQESeen(cqe)
+		p.Decommission()
+		return // Always resubmit to maintain constant pending count
+	}
+
+	conn := val.(*srtConn)
+	if conn == nil {
+		// Connection is nil - drop packet
+		ring.CQESeen(cqe)
+		p.Decommission()
+		return // Always resubmit to maintain constant pending count
+	}
+
+	// Validate peer address (if required)
+	if !ln.config.AllowPeerIpChange {
+		if p.Header().Addr.String() != conn.RemoteAddr().String() {
+			// Wrong peer - drop packet
+			ln.log("listen:recv:error", func() string {
+				return fmt.Sprintf("packet from wrong peer: expected %s, got %s", conn.RemoteAddr().String(), p.Header().Addr.String())
+			})
+			ring.CQESeen(cqe)
+			p.Decommission()
+			return // Always resubmit to maintain constant pending count
+		}
+	}
+
+	// Direct call to handlePacket (blocking mutex - never drops packets)
+	conn.handlePacketDirect(p)
 
 	// Mark CQE as seen (required by giouring)
 	ring.CQESeen(cqe)

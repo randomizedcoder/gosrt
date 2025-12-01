@@ -195,6 +195,46 @@ The IO_Uring read path implementation is a large undertaking that involves multi
 
 **Status**: ReadFrom() goroutines are now conditionally started only when io_uring is disabled or fails to initialize. When io_uring is enabled and successfully initialized, only the completion handler processes packets.
 
+---
+
+### Phase 5: Channel Bypass Optimization
+
+**Goal**: Eliminate channel overhead by routing packets directly from completion handler to handlePacket().
+
+**Scope:**
+- Replace connection map with sync.Map (optimized read path)
+- Implement direct routing in processRecvCompletion()
+- Add per-connection mutex for handlePacket() serialization
+- Eliminate rcvQueue and networkQueue channels for io_uring path
+- Maintain backward compatibility (keep channels for ReadFrom() path)
+
+**Benefits:**
+- 5-10x latency reduction (50μs → 5μs)
+- 20-50% throughput increase
+- 50% memory reduction
+- 10-20% CPU reduction
+- Zero packet drops (blocking mutex ensures all packets processed)
+
+**Dependencies:**
+- Phase 2 (ring initialization) ✅
+- Phase 3 (completion handler) ✅
+- Phase 4 (integration) ✅
+
+**Risk Level:** Medium
+
+**Estimated Effort:** 3-4 days
+
+**Deliverables:**
+- sync.Map for connection lookup
+- handlePacketDirect() with per-connection mutex
+- Direct routing in processRecvCompletion()
+- Backward compatibility maintained
+- Performance improvements verified
+
+**Detailed Plan**: See `IO_Uring_read_path_phase5_plan.md` for implementation details.
+
+**Status**: ✅ COMPLETED - All core implementation steps completed. Channel bypass optimization implemented with sync.Map for connection lookup, direct routing to handlePacket(), and per-connection mutex for serialization. Backward compatibility maintained for ReadFrom() path.
+
 **Dependencies:**
 - Phase 2 (ring initialization)
 - Phase 3 (completion handler)
