@@ -22,9 +22,11 @@ import (
 // Key insight: We only need the buffer (to return to pool after deserialization)
 // and rsa (to extract source address). The msg and iovec are only used during
 // SQE setup in submitRecvRequest(), not in the completion handler.
+// Note: msg must be kept alive until completion, so we store it here too.
 type recvCompletionInfo struct {
-	buffer []byte                 // Buffer to return to pool after deserialization completes
-	rsa    syscall.RawSockaddrAny // Kernel fills this during receive, used to extract source address
+	buffer *[]byte                 // Buffer pointer to return to pool after deserialization completes (pointer to avoid allocations)
+	rsa    *syscall.RawSockaddrAny // Pointer to rsa that kernel fills during receive (must be heap-allocated)
+	msg    *syscall.Msghdr         // Pointer to msg that kernel uses (must be heap-allocated to stay valid)
 }
 
 // getUDPConnFd extracts the file descriptor from a *net.UDPConn
@@ -56,7 +58,13 @@ func extractAddrFromRSA(rsa *syscall.RawSockaddrAny) net.Addr {
 		return nil
 	}
 
-	switch rsa.Addr.Family {
+	// Check if address family is valid (0 means uninitialized)
+	family := rsa.Addr.Family
+	if family == 0 {
+		return nil
+	}
+
+	switch family {
 	case syscall.AF_INET:
 		p := (*syscall.RawSockaddrInet4)(unsafe.Pointer(rsa))
 		addr := &net.UDPAddr{
@@ -123,9 +131,11 @@ func (ln *listener) initializeIoUringRecv() error {
 	ln.recvRing = ring // Store as interface{} for conditional compilation
 
 	// Initialize receive buffer pool (fixed size MSS)
+	// Store *[]byte to avoid allocations when putting back (staticcheck SA6002)
 	ln.recvBufferPool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, ln.config.MSS)
+			buf := make([]byte, ln.config.MSS)
+			return &buf
 		},
 	}
 
@@ -141,6 +151,10 @@ func (ln *listener) initializeIoUringRecv() error {
 
 	// Pre-populate ring with initial pending receives
 	ln.prePopulateRecvRing()
+
+	ln.log("listen:io_uring:recv:init", func() string {
+		return fmt.Sprintf("io_uring receive initialized: ring_size=%d, initial_pending=%d, fd=%d", ringSize, ln.config.IoUringRecvInitialPending, ln.recvRingFd)
+	})
 
 	return nil
 }
@@ -203,7 +217,8 @@ func (ln *listener) submitRecvRequest() {
 	}
 
 	// Get buffer from pool (fixed size MSS, no setup needed)
-	buffer := ln.recvBufferPool.Get().([]byte)
+	bufferPtr := ln.recvBufferPool.Get().(*[]byte)
+	buffer := *bufferPtr
 	// No Reset() needed - kernel will overwrite the buffer
 
 	// Setup iovec using buffer directly (no conversion needed)
@@ -212,9 +227,11 @@ func (ln *listener) submitRecvRequest() {
 	iovec.SetLen(len(buffer))
 
 	// Setup msghdr for UDP (to get source address)
-	var msg syscall.Msghdr
-	var rsa syscall.RawSockaddrAny
-	msg.Name = (*byte)(unsafe.Pointer(&rsa))
+	// Allocate rsa and msg on heap so they persist until completion is processed
+	// The kernel needs these structures to remain valid until the completion is processed
+	rsa := new(syscall.RawSockaddrAny)
+	msg := new(syscall.Msghdr)
+	msg.Name = (*byte)(unsafe.Pointer(rsa))
 	msg.Namelen = uint32(syscall.SizeofSockaddrAny)
 	msg.Iov = &iovec
 	msg.Iovlen = 1
@@ -222,11 +239,12 @@ func (ln *listener) submitRecvRequest() {
 	// Generate unique request ID using atomic counter (same pattern as send path)
 	requestID := ln.recvRequestID.Add(1)
 
-	// Create minimal completion info (only buffer and rsa needed)
-	// msg and iovec are only used for SQE setup, not stored in completion info
+	// Create minimal completion info (buffer, rsa, and msg needed)
+	// msg must be kept alive because kernel uses it during completion
 	compInfo := &recvCompletionInfo{
-		buffer: buffer, // Keep buffer alive until deserialization completes
-		rsa:    rsa,    // Kernel will fill this during receive
+		buffer: bufferPtr, // Keep buffer pointer alive until deserialization completes
+		rsa:    rsa,       // Pointer to rsa that kernel will fill during receive
+		msg:    msg,       // Pointer to msg that kernel uses (must stay valid)
 	}
 
 	// Store completion info in map (protected by lock, same pattern as send path)
@@ -255,7 +273,7 @@ func (ln *listener) submitRecvRequest() {
 		delete(ln.recvCompletions, requestID)
 		ln.recvCompLock.Unlock()
 
-		ln.recvBufferPool.Put(buffer)
+		ln.recvBufferPool.Put(bufferPtr)
 
 		ln.log("listen:recv:error", func() string {
 			return "io_uring ring full after retries"
@@ -264,7 +282,8 @@ func (ln *listener) submitRecvRequest() {
 	}
 
 	// Prepare recvmsg operation
-	sqe.PrepareRecvMsg(ln.recvRingFd, &msg, 0)
+	// Pass pointer to heap-allocated msg so it stays valid until completion
+	sqe.PrepareRecvMsg(ln.recvRingFd, msg, 0)
 
 	// Store request ID in user data for completion correlation (same pattern as send path)
 	sqe.SetData64(requestID)
@@ -296,7 +315,7 @@ func (ln *listener) submitRecvRequest() {
 		delete(ln.recvCompletions, requestID)
 		ln.recvCompLock.Unlock()
 
-		ln.recvBufferPool.Put(buffer)
+		ln.recvBufferPool.Put(bufferPtr)
 
 		ln.log("listen:recv:error", func() string {
 			return fmt.Sprintf("failed to submit receive request: %v", err)
@@ -349,7 +368,8 @@ func (ln *listener) lookupAndRemoveRecvCompletion(cqe *giouring.CompletionQueueE
 // processRecvCompletion processes a single completion
 // Always resubmits to maintain constant pending count (caller handles batching)
 func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.CompletionQueueEvent, compInfo *recvCompletionInfo) {
-	buffer := compInfo.buffer
+	bufferPtr := compInfo.buffer
+	buffer := *bufferPtr
 
 	// Check for receive errors
 	if cqe.Res < 0 {
@@ -358,7 +378,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 			return fmt.Sprintf("receive failed: %s (errno %d)", syscall.Errno(errno).Error(), errno)
 		})
 		ring.CQESeen(cqe)
-		ln.recvBufferPool.Put(buffer)
+		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
 	}
 
@@ -367,12 +387,33 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	if bytesReceived == 0 {
 		// Empty datagram - return buffer and resubmit
 		ring.CQESeen(cqe)
-		ln.recvBufferPool.Put(buffer)
+		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
 	}
 
 	// Extract source address from RawSockaddrAny (kernel filled this during receive)
-	addr := extractAddrFromRSA(&compInfo.rsa)
+	// Note: The kernel fills rsa during the recvmsg operation
+	if compInfo.rsa == nil {
+		// RSA is nil - this shouldn't happen, but handle gracefully
+		ln.log("listen:recv:parse:error", func() string {
+			return "rsa is nil in completion info"
+		})
+		ring.CQESeen(cqe)
+		ln.recvBufferPool.Put(bufferPtr)
+		return // Always resubmit to maintain constant pending count
+	}
+
+	addr := extractAddrFromRSA(compInfo.rsa)
+	if addr == nil {
+		// Failed to extract address - log with details and resubmit
+		family := compInfo.rsa.Addr.Family
+		ln.log("listen:recv:parse:error", func() string {
+			return fmt.Sprintf("failed to extract source address from RawSockaddrAny: family=%d (0=uninitialized, 2=AF_INET, 10=AF_INET6)", family)
+		})
+		ring.CQESeen(cqe)
+		ln.recvBufferPool.Put(bufferPtr)
+		return // Always resubmit to maintain constant pending count
+	}
 
 	// Use buffer directly (kernel wrote directly to it via iovec)
 	bufferSlice := buffer[:bytesReceived]
@@ -380,18 +421,19 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	// Deserialize packet (NewPacketFromData copies the data into packet structure)
 	p, err := packet.NewPacketFromData(addr, bufferSlice)
 
-	// After deserialization, we can return buffer to pool immediately
-	// (NewPacketFromData has copied the data, so buffer is no longer needed)
-	ln.recvBufferPool.Put(buffer)
-
 	if err != nil {
 		// Deserialization error - log and resubmit
 		ln.log("listen:recv:parse:error", func() string {
 			return fmt.Sprintf("failed to parse packet: %v", err)
 		})
 		ring.CQESeen(cqe)
+		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
 	}
+
+	// After successful deserialization, we can return buffer to pool immediately
+	// (NewPacketFromData has copied the data, so buffer is no longer needed)
+	ln.recvBufferPool.Put(bufferPtr)
 
 	// Route directly (bypass channels) - Channel Bypass Optimization
 	socketId := p.Header().DestinationSocketId
@@ -399,6 +441,9 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	// Handle handshake packets (DestinationSocketId == 0)
 	if socketId == 0 {
 		if p.Header().IsControlPacket && p.Header().ControlType == packet.CTRLTYPE_HANDSHAKE {
+			ln.log("listen:recv:handshake", func() string {
+				return fmt.Sprintf("received handshake packet from %s", p.Header().Addr.String())
+			})
 			select {
 			case ln.backlog <- p:
 				// Success - handshake packet queued to backlog
@@ -546,7 +591,8 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 
 	for i := 0; i < count; i++ {
 		// Get buffer from pool
-		buffer := ln.recvBufferPool.Get().([]byte)
+		bufferPtr := ln.recvBufferPool.Get().(*[]byte)
+		buffer := *bufferPtr
 
 		// Setup iovec using buffer directly
 		var iovec syscall.Iovec
@@ -554,9 +600,10 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 		iovec.SetLen(len(buffer))
 
 		// Setup msghdr for UDP (to get source address)
-		var msg syscall.Msghdr
-		var rsa syscall.RawSockaddrAny
-		msg.Name = (*byte)(unsafe.Pointer(&rsa))
+		// Allocate rsa and msg on heap so they persist until completion is processed
+		rsa := new(syscall.RawSockaddrAny)
+		msg := new(syscall.Msghdr)
+		msg.Name = (*byte)(unsafe.Pointer(rsa))
 		msg.Namelen = uint32(syscall.SizeofSockaddrAny)
 		msg.Iov = &iovec
 		msg.Iovlen = 1
@@ -566,8 +613,9 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 
 		// Create completion info
 		compInfo := &recvCompletionInfo{
-			buffer: buffer,
+			buffer: bufferPtr,
 			rsa:    rsa,
+			msg:    msg,
 		}
 
 		// Store completion info in map
@@ -593,12 +641,13 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 			ln.recvCompLock.Lock()
 			delete(ln.recvCompletions, requestID)
 			ln.recvCompLock.Unlock()
-			ln.recvBufferPool.Put(buffer)
+			ln.recvBufferPool.Put(bufferPtr)
 			break
 		}
 
 		// Prepare recvmsg operation
-		sqe.PrepareRecvMsg(ln.recvRingFd, &msg, 0)
+		// Pass pointer to heap-allocated msg so it stays valid until completion
+		sqe.PrepareRecvMsg(ln.recvRingFd, msg, 0)
 		sqe.SetData64(requestID)
 
 		sqes = append(sqes, sqe)

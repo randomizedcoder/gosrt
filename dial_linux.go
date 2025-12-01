@@ -47,9 +47,11 @@ func (dl *dialer) initializeIoUringRecv() error {
 	dl.recvRing = ring // Store as interface{} for conditional compilation
 
 	// Initialize receive buffer pool (fixed size MSS)
+	// Store *[]byte to avoid allocations when putting back (staticcheck SA6002)
 	dl.recvBufferPool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, dl.config.MSS)
+			buf := make([]byte, dl.config.MSS)
+			return &buf
 		},
 	}
 
@@ -123,7 +125,8 @@ func (dl *dialer) submitRecvRequest() {
 	}
 
 	// Get buffer from pool (fixed size MSS, no setup needed)
-	buffer := dl.recvBufferPool.Get().([]byte)
+	bufferPtr := dl.recvBufferPool.Get().(*[]byte)
+	buffer := *bufferPtr
 
 	// Setup iovec using buffer directly
 	var iovec syscall.Iovec
@@ -131,9 +134,11 @@ func (dl *dialer) submitRecvRequest() {
 	iovec.SetLen(len(buffer))
 
 	// Setup msghdr for UDP (to get source address)
-	var msg syscall.Msghdr
-	var rsa syscall.RawSockaddrAny
-	msg.Name = (*byte)(unsafe.Pointer(&rsa))
+	// Allocate rsa and msg on heap so they persist until completion is processed
+	// The kernel needs these structures to remain valid until the completion is processed
+	rsa := new(syscall.RawSockaddrAny)
+	msg := new(syscall.Msghdr)
+	msg.Name = (*byte)(unsafe.Pointer(rsa))
 	msg.Namelen = uint32(syscall.SizeofSockaddrAny)
 	msg.Iov = &iovec
 	msg.Iovlen = 1
@@ -143,8 +148,9 @@ func (dl *dialer) submitRecvRequest() {
 
 	// Create completion info
 	compInfo := &recvCompletionInfo{
-		buffer: buffer,
+		buffer: bufferPtr,
 		rsa:    rsa,
+		msg:    msg,
 	}
 
 	// Store completion info in map
@@ -170,12 +176,13 @@ func (dl *dialer) submitRecvRequest() {
 		dl.recvCompLock.Lock()
 		delete(dl.recvCompletions, requestID)
 		dl.recvCompLock.Unlock()
-		dl.recvBufferPool.Put(buffer)
+		dl.recvBufferPool.Put(bufferPtr)
 		return
 	}
 
 	// Prepare recvmsg operation
-	sqe.PrepareRecvMsg(dl.recvRingFd, &msg, 0)
+	// Pass pointer to heap-allocated msg so it stays valid until completion
+	sqe.PrepareRecvMsg(dl.recvRingFd, msg, 0)
 	sqe.SetData64(requestID)
 
 	// Submit to ring with retry loop
@@ -199,7 +206,7 @@ func (dl *dialer) submitRecvRequest() {
 		dl.recvCompLock.Lock()
 		delete(dl.recvCompletions, requestID)
 		dl.recvCompLock.Unlock()
-		dl.recvBufferPool.Put(buffer)
+		dl.recvBufferPool.Put(bufferPtr)
 		return
 	}
 }
@@ -239,13 +246,14 @@ func (dl *dialer) lookupAndRemoveRecvCompletion(cqe *giouring.CompletionQueueEve
 
 // processRecvCompletion processes a single completion
 func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.CompletionQueueEvent, compInfo *recvCompletionInfo) {
-	buffer := compInfo.buffer
+	bufferPtr := compInfo.buffer
+	buffer := *bufferPtr
 
 	// Check for receive errors
 	if cqe.Res < 0 {
 		// Dialer doesn't have log method, skip logging
 		ring.CQESeen(cqe)
-		dl.recvBufferPool.Put(buffer)
+		dl.recvBufferPool.Put(bufferPtr)
 		return
 	}
 
@@ -253,7 +261,7 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 	bytesReceived := int(cqe.Res)
 	if bytesReceived == 0 {
 		ring.CQESeen(cqe)
-		dl.recvBufferPool.Put(buffer)
+		dl.recvBufferPool.Put(bufferPtr)
 		return
 	}
 
@@ -261,7 +269,18 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 	addr := dl.remoteAddr
 	if addr == nil {
 		// Fallback to extracting from RSA if remoteAddr not set
-		addr = extractAddrFromRSA(&compInfo.rsa)
+		if compInfo.rsa == nil {
+			// RSA is nil - this shouldn't happen, but handle gracefully
+			// For dialer, we can continue without address if remoteAddr is set
+			ring.CQESeen(cqe)
+			return
+		}
+		addr = extractAddrFromRSA(compInfo.rsa)
+		if addr == nil {
+			// Failed to extract address - can't process packet without address
+			ring.CQESeen(cqe)
+			return
+		}
 	}
 
 	// Use buffer directly
@@ -271,7 +290,7 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 	p, err := packet.NewPacketFromData(addr, bufferSlice)
 
 	// Return buffer to pool
-	dl.recvBufferPool.Put(buffer)
+	dl.recvBufferPool.Put(bufferPtr)
 
 	if err != nil {
 		// Deserialization error - skip logging (no log method)
@@ -280,16 +299,31 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 	}
 
 	// Route directly (bypass channels) - Channel Bypass Optimization
-	// For dialer, we have a single connection
+	// For dialer, we need to handle handshake packets before connection is established
+	if p.Header().IsControlPacket && p.Header().ControlType == packet.CTRLTYPE_HANDSHAKE {
+		// Handshake packet - route to handleHandshake (non-blocking channel)
+		// This is needed during connection establishment before conn is set
+		select {
+		case dl.rcvQueue <- p:
+			// Success - handshake packet queued
+		default:
+			// Queue full - drop packet (shouldn't happen with reasonable buffer size)
+			p.Decommission()
+		}
+		ring.CQESeen(cqe)
+		return // Always resubmit to maintain constant pending count
+	}
+
+	// For non-handshake packets, route to connection if it exists
 	dl.connLock.RLock()
 	conn := dl.conn
 	dl.connLock.RUnlock()
 
 	if conn == nil {
-		// No connection yet - drop packet
+		// No connection yet and not a handshake packet - drop it
 		ring.CQESeen(cqe)
 		p.Decommission()
-		return
+		return // Always resubmit to maintain constant pending count
 	}
 
 	// Direct call to handlePacket (blocking mutex - never drops packets)
@@ -373,15 +407,17 @@ func (dl *dialer) submitRecvRequestBatch(count int) {
 	var requestIDs []uint64
 
 	for i := 0; i < count; i++ {
-		buffer := dl.recvBufferPool.Get().([]byte)
+		bufferPtr := dl.recvBufferPool.Get().(*[]byte)
+		buffer := *bufferPtr
 
 		var iovec syscall.Iovec
 		iovec.Base = &buffer[0]
 		iovec.SetLen(len(buffer))
 
-		var msg syscall.Msghdr
-		var rsa syscall.RawSockaddrAny
-		msg.Name = (*byte)(unsafe.Pointer(&rsa))
+		// Allocate rsa and msg on heap so they persist until completion is processed
+		rsa := new(syscall.RawSockaddrAny)
+		msg := new(syscall.Msghdr)
+		msg.Name = (*byte)(unsafe.Pointer(rsa))
 		msg.Namelen = uint32(syscall.SizeofSockaddrAny)
 		msg.Iov = &iovec
 		msg.Iovlen = 1
@@ -389,8 +425,9 @@ func (dl *dialer) submitRecvRequestBatch(count int) {
 		requestID := dl.recvRequestID.Add(1)
 
 		compInfo := &recvCompletionInfo{
-			buffer: buffer,
+			buffer: bufferPtr,
 			rsa:    rsa,
+			msg:    msg,
 		}
 
 		dl.recvCompLock.Lock()
@@ -413,11 +450,12 @@ func (dl *dialer) submitRecvRequestBatch(count int) {
 			dl.recvCompLock.Lock()
 			delete(dl.recvCompletions, requestID)
 			dl.recvCompLock.Unlock()
-			dl.recvBufferPool.Put(buffer)
+			dl.recvBufferPool.Put(bufferPtr)
 			break
 		}
 
-		sqe.PrepareRecvMsg(dl.recvRingFd, &msg, 0)
+		// Pass pointer to heap-allocated msg so it stays valid until completion
+		sqe.PrepareRecvMsg(dl.recvRingFd, msg, 0)
 		sqe.SetData64(requestID)
 
 		sqes = append(sqes, sqe)

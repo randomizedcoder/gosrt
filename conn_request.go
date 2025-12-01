@@ -70,6 +70,17 @@ type connRequest struct {
 }
 
 func newConnRequest(ln *listener, p packet.Packet) *connRequest {
+	if p == nil {
+		ln.log("handshake:recv:error", func() string { return "packet is nil" })
+		return nil
+	}
+
+	header := p.Header()
+	if header == nil {
+		ln.log("handshake:recv:error", func() string { return "packet header is nil" })
+		return nil
+	}
+
 	cif := &packet.CIFHandshake{}
 
 	err := p.UnmarshalCIF(cif)
@@ -84,11 +95,11 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 
 	// Assemble the response (4.3.1.  Caller-Listener Handshake)
 
-	p.Header().ControlType = packet.CTRLTYPE_HANDSHAKE
-	p.Header().SubType = 0
-	p.Header().TypeSpecific = 0
-	p.Header().Timestamp = uint32(time.Since(ln.start).Microseconds())
-	p.Header().DestinationSocketId = cif.SRTSocketId
+	header.ControlType = packet.CTRLTYPE_HANDSHAKE
+	header.SubType = 0
+	header.TypeSpecific = 0
+	header.Timestamp = uint32(time.Since(ln.start).Microseconds())
+	header.DestinationSocketId = cif.SRTSocketId
 
 	cif.PeerIP.FromNetAddr(ln.addr)
 
@@ -104,7 +115,15 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		//cif.maxTransmissionUnitSize = 0
 		//cif.maxFlowWindowSize = 0
 		//cif.SRTSocketId = 0
-		cif.SynCookie = ln.syncookie.Get(p.Header().Addr.String())
+		if ln.syncookie == nil {
+			ln.log("handshake:recv:error", func() string { return "syncookie is nil" })
+			return nil
+		}
+		if header.Addr == nil {
+			ln.log("handshake:recv:error", func() string { return "packet address is nil" })
+			return nil
+		}
+		cif.SynCookie = ln.syncookie.Get(header.Addr.String())
 
 		p.MarshalCIF(cif)
 
@@ -114,7 +133,15 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		ln.send(p)
 	} else if cif.HandshakeType == packet.HSTYPE_CONCLUSION {
 		// Verify the SYN cookie
-		if !ln.syncookie.Verify(cif.SynCookie, p.Header().Addr.String()) {
+		if ln.syncookie == nil {
+			ln.log("handshake:recv:error", func() string { return "syncookie is nil" })
+			return nil
+		}
+		if header.Addr == nil {
+			ln.log("handshake:recv:error", func() string { return "packet address is nil" })
+			return nil
+		}
+		if !ln.syncookie.Verify(cif.SynCookie, header.Addr.String()) {
 			cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 			ln.log("handshake:recv:error", func() string { return "invalid SYN cookie" })
 			p.MarshalCIF(cif)
