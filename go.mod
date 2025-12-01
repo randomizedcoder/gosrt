@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c
+	github.com/google/btree v1.1.3
 	github.com/pkg/profile v1.7.0
 	github.com/randomizedcoder/giouring v1.0.1
 	github.com/stretchr/testify v1.11.1
@@ -13,7 +14,6 @@ require (
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/felixge/fgprof v0.9.5 // indirect
-	github.com/google/btree v1.1.3 // indirect
 	github.com/google/pprof v0.0.0-20251114195745-4902fdda35c8 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
