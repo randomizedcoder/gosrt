@@ -20,7 +20,7 @@ type ReceiveConfig struct {
 	OnSendNAK              func(list []circular.Number)
 	OnDeliver              func(p packet.Packet)
 	PacketReorderAlgorithm string // "list" (default) or "btree"
-	BTreeDegree            int     // B-tree degree (default: 32, only used if PacketReorderAlgorithm == "btree")
+	BTreeDegree            int    // B-tree degree (default: 32, only used if PacketReorderAlgorithm == "btree")
 }
 
 // receiver implements the Receiver interface
@@ -267,53 +267,78 @@ func (r *receiver) Push(pkt packet.Packet) {
 }
 
 func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
-	r.lock.Lock()
-	defer r.lock.Unlock()
+	// Phase 1: Read-only work with read lock (allows concurrent Push() operations)
+	r.lock.RLock()
 
-	// 4.8.1. Packet Acknowledgement (ACKs, ACKACKs)
+	// Early return check (read-only)
+	needLiteACK := false
 	if now-r.lastPeriodicACK < r.periodicACKInterval {
 		if r.nPackets >= 64 {
-			lite = true // Send light ACK
+			needLiteACK = true // Will send light ACK, but can't update nPackets yet
 		} else {
-			return
+			r.lock.RUnlock()
+			return // Early return - no ACK needed
 		}
 	}
 
+	// Read-only iteration (read lock allows concurrent Push() operations)
 	minPktTsbpdTime, maxPktTsbpdTime := uint64(0), uint64(0)
 	ackSequenceNumber := r.lastACKSequenceNumber
 
 	// Get first packet for initial timestamps
 	minPkt := r.packetStore.Min()
 	if minPkt != nil {
-		minPktTsbpdTime = minPkt.Header().PktTsbpdTime
-		maxPktTsbpdTime = minPkt.Header().PktTsbpdTime
+		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+		minH := minPkt.Header()
+		minPktTsbpdTime = minH.PktTsbpdTime
+		maxPktTsbpdTime = minH.PktTsbpdTime
 	}
 
 	// Find the sequence number up until we have all in a row.
 	// Where the first gap is (or at the end of the list) is where we can ACK to.
-
 	r.packetStore.Iterate(func(p packet.Packet) bool {
+		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+		h := p.Header()
+
 		// Skip packets that we already ACK'd.
-		if p.Header().PacketSequenceNumber.Lte(ackSequenceNumber) {
+		if h.PacketSequenceNumber.Lte(ackSequenceNumber) {
 			return true // Continue
 		}
 
 		// If there are packets that should have been delivered by now, move forward.
-		if p.Header().PktTsbpdTime <= now {
-			ackSequenceNumber = p.Header().PacketSequenceNumber
+		if h.PktTsbpdTime <= now {
+			ackSequenceNumber = h.PacketSequenceNumber
 			return true // Continue
 		}
 
 		// Check if the packet is the next in the row.
-		if p.Header().PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
-			ackSequenceNumber = p.Header().PacketSequenceNumber
-			maxPktTsbpdTime = p.Header().PktTsbpdTime
+		if h.PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
+			ackSequenceNumber = h.PacketSequenceNumber
+			maxPktTsbpdTime = h.PktTsbpdTime
 			return true // Continue
 		}
 
 		return false // Stop iteration
 	})
 
+	// Release read lock before acquiring write lock (optimization: minimize lock contention)
+	r.lock.RUnlock()
+
+	// Phase 2: Write updates with write lock (brief - only for field updates)
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	// Re-check conditions (may have changed between read and write lock)
+	// If interval check still applies and we don't need lite ACK, return early
+	if now-r.lastPeriodicACK < r.periodicACKInterval {
+		if !needLiteACK {
+			return // Early return - no update needed
+		}
+		// Lite ACK needed, continue to update fields
+		lite = true
+	}
+
+	// Update fields (write lock held - brief operation)
 	ok = true
 	sequenceNumber = ackSequenceNumber.Inc()
 
@@ -346,20 +371,23 @@ func (r *receiver) periodicNAK(now uint64) []circular.Number {
 	// Send a NAK for all gaps.
 	// Not all gaps might get announced because the size of the NAK packet is limited.
 	r.packetStore.Iterate(func(p packet.Packet) bool {
+		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+		h := p.Header()
+
 		// Skip packets that we already ACK'd.
-		if p.Header().PacketSequenceNumber.Lte(ackSequenceNumber) {
+		if h.PacketSequenceNumber.Lte(ackSequenceNumber) {
 			return true // Continue
 		}
 
 		// If this packet is not in sequence, we stop here and report that gap.
-		if !p.Header().PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
+		if !h.PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
 			nackSequenceNumber := ackSequenceNumber.Inc()
 
 			list = append(list, nackSequenceNumber)
-			list = append(list, p.Header().PacketSequenceNumber.Dec())
+			list = append(list, h.PacketSequenceNumber.Dec())
 		}
 
-		ackSequenceNumber = p.Header().PacketSequenceNumber
+		ackSequenceNumber = h.PacketSequenceNumber
 		return true // Continue
 	})
 
@@ -381,13 +409,17 @@ func (r *receiver) Tick(now uint64) {
 	r.lock.Lock()
 	removed := r.packetStore.RemoveAll(
 		func(p packet.Packet) bool {
-			return p.Header().PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && p.Header().PktTsbpdTime <= now
+			// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+			h := p.Header()
+			return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
 		},
 		func(p packet.Packet) {
 			r.statistics.PktBuf--
 			r.statistics.ByteBuf -= p.Len()
 
-			r.lastDeliveredSequenceNumber = p.Header().PacketSequenceNumber
+			// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+			h := p.Header()
+			r.lastDeliveredSequenceNumber = h.PacketSequenceNumber
 
 			r.deliver(p)
 		},

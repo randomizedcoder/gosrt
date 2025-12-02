@@ -79,6 +79,8 @@ client:
 client-debug:
 	cd contrib/client && CGO_ENABLED=0 go build -o client-debug -a
 
+client-all: client client-debug
+
 ## server: Build import binary
 server:
 	cd contrib/server && CGO_ENABLED=0 go build -o server -ldflags="-s -w" -a
@@ -86,6 +88,11 @@ server:
 ## server-debug: Build server binary with debug symbols
 server-debug:
 	cd contrib/server && CGO_ENABLED=0 go build -o server-debug -a
+
+server-profile:
+	go tool pprof -http=0.0.0.0:8080 ./contrib/server/server-debug cpu.pprof
+
+server-all: server server-debug
 
 ## coverage: Generate code coverage analysis
 coverage:

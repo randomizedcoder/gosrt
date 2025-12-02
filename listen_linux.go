@@ -439,13 +439,15 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	ln.recvBufferPool.Put(bufferPtr)
 
 	// Route directly (bypass channels) - Channel Bypass Optimization
-	socketId := p.Header().DestinationSocketId
+	// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+	h := p.Header()
+	socketId := h.DestinationSocketId
 
 	// Handle handshake packets (DestinationSocketId == 0)
 	if socketId == 0 {
-		if p.Header().IsControlPacket && p.Header().ControlType == packet.CTRLTYPE_HANDSHAKE {
+		if h.IsControlPacket && h.ControlType == packet.CTRLTYPE_HANDSHAKE {
 			ln.log("listen:recv:handshake", func() string {
-				return fmt.Sprintf("received handshake packet from %s", p.Header().Addr.String())
+				return fmt.Sprintf("received handshake packet from %s", h.Addr.String())
 			})
 			select {
 			case ln.backlog <- p:
@@ -488,10 +490,10 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 
 	// Validate peer address (if required)
 	if !ln.config.AllowPeerIpChange {
-		if p.Header().Addr.String() != conn.RemoteAddr().String() {
+		if h.Addr.String() != conn.RemoteAddr().String() {
 			// Wrong peer - drop packet
 			ln.log("listen:recv:error", func() string {
-				return fmt.Sprintf("packet from wrong peer: expected %s, got %s", conn.RemoteAddr().String(), p.Header().Addr.String())
+				return fmt.Sprintf("packet from wrong peer: expected %s, got %s", conn.RemoteAddr().String(), h.Addr.String())
 			})
 			ring.CQESeen(cqe)
 			p.Decommission()

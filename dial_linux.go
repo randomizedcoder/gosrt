@@ -299,8 +299,11 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 	}
 
 	// Route directly (bypass channels) - Channel Bypass Optimization
+	// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+	h := p.Header()
+
 	// For dialer, we need to handle handshake packets before connection is established
-	if p.Header().IsControlPacket && p.Header().ControlType == packet.CTRLTYPE_HANDSHAKE {
+	if h.IsControlPacket && h.ControlType == packet.CTRLTYPE_HANDSHAKE {
 		// Handshake packet - route to handleHandshake (non-blocking channel)
 		// This is needed during connection establishment before conn is set
 		select {
