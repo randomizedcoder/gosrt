@@ -306,11 +306,44 @@ The statistics (`PktSentNAK`, `PktSentACK`) are incremented **BEFORE** the packe
 - If packets are being dropped in `sendIoUring()`, the peer never receives them
 - No packets received → `handlePacket()` never called → timer never reset → timeout
 
-**Verification Steps**:
-1. **Check logs for send errors** - Look for `connection:send:error` or `packet:send:error` messages
-2. **Check io_uring ring status** - Is the ring full? Check ring size vs. submission rate
-3. **Verify ring initialization** - Is `c.sendRing != nil` when sending?
-4. **Check marshalling** - Are ACK/NAK packets failing to marshal?
+**Serialization/Deserialization Analysis**:
+
+**Good News**: ✅ Tests exist and pass for ACK/NAK serialization:
+- `TestFullACK`, `TestSmallACK`, `TestLiteACK` - Test ACK CIF marshalling/unmarshalling
+- `TestNAK` - Test NAK CIF marshalling/unmarshalling
+- **NEW**: `TestFullACKPacketRoundTrip` - Tests full packet (header + CIF) round-trip for ACK
+- **NEW**: `TestFullNAKPacketRoundTrip` - Tests full packet (header + CIF) round-trip for NAK
+
+**Test Results**: ✅ **All tests pass** - Serialization/deserialization is working correctly
+
+The new round-trip tests verify:
+1. Create packet with header (ControlType, Timestamp, DestinationSocketId, etc.)
+2. Marshal CIF into packet payload
+3. Marshal full packet (header + payload) to bytes
+4. Unmarshal bytes back to packet (header + payload)
+5. Unmarshal CIF from packet payload
+6. Verify everything matches
+
+**Conclusion**: Serialization/deserialization is **NOT the issue**. The problem must be elsewhere.
+
+**However**: ⚠️ **Statistics are incremented BEFORE deserialization**
+
+In `handleACK()` and `handleNAK()`:
+- `pktRecvACK++` / `pktRecvNAK++` incremented at line 908/943
+- `UnmarshalCIF()` called at line 913/948
+- If deserialization fails, packet is logged as invalid but statistics already incremented
+
+**Critical Finding**: If packets are received but fail to deserialize:
+- `PktRecvNAK` would still increment (statistics incremented before deserialization)
+- `PktRecvInvalid` would also increment
+- But user sees `PktRecvNAK: 0`, suggesting packets are NOT being received at all
+
+**Next Steps**:
+1. **Check logs for parse errors** - Look for `listen:recv:parse:error` or `dial:recv:parse:error` messages
+2. **Check logs for send errors** - Look for `connection:send:error` or `packet:send:error` messages
+3. **Check logs for invalid packets** - Look for `control:recv:ACK:error` or `control:recv:NAK:error` messages
+4. **Check packet dumps** - Enable `control:send:NAK:dump` and `control:recv:NAK:dump` logging to compare sent vs received
+5. **Verify packets are actually sent** - Check if `sendIoUring()` is successfully submitting packets to the ring
 
 **Solutions**:
 1. **Fix statistics** - Only increment after successful send (or move increment to completion handler)

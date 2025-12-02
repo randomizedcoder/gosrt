@@ -465,6 +465,103 @@ func TestLiteACKString(t *testing.T) {
 	require.Greater(t, len(cif.String()), 0)
 }
 
+// TestFullACKPacketRoundTrip tests the full packet round-trip for ACK packets
+// This verifies that a packet with header + CIF can be marshalled and unmarshalled correctly
+func TestFullACKPacketRoundTrip(t *testing.T) {
+	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	// Create ACK packet as it would be created in sendACK()
+	p := NewPacket(addr)
+	p.Header().IsControlPacket = true
+	p.Header().ControlType = CTRLTYPE_ACK
+	p.Header().Timestamp = 12345678
+	p.Header().DestinationSocketId = 0x12345678
+	p.Header().TypeSpecific = 42
+
+	cif := &CIFACK{
+		IsLite:                      false,
+		IsSmall:                     false,
+		LastACKPacketSequenceNumber: circular.New(100, MAX_SEQUENCENUMBER),
+		RTT:                         38473,
+		RTTVar:                      9084,
+		AvailableBufferSize:         48533,
+		PacketsReceivingRate:        20,
+		EstimatedLinkCapacity:       0,
+		ReceivingRate:               73637,
+	}
+
+	err := p.MarshalCIF(cif)
+	require.NoError(t, err)
+
+	// Marshal full packet
+	var buf bytes.Buffer
+	err = p.Marshal(&buf)
+	require.NoError(t, err)
+
+	// Unmarshal full packet
+	p2, err := NewPacketFromData(addr, buf.Bytes())
+	require.NoError(t, err)
+
+	// Verify header
+	require.True(t, p2.Header().IsControlPacket)
+	require.Equal(t, CTRLTYPE_ACK, p2.Header().ControlType)
+	require.Equal(t, uint32(12345678), p2.Header().Timestamp)
+	require.Equal(t, uint32(0x12345678), p2.Header().DestinationSocketId)
+	require.Equal(t, uint32(42), p2.Header().TypeSpecific)
+
+	// Verify CIF
+	cif2 := &CIFACK{}
+	err = p2.UnmarshalCIF(cif2)
+	require.NoError(t, err)
+	require.Equal(t, cif, cif2)
+}
+
+// TestFullNAKPacketRoundTrip tests the full packet round-trip for NAK packets
+// This verifies that a packet with header + CIF can be marshalled and unmarshalled correctly
+func TestFullNAKPacketRoundTrip(t *testing.T) {
+	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	// Create NAK packet as it would be created in sendNAK()
+	p := NewPacket(addr)
+	p.Header().IsControlPacket = true
+	p.Header().ControlType = CTRLTYPE_NAK
+	p.Header().Timestamp = 87654321
+	p.Header().DestinationSocketId = 0x87654321
+
+	cif := &CIFNAK{
+		LostPacketSequenceNumber: []circular.Number{
+			circular.New(42, MAX_SEQUENCENUMBER),
+			circular.New(42, MAX_SEQUENCENUMBER),
+			circular.New(45, MAX_SEQUENCENUMBER),
+			circular.New(49, MAX_SEQUENCENUMBER),
+		},
+	}
+
+	err := p.MarshalCIF(cif)
+	require.NoError(t, err)
+
+	// Marshal full packet
+	var buf bytes.Buffer
+	err = p.Marshal(&buf)
+	require.NoError(t, err)
+
+	// Unmarshal full packet
+	p2, err := NewPacketFromData(addr, buf.Bytes())
+	require.NoError(t, err)
+
+	// Verify header
+	require.True(t, p2.Header().IsControlPacket)
+	require.Equal(t, CTRLTYPE_NAK, p2.Header().ControlType)
+	require.Equal(t, uint32(87654321), p2.Header().Timestamp)
+	require.Equal(t, uint32(0x87654321), p2.Header().DestinationSocketId)
+
+	// Verify CIF
+	cif2 := &CIFNAK{}
+	err = p2.UnmarshalCIF(cif2)
+	require.NoError(t, err)
+	require.Equal(t, cif, cif2)
+}
+
 func TestNAK(t *testing.T) {
 	cif := &CIFNAK{
 		LostPacketSequenceNumber: []circular.Number{
