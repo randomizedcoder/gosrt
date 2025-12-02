@@ -128,8 +128,11 @@ func main() {
 	default:
 	}
 
+	// Store profile so we can stop it explicitly on signal
+	var prof interface{ Stop() }
 	if p != nil {
-		defer profile.Start(profile.ProfilePath("."), profile.NoShutdownHook, p).Stop()
+		prof = profile.Start(profile.ProfilePath("."), profile.NoShutdownHook, p)
+		defer prof.Stop()
 	}
 
 	var logger srt.Logger
@@ -190,6 +193,11 @@ func main() {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, os.Interrupt)
 		<-quit
+
+		// Explicitly stop profiling before exiting to ensure profile is written
+		if prof != nil {
+			prof.Stop()
+		}
 
 		doneChan <- nil
 	}()
