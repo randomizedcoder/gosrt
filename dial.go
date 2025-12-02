@@ -215,6 +215,9 @@ func Dial(network, address string, config Config) (Conn, error) {
 	dl.log("dial", func() string { return "waiting for response" })
 
 	timer := time.AfterFunc(dl.config.ConnectionTimeout, func() {
+		dl.log("connection:close:reason", func() string {
+			return fmt.Sprintf("connection timeout: server didn't respond within %s", dl.config.ConnectionTimeout)
+		})
 		dl.connChan <- connResponse{
 			conn: nil,
 			err:  fmt.Errorf("connection timeout. server didn't respond"),
@@ -581,13 +584,17 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 		}
 	default:
 		var err error
+		var reason string
 
 		if cif.HandshakeType.IsRejection() {
+			reason = fmt.Sprintf("connection rejected: %s", cif.HandshakeType.String())
 			err = fmt.Errorf("connection rejected: %s", cif.HandshakeType.String())
 		} else {
+			reason = fmt.Sprintf("unsupported handshake: %s", cif.HandshakeType.String())
 			err = fmt.Errorf("unsupported handshake: %s", cif.HandshakeType.String())
 		}
 
+		dl.log("connection:close:reason", func() string { return reason })
 		dl.connChan <- connResponse{
 			conn: nil,
 			err:  err,

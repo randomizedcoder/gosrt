@@ -353,6 +353,9 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	c.readQueue = make(chan packet.Packet, readQueueSize)
 
 	c.peerIdleTimeout = time.AfterFunc(c.config.PeerIdleTimeout, func() {
+		c.log("connection:close:reason", func() string {
+			return fmt.Sprintf("peer idle timeout: no data received from peer for %s", c.config.PeerIdleTimeout)
+		})
 		c.log("connection:close", func() string {
 			return fmt.Sprintf("no more data received from peer for %s. shutting down", c.config.PeerIdleTimeout)
 		})
@@ -890,6 +893,9 @@ func (c *srtConn) handleShutdown(p packet.Packet) {
 	c.statistics.pktRecvShutdown++
 	c.statisticsLock.Unlock()
 
+	c.log("connection:close:reason", func() string {
+		return "shutdown packet received from peer"
+	})
 	go c.close()
 }
 
@@ -1014,6 +1020,9 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 	// Check for version
 	if cif.SRTVersion < 0x010200 || cif.SRTVersion >= 0x010300 {
 		c.log("control:recv:HSReq:error", func() string { return fmt.Sprintf("unsupported version: %#08x", cif.SRTVersion) })
+		c.log("connection:close:reason", func() string {
+			return fmt.Sprintf("handshake error: unsupported SRT version %#08x", cif.SRTVersion)
+		})
 		c.close()
 		return
 	}
@@ -1021,6 +1030,9 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 	// Check the required SRT flags
 	if !cif.SRTFlags.TSBPDSND {
 		c.log("control:recv:HSRes:error", func() string { return "TSBPDSND flag must be set" })
+		c.log("connection:close:reason", func() string {
+			return "handshake error: missing required flag TSBPDSND"
+		})
 		c.close()
 
 		return
@@ -1028,6 +1040,9 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 
 	if !cif.SRTFlags.TLPKTDROP {
 		c.log("control:recv:HSRes:error", func() string { return "TLPKTDROP flag must be set" })
+		c.log("connection:close:reason", func() string {
+			return "handshake error: missing required flag TLPKTDROP"
+		})
 		c.close()
 
 		return
@@ -1035,6 +1050,9 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 
 	if !cif.SRTFlags.CRYPT {
 		c.log("control:recv:HSRes:error", func() string { return "CRYPT flag must be set" })
+		c.log("connection:close:reason", func() string {
+			return "handshake error: missing required flag CRYPT"
+		})
 		c.close()
 
 		return
@@ -1042,6 +1060,9 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 
 	if !cif.SRTFlags.REXMITFLG {
 		c.log("control:recv:HSRes:error", func() string { return "REXMITFLG flag must be set" })
+		c.log("connection:close:reason", func() string {
+			return "handshake error: missing required flag REXMITFLG"
+		})
 		c.close()
 
 		return
@@ -1057,12 +1078,18 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 	// These flag was introduced in HSv5 and should not be set in HSv4
 	if cif.SRTFlags.STREAM {
 		c.log("control:recv:HSReq:error", func() string { return "STREAM flag is set" })
+		c.log("connection:close:reason", func() string {
+			return "handshake error: invalid flag STREAM (HSv4 only, flag is HSv5 only)"
+		})
 		c.close()
 		return
 	}
 
 	if cif.SRTFlags.PACKET_FILTER {
 		c.log("control:recv:HSReq:error", func() string { return "PACKET_FILTER flag is set" })
+		c.log("connection:close:reason", func() string {
+			return "handshake error: invalid flag PACKET_FILTER (HSv4 only, flag is HSv5 only)"
+		})
 		c.close()
 		return
 	}
@@ -1106,6 +1133,9 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 		// Check for version
 		if cif.SRTVersion < 0x010200 || cif.SRTVersion >= 0x010300 {
 			c.log("control:recv:HSRes:error", func() string { return fmt.Sprintf("unsupported version: %#08x", cif.SRTVersion) })
+			c.log("connection:close:reason", func() string {
+				return fmt.Sprintf("handshake error: unsupported SRT version %#08x", cif.SRTVersion)
+			})
 			c.close()
 			return
 		}
@@ -1116,6 +1146,9 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 		// Check the required SRT flags
 		if !cif.SRTFlags.TSBPDRCV {
 			c.log("control:recv:HSRes:error", func() string { return "TSBPDRCV flag must be set" })
+			c.log("connection:close:reason", func() string {
+				return "handshake error: missing required flag TSBPDRCV"
+			})
 			c.close()
 
 			return
@@ -1123,6 +1156,9 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 
 		if !cif.SRTFlags.TLPKTDROP {
 			c.log("control:recv:HSRes:error", func() string { return "TLPKTDROP flag must be set" })
+			c.log("connection:close:reason", func() string {
+				return "handshake error: missing required flag TLPKTDROP"
+			})
 			c.close()
 
 			return
@@ -1130,6 +1166,9 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 
 		if !cif.SRTFlags.CRYPT {
 			c.log("control:recv:HSRes:error", func() string { return "CRYPT flag must be set" })
+			c.log("connection:close:reason", func() string {
+				return "handshake error: missing required flag CRYPT"
+			})
 			c.close()
 
 			return
@@ -1137,6 +1176,9 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 
 		if !cif.SRTFlags.REXMITFLG {
 			c.log("control:recv:HSRes:error", func() string { return "REXMITFLG flag must be set" })
+			c.log("connection:close:reason", func() string {
+				return "handshake error: missing required flag REXMITFLG"
+			})
 			c.close()
 
 			return
@@ -1145,12 +1187,18 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 		// These flag was introduced in HSv5 and should not be set in HSv4
 		if cif.SRTFlags.STREAM {
 			c.log("control:recv:HSReq:error", func() string { return "STREAM flag is set" })
+			c.log("connection:close:reason", func() string {
+				return "handshake error: invalid flag STREAM (HSv4 only, flag is HSv5 only)"
+			})
 			c.close()
 			return
 		}
 
 		if cif.SRTFlags.PACKET_FILTER {
 			c.log("control:recv:HSReq:error", func() string { return "PACKET_FILTER flag is set" })
+			c.log("connection:close:reason", func() string {
+				return "handshake error: invalid flag PACKET_FILTER (HSv4 only, flag is HSv5 only)"
+			})
 			c.close()
 			return
 		}
@@ -1199,6 +1247,9 @@ func (c *srtConn) handleKMRequest(p packet.Packet) {
 		cr, err := crypto.New(int(cif.KLen))
 		if err != nil {
 			c.log("control:recv:KMReq:error", func() string { return fmt.Sprintf("crypto: %s", err) })
+			c.log("connection:close:reason", func() string {
+				return fmt.Sprintf("encryption error: failed to initialize crypto: %s", err)
+			})
 			c.cryptoLock.Unlock()
 			c.close()
 			return
@@ -1279,11 +1330,18 @@ func (c *srtConn) handleKMResponse(p packet.Packet) {
 		c.stopKMRequests()
 
 		if cif.Error != 0 {
-			if cif.Error == packet.KM_NOSECRET {
+			var reason string
+			switch cif.Error {
+			case packet.KM_NOSECRET:
 				c.log("control:recv:KMRes:error", func() string { return "peer didn't enabled encryption" })
-			} else if cif.Error == packet.KM_BADSECRET {
+				reason = "encryption error: peer didn't enable encryption"
+			case packet.KM_BADSECRET:
 				c.log("control:recv:KMRes:error", func() string { return "peer has a different passphrase" })
+				reason = "encryption error: peer has a different passphrase"
+			default:
+				reason = fmt.Sprintf("encryption error: key material error code %d", cif.Error)
 			}
+			c.log("connection:close:reason", func() string { return reason })
 			c.close()
 			return
 		}
@@ -1509,6 +1567,9 @@ func (c *srtConn) sendKMRequest(key packet.PacketEncryption) {
 
 // Close closes the connection.
 func (c *srtConn) Close() error {
+	c.log("connection:close:reason", func() string {
+		return "application requested close"
+	})
 	c.close()
 
 	return nil
