@@ -125,3 +125,24 @@ func (s *Server) defaultHandler(conn Conn) {
 	// Close the incoming connection
 	conn.Close()
 }
+
+// GetConnections returns all active connections from the listener.
+// This is safe to call concurrently and returns a snapshot of connections.
+func (s *Server) GetConnections() []Conn {
+	if s.ln == nil {
+		return nil
+	}
+
+	// Use type assertion to access the internal listener
+	// The listener interface doesn't expose conns, so we need to access it via type assertion
+	// This is safe because we control the implementation
+	type listenerWithConns interface {
+		getConnections() []Conn
+	}
+
+	if ln, ok := s.ln.(listenerWithConns); ok {
+		return ln.getConnections()
+	}
+
+	return nil
+}

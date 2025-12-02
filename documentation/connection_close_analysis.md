@@ -4,41 +4,6 @@
 
 This document analyzes all code paths that lead to connection closure in the GoSRT library, identifies existing logging, and provides recommendations for enabling comprehensive connection close logging.
 
-## Executive Summary
-
-### Key Finding: Timer Reset Logic is Correct ✅
-
-**The `peerIdleTimeout` reset logic is working correctly**:
-- Timer reset happens at the **start** of `handlePacket()` (line 785)
-- **ALL packets** that reach `handlePacket()` reset the timer (data, ACK, NAK, KEEPALIVE, etc.)
-- Timer reset happens **before** any packet filtering or processing
-
-### Root Cause: Network Packet Loss ❌
-
-**The actual problem is network packet loss**:
-- Statistics show: `PktRecvLossRate: 48.58%` (extreme loss rate)
-- NAK packets are being sent but not received: `PktSentNAK: 614117`, `PktRecvNAK: 0`
-- With 2-3% normal loss + bursts + 48% loss rate, it's possible for **ALL packets to be lost for 30 seconds**
-- If no packets are received, `handlePacket()` is never called, timer is never reset → timeout
-
-### Why This Happens
-
-**One-way packet loss scenario**:
-1. Server sends data packets at 40 Mb/s
-2. Some data packets are lost (2-3% + bursts)
-3. Client receives some packets → Sends ACK/NAK
-4. **Client's ACK/NAK packets are lost** (one-way loss)
-5. Server doesn't receive ACK/NAK → No packets received for 30s → Timeout
-
-**The timer reset logic is correct** - the problem is that packets never reach the code due to network loss.
-
-### Recommended Solutions
-
-1. **Increase timeout for high-loss networks** - Change `PeerIdleTimeout` from 30s to 60-90s
-2. **Implement proactive keepalive sending** - Send keepalives every 1 second (per SRT spec)
-3. **Investigate network** - 48% packet loss is extreme and needs investigation
-4. **Add diagnostic logging** - Log every packet that reaches `handlePacket()` to verify timer resets
-
 ## Real-World Log Analysis
 
 ### Observed Connection Close Scenarios
@@ -244,6 +209,7 @@ Given that the timer reset logic is correct, if a timeout occurs with active tra
 2. **Ring not initialized** - If `c.sendRing == nil`, `c.send()` drops the packet with error log
 3. **Marshalling failure** - If packet marshalling fails, packet is dropped
 4. **Type assertion failure** - If ring type assertion fails, packet is dropped
+5. **Submit failure** - If `ring.Submit()` fails after retries, packet is dropped
 
 **The Statistics Don't Prove Packets Were Sent**:
 - `PktSentNAK: 614117` means `sendNAK()` was called 614,117 times
@@ -252,61 +218,11 @@ Given that the timer reset logic is correct, if a timeout occurs with active tra
 
 **Verification Needed**:
 - Check logs for `connection:send:error` or `packet:send:error` messages
-- Check if io_uring ring is full (would cause packet drops)
+- Check if io_uring ring is full (ring size vs. submission rate)
 - Verify `c.sendRing != nil` when sending ACK/NAK packets
 - Check if marshalling is failing for ACK/NAK packets
 
-### Verification Needed
-
-To diagnose the actual issue, we need to check:
-
-1. **Are packets being received?** - Check if `handlePacket()` is being called
-   - Add logging: `connection:recv:packet` topic to log every packet received
-2. **Are packets being dropped?** - Check for "unknown socket ID" or parse errors
-   - Already logged: `listen:recv:error` for unknown socket ID
-   - Already logged: `listen:recv:parse:error` for parse errors
-3. **Is traffic bidirectional?** - Check if ACK/NAK packets are being sent/received
-   - Check statistics: `PktSentACK`, `PktRecvACK`, `PktSentNAK`, `PktRecvNAK`
-4. **Network packet loss** - Check statistics for packet loss rates
-   - Check: `PktRecvLoss`, `PktRecvLossRate`
-
-### Root Cause Hypothesis
-
-**Most Likely**: High packet loss (2-3% + bursts) combined with one-way traffic:
-- Server sends data packets → Some lost
-- Client receives some packets → Sends ACK/NAK
-- **Client's ACK/NAK packets are lost** → Server doesn't receive anything for 30s → timeout
-
-**Evidence from logs**:
-- Server stats show: `PktSentNAK: 164915`, `PktRecvNAK: 0` (server sending NAKs, not receiving any)
-- Client stats show: `PktSentNAK: 614117`, `PktRecvNAK: 0` (client sending NAKs, not receiving any)
-- This suggests **NAK packets are being lost** in one direction
-- High packet loss rates: `PktRecvLossRate: 48.58%` (client), indicating severe network issues
-
-**Root Cause Analysis**:
-
-**Critical Discovery**: ⚠️ **Statistics Don't Prove Packets Were Actually Sent**
-
-The statistics (`PktSentNAK`, `PktSentACK`) are incremented **BEFORE** the packet is sent:
-- `sendACK()` increments `pktSentACK++` at line 1454, then calls `c.pop(p)` at line 1457
-- `sendNAK()` increments `pktSentNAK++` at line 1403, then calls `c.pop(p)` at line 1406
-
-**If `c.pop(p)` fails or drops the packet, statistics still increment!**
-
-**Potential Packet Drop Scenarios**:
-1. **io_uring ring full** - `sendIoUring()` retries 3 times, but if ring stays full, packet is dropped (line 202-214)
-2. **Marshalling failure** - Packet is dropped with error log (line 139-146)
-3. **Ring not initialized** - If `c.sendRing == nil`, packet is dropped (line 661-667)
-4. **Type assertion failure** - If ring type assertion fails, packet is dropped (line 126-132)
-5. **Submit failure** - If `ring.Submit()` fails after retries, packet is dropped (line 246+)
-
-**This Explains Everything**:
-- Statistics show `PktSentNAK: 614117` - but this only means `sendNAK()` was called 614,117 times
-- **It does NOT mean 614,117 packets were actually sent to the network**
-- If packets are being dropped in `sendIoUring()`, the peer never receives them
-- No packets received → `handlePacket()` never called → timer never reset → timeout
-
-**Serialization/Deserialization Analysis**:
+### Serialization/Deserialization Analysis
 
 **Good News**: ✅ Tests exist and pass for ACK/NAK serialization:
 - `TestFullACK`, `TestSmallACK`, `TestLiteACK` - Test ACK CIF marshalling/unmarshalling
@@ -345,12 +261,35 @@ In `handleACK()` and `handleNAK()`:
 4. **Check packet dumps** - Enable `control:send:NAK:dump` and `control:recv:NAK:dump` logging to compare sent vs received
 5. **Verify packets are actually sent** - Check if `sendIoUring()` is successfully submitting packets to the ring
 
-**Solutions**:
-1. **Fix statistics** - Only increment after successful send (or move increment to completion handler)
-2. **Increase ring size** - If ring is full, increase `IoUringSendRingSize`
-3. **Add send error monitoring** - Track dropped packets separately from sent packets
-4. **Proactive keepalive sending** - Would help, but only if packets can actually be sent
-5. **Longer timeout** - Increase `PeerIdleTimeout` from 30s to 60s or 90s as temporary workaround
+---
+
+## Recommended Log Topics for Debugging
+
+### For ACK/NAK Packet Debugging
+
+**To track ACK/NAK packet sending:**
+- `control:send:ACK:dump` - ACK packet dump when sending
+- `control:send:ACK:cif` - ACK CIF details when sending
+- `control:send:NAK:dump` - NAK packet dump when sending
+- `control:send:NAK:cif` - NAK CIF details when sending
+- `connection:send:error` - Errors when sending (ring full, submit failure, etc.)
+
+**To track ACK/NAK packet receiving:**
+- `control:recv:ACK:dump` - ACK packet dump when receiving
+- `control:recv:ACK:cif` - ACK CIF details when receiving
+- `control:recv:ACK:error` - ACK deserialization errors
+- `control:recv:NAK:dump` - NAK packet dump when receiving
+- `control:recv:NAK:cif` - NAK CIF details when receiving
+- `control:recv:NAK:error` - NAK deserialization errors
+
+**To track packet parsing errors:**
+- `listen:recv:parse:error` - Packet parsing errors (malformed packets)
+- `listen:recv:error` - Other receive errors (unknown socket ID, wrong peer, etc.)
+
+**Example log topics string:**
+```
+-logtopics "listen:io_uring,listen:recv,listen:recv:parse:error,listen:recv:error,handshake:recv,connection:close,connection:close:reason,connection:send:error,control:send:ACK:dump,control:send:ACK:cif,control:send:NAK:dump,control:send:NAK:cif,control:recv:ACK:dump,control:recv:ACK:cif,control:recv:ACK:error,control:recv:NAK:dump,control:recv:NAK:cif,control:recv:NAK:error"
+```
 
 ---
 
@@ -415,7 +354,7 @@ c.log("connection:close:reason", func() string {
 
 ### 4. Handshake Errors (HSv5) 🤝
 
-**Location**: `connection.go:1158-1205` (`handleHSResponse`)
+**Location**: `connection.go:1118-1204` (`handleHSResponse`)
 
 **Multiple triggers** - All logged with `connection:close:reason`:
 - Unsupported version
@@ -426,15 +365,14 @@ c.log("connection:close:reason", func() string {
 
 ---
 
-### 5. Encryption/Key Material Errors 🔐
+### 5. Encryption Errors 🔐
 
-**Location**: `connection.go:1252-1301` (`handleKMResponse`)
+**Location**: `connection.go:1305-1357` (`handleKMResponse`)
 
 **Multiple triggers** - All logged with `connection:close:reason`:
-- Crypto initialization failure
-- Peer didn't enable encryption (KM_NOSECRET)
-- Peer has different passphrase (KM_BADSECRET)
-- Other key material errors
+- KM_NOSECRET - Peer didn't enable encryption
+- KM_BADSECRET - Peer has different passphrase
+- Other encryption errors
 
 **Status**: ✅ **All logged with explicit reasons**
 
@@ -442,7 +380,7 @@ c.log("connection:close:reason", func() string {
 
 ### 6. Application-Initiated Close 🖱️
 
-**Location**: `connection.go:1511-1514`
+**Location**: `connection.go:1657-1665` (`Close()`)
 
 **Trigger**: Application calls `conn.Close()`
 
@@ -453,13 +391,15 @@ c.log("connection:close:reason", func() string {
 })
 ```
 
+**Log Topic**: `connection:close:reason`
+
 **Status**: ✅ **Logged with explicit reason**
 
 ---
 
-### 7. Connection Timeout (Dialer) ⏱️
+### 7. Dialer Connection Timeout ⏱️
 
-**Location**: `dial.go:217-222`
+**Location**: `dial.go:151-161`
 
 **Trigger**: Server doesn't respond within `ConnectionTimeout`
 
@@ -470,145 +410,57 @@ dl.log("connection:close:reason", func() string {
 })
 ```
 
-**Status**: ✅ **Logged with explicit reason**
-
----
-
-### 8. Handshake Rejection 🤝
-
-**Location**: `dial.go:585-595`
-
-**Trigger**: Server rejects connection or unsupported handshake type
-
-**Current Logging**:
-```go
-dl.log("connection:close:reason", func() string { return reason })
-```
+**Log Topic**: `connection:close:reason`
 
 **Status**: ✅ **Logged with explicit reason**
 
 ---
 
-## Logging Summary
+## Root Cause: Missing Proactive Keepalive Implementation
 
-### Log Topics for Connection Close Debugging
+### Problem Statement
 
-| Topic | Purpose | Status |
-|-------|---------|--------|
-| `connection:close:reason` | Explicit reason for close | ✅ Implemented |
-| `connection:close` | Generic close messages | ✅ Existing |
-| `connection:error` | Error conditions | ✅ Existing |
-| `control:recv:shutdown` | Shutdown packet received | ✅ Existing |
-| `control:recv:HSReq:error` | Handshake request errors | ✅ Existing |
-| `control:recv:HSRes:error` | Handshake response errors | ✅ Existing |
-| `control:recv:KMRes:error` | Key material errors | ✅ Existing |
+**The GoSRT library does not proactively send keepalive packets**, which causes connections to timeout when:
+1. No data packets are being sent for 30 seconds
+2. Network has high packet loss (keepalives get lost)
+3. One side is receive-only (SUBSCRIBE) or send-only (PUBLISH)
 
-### Recommended Server Startup Configuration
+### SRT Specification Requirements
 
-**Minimal set for debugging connection closes:**
+According to the SRT specification (draft-sharabayko-srt-01.txt, section 3.2.3):
+- **Keep-alive control packets are sent after a certain timeout from the last time any packet (Control or Data) was sent**
+- **The default timeout for a keep-alive packet to be sent is 1 second**
 
-```bash
--logtopics "connection:close,connection:close:reason"
-```
+### Current Implementation
 
-**Comprehensive set (includes all close-related topics):**
+**What exists:**
+- `handleKeepAlive()` - Receives and **echoes** keepalive packets
+- `peerIdleTimeout` - Tracks when to close connection if no packets received
+- Timeout reset when packets are received
 
-```bash
--logtopics "connection:close,connection:close:reason,connection:error,control:recv:shutdown,control:recv:HSReq:error,control:recv:HSRes:error,control:recv:KMRes:error"
-```
+**What's missing:**
+- **Proactive keepalive sending** - No code sends keepalives when no packets sent for 1 second
+- **Keepalive timer** - No timer to trigger keepalive sending
 
----
+### Expected Behavior
 
-## Implementation Recommendations
+1. **Track last send time**: Record timestamp when any packet (data or control) is sent
+2. **Send keepalive if idle**: If 1 second passes without sending any packet, send a keepalive
+3. **Reset on any send**: Reset keepalive timer when any packet is sent (data, ACK, NAK, etc.)
 
-### High Priority: Implement Proactive Keepalive Sending
+### Impact on Observed Issues
 
-**Problem**: Connections timeout because keepalives are not sent proactively.
+**SUBSCRIBE connections (receive-only):**
+- Server sends data packets → Client receives → Client sends ACK/NAK
+- If server stops sending data, client stops sending ACK/NAK
+- **Without proactive keepalives**, server doesn't receive anything for 30s → timeout
 
-**Solution**: Add keepalive sending logic to `ticker()` function:
+**PUBLISH connections (send-only):**
+- Client sends data packets → Server receives → Server sends ACK/NAK
+- If client stops sending data, server stops sending ACK/NAK
+- **Without proactive keepalives**, client doesn't receive anything for 30s → timeout
 
-1. **Track last send time**: Add `lastSendTime time.Time` to `srtConn` struct
-2. **Update on send**: Update `lastSendTime` in `pop()` when any packet is sent
-3. **Send keepalive in ticker**: In `ticker()`, check if 1 second has passed since last send, and send keepalive if needed
-
-**Implementation Plan**:
-
-```go
-// In srtConn struct, add:
-lastSendTime time.Time
-keepaliveInterval time.Duration // Default: 1 second
-
-// In pop(), update lastSendTime:
-func (c *srtConn) pop(p packet.Packet) {
-    // ... existing code ...
-    c.lastSendTime = time.Now()
-    c.onSend(p)
-}
-
-// In ticker(), add keepalive sending:
-func (c *srtConn) ticker(ctx context.Context) {
-    ticker := time.NewTicker(c.tick)
-    defer ticker.Stop()
-
-    keepaliveTicker := time.NewTicker(c.keepaliveInterval)
-    defer keepaliveTicker.Stop()
-
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        case t := <-ticker.C:
-            tickTime := uint64(t.Sub(c.start).Microseconds())
-            c.recv.Tick(c.tsbpdTimeBase + tickTime)
-            c.snd.Tick(tickTime)
-        case <-keepaliveTicker.C:
-            // Send keepalive if no packet sent in last interval
-            if time.Since(c.lastSendTime) >= c.keepaliveInterval {
-                c.sendKeepAlive()
-            }
-        }
-    }
-}
-
-// New function to send keepalive:
-func (c *srtConn) sendKeepAlive() {
-    p := packet.NewPacket(c.remoteAddr)
-    p.Header().IsControlPacket = true
-    p.Header().ControlType = packet.CTRLTYPE_KEEPALIVE
-    p.Header().Timestamp = c.getTimestampForPacket()
-    p.Header().DestinationSocketId = c.peerSocketId
-
-    c.log("control:send:keepalive:dump", func() string { return p.Dump() })
-    c.pop(p)
-}
-```
-
-### Medium Priority: Adjust Timeout for High Loss Networks
-
-**Problem**: 30-second timeout may be too short for high packet loss networks (2-3% loss + bursts).
-
-**Solution**:
-- Make `PeerIdleTimeout` configurable (already is)
-- Consider increasing default for high-loss scenarios
-- Or make timeout adaptive based on packet loss rate
-
-### Low Priority: Suppress "Unknown Socket ID" During Shutdown
-
-**Status**: ✅ Already implemented - errors are suppressed during shutdown
-
----
-
-## Testing
-
-After implementing proactive keepalives, test:
-
-1. **SUBSCRIBE connection with no data**: Verify keepalives are sent every 1 second
-2. **PUBLISH connection with no data**: Verify keepalives are sent every 1 second
-3. **High packet loss**: Verify connections stay alive even with 2-3% loss
-4. **Long-running connections**: Verify connections stay open for extended periods
-
----
-
-## Conclusion
-
-The connection close logging is now comprehensive and provides clear reasons for all close scenarios. The **primary issue** is the **missing proactive keepalive implementation**, which causes connections to timeout when no data packets are being sent. Implementing proactive keepalive sending will resolve the majority of unexpected connection closes.
+**High packet loss networks:**
+- Even if keepalives are sent, they may be lost
+- Need more frequent keepalives or longer timeout
+- Current 30s timeout may be too short for high-loss networks

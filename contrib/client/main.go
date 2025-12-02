@@ -165,6 +165,74 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Get config to check for statistics interval
+	config := srt.DefaultConfig()
+	common.ApplyFlagsToConfig(&config)
+
+	// Start periodic statistics printing if enabled
+	if config.StatisticsPrintInterval > 0 {
+		go func() {
+			ticker := time.NewTicker(config.StatisticsPrintInterval)
+			defer ticker.Stop()
+
+			for range ticker.C {
+				var connections []srt.Conn
+
+				// Check if reader is an SRT connection
+				if srtconn, ok := r.(srt.Conn); ok {
+					connections = append(connections, srtconn)
+				}
+
+				// Check if writer is an SRT connection (and not NullWriter)
+				if srtconn, ok := w.(srt.Conn); ok {
+					connections = append(connections, srtconn)
+				}
+
+				if len(connections) == 0 {
+					continue
+				}
+
+				fmt.Fprintf(os.Stderr, "\n=== Connection Statistics (every %s) ===\n", config.StatisticsPrintInterval)
+				fmt.Fprintf(os.Stderr, "Active connections: %d\n\n", len(connections))
+
+				for i, conn := range connections {
+					stats := &srt.Statistics{}
+					conn.Stats(stats)
+
+					remoteAddr := "unknown"
+					if conn.RemoteAddr() != nil {
+						remoteAddr = conn.RemoteAddr().String()
+					}
+
+					connType := "unknown"
+					if i == 0 && len(connections) == 2 {
+						connType = "reader"
+					} else if i == 1 && len(connections) == 2 {
+						connType = "writer"
+					} else if len(connections) == 1 {
+						if _, ok := r.(srt.Conn); ok {
+							connType = "reader"
+						} else {
+							connType = "writer"
+						}
+					}
+
+					fmt.Fprintf(os.Stderr, "Connection %d - %s (SocketID: %#08x, Remote: %s):\n", i+1, connType, conn.SocketId(), remoteAddr)
+					fmt.Fprintf(os.Stderr, "  Accumulated:\n")
+					fmt.Fprintf(os.Stderr, "    PktSent: %d, PktRecv: %d\n", stats.Accumulated.PktSent, stats.Accumulated.PktRecv)
+					fmt.Fprintf(os.Stderr, "    PktSentACK: %d, PktRecvACK: %d\n", stats.Accumulated.PktSentACK, stats.Accumulated.PktRecvACK)
+					fmt.Fprintf(os.Stderr, "    PktSentNAK: %d, PktRecvNAK: %d\n", stats.Accumulated.PktSentNAK, stats.Accumulated.PktRecvNAK)
+					fmt.Fprintf(os.Stderr, "    PktRecvLoss: %d, PktRecvLossRate: %.2f%%\n", stats.Accumulated.PktRecvLoss, stats.Instantaneous.PktRecvLossRate)
+					fmt.Fprintf(os.Stderr, "  Instantaneous:\n")
+					fmt.Fprintf(os.Stderr, "    MbpsSentRate: %.2f, MbpsRecvRate: %.2f\n", stats.Instantaneous.MbpsSentRate, stats.Instantaneous.MbpsRecvRate)
+					fmt.Fprintf(os.Stderr, "    MsRTT: %.2f\n", stats.Instantaneous.MsRTT)
+					fmt.Fprintf(os.Stderr, "\n")
+				}
+				fmt.Fprintf(os.Stderr, "==========================================\n\n")
+			}
+		}()
+	}
+
 	doneChan := make(chan error)
 
 	go func() {

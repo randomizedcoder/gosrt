@@ -68,6 +68,9 @@ var (
 	IoUringRecvRingSize       = flag.Int("iouringrecvringsize", 0, "Size of the io_uring receive ring (must be power of 2, 64-32768)")
 	IoUringRecvInitialPending = flag.Int("iouringrecvinitialpending", 0, "Initial number of pending receive requests at startup (default: ring size)")
 	IoUringRecvBatchSize      = flag.Int("iouringrecvbatchsize", 0, "Batch size for resubmitting receive requests after completions (default: 256)")
+
+	// Statistics configuration flags
+	StatisticsPrintInterval = flag.Duration("statisticsinterval", 0, "Interval for printing connection statistics (e.g., 10s). 0 disables periodic statistics printing")
 )
 
 // ParseFlags parses command-line flags and populates FlagSet map
@@ -225,5 +228,8 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["iouringrecvbatchsize"] {
 		config.IoUringRecvBatchSize = *IoUringRecvBatchSize
+	}
+	if FlagSet["statisticsinterval"] {
+		config.StatisticsPrintInterval = *StatisticsPrintInterval
 	}
 }

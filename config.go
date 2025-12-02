@@ -221,6 +221,11 @@ type Config struct {
 	// Batch size for resubmitting receive requests after completions
 	// Default: 256. Larger batches reduce syscall overhead but increase latency
 	IoUringRecvBatchSize int
+
+	// Statistics print interval for server connections
+	// If > 0, server will periodically print statistics for all active connections
+	// Default: 0 (disabled). Set to e.g. 10s to print statistics every 10 seconds
+	StatisticsPrintInterval time.Duration
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -274,6 +279,7 @@ var defaultConfig Config = Config{
 	IoUringRecvRingSize:       512,
 	IoUringRecvInitialPending: 512,
 	IoUringRecvBatchSize:      256,
+	StatisticsPrintInterval:   0, // Disabled by default
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.

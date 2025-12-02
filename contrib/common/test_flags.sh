@@ -139,9 +139,18 @@ run_test "BTreeDegree flag" "-btreedegree 64" '"BTreeDegree" *: *64' "$CLIENT_BI
 # Test 16: PacketReorderAlgorithm and BTreeDegree together
 run_test "PacketReorderAlgorithm and BTreeDegree together" "-packetreorderalgorithm btree -btreedegree 64" '"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *64' "$CLIENT_BIN"
 
-# Test 17: All flag types combined (excluding drifttracer=false due to known limitation)
-# Note: Put packetreorderalgorithm first to ensure it's parsed correctly
-run_test "All flag types" "-packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
+# Test 17: StatisticsPrintInterval flag (10 seconds)
+run_test "StatisticsPrintInterval flag (10s)" "-statisticsinterval 10s" '"StatisticsPrintInterval" *: *10000000000' "$CLIENT_BIN"
+
+# Test 18: StatisticsPrintInterval flag (5 seconds)
+run_test "StatisticsPrintInterval flag (5s)" "-statisticsinterval 5s" '"StatisticsPrintInterval" *: *5000000000' "$CLIENT_BIN"
+
+# Test 19: StatisticsPrintInterval flag (1 minute)
+run_test "StatisticsPrintInterval flag (1m)" "-statisticsinterval 1m" '"StatisticsPrintInterval" *: *60000000000' "$CLIENT_BIN"
+
+# Test 20: All flag types combined (excluding drifttracer=false due to known limitation)
+# Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
+run_test "All flag types" "-statisticsinterval 10s -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 
 echo ""
 echo "================================"

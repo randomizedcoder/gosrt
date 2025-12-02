@@ -365,6 +365,18 @@ func (ln *listener) handleShutdown(socketId uint32) {
 	ln.conns.Delete(socketId)
 }
 
+// getConnections returns all active connections from the listener.
+// This is safe to call concurrently and returns a snapshot of connections.
+func (ln *listener) getConnections() (connections []Conn) {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn != nil {
+			connections = append(connections, conn)
+		}
+		return true
+	})
+	return
+}
+
 func (ln *listener) isShutdown() bool {
 	ln.shutdownLock.RLock()
 	defer ln.shutdownLock.RUnlock()
