@@ -182,9 +182,12 @@ func (ln *listener) cleanupIoUringRecv() {
 		// Completion handler finished
 	case <-time.After(5 * time.Second):
 		// Timeout - log warning but continue
-		ln.log("listen:io_uring:recv:cleanup", func() string {
-			return "timeout waiting for completion handler"
-		})
+		// Use safe logging (won't panic if logger is closed)
+		if ln.config.Logger != nil {
+			ln.config.Logger.Print("listen:io_uring:recv:cleanup", 0, 2, func() string {
+				return "timeout waiting for completion handler"
+			})
+		}
 	}
 
 	// Close the ring
@@ -463,9 +466,13 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	val, ok := ln.conns.Load(socketId)
 	if !ok {
 		// Unknown destination - drop packet
-		ln.log("listen:recv:error", func() string {
-			return fmt.Sprintf("unknown destination socket ID: %d", socketId)
-		})
+		// During shutdown, connections may be closed before all packets are processed
+		// Only log if not shutting down to avoid noise during graceful shutdown
+		if !ln.isShutdown() {
+			ln.log("listen:recv:error", func() string {
+				return fmt.Sprintf("unknown destination socket ID: %d", socketId)
+			})
+		}
 		ring.CQESeen(cqe)
 		p.Decommission()
 		return // Always resubmit to maintain constant pending count
@@ -746,9 +753,12 @@ func (ln *listener) drainRecvCompletions() {
 		select {
 		case <-timeout.C:
 			// Timeout - give up on remaining completions
-			ln.log("listen:recv:drain", func() string {
-				return "timeout draining receive completions"
-			})
+			// Don't log during shutdown if logger might be closed
+			if !ln.isShutdown() {
+				ln.log("listen:recv:drain", func() string {
+					return "timeout draining receive completions"
+				})
+			}
 			return
 
 		default:
