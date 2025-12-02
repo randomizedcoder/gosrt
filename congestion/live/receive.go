@@ -464,7 +464,9 @@ func (r *receiver) String(t uint64) string {
 
 	r.lock.RLock()
 	r.packetStore.Iterate(func(p packet.Packet) bool {
-		b.WriteString(fmt.Sprintf("   %d @ %d (in %d)\n", p.Header().PacketSequenceNumber.Val(), p.Header().PktTsbpdTime, int64(p.Header().PktTsbpdTime)-int64(t)))
+		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+		h := p.Header()
+		b.WriteString(fmt.Sprintf("   %d @ %d (in %d)\n", h.PacketSequenceNumber.Val(), h.PktTsbpdTime, int64(h.PktTsbpdTime)-int64(t)))
 		return true // Continue
 	})
 	r.lock.RUnlock()

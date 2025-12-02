@@ -80,7 +80,7 @@ func (s *stats) update(n uint64) {
 var (
 	// Client-specific flags
 	from        = flag.String("from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
-	to          = flag.String("to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout)")
+	to          = flag.String("to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout), null (discard output, useful for profiling)")
 	logtopics   = flag.String("logtopics", "", "topics for the log output")
 	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
 	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
@@ -210,6 +210,7 @@ func main() {
 
 	w.Close()
 
+	// Only print writer stats if it's an SRT connection (not NullWriter)
 	if srtconn, ok := w.(srt.Conn); ok {
 		stats := &srt.Statistics{}
 		srtconn.Stats(stats)
@@ -220,6 +221,9 @@ func main() {
 		} else {
 			fmt.Fprintf(os.Stderr, "writer: %s\n", string(data))
 		}
+	} else if _, ok := w.(*NullWriter); ok {
+		// NullWriter - no stats to print, but indicate output was discarded
+		fmt.Fprintf(os.Stderr, "writer: output discarded (null mode)\n")
 	}
 
 	r.Close()
@@ -239,6 +243,18 @@ func main() {
 	if logger != nil {
 		logger.Close()
 	}
+}
+
+// NullWriter is an io.WriteCloser that discards all data.
+// Useful for profiling and testing SRT connections without output overhead.
+type NullWriter struct{}
+
+func (n *NullWriter) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (n *NullWriter) Close() error {
+	return nil
 }
 
 func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
@@ -346,8 +362,9 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 }
 
 func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
-	if len(addr) == 0 {
-		return nil, fmt.Errorf("the address must not be empty")
+	// Handle no-output mode: empty string, "null", or "discard"
+	if len(addr) == 0 || addr == "null" || addr == "discard" {
+		return &NullWriter{}, nil
 	}
 
 	if addr == "-" {

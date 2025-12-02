@@ -38,6 +38,11 @@ bench-packet-all:
 bench-packet-pool:
 	@echo "=== Packet Pooling Benchmarks ==="
 	go test -bench=BenchmarkNewPacket -benchmem -count=5 ./packet | tee /tmp/bench-packet-pool.txt
+
+## bench-circular: Benchmark circular number comparison functions (Lt vs LtBranchless)
+bench-circular:
+	@echo "=== Circular Number Comparison Benchmarks ==="
+	go test -bench=BenchmarkLt -benchmem -benchtime=2s ./circular | tee /tmp/bench-circular.txt
 	@echo ""
 	@echo "Results saved to /tmp/bench-packet-pool.txt"
 
@@ -118,7 +123,7 @@ nixshell:
 # Testing targets
 .PHONY: test test-flags test-flags-integration test-congestion-live test-packet-pool test-packet fuzz coverage
 # Benchmark targets
-.PHONY: bench-packet bench-packet-all bench-packet-pool
+.PHONY: bench-packet bench-packet-all bench-packet-pool bench-circular
 # Code quality targets
 .PHONY: vet fmt lint
 # Dependency management targets

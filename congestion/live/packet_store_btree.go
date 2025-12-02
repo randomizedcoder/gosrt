@@ -25,13 +25,17 @@ func NewBTreePacketStore(degree int) packetStore {
 	return &btreePacketStore{
 		tree: btree.NewG[*packetItem](degree, func(a, b *packetItem) bool {
 			return a.seqNum.Lt(b.seqNum)
+			// Tried to make a faster version, but benchmarks show no improvement
+			//return a.seqNum.LtBranchless(b.seqNum)
 		}),
 	}
 }
 
 func (s *btreePacketStore) Insert(pkt packet.Packet) bool {
+	// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+	h := pkt.Header()
 	item := &packetItem{
-		seqNum: pkt.Header().PacketSequenceNumber,
+		seqNum: h.PacketSequenceNumber,
 		packet: pkt,
 	}
 
@@ -114,4 +118,3 @@ func (s *btreePacketStore) Min() packet.Packet {
 	}
 	return item.packet
 }
-

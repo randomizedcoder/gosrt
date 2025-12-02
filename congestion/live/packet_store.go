@@ -53,15 +53,19 @@ func NewListPacketStore() packetStore {
 }
 
 func (s *listPacketStore) Insert(pkt packet.Packet) bool {
-	seqNum := pkt.Header().PacketSequenceNumber
+	// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+	h := pkt.Header()
+	seqNum := h.PacketSequenceNumber
 
 	// Check for duplicate
 	for e := s.list.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
-		if p.Header().PacketSequenceNumber == seqNum {
+		// Note: Still need to call Header() for each list element in comparison loop
+		ph := p.Header()
+		if ph.PacketSequenceNumber == seqNum {
 			return false // Duplicate
 		}
-		if p.Header().PacketSequenceNumber.Gt(seqNum) {
+		if ph.PacketSequenceNumber.Gt(seqNum) {
 			s.list.InsertBefore(pkt, e)
 			return true
 		}
@@ -85,7 +89,9 @@ func (s *listPacketStore) Iterate(fn func(pkt packet.Packet) bool) bool {
 func (s *listPacketStore) Remove(seqNum circular.Number) packet.Packet {
 	for e := s.list.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
-		if p.Header().PacketSequenceNumber == seqNum {
+		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+		h := p.Header()
+		if h.PacketSequenceNumber == seqNum {
 			s.list.Remove(e)
 			return p
 		}
@@ -118,7 +124,9 @@ func (s *listPacketStore) RemoveAll(predicate func(pkt packet.Packet) bool, deli
 func (s *listPacketStore) Has(seqNum circular.Number) bool {
 	for e := s.list.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
-		if p.Header().PacketSequenceNumber == seqNum {
+		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+		h := p.Header()
+		if h.PacketSequenceNumber == seqNum {
 			return true
 		}
 	}

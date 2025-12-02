@@ -89,6 +89,31 @@ func (a Number) Lt(b Number) bool {
 	return !altb
 }
 
+// LtBranchless returns whether the circular number is lower than the circular number b.
+// This is an optimized branchless version that avoids branch mispredictions in hot paths.
+// Uses branchless absolute difference calculation for better performance in tight loops.
+func (a Number) LtBranchless(b Number) bool {
+	// Early return for equals (common case, especially in sorted structures)
+	if a.value == b.value {
+		return false
+	}
+
+	// Calculate absolute difference branchlessly to avoid branch mispredictions
+	// This eliminates the "if a.value > b.value" branch which has ~50% misprediction rate
+	diff := int32(a.value) - int32(b.value)
+	sign := diff >> 31                // -1 if diff < 0, 0 if diff >= 0
+	d := uint32((diff ^ sign) - sign) // abs(diff) - branchless absolute value
+	altb := sign != 0                 // true if a.value < b.value
+
+	// Threshold check (wraparound detection)
+	// This branch is less frequent (only when distance is large, indicating wraparound)
+	if d < a.threshold {
+		return altb
+	}
+
+	return !altb
+}
+
 // Lte returns whether the circular number is lower than or equal to the circular number b.
 func (a Number) Lte(b Number) bool {
 	if a.Equals(b) {

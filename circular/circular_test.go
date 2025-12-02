@@ -135,6 +135,33 @@ func TestGt(t *testing.T) {
 	require.Equal(t, false, x)
 }
 
+func TestLtBranchless(t *testing.T) {
+	// Test that LtBranchless produces the same results as Lt
+	testCases := []struct {
+		name string
+		a    Number
+		b    Number
+	}{
+		{"simple_less", New(42, max), New(50, max)},
+		{"simple_greater", New(50, max), New(42, max)},
+		{"wraparound_less", New(max-10, max), New(10, max)},
+		{"wraparound_greater", New(10, max), New(max-10, max)},
+		{"equal", New(42, max), New(42, max)},
+		{"near_wraparound_less", New(max-5, max), New(5, max)},
+		{"near_wraparound_greater", New(5, max), New(max-5, max)},
+		{"threshold_boundary_less", New(max/2-1, max), New(max/2+1, max)},
+		{"threshold_boundary_greater", New(max/2+1, max), New(max/2-1, max)},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			expected := tc.a.Lt(tc.b)
+			actual := tc.a.LtBranchless(tc.b)
+			require.Equal(t, expected, actual, "LtBranchless should match Lt for a=%d, b=%d", tc.a.Val(), tc.b.Val())
+		})
+	}
+}
+
 func TestAdd(t *testing.T) {
 	a := New(max-42, max)
 
