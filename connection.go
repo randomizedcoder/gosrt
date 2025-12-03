@@ -19,6 +19,7 @@ import (
 	"github.com/datarhei/gosrt/congestion"
 	"github.com/datarhei/gosrt/congestion/live"
 	"github.com/datarhei/gosrt/crypto"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 )
 
@@ -231,6 +232,9 @@ type srtConn struct {
 	statistics     connStats
 	statisticsLock sync.RWMutex
 
+	// Metrics for Prometheus (atomic counters, lock-free)
+	metrics *metrics.ConnectionMetrics
+
 	logger Logger
 
 	debug struct {
@@ -430,6 +434,17 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	} else {
 		c.statistics.headerSize += 40 // 40 bytes IPv6 header
 	}
+
+	// Initialize metrics
+	c.metrics = &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	c.metrics.HeaderSize.Store(uint64(c.statistics.headerSize))
+
+	// Register with metrics registry
+	metrics.RegisterConnection(c.socketId, c.metrics)
 
 	if c.version == 4 && c.isCaller {
 		var hsrequestsCtx context.Context
@@ -1639,6 +1654,9 @@ func (c *srtConn) getPeerIdleTimeoutRemaining() time.Duration {
 func (c *srtConn) close() {
 
 	c.shutdownOnce.Do(func() {
+		// Unregister from metrics registry
+		metrics.UnregisterConnection(c.socketId)
+
 		// Print statistics before closing (if logger is available)
 		if c.logger != nil {
 			c.printCloseStatistics()

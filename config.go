@@ -226,6 +226,15 @@ type Config struct {
 	// If > 0, server will periodically print statistics for all active connections
 	// Default: 0 (disabled). Set to e.g. 10s to print statistics every 10 seconds
 	StatisticsPrintInterval time.Duration
+
+	// Metrics configuration
+	// Enable metrics collection and expose /metrics endpoint
+	MetricsEnabled bool
+
+	// HTTP address for /metrics endpoint (e.g., ":9090")
+	// If empty, metrics server is not started
+	// Default: "" (disabled)
+	MetricsListenAddr string
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -280,6 +289,8 @@ var defaultConfig Config = Config{
 	IoUringRecvInitialPending: 512,
 	IoUringRecvBatchSize:      256,
 	StatisticsPrintInterval:   0, // Disabled by default
+	MetricsEnabled:            false,
+	MetricsListenAddr:         "", // Disabled by default
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.

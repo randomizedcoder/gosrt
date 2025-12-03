@@ -2,6 +2,10 @@ package srt
 
 import (
 	"errors"
+	"net/http"
+	"sync"
+
+	"github.com/datarhei/gosrt/metrics"
 )
 
 // Server is a framework for a SRT server
@@ -24,7 +28,9 @@ type Server struct {
 	// HandlePublish will be called for a subscribing connection.
 	HandleSubscribe func(conn Conn)
 
-	ln Listener
+	ln           Listener
+	metricsServer *http.Server // Optional metrics HTTP server
+	metricsServerOnce sync.Once // Ensure metrics server is started only once
 }
 
 // ErrServerClosed is returned when the server is about to shutdown.
@@ -65,6 +71,11 @@ func (s *Server) Listen() error {
 	}
 
 	s.ln = ln
+
+	// Start metrics server if enabled
+	if s.Config != nil && s.Config.MetricsEnabled && s.Config.MetricsListenAddr != "" {
+		s.startMetricsServer()
+	}
 
 	return err
 }
@@ -109,6 +120,26 @@ func (s *Server) Serve() error {
 			}
 		}(req)
 	}
+}
+
+// startMetricsServer starts an HTTP server for Prometheus metrics
+func (s *Server) startMetricsServer() {
+	s.metricsServerOnce.Do(func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.MetricsHandler())
+
+		s.metricsServer = &http.Server{
+			Addr:    s.Config.MetricsListenAddr,
+			Handler: mux,
+		}
+
+		go func() {
+			if err := s.metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				// Log error (if logger available)
+				// For now, silently ignore - metrics are optional
+			}
+		}()
+	})
 }
 
 // Shutdown will shutdown the server. ListenAndServe will return a ErrServerClosed
