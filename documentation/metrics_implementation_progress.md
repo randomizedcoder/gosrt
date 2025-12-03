@@ -86,23 +86,45 @@ The implementation is divided into phases:
 
 ## Phase 3: Receive Path Metrics (Complete Visibility)
 
-**Status**: ⏳ Pending
+**Status**: 🔄 In Progress
 
 **Tasks**:
-- [ ] Add counters for all receive path drop points
-- [ ] Add path identification (io_uring vs ReadFrom)
-- [ ] Add error classification
-- [ ] Update `processRecvCompletion()` to increment metrics
-- [ ] Update `reader()` to increment metrics
+- [x] Create packet classifier helper (`IncrementRecvMetrics`, `IncrementRecvErrorMetrics`)
+- [x] Add path identification (io_uring vs ReadFrom)
+- [x] Add error classification
+- [x] Update `processRecvCompletion()` in `listen_linux.go` to increment metrics
+- [x] Update `processRecvCompletion()` in `dial_linux.go` to increment metrics
+- [x] Update `reader()` in `listen.go` to increment metrics
+- [x] Update `reader()` in `dial.go` to increment metrics
+- [x] Update `ReadFrom()` fallback paths to increment metrics
+- [x] Update `handlePacket()` in `connection.go` to track packet drops (FEC filter, unknown control types)
 
-**Files to Modify**:
-- [ ] `listen_linux.go` - Add metrics to io_uring path
-- [ ] `listen.go` - Add metrics to ReadFrom path
-- [ ] `dial_linux.go` - Add metrics to io_uring path
-- [ ] `dial.go` - Add metrics to ReadFrom path
-- [ ] `connection.go` - Add metrics to `handlePacket()`
+**Files Created**:
+- [x] `metrics/packet_classifier.go` - Helper functions for packet type classification and metrics increment
+
+**Files Modified**:
+- [x] `listen_linux.go` - Added metrics to io_uring path (processRecvCompletion)
+- [x] `listen.go` - Added metrics to ReadFrom path and reader()
+- [x] `dial_linux.go` - Added metrics to io_uring path (processRecvCompletion)
+- [x] `dial.go` - Added metrics to ReadFrom path and reader()
+- [x] `connection.go` - Added metrics to `handlePacket()` for packet drops (FEC filter, unknown control types)
+
+**Implementation Details**:
+- Metrics are tracked per-connection where connection is available
+- Pre-connection errors (parse errors, empty packets, io_uring errors) are not tracked (connection not identified yet)
+- Path identification: `PktRecvIoUring` vs `PktRecvReadFrom`
+- Packet type classification: Data, ACK, NAK, ACKACK, Keepalive, Shutdown, Handshake, KM
+- Error classification: parse, route, empty, unknown_socket, nil_connection, wrong_peer, backlog_full, queue_full
 
 **Estimated Effort**: 4-5 hours
+**Progress**: ✅ 100% complete
+
+**Notes**:
+- All receive path metrics are now tracked
+- Metrics are per-connection (where connection is available)
+- Pre-connection errors (parse, empty, io_uring errors) are not tracked (connection not identified)
+- Packet classification handles all control packet types (ACK, NAK, ACKACK, Keepalive, Shutdown, Handshake, KM)
+- Error classification covers all drop points (parse, route, unknown_socket, nil_connection, wrong_peer, backlog_full, queue_full)
 
 ---
 
@@ -184,14 +206,15 @@ The implementation is divided into phases:
 
 **Total Estimated Effort**: 22-31 hours
 
-**Completed**: Phase 1 (100%), Phase 2 (100%)
+**Completed**: Phase 1 (100%), Phase 2 (100%), Phase 3 (100%)
 **In Progress**: None
-**Remaining**: Phases 3-7
+**Remaining**: Phases 4-7
 
 **Current Status**:
 - Phase 1 (Metrics Infrastructure) is complete. All core structures, registry, handler, and runtime metrics are implemented.
 - Phase 2 (Lock Timing) is complete. Lock timing is now measured for all critical lock operations (handlePacketMutex, receiver.lock, sender.lock) and exposed via the `/metrics` endpoint.
-- Ready to proceed with Phase 3 (Receive Path Metrics).
+- Phase 3 (Receive Path Metrics) is complete. All receive paths (io_uring and ReadFrom) now track packet metrics with full classification and error tracking.
+- Ready to proceed with Phase 4 (Send Path Metrics).
 
 ---
 

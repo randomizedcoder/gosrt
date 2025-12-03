@@ -14,6 +14,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 	"github.com/randomizedcoder/giouring"
 )
@@ -380,6 +381,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		ln.log("listen:recv:completion:error", func() string {
 			return fmt.Sprintf("receive failed: %s (errno %d)", syscall.Errno(errno).Error(), errno)
 		})
+		// Note: Can't track metrics here - no connection identified yet
 		ring.CQESeen(cqe)
 		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
@@ -389,6 +391,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	bytesReceived := int(cqe.Res)
 	if bytesReceived == 0 {
 		// Empty datagram - return buffer and resubmit
+		// Note: Can't track metrics here - no connection identified yet
 		ring.CQESeen(cqe)
 		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
@@ -401,6 +404,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		ln.log("listen:recv:parse:error", func() string {
 			return "rsa is nil in completion info"
 		})
+		// Note: Can't track metrics here - no connection identified yet
 		ring.CQESeen(cqe)
 		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
@@ -413,6 +417,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		ln.log("listen:recv:parse:error", func() string {
 			return fmt.Sprintf("failed to extract source address from RawSockaddrAny: family=%d (0=uninitialized, 2=AF_INET, 10=AF_INET6)", family)
 		})
+		// Note: Can't track metrics here - no connection identified yet
 		ring.CQESeen(cqe)
 		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
@@ -429,6 +434,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		ln.log("listen:recv:parse:error", func() string {
 			return fmt.Sprintf("failed to parse packet: %v", err)
 		})
+		// Note: Can't track metrics here - no connection identified yet (parse failed)
 		ring.CQESeen(cqe)
 		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
@@ -452,12 +458,15 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 			select {
 			case ln.backlog <- p:
 				// Success - handshake packet queued to backlog
+				// Note: Can't track metrics here - no connection yet (handshake in progress)
 			default:
 				ln.log("handshake:recv:error", func() string { return "backlog is full" })
+				// Note: Can't track metrics here - no connection yet
 				p.Decommission() // Clean up dropped packet
 			}
 		} else {
 			// Non-handshake packet with socketId == 0 - drop it
+			// Note: Can't track metrics here - no connection identified
 			p.Decommission()
 		}
 		ring.CQESeen(cqe)
@@ -475,6 +484,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 				return fmt.Sprintf("unknown destination socket ID: %d", socketId)
 			})
 		}
+		// Note: Can't track metrics here - connection doesn't exist
 		ring.CQESeen(cqe)
 		p.Decommission()
 		return // Always resubmit to maintain constant pending count
@@ -483,6 +493,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	conn := val.(*srtConn)
 	if conn == nil {
 		// Connection is nil - drop packet
+		// Note: Can't track metrics here - connection is nil
 		ring.CQESeen(cqe)
 		p.Decommission()
 		return // Always resubmit to maintain constant pending count
@@ -495,10 +506,19 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 			ln.log("listen:recv:error", func() string {
 				return fmt.Sprintf("packet from wrong peer: expected %s, got %s", conn.RemoteAddr().String(), h.Addr.String())
 			})
+			// Track metrics for wrong peer (we have connection now)
+			if conn.metrics != nil {
+				metrics.IncrementRecvErrorMetrics(conn.metrics, true, "wrong_peer")
+			}
 			ring.CQESeen(cqe)
 			p.Decommission()
 			return // Always resubmit to maintain constant pending count
 		}
+	}
+
+	// Track successful receive (io_uring path)
+	if conn.metrics != nil {
+		metrics.IncrementRecvMetrics(conn.metrics, p, true, true, "")
 	}
 
 	// Direct call to handlePacket (blocking mutex - never drops packets)

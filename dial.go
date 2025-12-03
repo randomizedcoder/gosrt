@@ -14,6 +14,7 @@ import (
 
 	"github.com/datarhei/gosrt/circular"
 	"github.com/datarhei/gosrt/crypto"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 	"github.com/datarhei/gosrt/rand"
 )
@@ -192,14 +193,18 @@ func Dial(network, address string, config Config) (Conn, error) {
 
 				p, err := packet.NewPacketFromData(dl.remoteAddr, buffer[:n])
 				if err != nil {
+					// Parse error - can't track metrics (no connection identified yet)
 					continue
 				}
 
 				// non-blocking
 				select {
 				case dl.rcvQueue <- p:
+					// Success - packet queued (metrics tracked in reader())
 				default:
 					dl.log("dial", func() string { return "receive queue is full" })
+					// Queue full - can't track metrics (no connection identified yet)
+					p.Decommission()
 				}
 			}
 		}()
@@ -282,11 +287,18 @@ func (dl *dialer) reader(ctx context.Context) {
 			dl.connLock.RLock()
 			if dl.conn == nil {
 				dl.connLock.RUnlock()
+				// Note: Can't track metrics here - no connection yet
 				break
 			}
-
-			dl.conn.push(p)
+			conn := dl.conn
 			dl.connLock.RUnlock()
+
+			// Track successful receive (ReadFrom path)
+			if conn.metrics != nil {
+				metrics.IncrementRecvMetrics(conn.metrics, p, false, true, "")
+			}
+
+			conn.push(p)
 		}
 	}
 }

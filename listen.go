@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/datarhei/gosrt/metrics"
 	srtnet "github.com/datarhei/gosrt/net"
 	"github.com/datarhei/gosrt/packet"
 )
@@ -272,14 +273,18 @@ func Listen(network, address string, config Config) (Listener, error) {
 
 				p, err := packet.NewPacketFromData(addr, buffer[:n])
 				if err != nil {
+					// Parse error - can't track metrics (no connection identified yet)
 					continue
 				}
 
 				// non-blocking
 				select {
 				case ln.rcvQueue <- p:
+					// Success - packet queued (metrics tracked in reader())
 				default:
 					ln.log("listen", func() string { return "receive queue is full" })
+					// Queue full - can't track metrics (no connection identified yet)
+					p.Decommission()
 				}
 			}
 		}()
@@ -459,6 +464,7 @@ func (ln *listener) reader(ctx context.Context) {
 
 			if !ok || conn == nil {
 				// ignore the packet, we don't know the destination
+				// Note: Can't track metrics here - connection doesn't exist
 				break
 			}
 
@@ -466,8 +472,17 @@ func (ln *listener) reader(ctx context.Context) {
 				if p.Header().Addr.String() != conn.RemoteAddr().String() {
 					// ignore the packet, it's not from the expected peer
 					// https://haivision.github.io/srt-rfc/draft-sharabayko-srt.html#name-security-considerations
+					// Track metrics for wrong peer (we have connection now)
+					if conn.metrics != nil {
+						metrics.IncrementRecvErrorMetrics(conn.metrics, false, "wrong_peer")
+					}
 					break
 				}
+			}
+
+			// Track successful receive (ReadFrom path)
+			if conn.metrics != nil {
+				metrics.IncrementRecvMetrics(conn.metrics, p, false, true, "")
 			}
 
 			conn.push(p)

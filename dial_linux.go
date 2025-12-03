@@ -11,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 	"github.com/randomizedcoder/giouring"
 )
@@ -324,9 +325,15 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 
 	if conn == nil {
 		// No connection yet and not a handshake packet - drop it
+		// Note: Can't track metrics here - no connection yet
 		ring.CQESeen(cqe)
 		p.Decommission()
 		return // Always resubmit to maintain constant pending count
+	}
+
+	// Track successful receive (io_uring path)
+	if conn.metrics != nil {
+		metrics.IncrementRecvMetrics(conn.metrics, p, true, true, "")
 	}
 
 	// Direct call to handlePacket (blocking mutex - never drops packets)

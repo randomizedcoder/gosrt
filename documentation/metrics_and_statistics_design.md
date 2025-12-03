@@ -762,7 +762,7 @@ rate(go_memstats_heap_alloc_bytes[5m])  # Alert if continuously increasing
 ### Benefits
 
 1. **Standard Metrics**: Compatible with standard Prometheus Go metrics (same names as `prometheus/client_golang`)
-2. **Process Health**: Monitor memory, GC, and goroutine health
+2. **Process Health**: Monitor memory, Gphase 3 C, and goroutine health
 3. **Debugging**: Identify memory leaks, GC pressure, goroutine leaks
 4. **No External Dependencies**: Uses only Go standard library (`runtime` package)
 5. **Low Overhead**: Called only during metrics scraping (infrequent)

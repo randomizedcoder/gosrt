@@ -846,6 +846,11 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 			c.log("connection:recv:ctrl:unknown", func() string {
 				return fmt.Sprintf("unknown control packet type: %s", header.ControlType)
 			})
+			// Track drop for unknown control type
+			if c.metrics != nil {
+				// Classify as generic error (unknown control type)
+				c.metrics.PktRecvErrorParse.Add(1)
+			}
 			return
 		}
 
@@ -871,6 +876,11 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	// numbers start from 1, increment to a maximum, and then roll back to 1)."
 	if header.MessageNumber == 0 {
 		c.log("connection:filter", func() string { return "dropped FEC filter control packet" })
+		// Track drop for FEC filter packet
+		if c.metrics != nil {
+			c.metrics.PktRecvDataDropped.Add(1)
+			c.metrics.ByteRecvDataDropped.Add(uint64(p.Len()))
+		}
 		return
 	}
 
