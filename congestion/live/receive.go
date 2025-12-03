@@ -8,6 +8,7 @@ import (
 
 	"github.com/datarhei/gosrt/circular"
 	"github.com/datarhei/gosrt/congestion"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 )
 
@@ -19,8 +20,9 @@ type ReceiveConfig struct {
 	OnSendACK              func(seq circular.Number, light bool)
 	OnSendNAK              func(list []circular.Number)
 	OnDeliver              func(p packet.Packet)
-	PacketReorderAlgorithm string // "list" (default) or "btree"
-	BTreeDegree            int    // B-tree degree (default: 32, only used if PacketReorderAlgorithm == "btree")
+	PacketReorderAlgorithm string                     // "list" (default) or "btree"
+	BTreeDegree            int                        // B-tree degree (default: 32, only used if PacketReorderAlgorithm == "btree")
+	LockTimingMetrics      *metrics.LockTimingMetrics // Optional lock timing metrics for performance monitoring
 }
 
 // receiver implements the Receiver interface
@@ -30,6 +32,7 @@ type receiver struct {
 	lastDeliveredSequenceNumber circular.Number
 	packetStore                 packetStore
 	lock                        sync.RWMutex
+	lockTiming                  *metrics.LockTimingMetrics // Optional lock timing metrics
 
 	nPackets uint
 
@@ -86,6 +89,7 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		lastACKSequenceNumber:       config.InitialSequenceNumber.Dec(),
 		lastDeliveredSequenceNumber: config.InitialSequenceNumber.Dec(),
 		packetStore:                 store,
+		lockTiming:                  config.LockTimingMetrics,
 
 		periodicACKInterval: config.PeriodicACKInterval,
 		periodicNAKInterval: config.PeriodicNAKInterval,
@@ -146,9 +150,18 @@ func (r *receiver) Flush() {
 }
 
 func (r *receiver) Push(pkt packet.Packet) {
+	if r.lockTiming != nil {
+		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
+			r.pushLocked(pkt)
+		})
+		return
+	}
 	r.lock.Lock()
 	defer r.lock.Unlock()
+	r.pushLocked(pkt)
+}
 
+func (r *receiver) pushLocked(pkt packet.Packet) {
 	if pkt == nil {
 		return
 	}
@@ -325,8 +338,22 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	r.lock.RUnlock()
 
 	// Phase 2: Write updates with write lock (brief - only for field updates)
+	// Measure lock timing for the write lock (critical section)
+	if r.lockTiming != nil {
+		var okResult bool
+		var seqResult circular.Number
+		var liteResult bool
+		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
+			okResult, seqResult, liteResult = r.periodicACKWriteLocked(now, needLiteACK, ackSequenceNumber, minPktTsbpdTime, maxPktTsbpdTime)
+		})
+		return okResult, seqResult, liteResult
+	}
 	r.lock.Lock()
 	defer r.lock.Unlock()
+	return r.periodicACKWriteLocked(now, needLiteACK, ackSequenceNumber, minPktTsbpdTime, maxPktTsbpdTime)
+}
+
+func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSequenceNumber circular.Number, minPktTsbpdTime, maxPktTsbpdTime uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
 
 	// Re-check conditions (may have changed between read and write lock)
 	// If interval check still applies and we don't need lite ACK, return early
@@ -355,9 +382,19 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 }
 
 func (r *receiver) periodicNAK(now uint64) []circular.Number {
+	if r.lockTiming != nil {
+		var result []circular.Number
+		metrics.WithRLockTiming(r.lockTiming, &r.lock, func() {
+			result = r.periodicNAKLocked(now)
+		})
+		return result
+	}
 	r.lock.RLock()
 	defer r.lock.RUnlock()
+	return r.periodicNAKLocked(now)
+}
 
+func (r *receiver) periodicNAKLocked(now uint64) []circular.Number {
 	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
 		return nil
 	}
@@ -406,30 +443,64 @@ func (r *receiver) Tick(now uint64) {
 	}
 
 	// Deliver packets whose PktTsbpdTime is ripe
-	r.lock.Lock()
-	removed := r.packetStore.RemoveAll(
-		func(p packet.Packet) bool {
-			// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
-			h := p.Header()
-			return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
-		},
-		func(p packet.Packet) {
-			r.statistics.PktBuf--
-			r.statistics.ByteBuf -= p.Len()
+	if r.lockTiming != nil {
+		var removed int
+		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
+			removed = r.packetStore.RemoveAll(
+				func(p packet.Packet) bool {
+					// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+					h := p.Header()
+					return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
+				},
+				func(p packet.Packet) {
+					r.statistics.PktBuf--
+					r.statistics.ByteBuf -= p.Len()
 
-			// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
-			h := p.Header()
-			r.lastDeliveredSequenceNumber = h.PacketSequenceNumber
+					// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+					h := p.Header()
+					r.lastDeliveredSequenceNumber = h.PacketSequenceNumber
 
-			r.deliver(p)
-		},
-	)
-	r.lock.Unlock()
+					r.deliver(p)
+				},
+			)
+		})
+		_ = removed
+	} else {
+		r.lock.Lock()
+		removed := r.packetStore.RemoveAll(
+			func(p packet.Packet) bool {
+				// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+				h := p.Header()
+				return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
+			},
+			func(p packet.Packet) {
+				r.statistics.PktBuf--
+				r.statistics.ByteBuf -= p.Len()
 
-	// removed count is available if needed for statistics
-	_ = removed
+				// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
+				h := p.Header()
+				r.lastDeliveredSequenceNumber = h.PacketSequenceNumber
 
-	r.lock.Lock()
+				r.deliver(p)
+			},
+		)
+		r.lock.Unlock()
+		_ = removed
+	}
+
+	// Update rate statistics
+	if r.lockTiming != nil {
+		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
+			r.updateRateStats(now)
+		})
+	} else {
+		r.lock.Lock()
+		r.updateRateStats(now)
+		r.lock.Unlock()
+	}
+}
+
+func (r *receiver) updateRateStats(now uint64) {
 	tdiff := now - r.rate.last // microseconds
 
 	if tdiff > r.rate.period {
@@ -447,7 +518,6 @@ func (r *receiver) Tick(now uint64) {
 
 		r.rate.last = now
 	}
-	r.lock.Unlock()
 }
 
 func (r *receiver) SetNAKInterval(nakInterval uint64) {

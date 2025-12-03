@@ -45,7 +45,7 @@ func MetricsHandler() http.Handler {
 
 			// ... (similar for all metrics - will be expanded as we add more)
 
-			// Lock timing (average and max)
+			// Lock timing (average and max) - handlePacketMutex
 			if metrics.HandlePacketLockTiming != nil {
 				holdAvg, holdMax, waitAvg, waitMax := metrics.HandlePacketLockTiming.GetStats()
 				writeGauge(b, "gosrt_connection_lock_hold_seconds_avg",
@@ -60,6 +60,40 @@ func MetricsHandler() http.Handler {
 				writeCounterValue(b, "gosrt_connection_lock_acquisitions_total",
 					metrics.HandlePacketLockTiming.GetTotalAcquisitions(),
 					"socket_id", socketIdStr, "lock", "handle_packet")
+			}
+
+			// Lock timing - receiver.lock
+			if metrics.ReceiverLockTiming != nil {
+				holdAvg, holdMax, waitAvg, waitMax := metrics.ReceiverLockTiming.GetStats()
+				writeGauge(b, "gosrt_connection_lock_hold_seconds_avg",
+					holdAvg, "socket_id", socketIdStr, "lock", "receiver")
+				writeGauge(b, "gosrt_connection_lock_hold_seconds_max",
+					holdMax, "socket_id", socketIdStr, "lock", "receiver")
+				writeGauge(b, "gosrt_connection_lock_wait_seconds_avg",
+					waitAvg, "socket_id", socketIdStr, "lock", "receiver")
+				writeGauge(b, "gosrt_connection_lock_wait_seconds_max",
+					waitMax, "socket_id", socketIdStr, "lock", "receiver")
+
+				writeCounterValue(b, "gosrt_connection_lock_acquisitions_total",
+					metrics.ReceiverLockTiming.GetTotalAcquisitions(),
+					"socket_id", socketIdStr, "lock", "receiver")
+			}
+
+			// Lock timing - sender.lock
+			if metrics.SenderLockTiming != nil {
+				holdAvg, holdMax, waitAvg, waitMax := metrics.SenderLockTiming.GetStats()
+				writeGauge(b, "gosrt_connection_lock_hold_seconds_avg",
+					holdAvg, "socket_id", socketIdStr, "lock", "sender")
+				writeGauge(b, "gosrt_connection_lock_hold_seconds_max",
+					holdMax, "socket_id", socketIdStr, "lock", "sender")
+				writeGauge(b, "gosrt_connection_lock_wait_seconds_avg",
+					waitAvg, "socket_id", socketIdStr, "lock", "sender")
+				writeGauge(b, "gosrt_connection_lock_wait_seconds_max",
+					waitMax, "socket_id", socketIdStr, "lock", "sender")
+
+				writeCounterValue(b, "gosrt_connection_lock_acquisitions_total",
+					metrics.SenderLockTiming.GetTotalAcquisitions(),
+					"socket_id", socketIdStr, "lock", "sender")
 			}
 		}
 

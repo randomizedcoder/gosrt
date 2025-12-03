@@ -7,6 +7,7 @@ import (
 
 	"github.com/datarhei/gosrt/circular"
 	"github.com/datarhei/gosrt/congestion"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 )
 
@@ -19,6 +20,7 @@ type SendConfig struct {
 	MinInputBW            int64
 	OverheadBW            int64
 	OnDeliver             func(p packet.Packet)
+	LockTimingMetrics     *metrics.LockTimingMetrics // Optional lock timing metrics for performance monitoring
 }
 
 // sender implements the Sender interface
@@ -29,6 +31,7 @@ type sender struct {
 	packetList *list.List
 	lossList   *list.List
 	lock       sync.RWMutex
+	lockTiming *metrics.LockTimingMetrics // Optional lock timing metrics
 
 	avgPayloadSize float64 // bytes
 	pktSndPeriod   float64 // microseconds
@@ -64,6 +67,7 @@ func NewSender(config SendConfig) congestion.Sender {
 		dropThreshold:      config.DropThreshold,
 		packetList:         list.New(),
 		lossList:           list.New(),
+		lockTiming:         config.LockTimingMetrics,
 
 		avgPayloadSize: packet.MAX_PAYLOAD_SIZE, //  5.1.2. SRT's Default LiveCC Algorithm
 		maxBW:          float64(config.MaxBW),
@@ -118,9 +122,18 @@ func (s *sender) Flush() {
 }
 
 func (s *sender) Push(p packet.Packet) {
+	if s.lockTiming != nil {
+		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {
+			s.pushLocked(p)
+		})
+		return
+	}
 	s.lock.Lock()
 	defer s.lock.Unlock()
+	s.pushLocked(p)
+}
 
+func (s *sender) pushLocked(p packet.Packet) {
 	if p == nil {
 		return
 	}
@@ -163,7 +176,36 @@ func (s *sender) Push(p packet.Packet) {
 
 func (s *sender) Tick(now uint64) {
 	// Deliver packets whose PktTsbpdTime is ripe
+	if s.lockTiming != nil {
+		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {
+			s.tickDeliverPackets(now)
+		})
+
+		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {
+			s.tickDropOldPackets(now)
+		})
+
+		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {
+			s.tickUpdateRateStats(now)
+		})
+		return
+	}
+
+	// Fallback without metrics
 	s.lock.Lock()
+	s.tickDeliverPackets(now)
+	s.lock.Unlock()
+
+	s.lock.Lock()
+	s.tickDropOldPackets(now)
+	s.lock.Unlock()
+
+	s.lock.Lock()
+	s.tickUpdateRateStats(now)
+	s.lock.Unlock()
+}
+
+func (s *sender) tickDeliverPackets(now uint64) {
 	removeList := make([]*list.Element, 0, s.packetList.Len())
 	for e := s.packetList.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
@@ -194,10 +236,10 @@ func (s *sender) Tick(now uint64) {
 		s.lossList.PushBack(e.Value)
 		s.packetList.Remove(e)
 	}
-	s.lock.Unlock()
+}
 
-	s.lock.Lock()
-	removeList = make([]*list.Element, 0, s.lossList.Len())
+func (s *sender) tickDropOldPackets(now uint64) {
+	removeList := make([]*list.Element, 0, s.lossList.Len())
 	for e := s.lossList.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
 
@@ -224,9 +266,9 @@ func (s *sender) Tick(now uint64) {
 		// This packet has been ACK'd and we don't need it anymore
 		p.Decommission()
 	}
-	s.lock.Unlock()
+}
 
-	s.lock.Lock()
+func (s *sender) tickUpdateRateStats(now uint64) {
 	tdiff := now - s.rate.last
 
 	if tdiff > s.rate.period {
@@ -244,13 +286,21 @@ func (s *sender) Tick(now uint64) {
 
 		s.rate.last = now
 	}
-	s.lock.Unlock()
 }
 
 func (s *sender) ACK(sequenceNumber circular.Number) {
+	if s.lockTiming != nil {
+		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {
+			s.ackLocked(sequenceNumber)
+		})
+		return
+	}
 	s.lock.Lock()
 	defer s.lock.Unlock()
+	s.ackLocked(sequenceNumber)
+}
 
+func (s *sender) ackLocked(sequenceNumber circular.Number) {
 	removeList := make([]*list.Element, 0, s.lossList.Len())
 	for e := s.lossList.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
@@ -284,9 +334,19 @@ func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 		return 0
 	}
 
+	if s.lockTiming != nil {
+		var result uint64
+		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {
+			result = s.nakLocked(sequenceNumbers)
+		})
+		return result
+	}
 	s.lock.Lock()
 	defer s.lock.Unlock()
+	return s.nakLocked(sequenceNumbers)
+}
 
+func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
 	retransCount := uint64(0)
 
 	for e := s.lossList.Back(); e != nil; e = e.Prev() {

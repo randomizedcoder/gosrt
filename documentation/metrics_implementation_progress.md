@@ -56,21 +56,31 @@ The implementation is divided into phases:
 
 ## Phase 2: Lock Timing (Critical for Debugging)
 
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 
 **Tasks**:
-- [ ] Implement lock timing helpers
-- [ ] Add lock timing to `handlePacketMutex`
-- [ ] Add lock timing to `receiver.lock` and `sender.lock`
-- [ ] Expose lock timing metrics to Prometheus handler
+- [x] Implement lock timing helpers (`WithLockTiming`, `WithRLockTiming`, `WithWLockTiming`)
+- [x] Add lock timing to `handlePacketMutex` in `handlePacketDirect()`
+- [x] Add lock timing to `receiver.lock` (Push, periodicACK, periodicNAK, Tick)
+- [x] Add lock timing to `sender.lock` (Push, Tick, ACK, NAK)
+- [x] Expose lock timing metrics to Prometheus handler (already in handler.go)
 
-**Files to Modify**:
-- [ ] `metrics/lock_timing.go` - Lock timing implementation (if not in metrics.go)
-- [ ] `connection.go` - Update `handlePacketDirect()` to use lock timing
-- [ ] `congestion/live/receive.go` - Add lock timing to receiver
-- [ ] `congestion/live/send.go` - Add lock timing to sender
+**Files Modified**:
+- [x] `metrics/helpers.go` - Added `WithRLockTiming` and `WithWLockTiming` helpers
+- [x] `connection.go` - Updated `handlePacketDirect()` to measure lock timing, moved metrics initialization earlier
+- [x] `congestion/live/receive.go` - Added lock timing to Push, periodicACK, periodicNAK, Tick methods
+- [x] `congestion/live/send.go` - Added lock timing to Push, Tick, ACK, NAK methods
+- [x] `congestion/live/receive.go` - Added `LockTimingMetrics` to `ReceiveConfig`
+- [x] `congestion/live/send.go` - Added `LockTimingMetrics` to `SendConfig`
+
+**Implementation Details**:
+- Lock timing is measured for all critical lock operations
+- Uses lock-free ring buffer (10 samples) for minimal overhead
+- Metrics are exposed via `/metrics` endpoint with labels for socket_id and lock name
+- Helper functions provide clean abstraction for lock timing measurement
 
 **Estimated Effort**: 3-4 hours
+**Progress**: ✅ 100% complete
 
 ---
 
@@ -174,11 +184,14 @@ The implementation is divided into phases:
 
 **Total Estimated Effort**: 22-31 hours
 
-**Completed**: Phase 1 (100%)
+**Completed**: Phase 1 (100%), Phase 2 (100%)
 **In Progress**: None
-**Remaining**: Phases 2-7
+**Remaining**: Phases 3-7
 
-**Current Status**: Phase 1 (Metrics Infrastructure) is complete. All core structures, registry, handler, and runtime metrics are implemented. Metrics are automatically initialized for each connection and the metrics server starts if enabled in config.
+**Current Status**:
+- Phase 1 (Metrics Infrastructure) is complete. All core structures, registry, handler, and runtime metrics are implemented.
+- Phase 2 (Lock Timing) is complete. Lock timing is now measured for all critical lock operations (handlePacketMutex, receiver.lock, sender.lock) and exposed via the `/metrics` endpoint.
+- Ready to proceed with Phase 3 (Receive Path Metrics).
 
 ---
 

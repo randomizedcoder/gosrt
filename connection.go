@@ -393,6 +393,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		OnDeliver:              c.deliver,
 		PacketReorderAlgorithm: c.config.PacketReorderAlgorithm,
 		BTreeDegree:            c.config.BTreeDegree,
+		LockTimingMetrics:      c.metrics.ReceiverLockTiming,
 	})
 
 	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second
@@ -411,6 +412,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		MinInputBW:            c.config.MinInputBW,
 		OverheadBW:            c.config.OverheadBW,
 		OnDeliver:             c.pop,
+		LockTimingMetrics:     c.metrics.SenderLockTiming,
 	})
 
 	c.ctx, c.cancelCtx = context.WithCancel(context.Background())
@@ -753,10 +755,30 @@ func (c *srtConn) deliver(p packet.Packet) {
 // The mutex is blocking to ensure no packets are dropped (never drop packets that successfully arrived from network)
 func (c *srtConn) handlePacketDirect(p packet.Packet) {
 	// Block until mutex available - never drop packets
-	c.handlePacketMutex.Lock()
-	defer c.handlePacketMutex.Unlock()
+	// Measure lock timing for debugging and performance monitoring
+	if c.metrics != nil && c.metrics.HandlePacketLockTiming != nil {
+		waitStart := time.Now()
+		c.handlePacketMutex.Lock()
+		waitDuration := time.Since(waitStart)
 
-	c.handlePacket(p)
+		if waitDuration > 0 {
+			c.metrics.HandlePacketLockTiming.RecordWaitTime(waitDuration)
+		}
+		// Note: RecordHoldTime will increment holdTimeIndex, which serves as acquisition counter
+
+		defer func() {
+			holdDuration := time.Since(waitStart)                         // Total time from lock acquisition
+			c.metrics.HandlePacketLockTiming.RecordHoldTime(holdDuration) // This increments holdTimeIndex
+			c.handlePacketMutex.Unlock()
+		}()
+
+		c.handlePacket(p)
+	} else {
+		// Fallback if metrics not initialized (shouldn't happen in normal operation)
+		c.handlePacketMutex.Lock()
+		defer c.handlePacketMutex.Unlock()
+		c.handlePacket(p)
+	}
 }
 
 // initializeControlHandlers initializes the control packet dispatch tables.
