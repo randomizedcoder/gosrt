@@ -13,8 +13,9 @@ This document provides a comprehensive design for a unified metrics and statisti
 5. [Unified Metrics Architecture](#unified-metrics-architecture)
 6. [Prometheus Integration](#prometheus-integration)
 7. [Lock Timing Metrics](#lock-timing-metrics)
-8. [Detailed Migration Guide: `connStats` to Atomic Counters](#detailed-migration-guide-connstats-to-atomic-counters)
-9. [Implementation Plan](#implementation-plan)
+8. [Go Runtime Metrics](#go-runtime-metrics)
+9. [Detailed Migration Guide: `connStats` to Atomic Counters](#detailed-migration-guide-connstats-to-atomic-counters)
+10. [Implementation Plan](#implementation-plan)
 
 ---
 
@@ -497,6 +498,275 @@ if ringFull {
 - Remove `connStats` struct
 - Remove `statisticsLock` (if all counters are atomic)
 - Clean up old increment code
+
+---
+
+## Go Runtime Metrics
+
+### Overview
+
+Go runtime metrics provide visibility into the Go process itself, including memory usage, garbage collection statistics, goroutine counts, and other runtime information. These metrics are essential for understanding the health and performance of the GoSRT library in production.
+
+**Rationale**: Similar to `promauto`, we want to expose standard Go runtime metrics to enable:
+- Memory leak detection
+- GC pressure monitoring
+- Goroutine leak detection
+- Overall process health monitoring
+
+### Metrics to Include
+
+Based on what `prometheus/client_golang` exposes via `promauto`, we should include:
+
+#### 1. Memory Metrics
+
+| Metric Name | Description | Source |
+|------------|-------------|--------|
+| `go_memstats_alloc_bytes` | Bytes allocated and still in use | `runtime.MemStats.Alloc` |
+| `go_memstats_alloc_bytes_total` | Total bytes allocated (cumulative) | `runtime.MemStats.TotalAlloc` |
+| `go_memstats_sys_bytes` | Bytes obtained from system | `runtime.MemStats.Sys` |
+| `go_memstats_lookups_total` | Number of pointer lookups | `runtime.MemStats.Lookups` |
+| `go_memstats_mallocs_total` | Total number of mallocs | `runtime.MemStats.Mallocs` |
+| `go_memstats_frees_total` | Total number of frees | `runtime.MemStats.Frees` |
+| `go_memstats_heap_alloc_bytes` | Bytes allocated for heap objects | `runtime.MemStats.HeapAlloc` |
+| `go_memstats_heap_sys_bytes` | Bytes obtained from system for heap | `runtime.MemStats.HeapSys` |
+| `go_memstats_heap_idle_bytes` | Bytes in idle spans | `runtime.MemStats.HeapIdle` |
+| `go_memstats_heap_inuse_bytes` | Bytes in in-use spans | `runtime.MemStats.HeapInuse` |
+| `go_memstats_heap_released_bytes` | Bytes released to the OS | `runtime.MemStats.HeapReleased` |
+| `go_memstats_heap_objects` | Number of allocated heap objects | `runtime.MemStats.HeapObjects` |
+| `go_memstats_stack_inuse_bytes` | Bytes used for stack spans | `runtime.MemStats.StackInuse` |
+| `go_memstats_stack_sys_bytes` | Bytes obtained from system for stack | `runtime.MemStats.StackSys` |
+| `go_memstats_mspan_inuse_bytes` | Bytes used for mspan structures | `runtime.MemStats.MSpanInuse` |
+| `go_memstats_mspan_sys_bytes` | Bytes obtained from system for mspan | `runtime.MemStats.MSpanSys` |
+| `go_memstats_mcache_inuse_bytes` | Bytes used for mcache structures | `runtime.MemStats.MCacheInuse` |
+| `go_memstats_mcache_sys_bytes` | Bytes obtained from system for mcache | `runtime.MemStats.MCacheSys` |
+| `go_memstats_buck_hash_sys_bytes` | Bytes used by the profiling bucket hash table | `runtime.MemStats.BuckHashSys` |
+| `go_memstats_gc_sys_bytes` | Bytes used for GC metadata | `runtime.MemStats.GCSys` |
+| `go_memstats_other_sys_bytes` | Bytes used for other system allocations | `runtime.MemStats.OtherSys` |
+| `go_memstats_next_gc_bytes` | Target heap size for next GC | `runtime.MemStats.NextGC` |
+| `go_memstats_last_gc_time_seconds` | Last GC time (relative to program start) | `runtime.MemStats.LastGC` (convert to seconds) |
+
+#### 2. Garbage Collection Metrics
+
+| Metric Name | Description | Source |
+|------------|-------------|--------|
+| `go_memstats_gc_cpu_fraction` | Fraction of CPU time used by GC | `runtime.MemStats.GCCPUFraction` |
+| `go_memstats_gc_count` | Number of GC cycles | `runtime.MemStats.NumGC` |
+| `go_memstats_gc_duration_seconds` | Summary of GC pause durations | `runtime.MemStats.PauseTotalNs` (convert to seconds) |
+
+#### 3. Goroutine Metrics
+
+| Metric Name | Description | Source |
+|------------|-------------|--------|
+| `go_goroutines` | Number of goroutines | `runtime.NumGoroutine()` |
+
+#### 4. CPU Metrics
+
+| Metric Name | Description | Source |
+|------------|-------------|--------|
+| `go_cpu_count` | Number of logical CPUs | `runtime.NumCPU()` |
+
+**Note**: Thread count is not directly available in Go's `runtime` package. If needed, it could be obtained via platform-specific methods (e.g., parsing `/proc/self/status` on Linux), but this adds complexity and is typically not needed.
+
+### Implementation
+
+**Location**: `metrics/runtime.go`
+
+```go
+package metrics
+
+import (
+    "fmt"
+    "runtime"
+    "strings"
+    "time"
+)
+
+// Track program start time for GC timestamp conversion
+var programStartTime = time.Now()
+
+// writeRuntimeMetrics writes Go runtime metrics to the strings.Builder
+// These metrics are compatible with prometheus/client_golang's promauto metrics
+func writeRuntimeMetrics(b *strings.Builder) {
+    var m runtime.MemStats
+    runtime.ReadMemStats(&m)
+
+    // Memory metrics
+    writeGauge(b, "go_memstats_alloc_bytes", float64(m.Alloc))
+    writeGauge(b, "go_memstats_alloc_bytes_total", float64(m.TotalAlloc))
+    writeGauge(b, "go_memstats_sys_bytes", float64(m.Sys))
+    writeGauge(b, "go_memstats_lookups_total", float64(m.Lookups))
+    writeGauge(b, "go_memstats_mallocs_total", float64(m.Mallocs))
+    writeGauge(b, "go_memstats_frees_total", float64(m.Frees))
+
+    // Heap metrics
+    writeGauge(b, "go_memstats_heap_alloc_bytes", float64(m.HeapAlloc))
+    writeGauge(b, "go_memstats_heap_sys_bytes", float64(m.HeapSys))
+    writeGauge(b, "go_memstats_heap_idle_bytes", float64(m.HeapIdle))
+    writeGauge(b, "go_memstats_heap_inuse_bytes", float64(m.HeapInuse))
+    writeGauge(b, "go_memstats_heap_released_bytes", float64(m.HeapReleased))
+    writeGauge(b, "go_memstats_heap_objects", float64(m.HeapObjects))
+
+    // Stack metrics
+    writeGauge(b, "go_memstats_stack_inuse_bytes", float64(m.StackInuse))
+    writeGauge(b, "go_memstats_stack_sys_bytes", float64(m.StackSys))
+
+    // MSpan metrics
+    writeGauge(b, "go_memstats_mspan_inuse_bytes", float64(m.MSpanInuse))
+    writeGauge(b, "go_memstats_mspan_sys_bytes", float64(m.MSpanSys))
+
+    // MCache metrics
+    writeGauge(b, "go_memstats_mcache_inuse_bytes", float64(m.MCacheInuse))
+    writeGauge(b, "go_memstats_mcache_sys_bytes", float64(m.MCacheSys))
+
+    // Other memory metrics
+    writeGauge(b, "go_memstats_buck_hash_sys_bytes", float64(m.BuckHashSys))
+    writeGauge(b, "go_memstats_gc_sys_bytes", float64(m.GCSys))
+    writeGauge(b, "go_memstats_other_sys_bytes", float64(m.OtherSys))
+    writeGauge(b, "go_memstats_next_gc_bytes", float64(m.NextGC))
+
+    // GC metrics
+    if m.LastGC != 0 {
+        // LastGC is in nanoseconds since program start
+        // Convert to seconds since program start (relative time)
+        lastGCRelative := float64(m.LastGC) / 1e9
+        writeGauge(b, "go_memstats_last_gc_time_seconds", lastGCRelative)
+    }
+    writeGauge(b, "go_memstats_gc_cpu_fraction", m.GCCPUFraction)
+    writeGauge(b, "go_memstats_gc_count", float64(m.NumGC))
+
+    // GC pause duration (total)
+    writeGauge(b, "go_memstats_gc_duration_seconds", float64(m.PauseTotalNs)/1e9)
+
+    // Goroutines
+    writeGauge(b, "go_goroutines", float64(runtime.NumGoroutine()))
+
+    // CPU count
+    writeGauge(b, "go_cpu_count", float64(runtime.NumCPU()))
+}
+```
+
+### Integration into MetricsHandler
+
+**Update `MetricsHandler()` to include runtime metrics**:
+
+```go
+// MetricsHandler returns an HTTP handler that serves Prometheus-formatted metrics
+func MetricsHandler() http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+
+        // Get strings.Builder from pool
+        b := metricsBuilderPool.Get().(*strings.Builder)
+        defer func() {
+            // Reset and return to pool
+            b.Reset()
+            // Keep the grown capacity (don't shrink)
+            metricsBuilderPool.Put(b)
+        }()
+
+        // Write Go runtime metrics first (standard metrics, compatible with prometheus/client_golang)
+        writeRuntimeMetrics(b)
+
+        // Write application-specific metrics
+        globalRegistry.mu.RLock()
+        connections := make([]*ConnectionMetrics, 0, len(globalRegistry.connections))
+        socketIds := make([]uint32, 0, len(globalRegistry.connections))
+        for socketId, metrics := range globalRegistry.connections {
+            connections = append(connections, metrics)
+            socketIds = append(socketIds, socketId)
+        }
+        globalRegistry.mu.RUnlock()
+
+        // Write metrics for each connection
+        for i, metrics := range connections {
+            socketId := socketIds[i]
+            socketIdStr := fmt.Sprintf("0x%08x", socketId)
+
+            // ... (connection-specific metrics)
+        }
+
+        w.Write([]byte(b.String()))
+    })
+}
+```
+
+### Performance Considerations
+
+**Cost of `runtime.ReadMemStats()`**:
+- **Stop-the-world operation**: `runtime.ReadMemStats()` stops all goroutines briefly (< 1ms typically)
+- **Frequency**: Called once per `/metrics` scrape (typically every 15-60 seconds)
+- **Impact**: Minimal for typical scraping intervals, but should be documented
+- **Alternative**: Could cache metrics with a TTL (e.g., 1 second) to reduce calls if needed
+
+**Caching Option** (if profiling shows it's needed):
+```go
+var (
+    runtimeMetricsCache struct {
+        data      string
+        timestamp time.Time
+        mu        sync.RWMutex
+    }
+    runtimeMetricsCacheTTL = 1 * time.Second
+)
+
+func getCachedRuntimeMetrics() string {
+    runtimeMetricsCache.mu.RLock()
+    if time.Since(runtimeMetricsCache.timestamp) < runtimeMetricsCacheTTL {
+        data := runtimeMetricsCache.data
+        runtimeMetricsCache.mu.RUnlock()
+        return data
+    }
+    runtimeMetricsCache.mu.RUnlock()
+
+    // Cache miss - generate new metrics
+    var b strings.Builder
+    b.Grow(4 * 1024) // Smaller buffer for runtime metrics
+    writeRuntimeMetrics(&b)
+    data := b.String()
+
+    runtimeMetricsCache.mu.Lock()
+    runtimeMetricsCache.data = data
+    runtimeMetricsCache.timestamp = time.Now()
+    runtimeMetricsCache.mu.Unlock()
+
+    return data
+}
+```
+
+**Recommendation**: Start without caching. The stop-the-world pause is typically < 1ms and only occurs during metrics scraping (infrequent). Add caching only if profiling shows it's a bottleneck.
+
+### Example Prometheus Queries
+
+**Memory Usage**:
+```promql
+go_memstats_heap_alloc_bytes / 1024 / 1024  # MB
+```
+
+**GC Pressure**:
+```promql
+rate(go_memstats_gc_count[5m])  # GCs per second
+go_memstats_gc_cpu_fraction  # Fraction of CPU used by GC
+```
+
+**Goroutine Leak Detection**:
+```promql
+go_goroutines  # Alert if > threshold
+rate(go_goroutines[5m])  # Alert if increasing rapidly
+```
+
+**Memory Leak Detection**:
+```promql
+rate(go_memstats_heap_alloc_bytes[5m])  # Alert if continuously increasing
+```
+
+### Benefits
+
+1. **Standard Metrics**: Compatible with standard Prometheus Go metrics (same names as `prometheus/client_golang`)
+2. **Process Health**: Monitor memory, GC, and goroutine health
+3. **Debugging**: Identify memory leaks, GC pressure, goroutine leaks
+4. **No External Dependencies**: Uses only Go standard library (`runtime` package)
+5. **Low Overhead**: Called only during metrics scraping (infrequent)
+6. **Familiar**: Same metric names as `promauto`, making it easy for operators familiar with Prometheus Go metrics
 
 ---
 
