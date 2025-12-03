@@ -188,47 +188,23 @@ func main() {
 					connections = append(connections, srtconn)
 				}
 
-				if len(connections) == 0 {
-					continue
-				}
-
-				fmt.Fprintf(os.Stderr, "\n=== Connection Statistics (every %s) ===\n", config.StatisticsPrintInterval)
-				fmt.Fprintf(os.Stderr, "Active connections: %d\n\n", len(connections))
-
-				for i, conn := range connections {
-					stats := &srt.Statistics{}
-					conn.Stats(stats)
-
-					remoteAddr := "unknown"
-					if conn.RemoteAddr() != nil {
-						remoteAddr = conn.RemoteAddr().String()
-					}
-
-					connType := "unknown"
-					if i == 0 && len(connections) == 2 {
-						connType = "reader"
-					} else if i == 1 && len(connections) == 2 {
-						connType = "writer"
-					} else if len(connections) == 1 {
+				// Create labeler function for client (reader/writer labels)
+				labeler := func(index int, total int) string {
+					if index == 0 && total == 2 {
+						return "reader"
+					} else if index == 1 && total == 2 {
+						return "writer"
+					} else if total == 1 {
+						// Single connection - determine if reader or writer
 						if _, ok := r.(srt.Conn); ok {
-							connType = "reader"
-						} else {
-							connType = "writer"
+							return "reader"
 						}
+						return "writer"
 					}
-
-					fmt.Fprintf(os.Stderr, "Connection %d - %s (SocketID: %#08x, Remote: %s):\n", i+1, connType, conn.SocketId(), remoteAddr)
-					fmt.Fprintf(os.Stderr, "  Accumulated:\n")
-					fmt.Fprintf(os.Stderr, "    PktSent: %d, PktRecv: %d\n", stats.Accumulated.PktSent, stats.Accumulated.PktRecv)
-					fmt.Fprintf(os.Stderr, "    PktSentACK: %d, PktRecvACK: %d\n", stats.Accumulated.PktSentACK, stats.Accumulated.PktRecvACK)
-					fmt.Fprintf(os.Stderr, "    PktSentNAK: %d, PktRecvNAK: %d\n", stats.Accumulated.PktSentNAK, stats.Accumulated.PktRecvNAK)
-					fmt.Fprintf(os.Stderr, "    PktRecvLoss: %d, PktRecvLossRate: %.2f%%\n", stats.Accumulated.PktRecvLoss, stats.Instantaneous.PktRecvLossRate)
-					fmt.Fprintf(os.Stderr, "  Instantaneous:\n")
-					fmt.Fprintf(os.Stderr, "    MbpsSentRate: %.2f, MbpsRecvRate: %.2f\n", stats.Instantaneous.MbpsSentRate, stats.Instantaneous.MbpsRecvRate)
-					fmt.Fprintf(os.Stderr, "    MsRTT: %.2f\n", stats.Instantaneous.MsRTT)
-					fmt.Fprintf(os.Stderr, "\n")
+					return ""
 				}
-				fmt.Fprintf(os.Stderr, "==========================================\n\n")
+
+				common.PrintConnectionStatistics(connections, config.StatisticsPrintInterval.String(), labeler)
 			}
 		}()
 	}

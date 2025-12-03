@@ -67,11 +67,11 @@ func TestSendLossListACK(t *testing.T) {
 
 func TestSendRetransmit(t *testing.T) {
 	numbers := []uint32{}
-	nRetransmit := 0
+	var nRetransmitFromFlag uint64
 	send := mockLiveSend(func(p packet.Packet) {
 		numbers = append(numbers, p.Header().PacketSequenceNumber.Val())
 		if p.Header().RetransmittedPacketFlag {
-			nRetransmit++
+			nRetransmitFromFlag++
 		}
 	})
 
@@ -86,21 +86,23 @@ func TestSendRetransmit(t *testing.T) {
 
 	send.Tick(10)
 
-	require.Equal(t, 0, nRetransmit)
+	require.Equal(t, uint64(0), nRetransmitFromFlag)
 
-	send.NAK([]circular.Number{
+	nRetransmit := send.NAK([]circular.Number{
 		circular.New(2, packet.MAX_SEQUENCENUMBER),
 		circular.New(2, packet.MAX_SEQUENCENUMBER),
 	})
 
-	require.Equal(t, 1, nRetransmit)
+	require.Equal(t, uint64(1), nRetransmit)
+	require.Equal(t, uint64(1), nRetransmitFromFlag)
 
-	send.NAK([]circular.Number{
+	nRetransmit = send.NAK([]circular.Number{
 		circular.New(5, packet.MAX_SEQUENCENUMBER),
 		circular.New(7, packet.MAX_SEQUENCENUMBER),
 	})
 
-	require.Equal(t, 4, nRetransmit)
+	require.Equal(t, uint64(3), nRetransmit)         // Packets 5, 6, 7
+	require.Equal(t, uint64(4), nRetransmitFromFlag) // Total: 1 + 3 = 4
 }
 
 func TestSendDrop(t *testing.T) {

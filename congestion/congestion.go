@@ -26,7 +26,8 @@ type Sender interface {
 	ACK(sequenceNumber circular.Number)
 
 	// NAK get called when packets with the listed sequence number should be resend.
-	NAK(sequenceNumbers []circular.Number)
+	// Returns the number of packets retransmitted.
+	NAK(sequenceNumbers []circular.Number) uint64
 
 	// SetDropThreshold sets the threshold in microseconds for when to drop too late packages from the queue.
 	SetDropThreshold(threshold uint64)

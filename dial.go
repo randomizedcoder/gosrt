@@ -835,6 +835,28 @@ func (dl *dialer) Stats(s *Statistics) {
 	dl.conn.Stats(s)
 }
 
+func (dl *dialer) GetExtendedStatistics() *ExtendedStatistics {
+	dl.connLock.RLock()
+	defer dl.connLock.RUnlock()
+
+	if dl.conn == nil {
+		return nil
+	}
+
+	return dl.conn.GetExtendedStatistics()
+}
+
+func (dl *dialer) GetPeerIdleTimeoutRemaining() time.Duration {
+	dl.connLock.RLock()
+	defer dl.connLock.RUnlock()
+
+	if dl.conn == nil {
+		return 0
+	}
+
+	return dl.conn.GetPeerIdleTimeoutRemaining()
+}
+
 func (dl *dialer) log(topic string, message func() string) {
 	if dl.config.Logger == nil {
 		return

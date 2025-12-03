@@ -457,6 +457,212 @@ According to the SRT specification (draft-sharabayko-srt-01.txt, section 3.2.3):
 
 **PUBLISH connections (send-only):**
 - Client sends data packets → Server receives → Server sends ACK/NAK
+
+---
+
+## Case Study: Server Stops Sending Data
+
+### Scenario
+A client connection (SUBSCRIBE/receive-only) was receiving data at ~40 Mbps for an extended period, then the server stopped sending data packets. The connection eventually closed due to peer idle timeout.
+
+### Client Statistics (Before Close)
+```json
+{
+  "pkt_recv_data": 6942577,
+  "pkt_sent_ack": 153616,
+  "pkt_recv_ack": 136898,
+  "pkt_sent_nak": 14039,
+  "pkt_recv_nak": 0,
+  "mbps_recv_rate": 0,  // ← Stopped receiving data
+  "pkt_recv_loss": 109721
+}
+```
+
+### Timeline
+1. **Normal Operation**: Client receiving data at ~40 Mbps, sending ACKs/NAKs
+2. **Data Stops**: `mbps_recv_rate` drops to 0 (server stopped sending data packets)
+3. **Client Continues**: Client still sending ACKs (`pkt_sent_ack` increased from 152181 to 153616)
+4. **Server Stops Responding**: `pkt_recv_ack` stayed at 136898 (server stopped sending ACKs back)
+5. **Timeout**: After 30 seconds of no data packets, peer idle timeout fires
+
+### Root Cause Analysis
+
+**Possible Causes:**
+1. **Server-side source stopped**: The application feeding data to the server stopped (e.g., ffmpeg ended, file finished)
+2. **Server connection closed**: Server-side connection closed but client didn't receive shutdown packet
+3. **Network issue**: Network path from server to client failed, but client to server still works
+4. **Server application error**: Server application encountered an error and stopped sending
+
+**Evidence:**
+- Client `pkt_sent_ack` continued increasing → Client was still trying to communicate
+- Server `pkt_recv_ack` stopped increasing → Server stopped responding
+- This suggests **server-side issue**, not network loss (which would affect both directions)
+
+### Diagnostic Recommendations
+
+**To diagnose this scenario, enable logging:**
+```bash
+# Server-side logging
+-logtopics "connection:close:reason,packet:send:error,connection:recv:ctrl"
+
+# Client-side logging
+-logtopics "connection:close:reason,packet:recv:error,connection:recv:ctrl"
+```
+
+**Key Questions to Answer:**
+1. Did the server send a shutdown packet? (Check server logs for `connection:close:reason`)
+2. Did the server encounter a send error? (Check for `packet:send:error`)
+3. Did the server application stop feeding data? (Check application logs)
+4. Was there a network issue on the server→client path? (Check server network stats)
+
+### Prevention
+
+**For Server Applications:**
+- Monitor for when data source stops (file ends, stream ends, etc.)
+- Send explicit shutdown packet when data source stops
+- Implement health checks to detect when connections should be closed
+
+**For Library:**
+- Consider adding "last data packet sent" tracking to detect when server stops sending
+- Add logging when data transmission stops (no data sent for X seconds)
+- Consider shorter peer idle timeout for receive-only connections (if data stops, close faster)
+
+---
+
+## Case Study: Client Stops Responding (One-Way Communication Failure)
+
+### Scenario
+A server connection (PUBLISH/send-only) was sending data at ~38-40 Mbps for over 2 hours, then the client stopped sending any packets (ACKs, ACKACKs, NAKs). The connection eventually closed due to peer idle timeout.
+
+### Connection Details
+- **Socket ID**: `0xc4bf813e`
+- **Remote Address**: `172.16.40.212:8439`
+- **Connection Duration**: 2h19m33s
+- **Final Statistics**:
+  - `pkt_sent_data`: 34,756,684
+  - `pkt_recv_ack`: 696,064 (stopped increasing)
+  - `pkt_recv_ackack`: 610,576 (stopped increasing)
+  - `pkt_recv_nak`: 491,534 (stopped increasing)
+  - `pkt_retrans_total`: 1,961,786 (5.64% retransmission rate)
+
+### Timeline Analysis
+
+**18:39:36.847** - First snapshot:
+- `peer_idle_timeout_remaining_seconds`: **11.876 seconds**
+- `pkt_sent_data`: 34,710,237
+- `pkt_recv_ack`: 696,064
+- `pkt_recv_ackack`: 610,576
+- `pkt_recv_nak`: 491,534
+- Server actively sending data at 38.88 Mbps
+
+**18:39:46.847** - Second snapshot (10 seconds later):
+- `peer_idle_timeout_remaining_seconds`: **1.876 seconds** ⚠️ (decreased by ~10 seconds)
+- `pkt_sent_data`: 34,749,379 (increased by 39,142 packets)
+- `pkt_recv_ack`: 696,064 (unchanged - **client stopped sending ACKs**)
+- `pkt_recv_ackack`: 610,576 (unchanged - **client stopped sending ACKACKs**)
+- `pkt_recv_nak`: 491,534 (unchanged - **client stopped sending NAKs**)
+- Server still sending data at 39.32 Mbps
+
+**18:39:48.724** - Connection closed:
+- `peer_idle_timeout_remaining_seconds`: **0 seconds**
+- Reason: `peer idle timeout: no data received from peer for 30s`
+- Final `pkt_sent_data`: 34,756,684 (increased by 7,305 more packets)
+
+### Root Cause Analysis
+
+**What Happened:**
+1. **Client stopped responding** - No packets received from client after 18:39:36
+2. **Server continued sending** - Server kept sending data packets (39,142 packets in 10 seconds)
+3. **Timer countdown** - `peerIdleTimeout` decreased from 11.8s to 1.8s (exactly 10 seconds)
+4. **Timeout fired** - After 30 seconds of no packets, connection closed
+
+**Key Evidence (Server Side):**
+- `pkt_recv_ack` stayed at 696,064 (no new ACKs received)
+- `pkt_recv_ackack` stayed at 610,576 (no new ACKACKs received)
+- `pkt_recv_nak` stayed at 491,534 (no new NAKs received)
+- Server was still sending data (`pkt_sent_data` increased)
+- Timer countdown was accurate (decreased by exactly 10 seconds between snapshots)
+
+**Client-Side Evidence (Critical Finding):**
+The client logs reveal that **the client was actively sending packets** but the server wasn't receiving them:
+
+- **Client sent**: 698,633 ACKs (as of 18:39:48)
+- **Server received**: 696,064 ACKs (stopped at 18:39:36)
+- **Difference**: 2,569 ACKs lost in transit (client→server)
+
+- **Client sent**: 612,762 ACKACKs (as of 18:39:48)
+- **Server received**: 610,576 ACKACKs (stopped at 18:39:36)
+- **Difference**: 2,186 ACKACKs lost in transit
+
+- **Client sent**: 492,433 NAKs (as of 18:39:48)
+- **Server received**: 491,534 NAKs (stopped at 18:39:36)
+- **Difference**: 899 NAKs lost in transit
+
+**Root Cause: Network Packet Loss (Client→Server Path)**
+
+The client was **actively sending** ACKs, ACKACKs, and NAKs, but these packets were being **lost in the network** on the client→server path. This is why:
+1. Server's `peerIdleTimeout` fired (no packets received for 30 seconds)
+2. Server sent shutdown packet
+3. Client received shutdown packet and closed gracefully
+
+**Possible Causes of Network Loss:**
+1. **Network congestion** - Router/switch buffer overflow on client→server path
+2. **Network interface issue** - Client's network interface dropping outbound packets
+3. **Router/switch failure** - Network equipment dropping packets on client→server path
+4. **Asymmetric routing** - Different paths for server→client vs client→server, with client→server path having issues
+5. **Network policy/QoS** - Network policies dropping client→server traffic (but not server→client)
+
+**Why Server Didn't Detect Earlier:**
+- Server was still successfully sending data packets
+- Server had no way to know client stopped receiving (no feedback)
+- Only way to detect is via `peerIdleTimeout` (no packets received for 30s)
+- This is **expected behavior** - the timeout mechanism worked correctly
+
+### Diagnostic Value of New Features
+
+**Peer Idle Timeout Remaining:**
+- ✅ **Worked perfectly** - Showed countdown from 11.8s → 1.8s → 0s
+- ✅ **Accurate timing** - Decreased by exactly 10 seconds between snapshots
+- ✅ **Early warning** - Could see connection was about to timeout
+
+**Close Statistics:**
+- ✅ **Captured final state** - Complete statistics at time of close
+- ✅ **Connection duration** - Shows connection was active for 2h19m33s
+- ✅ **Final metrics** - All accumulated statistics preserved
+
+**Cross-Reference Analysis:**
+- ✅ **Revealed network loss** - Comparing client `pkt_sent_*` vs server `pkt_recv_*` showed 2,569+ packets lost
+- ✅ **Identified asymmetric issue** - Server→client path working, client→server path failing
+- ✅ **Confirmed graceful shutdown** - Client received shutdown packet and closed properly
+
+### Recommendations
+
+**For Monitoring:**
+- Alert when `peer_idle_timeout_remaining_seconds` drops below 10 seconds
+- Alert when `pkt_recv_ack` stops increasing while `pkt_sent_data` continues
+- Monitor for connections with one-way communication (send but no receive)
+- **Compare client `pkt_sent_*` vs server `pkt_recv_*`** to detect network packet loss
+- Alert on large discrepancies between sent/received counts
+
+**For Debugging:**
+- **Compare client and server logs** - Cross-reference `pkt_sent_*` vs `pkt_recv_*` to identify network loss
+- Check network connectivity on client→server path (may differ from server→client path)
+- Check network equipment (routers, switches) for packet drops
+- Verify network interface statistics on both client and server
+- Check for asymmetric routing issues
+- Check network policies/QoS that might affect one direction
+
+**For Prevention:**
+- Monitor network packet loss on both directions independently
+- Implement network health checks (ping, traceroute) on both paths
+- Consider shorter timeout for critical connections (if acceptable)
+- Implement application-level keepalive/heartbeat
+- **Use statistics comparison** - Regularly compare client/server statistics to detect asymmetric network issues early
+
+---
+
+**PUBLISH connections (send-only):**
+- Client sends data packets → Server receives → Server sends ACK/NAK
 - If client stops sending data, server stops sending ACK/NAK
 - **Without proactive keepalives**, client doesn't receive anything for 30s → timeout
 

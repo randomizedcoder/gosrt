@@ -3,10 +3,12 @@ package srt
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,6 +77,15 @@ type Conn interface {
 
 	// Version returns the connection version, either 4 or 5. With version 4, the streamid is not available
 	Version() uint32
+
+	// GetExtendedStatistics returns extended statistics that are not part of the standard SRT Statistics struct.
+	// This includes ACKACK packet counts and retransmissions triggered by NAKs.
+	// Returns nil if extended statistics are not available.
+	GetExtendedStatistics() *ExtendedStatistics
+
+	// GetPeerIdleTimeoutRemaining returns the remaining time until the peer idle timeout fires.
+	// Returns 0 if the timer is not active or has already fired.
+	GetPeerIdleTimeoutRemaining() time.Duration
 }
 
 type rtt struct {
@@ -130,6 +141,7 @@ type connStats struct {
 	pktRecvACKACK     uint64
 	pktSentNAK        uint64
 	pktRecvNAK        uint64
+	pktRetransFromNAK uint64
 	pktSentKM         uint64
 	pktRecvKM         uint64
 	pktRecvUndecrypt  uint64
@@ -168,7 +180,8 @@ type srtConn struct {
 	kmConfirmed            bool
 	cryptoLock             sync.Mutex
 
-	peerIdleTimeout *time.Timer
+	peerIdleTimeout          *time.Timer
+	peerIdleTimeoutLastReset time.Time // Track when the peer idle timeout was last reset
 
 	rtt rtt // microseconds
 
@@ -352,6 +365,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	}
 	c.readQueue = make(chan packet.Packet, readQueueSize)
 
+	c.peerIdleTimeoutLastReset = time.Now()
 	c.peerIdleTimeout = time.AfterFunc(c.config.PeerIdleTimeout, func() {
 		c.log("connection:close:reason", func() string {
 			return fmt.Sprintf("peer idle timeout: no data received from peer for %s", c.config.PeerIdleTimeout)
@@ -783,6 +797,7 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	}
 
 	c.peerIdleTimeout.Reset(c.config.PeerIdleTimeout)
+	c.peerIdleTimeoutLastReset = time.Now()
 
 	header := p.Header()
 
@@ -879,6 +894,7 @@ func (c *srtConn) handleKeepAlive(p packet.Packet) {
 	c.statisticsLock.Unlock()
 
 	c.peerIdleTimeout.Reset(c.config.PeerIdleTimeout)
+	c.peerIdleTimeoutLastReset = time.Now()
 
 	c.log("control:send:keepalive:dump", func() string { return p.Dump() })
 
@@ -955,8 +971,33 @@ func (c *srtConn) handleNAK(p packet.Packet) {
 
 	c.log("control:recv:NAK:cif", func() string { return cif.String() })
 
-	// Inform congestion control about lost packets
-	c.snd.NAK(cif.LostPacketSequenceNumber)
+	// Inform congestion control about lost packets and track retransmissions
+	retransCount := c.snd.NAK(cif.LostPacketSequenceNumber)
+	if retransCount > 0 {
+		c.statisticsLock.Lock()
+		c.statistics.pktRetransFromNAK += retransCount
+		c.statisticsLock.Unlock()
+	}
+}
+
+// ExtendedStatistics contains statistics that are not part of the standard SRT Statistics struct.
+// These are retrieved in a single call to minimize lock contention.
+type ExtendedStatistics struct {
+	PktSentACKACK     uint64 // Number of ACKACK packets sent
+	PktRecvACKACK     uint64 // Number of ACKACK packets received
+	PktRetransFromNAK uint64 // Number of packets retransmitted in response to NAKs
+}
+
+// GetExtendedStatistics returns all extended statistics in a single call with a single lock.
+// This implements the Conn interface.
+func (c *srtConn) GetExtendedStatistics() *ExtendedStatistics {
+	c.statisticsLock.RLock()
+	defer c.statisticsLock.RUnlock()
+	return &ExtendedStatistics{
+		PktSentACKACK:     c.statistics.pktSentACKACK,
+		PktRecvACKACK:     c.statistics.pktRecvACKACK,
+		PktRetransFromNAK: c.statistics.pktRetransFromNAK,
+	}
 }
 
 // handleACKACK updates the RTT and NAK interval for the congestion control.
@@ -1575,10 +1616,34 @@ func (c *srtConn) Close() error {
 	return nil
 }
 
+// GetPeerIdleTimeoutRemaining returns the remaining time until the peer idle timeout fires.
+// Returns 0 if the timer is not active or has already fired.
+// This implements the Conn interface.
+func (c *srtConn) GetPeerIdleTimeoutRemaining() time.Duration {
+	// Calculate remaining time based on when it was last reset
+	elapsed := time.Since(c.peerIdleTimeoutLastReset)
+	remaining := c.config.PeerIdleTimeout - elapsed
+
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+// getPeerIdleTimeoutRemaining is an internal alias for GetPeerIdleTimeoutRemaining
+func (c *srtConn) getPeerIdleTimeoutRemaining() time.Duration {
+	return c.GetPeerIdleTimeoutRemaining()
+}
+
 // close closes the connection.
 func (c *srtConn) close() {
 
 	c.shutdownOnce.Do(func() {
+		// Print statistics before closing (if logger is available)
+		if c.logger != nil {
+			c.printCloseStatistics()
+		}
+
 		c.log("connection:close", func() string { return "stopping peer idle timeout" })
 
 		c.peerIdleTimeout.Stop()
@@ -1652,6 +1717,78 @@ func (c *srtConn) close() {
 
 func (c *srtConn) log(topic string, message func() string) {
 	c.logger.Print(topic, c.socketId, 2, message)
+}
+
+// printCloseStatistics prints connection statistics in JSON format when the connection closes.
+// This is called from close() before the connection is fully shut down.
+func (c *srtConn) printCloseStatistics() {
+	stats := &Statistics{}
+	c.Stats(stats)
+
+	remoteAddr := "unknown"
+	if c.remoteAddr != nil {
+		remoteAddr = c.remoteAddr.String()
+	}
+
+	// Get extended statistics
+	extStats := c.GetExtendedStatistics()
+
+	// Calculate retransmit percentage
+	var retransPercent *float64
+	if stats.Accumulated.PktSent > 0 {
+		percent := (float64(stats.Accumulated.PktRetrans) / float64(stats.Accumulated.PktSent)) * 100.0
+		retransPercent = &percent
+	}
+
+	// Get remaining peer idle timeout
+	remainingTimeout := c.GetPeerIdleTimeoutRemaining()
+	remainingSeconds := float64(remainingTimeout.Seconds())
+
+	// Build JSON output
+	output := map[string]interface{}{
+		"timestamp":                           time.Now().Format(time.RFC3339Nano),
+		"event":                               "connection_closed",
+		"socket_id":                           fmt.Sprintf("0x%08x", c.socketId),
+		"remote_addr":                         remoteAddr,
+		"connection_duration":                 time.Since(c.start).String(),
+		"peer_idle_timeout_remaining_seconds": remainingSeconds,
+		"accumulated": map[string]interface{}{
+			"pkt_sent_data":      stats.Accumulated.PktSent,
+			"pkt_recv_data":      stats.Accumulated.PktRecv,
+			"pkt_sent_ack":       stats.Accumulated.PktSentACK,
+			"pkt_recv_ack":       stats.Accumulated.PktRecvACK,
+			"pkt_sent_nak":       stats.Accumulated.PktSentNAK,
+			"pkt_recv_nak":       stats.Accumulated.PktRecvNAK,
+			"pkt_retrans_total":  stats.Accumulated.PktRetrans,
+			"pkt_recv_loss":      stats.Accumulated.PktRecvLoss,
+			"pkt_recv_loss_rate": stats.Instantaneous.PktRecvLossRate,
+		},
+		"instantaneous": map[string]interface{}{
+			"mbps_sent_rate": stats.Instantaneous.MbpsSentRate,
+			"mbps_recv_rate": stats.Instantaneous.MbpsRecvRate,
+			"ms_rtt":         stats.Instantaneous.MsRTT,
+		},
+	}
+
+	if extStats != nil {
+		output["accumulated"].(map[string]interface{})["pkt_sent_ackack"] = extStats.PktSentACKACK
+		output["accumulated"].(map[string]interface{})["pkt_recv_ackack"] = extStats.PktRecvACKACK
+		output["accumulated"].(map[string]interface{})["pkt_retrans_from_nak"] = extStats.PktRetransFromNAK
+	}
+
+	if retransPercent != nil {
+		output["accumulated"].(map[string]interface{})["pkt_retrans_percent"] = *retransPercent
+	}
+
+	jsonData, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		c.log("connection:close:error", func() string {
+			return fmt.Sprintf("failed to encode close statistics: %v", err)
+		})
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "\n%s\n", string(jsonData))
 }
 
 func (c *srtConn) SetDeadline(t time.Time) error      { return nil }

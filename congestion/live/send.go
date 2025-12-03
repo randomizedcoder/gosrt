@@ -278,13 +278,16 @@ func (s *sender) ACK(sequenceNumber circular.Number) {
 	s.pktSndPeriod = (s.avgPayloadSize + 16) * 1000000 / s.maxBW
 }
 
-func (s *sender) NAK(sequenceNumbers []circular.Number) {
+// NAK processes a NAK request and returns the number of packets retransmitted
+func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 	if len(sequenceNumbers) == 0 {
-		return
+		return 0
 	}
 
 	s.lock.Lock()
 	defer s.lock.Unlock()
+
+	retransCount := uint64(0)
 
 	for e := s.lossList.Back(); e != nil; e = e.Prev() {
 		p := e.Value.(packet.Packet)
@@ -307,9 +310,13 @@ func (s *sender) NAK(sequenceNumbers []circular.Number) {
 
 				p.Header().RetransmittedPacketFlag = true
 				s.deliver(p)
+
+				retransCount++
 			}
 		}
 	}
+
+	return retransCount
 }
 
 func (s *sender) SetDropThreshold(threshold uint64) {
