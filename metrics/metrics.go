@@ -78,10 +78,11 @@ type ConnectionMetrics struct {
 	PktSentHandshakeError   atomic.Uint64
 
 	// Path-specific counters
-	PktRecvIoUring  atomic.Uint64
-	PktRecvReadFrom atomic.Uint64
-	PktSentIoUring  atomic.Uint64
-	PktSentWriteTo  atomic.Uint64
+	PktRecvIoUring   atomic.Uint64
+	PktRecvReadFrom  atomic.Uint64
+	PktSentIoUring   atomic.Uint64
+	PktSentWriteTo   atomic.Uint64
+	PktSentSubmitted atomic.Uint64 // io_uring submissions (for detecting lost completions)
 
 	// Error counters (detailed)
 	PktRecvErrorIoUring atomic.Uint64

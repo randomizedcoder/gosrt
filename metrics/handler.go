@@ -170,9 +170,13 @@ func MetricsHandler() http.Handler {
 			writeCounterValue(b, "gosrt_connection_recv_control_error_total",
 				metrics.PktRecvControlErrorRoute.Load(),
 				"socket_id", socketIdStr, "type", "route")
+
+			// Path-specific counters - io_uring submissions (for detecting lost completions)
+			writeCounterValue(b, "gosrt_connection_send_submitted_total",
+				metrics.PktSentSubmitted.Load(),
+				"socket_id", socketIdStr)
 		}
 
 		w.Write([]byte(b.String()))
 	})
 }
-

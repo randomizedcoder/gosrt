@@ -285,6 +285,12 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		return
 	}
 
+	// Request submitted successfully - track submission
+	// This counter helps detect packets that are submitted but never complete
+	if c.metrics != nil {
+		c.metrics.PktSentSubmitted.Add(1)
+	}
+
 	// Request submitted successfully - track success
 	// Note: We track success here (not in completion handler) because:
 	// 1. Control packets are decommissioned, so we can't get type in completion handler
