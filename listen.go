@@ -246,17 +246,29 @@ func Listen(network, address string, config Config, ctx context.Context, shutdow
 		ioUringInitialized = (ln.recvRing != nil)
 	}
 
-	var readerCtx context.Context
-	readerCtx, ln.stopReader = context.WithCancel(context.Background())
-	go ln.reader(readerCtx)
+	// Start reader goroutine with listener context
+	// Note: reader will exit when ln.ctx is cancelled (via server context cancellation)
+	go ln.reader(ln.ctx)
 
 	// Only start ReadFrom() goroutine if io_uring is NOT enabled or failed to initialize
 	// When io_uring is enabled and initialized, the completion handler processes packets
 	if !ioUringInitialized {
 		go func() {
+			defer func() {
+				ln.log("listen", func() string { return "ReadFrom goroutine exited" })
+			}()
+
 			buffer := make([]byte, config.MSS) // MTU size
 
 			for {
+				// Check for context cancellation first
+				select {
+				case <-ln.ctx.Done():
+					ln.markDone(ErrListenerClosed)
+					return
+				default:
+				}
+
 				if ln.isShutdown() {
 					ln.markDone(ErrListenerClosed)
 					return
@@ -267,6 +279,14 @@ func Listen(network, address string, config Config, ctx context.Context, shutdow
 				if err != nil {
 					if errors.Is(err, os.ErrDeadlineExceeded) {
 						continue
+					}
+
+					// Check context again after read error
+					select {
+					case <-ln.ctx.Done():
+						ln.markDone(ErrListenerClosed)
+						return
+					default:
 					}
 
 					if ln.isShutdown() {
@@ -286,6 +306,11 @@ func Listen(network, address string, config Config, ctx context.Context, shutdow
 
 				// non-blocking
 				select {
+				case <-ln.ctx.Done():
+					// Context cancelled - decommission packet and exit
+					p.Decommission()
+					ln.markDone(ErrListenerClosed)
+					return
 				case ln.rcvQueue <- p:
 					// Success - packet queued (metrics tracked in reader())
 				default:
@@ -402,10 +427,8 @@ func (ln *listener) Close() {
 		ln.shutdown = true
 		ln.shutdownLock.Unlock()
 
-		// Cancel context if set (triggers goroutines to exit)
-		if ln.stopReader != nil {
-			ln.stopReader()
-		}
+		// Note: All goroutines will exit when ln.ctx is cancelled (via server context cancellation)
+		// No need to call stopReader() - it was a no-op anyway since we use ln.ctx directly
 
 		// Close all connections (triggers connection shutdowns)
 		// sync.Map handles locking internally

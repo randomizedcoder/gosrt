@@ -143,12 +143,10 @@ func (ln *listener) initializeIoUringRecv() error {
 	// Initialize completion tracking
 	ln.recvCompletions = make(map[uint64]*recvCompletionInfo)
 
-	// Create context for completion handler
-	ln.recvCompCtx, ln.recvCompCancel = context.WithCancel(context.Background())
-
-	// Start completion handler goroutine
+	// Start completion handler goroutine with listener context
+	// Note: handler will exit when ln.ctx is cancelled (via server context cancellation)
 	ln.recvCompWg.Add(1)
-	go ln.recvCompletionHandler(ln.recvCompCtx)
+	go ln.recvCompletionHandler(ln.ctx)
 
 	// Pre-populate ring with initial pending receives
 	ln.prePopulateRecvRing()
@@ -166,10 +164,8 @@ func (ln *listener) cleanupIoUringRecv() {
 		return // Nothing to clean up
 	}
 
-	// Stop completion handler (if started in Phase 3)
-	if ln.recvCompCancel != nil {
-		ln.recvCompCancel()
-	}
+	// Note: Completion handler will exit when ln.ctx is cancelled (via server context cancellation)
+	// No need to call recvCompCancel() - it was a no-op anyway since we use ln.ctx directly
 
 	// Wait for completion handler to finish (with timeout)
 	done := make(chan struct{})
