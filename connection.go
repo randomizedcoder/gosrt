@@ -277,7 +277,9 @@ type srtConn struct {
 
 // sendCompletionInfo stores minimal information needed for completion handling
 type sendCompletionInfo struct {
-	buffer *bytes.Buffer // Buffer to return to per-connection pool
+	buffer    *bytes.Buffer // Buffer to return to per-connection pool
+	packet    packet.Packet // Packet for metrics tracking (nil for control packets after decommission)
+	isIoUring bool          // Track path for metrics
 }
 
 type srtConnConfig struct {
@@ -694,6 +696,10 @@ func (c *srtConn) send(p packet.Packet) {
 		c.log("connection:send:error", func() string {
 			return "io_uring ring not available, packet dropped"
 		})
+		// Track error (ring not available)
+		if c.metrics != nil {
+			metrics.IncrementSendErrorMetrics(c.metrics, true, "iouring")
+		}
 		p.Decommission()
 		return
 	}

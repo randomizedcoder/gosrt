@@ -315,6 +315,13 @@ func (dl *dialer) send(p packet.Packet) {
 	if err := p.Marshal(&dl.sndData); err != nil {
 		p.Decommission()
 		dl.log("packet:send:error", func() string { return "marshalling packet failed" })
+		// Try to find connection for metrics tracking
+		dl.connLock.RLock()
+		conn := dl.conn
+		dl.connLock.RUnlock()
+		if conn != nil && conn.metrics != nil {
+			metrics.IncrementSendMetrics(conn.metrics, p, false, false, "marshal")
+		}
 		return
 	}
 
@@ -323,8 +330,24 @@ func (dl *dialer) send(p packet.Packet) {
 	dl.log("packet:send:dump", func() string { return p.Dump() })
 
 	// Write the packet's contents to the wire
-	if _, err := dl.pc.Write(buffer); err != nil {
-		dl.log("packet:send:error", func() string { return fmt.Sprintf("failed to write packet to network: %v", err) })
+	_, writeErr := dl.pc.Write(buffer)
+	if writeErr != nil {
+		dl.log("packet:send:error", func() string { return fmt.Sprintf("failed to write packet to network: %v", writeErr) })
+		// Try to find connection for metrics tracking
+		dl.connLock.RLock()
+		conn := dl.conn
+		dl.connLock.RUnlock()
+		if conn != nil && conn.metrics != nil {
+			metrics.IncrementSendMetrics(conn.metrics, p, false, false, "write")
+		}
+	} else {
+		// Success - try to find connection for metrics tracking
+		dl.connLock.RLock()
+		conn := dl.conn
+		dl.connLock.RUnlock()
+		if conn != nil && conn.metrics != nil {
+			metrics.IncrementSendMetrics(conn.metrics, p, false, true, "")
+		}
 	}
 
 	if p.Header().IsControlPacket {

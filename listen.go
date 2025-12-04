@@ -502,6 +502,16 @@ func (ln *listener) send(p packet.Packet) {
 	if err := p.Marshal(&ln.sndData); err != nil {
 		p.Decommission()
 		ln.log("packet:send:error", func() string { return "marshalling packet failed" })
+		// Try to find connection for metrics tracking
+		h := p.Header()
+		if h != nil {
+			val, ok := ln.conns.Load(h.DestinationSocketId)
+			if ok {
+				if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
+					metrics.IncrementSendMetrics(conn.metrics, p, false, false, "marshal")
+				}
+			}
+		}
 		return
 	}
 
@@ -510,8 +520,30 @@ func (ln *listener) send(p packet.Packet) {
 	ln.log("packet:send:dump", func() string { return p.Dump() })
 
 	// Write the packet's contents to the wire
-	if _, err := ln.pc.WriteTo(buffer, p.Header().Addr); err != nil {
-		ln.log("packet:send:error", func() string { return fmt.Sprintf("failed to write packet to network: %v", err) })
+	_, writeErr := ln.pc.WriteTo(buffer, p.Header().Addr)
+	if writeErr != nil {
+		ln.log("packet:send:error", func() string { return fmt.Sprintf("failed to write packet to network: %v", writeErr) })
+		// Try to find connection for metrics tracking
+		h := p.Header()
+		if h != nil {
+			val, ok := ln.conns.Load(h.DestinationSocketId)
+			if ok {
+				if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
+					metrics.IncrementSendMetrics(conn.metrics, p, false, false, "write")
+				}
+			}
+		}
+	} else {
+		// Success - try to find connection for metrics tracking
+		h := p.Header()
+		if h != nil {
+			val, ok := ln.conns.Load(h.DestinationSocketId)
+			if ok {
+				if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
+					metrics.IncrementSendMetrics(conn.metrics, p, false, true, "")
+				}
+			}
+		}
 	}
 
 	if p.Header().IsControlPacket {

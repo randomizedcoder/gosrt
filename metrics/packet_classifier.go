@@ -120,3 +120,115 @@ func IncrementRecvErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType s
 	}
 }
 
+// IncrementSendMetrics increments the appropriate send metrics based on packet type and outcome
+// This is a helper function to reduce code duplication in send paths
+// Exported for use in send paths (connection_linux.go, connection.go, etc.)
+func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool, success bool, dropReason string) {
+	if m == nil {
+		return
+	}
+
+	// Track path
+	if isIoUring {
+		m.PktSentIoUring.Add(1)
+	} else {
+		m.PktSentWriteTo.Add(1)
+	}
+
+	if p == nil {
+		// No packet - can't classify type, but track error
+		if !success {
+			m.PktSentErrorMarshal.Add(1)
+		}
+		return
+	}
+
+	h := p.Header()
+	pktLen := uint64(p.Len())
+
+	if !success {
+		// Track error/drop based on reason
+		switch dropReason {
+		case "marshal":
+			m.PktSentErrorMarshal.Add(1)
+		case "ring_full":
+			m.PktSentRingFull.Add(1)
+			m.PktSentDataDropped.Add(1) // Also track as dropped
+		case "submit":
+			m.PktSentErrorSubmit.Add(1)
+		case "iouring":
+			m.PktSentErrorIoUring.Add(1)
+		case "write":
+			m.PktSentDataError.Add(1)
+		default:
+			// Generic error
+			m.PktSentErrorMarshal.Add(1)
+		}
+		return
+	}
+
+	// Success case - classify by packet type
+	if h.IsControlPacket {
+		switch h.ControlType {
+		case packet.CTRLTYPE_ACK:
+			m.PktSentACKSuccess.Add(1)
+		case packet.CTRLTYPE_ACKACK:
+			m.PktSentACKACKSuccess.Add(1)
+		case packet.CTRLTYPE_NAK:
+			m.PktSentNAKSuccess.Add(1)
+		case packet.CTRLTYPE_KEEPALIVE:
+			m.PktSentKeepaliveSuccess.Add(1)
+		case packet.CTRLTYPE_SHUTDOWN:
+			m.PktSentShutdownSuccess.Add(1)
+		case packet.CTRLTYPE_HANDSHAKE:
+			m.PktSentHandshakeSuccess.Add(1)
+		case packet.CTRLTYPE_USER:
+			// USER packets can be KM (key material) - check SubType
+			switch h.SubType {
+			case packet.EXTTYPE_KMREQ, packet.EXTTYPE_KMRSP:
+				m.PktSentKMSuccess.Add(1)
+			default:
+				// Other USER subtypes - count as handshake for now
+				m.PktSentHandshakeSuccess.Add(1)
+			}
+		default:
+			// Unknown control type - count as generic success
+			m.PktSentHandshakeSuccess.Add(1) // Use handshake as catch-all
+		}
+	} else {
+		// Data packet
+		m.PktSentDataSuccess.Add(1)
+		m.ByteSentDataSuccess.Add(pktLen)
+	}
+}
+
+// IncrementSendErrorMetrics increments error metrics for cases where we don't have a packet
+// Exported for use in send paths
+func IncrementSendErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType string) {
+	if m == nil {
+		return
+	}
+
+	// Track path
+	if isIoUring {
+		m.PktSentIoUring.Add(1)
+		m.PktSentErrorIoUring.Add(1)
+	} else {
+		m.PktSentWriteTo.Add(1)
+	}
+
+	// Track error type
+	switch errorType {
+	case "marshal":
+		m.PktSentErrorMarshal.Add(1)
+	case "ring_full":
+		m.PktSentRingFull.Add(1)
+	case "submit":
+		m.PktSentErrorSubmit.Add(1)
+	case "iouring":
+		m.PktSentErrorIoUring.Add(1)
+	default:
+		m.PktSentErrorMarshal.Add(1)
+	}
+}
+

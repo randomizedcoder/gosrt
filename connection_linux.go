@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 	"github.com/randomizedcoder/giouring"
 )
@@ -128,6 +129,10 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		c.log("connection:send:error", func() string {
 			return "io_uring ring type assertion failed"
 		})
+		// Track error (ring type assertion failed)
+		if c.metrics != nil {
+			metrics.IncrementSendErrorMetrics(c.metrics, true, "iouring")
+		}
 		p.Decommission()
 		return
 	}
@@ -139,6 +144,10 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	if err := p.Marshal(sendBuffer); err != nil {
 		sendBuffer.Reset() // Reset before putting back
 		c.sendBufferPool.Put(sendBuffer)
+		// Track marshal error
+		if c.metrics != nil {
+			metrics.IncrementSendMetrics(c.metrics, p, true, false, "marshal")
+		}
 		p.Decommission()
 		c.log("connection:send:error", func() string {
 			return fmt.Sprintf("marshalling packet failed: %v", err)
@@ -146,9 +155,13 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		return
 	}
 
-	// Decommission control packets immediately (they won't be retransmitted)
+	// Store packet for metrics tracking (before decommissioning control packets)
+	// Note: Control packets are decommissioned immediately, but we need packet type for metrics
+	packetForMetrics := p
 	if p.Header().IsControlPacket {
+		// Decommission control packets immediately (they won't be retransmitted)
 		p.Decommission()
+		packetForMetrics = nil // Can't use after decommission, but we already have header info
 	}
 	// Data packets are handled by congestion control (may be retransmitted)
 
@@ -174,9 +187,11 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	msg.Iov = &iovec
 	msg.Iovlen = 1
 
-	// Create minimal completion info (only buffer - packet already decommissioned if control)
+	// Create minimal completion info (buffer and packet info for metrics)
 	compInfo := &sendCompletionInfo{
-		buffer: sendBuffer, // Keep buffer alive until send completes
+		buffer:    sendBuffer, // Keep buffer alive until send completes
+		packet:    packetForMetrics, // Packet for metrics (nil for control packets)
+		isIoUring: true,             // Track path
 	}
 
 	// Store completion info in map (protected by lock)
@@ -207,6 +222,12 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 
 		sendBuffer.Reset() // Reset before putting back
 		c.sendBufferPool.Put(sendBuffer)
+
+		// Track ring full error (packet dropped)
+		if c.metrics != nil {
+			// Use packetForMetrics if available, otherwise nil (will track as generic error)
+			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, "ring_full")
+		}
 
 		c.log("connection:send:error", func() string {
 			return "io_uring ring full after retries"
@@ -253,14 +274,27 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		sendBuffer.Reset() // Reset before putting back
 		c.sendBufferPool.Put(sendBuffer)
 
+		// Track submit error
+		if c.metrics != nil {
+			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, "submit")
+		}
+
 		c.log("connection:send:error", func() string {
 			return fmt.Sprintf("failed to submit send request: %v", err)
 		})
 		return
 	}
 
-	// Request submitted successfully
+	// Request submitted successfully - track success
+	// Note: We track success here (not in completion handler) because:
+	// 1. Control packets are decommissioned, so we can't get type in completion handler
+	// 2. Submission success means the packet will be sent (completion errors are rare)
+	if c.metrics != nil {
+		metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, true, "")
+	}
+
 	// Completion will be handled asynchronously by completion handler
+	// Errors in completion handler will be tracked separately
 }
 
 // sendCompletionHandler processes io_uring send completions using direct CQE polling
@@ -335,13 +369,33 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 			c.log("connection:send:completion:error", func() string {
 				return fmt.Sprintf("send failed: %s (errno %d)", syscall.Errno(errno).Error(), errno)
 			})
+			// Track send error (io_uring completion error)
+			// Note: packet may be nil for control packets (already decommissioned)
+			if c.metrics != nil {
+				if compInfo.packet != nil {
+					// We have the packet - track with type
+					metrics.IncrementSendMetrics(c.metrics, compInfo.packet, compInfo.isIoUring, false, "iouring")
+				} else {
+					// No packet (control packet decommissioned) - track generic error
+					metrics.IncrementSendErrorMetrics(c.metrics, compInfo.isIoUring, "iouring")
+				}
+			}
 		} else {
 			bytesSent := int(cqe.Res)
 			if bytesSent < len(buffer.Bytes()) {
 				c.log("connection:send:completion:warning", func() string {
 					return fmt.Sprintf("partial send: %d/%d bytes", bytesSent, len(buffer.Bytes()))
 				})
+				// Partial send - track as error
+				if c.metrics != nil {
+					if compInfo.packet != nil {
+						metrics.IncrementSendMetrics(c.metrics, compInfo.packet, compInfo.isIoUring, false, "iouring")
+					} else {
+						metrics.IncrementSendErrorMetrics(c.metrics, compInfo.isIoUring, "iouring")
+					}
+				}
 			}
+			// Full send success - already tracked in sendIoUring() after successful submit
 		}
 
 		ring.CQESeen(cqe)

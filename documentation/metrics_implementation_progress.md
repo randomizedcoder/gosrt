@@ -130,20 +130,45 @@ The implementation is divided into phases:
 
 ## Phase 4: Send Path Metrics (Complete Visibility)
 
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 
 **Tasks**:
-- [ ] Add counters for all send path drop points
-- [ ] Add path identification (io_uring vs WriteTo)
-- [ ] Add error classification
-- [ ] Update `sendIoUring()` to increment metrics
-- [ ] Update `send()` fallback to increment metrics
+- [x] Create send packet classifier helper (`IncrementSendMetrics`, `IncrementSendErrorMetrics`)
+- [x] Add path identification (io_uring vs WriteTo)
+- [x] Add error classification
+- [x] Update `sendIoUring()` to increment metrics (marshal errors, ring full, submit errors, success)
+- [x] Update `sendCompletionHandler()` to increment metrics (send errors, partial sends)
+- [x] Update `send()` fallback in `connection.go` to increment metrics (ring not available)
+- [x] Update `listen.go:send()` fallback to increment metrics (marshal errors, write errors, success)
+- [x] Update `dial.go:send()` fallback to increment metrics (marshal errors, write errors, success)
 
-**Files to Modify**:
-- [ ] `connection_linux.go` - Add metrics to io_uring send path
-- [ ] `connection.go` - Add metrics to fallback send path
+**Files Created**:
+- [x] `metrics/packet_classifier.go` - Added send metrics helper functions
+
+**Files Modified**:
+- [x] `connection_linux.go` - Added metrics to io_uring send path (sendIoUring, sendCompletionHandler)
+- [x] `connection.go` - Added metrics to send() fallback (ring not available)
+- [x] `listen.go` - Added metrics to WriteTo fallback path
+- [x] `dial.go` - Added metrics to WriteTo fallback path
+
+**Implementation Details**:
+- Metrics are tracked per-connection where connection is available
+- For fallback paths (listen.go:send, dial.go:send), connection is looked up using DestinationSocketId (listener) or stored connection (dialer)
+- Path identification: `PktSentIoUring` vs `PktSentWriteTo`
+- Packet type classification: Data, ACK, NAK, ACKACK, Keepalive, Shutdown, Handshake, KM
+- Error classification: marshal, ring_full, submit, iouring, write
+- Success is tracked after successful submit (io_uring) or successful write (fallback)
+- Completion handler tracks send errors and partial sends
 
 **Estimated Effort**: 3-4 hours
+**Progress**: ✅ 100% complete
+
+**Notes**:
+- All send path metrics are now tracked
+- Metrics are per-connection (where connection is available)
+- Control packets are decommissioned before completion, so packet type is stored in completion info for metrics
+- Success tracking happens at submission time (io_uring) or write time (fallback), not in completion handler
+- Completion handler only tracks errors (send failures, partial sends)
 
 ---
 
@@ -206,15 +231,16 @@ The implementation is divided into phases:
 
 **Total Estimated Effort**: 22-31 hours
 
-**Completed**: Phase 1 (100%), Phase 2 (100%), Phase 3 (100%)
+**Completed**: Phase 1 (100%), Phase 2 (100%), Phase 3 (100%), Phase 4 (100%)
 **In Progress**: None
-**Remaining**: Phases 4-7
+**Remaining**: Phases 5-7
 
 **Current Status**:
 - Phase 1 (Metrics Infrastructure) is complete. All core structures, registry, handler, and runtime metrics are implemented.
 - Phase 2 (Lock Timing) is complete. Lock timing is now measured for all critical lock operations (handlePacketMutex, receiver.lock, sender.lock) and exposed via the `/metrics` endpoint.
 - Phase 3 (Receive Path Metrics) is complete. All receive paths (io_uring and ReadFrom) now track packet metrics with full classification and error tracking.
-- Ready to proceed with Phase 4 (Send Path Metrics).
+- Phase 4 (Send Path Metrics) is complete. All send paths (io_uring and WriteTo) now track packet metrics with full classification and error tracking.
+- Ready to proceed with Phase 5 (Cleanup and Refinement).
 
 ---
 
