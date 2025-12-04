@@ -238,9 +238,9 @@ This document tracks the implementation progress of the context and cancellation
 ## Overall Progress
 
 - **Total Estimated Effort**: 26-36 hours
-- **Phases Completed**: 6 / 8
-- **Current Phase**: Phase 7 (Timeout Context Wrapping and Configuration)
-- **Status**: ✅ Phases 1-6 Complete, Ready for Phase 7
+- **Phases Completed**: 7 / 8
+- **Current Phase**: Phase 8 (Testing and Validation)
+- **Status**: ✅ Phases 1-7 Complete, Ready for Phase 8
 
 ---
 
@@ -263,4 +263,79 @@ This document tracks the implementation progress of the context and cancellation
 
 ### Future Improvements
 -
+
+---
+
+## Peer Idle Timeout Optimization (Post-Phase 7)
+
+**Status**: ✅ Complete
+**Date**: 2024-12-19
+**Related Design**: `peer_idle_timeout_design.md`
+
+### Overview
+
+After implementing Phase 7 (context-based peer idle timeout), performance analysis revealed that the mutex lock in `resetPeerIdleTimeout()` was a bottleneck in the hot path (called on every received packet). This optimization reverts to a `time.Timer`-based approach with atomic counter verification for better performance.
+
+### Changes Made
+
+1. **Reverted Context-Based Timeout to `time.Timer`**:
+   - Removed `peerIdleTimeoutCtx`, `peerIdleTimeoutCancel`, and `peerIdleTimeoutLock` from `srtConn`
+   - Replaced with `peerIdleTimeout *time.Timer` (lock-free reset)
+   - `resetPeerIdleTimeout()` now just calls `timer.Reset()` (no mutex needed)
+
+2. **Added Atomic Counter for Packet Tracking**:
+   - Added `PktRecvSuccess` counter to `ConnectionMetrics` (single atomic counter for all successful receives)
+   - Added `getTotalReceivedPackets()` helper that does a single atomic load
+   - Eliminates need to sum 8 separate counters (performance improvement)
+
+3. **Refactored `watchPeerIdleTimeout()`**:
+   - Uses atomic counter checks instead of context cancellation
+   - Adaptive ticker interval: 1/2 timeout for <=6s, 1/4 timeout for >6s
+   - DRY refactoring: common reset logic moved after select statement
+   - Periodic checks provide redundancy in case `timer.Reset()` is missed
+
+4. **Enhanced Metrics with Defensive Counters**:
+   - Added `PktRecvNil` - tracks nil packet edge case
+   - Added `PktRecvControlUnknown` - tracks unknown control packet types
+   - Added `PktRecvSubTypeUnknown` - tracks unknown USER packet subtypes
+   - These counters should remain at 0 in normal operation (defensive programming)
+
+5. **Refactored `IncrementRecvMetrics()`**:
+   - Added `PktRecvSuccess` increment immediately after `!success` check
+   - Handle data packets first (early return) to reduce nesting
+   - Control packet switch no longer nested in if block
+   - Better code clarity and maintainability
+
+6. **Updated Prometheus Handler**:
+   - Added metrics for `PktRecvSuccess`, `PktRecvNil`, `PktRecvControlUnknown`, `PktRecvSubTypeUnknown`
+   - Exposed with appropriate labels for monitoring and alerting
+
+### Performance Benefits
+
+- **Eliminated mutex lock from hot path**: `resetPeerIdleTimeout()` is now lock-free
+- **Single atomic load**: `getTotalReceivedPackets()` does 1 atomic load instead of 8
+- **Reduced context creation overhead**: No context creation on every packet reset
+- **Better scalability**: No lock contention with many connections
+
+### Rationale
+
+The peer idle timeout is a simple "reset on packet, expire if no packets" mechanism that doesn't need the full context hierarchy. The context-based approach (Phase 7) was well-intentioned but introduced unnecessary complexity and performance overhead for this specific use case.
+
+### Files Modified
+
+- `metrics/metrics.go`: Added new atomic counters
+- `metrics/packet_classifier.go`: Refactored `IncrementRecvMetrics()` with new structure
+- `connection.go`: Reverted to `time.Timer` approach, added `getTotalReceivedPackets()` and new `watchPeerIdleTimeout()`
+- `metrics/handler.go`: Added Prometheus metrics for new counters
+
+### Testing Notes
+
+- Timer reset is lock-free and thread-safe (`timer.Reset()` is safe to call from any goroutine)
+- Atomic counter reads are safe and provide accurate packet counts
+- Periodic checks catch missed resets even if `timer.Reset()` is called incorrectly
+- Edge case counters should remain at 0 in normal operation (monitor for bugs)
+
+### Related Documentation
+
+- `peer_idle_timeout_design.md`: Complete design document with rationale and alternatives
 

@@ -251,30 +251,54 @@ func Dial(network, address string, config Config, ctx context.Context, shutdownW
 
 	dl.log("dial", func() string { return "waiting for response" })
 
-	timer := time.AfterFunc(dl.config.ConnectionTimeout, func() {
-		dl.log("connection:close:reason", func() string {
-			return fmt.Sprintf("connection timeout: server didn't respond within %s", dl.config.ConnectionTimeout)
-		})
-		dl.connChan <- connResponse{
-			conn: nil,
-			err:  fmt.Errorf("connection timeout. server didn't respond"),
-		}
-	})
+	// Create handshake timeout context (wraps dialer context)
+	handshakeCtx, handshakeCancel := context.WithTimeout(dl.ctx, dl.config.HandshakeTimeout)
+	defer handshakeCancel()
 
-	// Wait for handshake to conclude
-	response := <-dl.connChan
-	if response.err != nil {
+	// Start goroutine to handle handshake timeout
+	go func() {
+		select {
+		case <-handshakeCtx.Done():
+			if handshakeCtx.Err() == context.DeadlineExceeded {
+				dl.log("connection:close:reason", func() string {
+					return fmt.Sprintf("handshake timeout: server didn't respond within %s", dl.config.HandshakeTimeout)
+				})
+				dl.connChan <- connResponse{
+					conn: nil,
+					err:  fmt.Errorf("handshake timeout: server didn't respond within %s", dl.config.HandshakeTimeout),
+				}
+			}
+		case <-dl.ctx.Done():
+			// Dialer context cancelled - don't send error, let main flow handle it
+			return
+		}
+	}()
+
+	// Wait for handshake to conclude or timeout
+	select {
+	case response := <-dl.connChan:
+		if response.err != nil {
+			handshakeCancel() // Cancel timeout context
+			dl.Close()
+			return nil, response.err
+		}
+		handshakeCancel() // Cancel timeout context (handshake completed)
+		dl.connLock.Lock()
+		dl.conn = response.conn
+		dl.connLock.Unlock()
+		return dl, nil
+	case <-handshakeCtx.Done():
+		// Timeout occurred - error already sent to connChan by goroutine above
+		// Wait for the error response
+		response := <-dl.connChan
 		dl.Close()
 		return nil, response.err
+	case <-dl.ctx.Done():
+		// Dialer context cancelled
+		handshakeCancel()
+		dl.Close()
+		return nil, dl.ctx.Err()
 	}
-
-	timer.Stop()
-
-	dl.connLock.Lock()
-	dl.conn = response.conn
-	dl.connLock.Unlock()
-
-	return dl, nil
 }
 
 func (dl *dialer) checkConnection() error {

@@ -13,6 +13,14 @@ const (
 // ConnectionMetrics holds all metrics for a single connection
 // All counters use atomic.Uint64 for lock-free, high-performance increments
 type ConnectionMetrics struct {
+	// Single counter for all successful receives (for peer idle timeout)
+	PktRecvSuccess atomic.Uint64
+
+	// Edge case tracking (should never increment, but defensive programming)
+	PktRecvNil            atomic.Uint64 // Nil packet edge case
+	PktRecvControlUnknown atomic.Uint64 // Unknown control packet types
+	PktRecvSubTypeUnknown atomic.Uint64 // Unknown USER packet subtypes
+
 	// Packet counters (atomic for performance)
 	PktRecvDataSuccess atomic.Uint64
 	PktRecvDataDropped atomic.Uint64
@@ -94,6 +102,11 @@ type ConnectionMetrics struct {
 	PktSentErrorMarshal atomic.Uint64
 	PktSentErrorSubmit  atomic.Uint64
 	PktSentErrorUnknown atomic.Uint64 // Unknown/unexpected error (unrecognized drop reason)
+
+	// Crypto operation error counters
+	CryptoErrorEncrypt     atomic.Uint64 // Encryption/decryption payload errors
+	CryptoErrorGenerateSEK atomic.Uint64 // SEK generation errors
+	CryptoErrorMarshalKM   atomic.Uint64 // Key material marshaling errors
 
 	// Routing failure counters
 	PktRecvUnknownSocketId atomic.Uint64

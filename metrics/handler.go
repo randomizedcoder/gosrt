@@ -35,6 +35,35 @@ func MetricsHandler() http.Handler {
 
 			socketIdStr := fmt.Sprintf("0x%08x", socketId)
 
+			// Single success counter (for peer idle timeout)
+			writeCounterValue(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvSuccess.Load(),
+				"socket_id", socketIdStr, "type", "all", "status", "success")
+
+			// Edge case counters (should be 0, but track for debugging)
+			writeCounterValue(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvNil.Load(),
+				"socket_id", socketIdStr, "type", "nil", "status", "error")
+
+			writeCounterValue(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvControlUnknown.Load(),
+				"socket_id", socketIdStr, "type", "control_unknown", "status", "error")
+
+			writeCounterValue(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvSubTypeUnknown.Load(),
+				"socket_id", socketIdStr, "type", "subtype_unknown", "status", "error")
+
+			// Crypto operation error counters
+			writeCounterValue(b, "gosrt_connection_crypto_error_total",
+				metrics.CryptoErrorEncrypt.Load(),
+				"socket_id", socketIdStr, "operation", "encrypt")
+			writeCounterValue(b, "gosrt_connection_crypto_error_total",
+				metrics.CryptoErrorGenerateSEK.Load(),
+				"socket_id", socketIdStr, "operation", "generate_sek")
+			writeCounterValue(b, "gosrt_connection_crypto_error_total",
+				metrics.CryptoErrorMarshalKM.Load(),
+				"socket_id", socketIdStr, "operation", "marshal_km")
+
 			// Packet counters - ACK
 			writeCounterValue(b, "gosrt_connection_packets_received_total",
 				metrics.PktRecvACKSuccess.Load(),

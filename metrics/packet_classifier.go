@@ -21,6 +21,9 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 	}
 
 	if p == nil {
+		// Track nil packet edge case (should never happen, but defensive programming)
+		m.PktRecvNil.Add(1)
+
 		// No packet - can't classify type, but track error
 		// For parse errors, we typically don't have packet info
 		if !success {
@@ -71,39 +74,46 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 		return
 	}
 
-	// Success case - classify by packet type
-	if h.IsControlPacket {
-		switch h.ControlType {
-		case packet.CTRLTYPE_ACK:
-			m.PktRecvACKSuccess.Add(1)
-			m.ByteRecvDataSuccess.Add(pktLen) // ACK packets have data too
-		case packet.CTRLTYPE_ACKACK:
-			m.PktRecvACKACKSuccess.Add(1)
-		case packet.CTRLTYPE_NAK:
-			m.PktRecvNAKSuccess.Add(1)
-		case packet.CTRLTYPE_KEEPALIVE:
-			m.PktRecvKeepaliveSuccess.Add(1)
-		case packet.CTRLTYPE_SHUTDOWN:
-			m.PktRecvShutdownSuccess.Add(1)
-		case packet.CTRLTYPE_HANDSHAKE:
-			m.PktRecvHandshakeSuccess.Add(1)
-		case packet.CTRLTYPE_USER:
-			// USER packets can be KM (key material) - check SubType
-			switch h.SubType {
-			case packet.EXTTYPE_KMREQ, packet.EXTTYPE_KMRSP:
-				m.PktRecvKMSuccess.Add(1)
-			default:
-				// Other USER subtypes - count as handshake for now
-				m.PktRecvHandshakeSuccess.Add(1)
-			}
-		default:
-			// Unknown control type - count as generic success
-			m.PktRecvHandshakeSuccess.Add(1) // Use handshake as catch-all
-		}
-	} else {
+	// Success case - increment single success counter (for peer idle timeout)
+	// This is done immediately after the !success check for performance
+	m.PktRecvSuccess.Add(1)
+
+	// Classify by packet type (for detailed metrics)
+	// Handle data packets first (early return) to reduce nesting
+	if !h.IsControlPacket {
 		// Data packet
 		m.PktRecvDataSuccess.Add(1)
 		m.ByteRecvDataSuccess.Add(pktLen)
+		return
+	}
+
+	// Control packet - switch on control type
+	switch h.ControlType {
+	case packet.CTRLTYPE_ACK:
+		m.PktRecvACKSuccess.Add(1)
+		m.ByteRecvDataSuccess.Add(pktLen) // ACK packets have data too
+	case packet.CTRLTYPE_ACKACK:
+		m.PktRecvACKACKSuccess.Add(1)
+	case packet.CTRLTYPE_NAK:
+		m.PktRecvNAKSuccess.Add(1)
+	case packet.CTRLTYPE_KEEPALIVE:
+		m.PktRecvKeepaliveSuccess.Add(1)
+	case packet.CTRLTYPE_SHUTDOWN:
+		m.PktRecvShutdownSuccess.Add(1)
+	case packet.CTRLTYPE_HANDSHAKE:
+		m.PktRecvHandshakeSuccess.Add(1)
+	case packet.CTRLTYPE_USER:
+		// USER packets can be KM (key material) - check SubType
+		switch h.SubType {
+		case packet.EXTTYPE_KMREQ, packet.EXTTYPE_KMRSP:
+			m.PktRecvKMSuccess.Add(1)
+		default:
+			// Unknown USER subtype - track separately (should never happen, but defensive programming)
+			m.PktRecvSubTypeUnknown.Add(1)
+		}
+	default:
+		// Unknown control type - track separately (should never happen, but defensive programming)
+		m.PktRecvControlUnknown.Add(1)
 	}
 }
 

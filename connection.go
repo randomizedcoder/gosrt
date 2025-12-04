@@ -162,8 +162,8 @@ type srtConn struct {
 	kmConfirmed            bool
 	cryptoLock             sync.Mutex
 
-	peerIdleTimeout          *time.Timer
-	peerIdleTimeoutLastReset time.Time // Track when the peer idle timeout was last reset
+	peerIdleTimeout          *time.Timer  // Timer for peer idle timeout (lock-free reset)
+	peerIdleTimeoutLastReset atomic.Int64 // Track when the peer idle timeout was last reset (Unix nano timestamp, atomic)
 
 	rtt rtt // microseconds
 
@@ -357,17 +357,6 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	}
 	c.readQueue = make(chan packet.Packet, readQueueSize)
 
-	c.peerIdleTimeoutLastReset = time.Now()
-	c.peerIdleTimeout = time.AfterFunc(c.config.PeerIdleTimeout, func() {
-		c.log("connection:close:reason", func() string {
-			return fmt.Sprintf("peer idle timeout: no data received from peer for %s", c.config.PeerIdleTimeout)
-		})
-		c.log("connection:close", func() string {
-			return fmt.Sprintf("no more data received from peer for %s. shutting down", c.config.PeerIdleTimeout)
-		})
-		go c.close()
-	})
-
 	c.debug.expectedRcvPacketSequenceNumber = c.initialPacketSequenceNumber
 	c.debug.expectedReadPacketSequenceNumber = c.initialPacketSequenceNumber
 
@@ -439,6 +428,10 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	// Initialize io_uring send ring if enabled (Linux-specific)
 	c.initializeIoUring(config)
 
+	// Initialize peer idle timeout (must be after context is created)
+	c.peerIdleTimeout = time.NewTimer(c.config.PeerIdleTimeout)
+	c.peerIdleTimeoutLastReset.Store(time.Now().UnixNano())
+
 	// Start connection goroutines with waitgroup tracking
 	c.connWg.Add(1)
 	go func() {
@@ -456,6 +449,13 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	go func() {
 		defer c.connWg.Done()
 		c.ticker(c.ctx)
+	}()
+
+	// Start peer idle timeout watcher (must be after context is created)
+	c.connWg.Add(1)
+	go func() {
+		defer c.connWg.Done()
+		c.watchPeerIdleTimeout()
 	}()
 
 	if c.version == 4 && c.isCaller {
@@ -667,7 +667,16 @@ func (c *srtConn) pop(p packet.Packet) {
 		if c.crypto != nil {
 			p.Header().KeyBaseEncryptionFlag = c.keyBaseEncryption
 			if !p.Header().RetransmittedPacketFlag {
-				c.crypto.EncryptOrDecryptPayload(p.Data(), p.Header().KeyBaseEncryptionFlag, p.Header().PacketSequenceNumber.Val())
+				if err := c.crypto.EncryptOrDecryptPayload(p.Data(), p.Header().KeyBaseEncryptionFlag, p.Header().PacketSequenceNumber.Val()); err != nil {
+					c.log("connection:send:error", func() string {
+						return fmt.Sprintf("encryption failed: %v", err)
+					})
+					// Track error in metrics if available
+					if c.metrics != nil {
+						c.metrics.CryptoErrorEncrypt.Add(1)
+						c.metrics.PktSentDataError.Add(1)
+					}
+				}
 			}
 
 			c.kmPreAnnounceCountdown--
@@ -693,7 +702,15 @@ func (c *srtConn) pop(p packet.Packet) {
 			if c.kmRefreshCountdown == c.config.KMRefreshRate-c.config.KMPreAnnounce {
 				// Decommission the previous key, resp. create a new SEK that will
 				// be used in the next switch.
-				c.crypto.GenerateSEK(c.keyBaseEncryption.Opposite())
+				if err := c.crypto.GenerateSEK(c.keyBaseEncryption.Opposite()); err != nil {
+					c.log("connection:crypto:error", func() string {
+						return fmt.Sprintf("failed to generate SEK: %v", err)
+					})
+					// Track error in metrics if available
+					if c.metrics != nil {
+						c.metrics.CryptoErrorGenerateSEK.Add(1)
+					}
+				}
 			}
 		}
 		c.cryptoLock.Unlock()
@@ -856,8 +873,7 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 		return
 	}
 
-	c.peerIdleTimeout.Reset(c.config.PeerIdleTimeout)
-	c.peerIdleTimeoutLastReset = time.Now()
+	c.resetPeerIdleTimeout()
 
 	header := p.Header()
 
@@ -961,8 +977,7 @@ func (c *srtConn) handleKeepAlive(p packet.Packet) {
 	// Note: Keepalive metrics are tracked via packet classifier in send/recv paths
 	// No need to increment here - metrics already tracked
 
-	c.peerIdleTimeout.Reset(c.config.PeerIdleTimeout)
-	c.peerIdleTimeoutLastReset = time.Now()
+	c.resetPeerIdleTimeout()
 
 	c.log("control:send:keepalive:dump", func() string { return p.Dump() })
 
@@ -1644,7 +1659,16 @@ func (c *srtConn) sendKMRequest(key packet.PacketEncryption) {
 
 	cif := &packet.CIFKeyMaterialExtension{}
 
-	c.crypto.MarshalKM(cif, c.config.Passphrase, key)
+	if err := c.crypto.MarshalKM(cif, c.config.Passphrase, key); err != nil {
+		c.log("control:send:KMReq:error", func() string {
+			return fmt.Sprintf("failed to marshal key material: %v", err)
+		})
+		// Track error in metrics if available
+		if c.metrics != nil {
+			c.metrics.CryptoErrorMarshalKM.Add(1)
+		}
+		return
+	}
 
 	p := packet.NewPacket(c.remoteAddr)
 
@@ -1679,8 +1703,13 @@ func (c *srtConn) Close() error {
 // Returns 0 if the timer is not active or has already fired.
 // This implements the Conn interface.
 func (c *srtConn) GetPeerIdleTimeoutRemaining() time.Duration {
-	// Calculate remaining time based on when it was last reset
-	elapsed := time.Since(c.peerIdleTimeoutLastReset)
+	// Calculate remaining time based on when it was last reset (atomic read)
+	lastResetNano := c.peerIdleTimeoutLastReset.Load()
+	if lastResetNano == 0 {
+		return 0
+	}
+	lastReset := time.Unix(0, lastResetNano)
+	elapsed := time.Since(lastReset)
 	remaining := c.config.PeerIdleTimeout - elapsed
 
 	if remaining < 0 {
@@ -1689,9 +1718,77 @@ func (c *srtConn) GetPeerIdleTimeoutRemaining() time.Duration {
 	return remaining
 }
 
-// getPeerIdleTimeoutRemaining is an internal alias for GetPeerIdleTimeoutRemaining
-func (c *srtConn) getPeerIdleTimeoutRemaining() time.Duration {
-	return c.GetPeerIdleTimeoutRemaining()
+// resetPeerIdleTimeout resets the peer idle timeout timer (hot path - lock-free)
+func (c *srtConn) resetPeerIdleTimeout() {
+	// No lock needed - timer.Reset() and atomic store are thread-safe and lock-free
+	c.peerIdleTimeout.Reset(c.config.PeerIdleTimeout)
+	c.peerIdleTimeoutLastReset.Store(time.Now().UnixNano())
+}
+
+// getTotalReceivedPackets returns total received packets (atomic read)
+// This counts all packets that successfully reached the connection, indicating peer is alive
+func (c *srtConn) getTotalReceivedPackets() uint64 {
+	if c.metrics == nil {
+		return 0
+	}
+	// Single atomic load - much faster than summing 8 counters
+	return c.metrics.PktRecvSuccess.Load()
+}
+
+// watchPeerIdleTimeout watches for timeout using atomic counter checks
+func (c *srtConn) watchPeerIdleTimeout() {
+	defer c.connWg.Done()
+
+	// Get initial packet count
+	initialCount := c.getTotalReceivedPackets()
+
+	// Determine ticker interval based on timeout duration
+	// For longer timeouts (>6s), check more frequently (1/4) for better responsiveness
+	// For shorter timeouts (<=6s), check at 1/2 interval
+	tickerInterval := c.config.PeerIdleTimeout / 2
+	if c.config.PeerIdleTimeout > 6*time.Second {
+		tickerInterval = c.config.PeerIdleTimeout / 4
+	}
+	ticker := time.NewTicker(tickerInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.peerIdleTimeout.C:
+			// Timer expired - check if packets were received
+			currentCount := c.getTotalReceivedPackets()
+			if currentCount == initialCount {
+				// No packets received - timeout occurred
+				c.log("connection:close:reason", func() string {
+					return fmt.Sprintf("peer idle timeout: no data received from peer for %s", c.config.PeerIdleTimeout)
+				})
+				c.log("connection:close", func() string {
+					return fmt.Sprintf("no more data received from peer for %s. shutting down", c.config.PeerIdleTimeout)
+				})
+				go c.close()
+				return
+			}
+			// Packets were received - will reset timer after select
+
+		case <-ticker.C:
+			// Periodic check (1/2 timeout for <=6s, 1/4 timeout for >6s)
+			// Will check counter and reset if needed after select
+
+		case <-c.ctx.Done():
+			// Connection closing
+			return
+		}
+
+		// Check if packets were received (common logic for both timer and ticker)
+		// This is executed after the select, making the code more DRY and Go-idiomatic
+		currentCount := c.getTotalReceivedPackets()
+		if currentCount > initialCount {
+			// Packets received - reset timer and update count
+			initialCount = currentCount
+			c.peerIdleTimeout.Reset(c.config.PeerIdleTimeout)
+			c.peerIdleTimeoutLastReset.Store(time.Now().UnixNano())
+		}
+	}
 }
 
 // close closes the connection.
@@ -1708,7 +1805,10 @@ func (c *srtConn) close() {
 
 		c.log("connection:close", func() string { return "stopping peer idle timeout" })
 
-		c.peerIdleTimeout.Stop()
+		// Stop peer idle timeout timer
+		if c.peerIdleTimeout != nil {
+			c.peerIdleTimeout.Stop()
+		}
 
 		c.log("connection:close", func() string { return "sending shutdown message to peer" })
 
