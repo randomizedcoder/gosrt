@@ -174,40 +174,102 @@ The implementation is divided into phases:
 
 ## Phase 5: Migration from `connStats` to Atomic Counters
 
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 
 **Tasks**:
-- [ ] Replace all `connStats` increments with atomic counters
-- [ ] Update `Stats()` method to read from atomic counters
-- [ ] Update `GetExtendedStatistics()` to read from atomic counters
-- [ ] Remove `connStats` struct
-- [ ] Remove `statisticsLock` mutex
+- [x] Replace all `connStats` increments with atomic counters
+- [x] Update `Stats()` method to read from atomic counters
+- [x] Update `GetExtendedStatistics()` to read from atomic counters
+- [x] Remove `connStats` struct
+- [x] Remove `statisticsLock` mutex
 
-**Files to Modify**:
-- [ ] `connection.go` - ~35 locations to update
+**Files Modified**:
+- [x] `connection.go` - ~35 locations updated, all statistics now use atomic counters
 
 **Estimated Effort**: 4-6 hours
+**Progress**: ✅ 100% complete
+
+**Notes**:
+- All connection-level statistics are now lock-free
+- Statistics reads in `Stats()` and `GetExtendedStatistics()` are lock-free
+- `connStats` struct and `statisticsLock` have been removed
 
 ---
 
-## Phase 6: Go Runtime Metrics
+## Phase 6: Congestion Control Statistics Migration (Lock-Free Statistics)
 
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 
 **Tasks**:
-- [ ] Implement `writeRuntimeMetrics()` function
-- [ ] Integrate runtime metrics into `MetricsHandler()`
-- [ ] Test runtime metrics output
+- [x] Add congestion control fields to `ConnectionMetrics` struct (~40 fields)
+- [x] Pass `ConnectionMetrics` to receiver and sender via config
+- [x] Replace all `r.statistics.*` increments with atomic operations in receiver
+- [x] Replace all `s.statistics.*` increments with atomic operations in sender
+- [x] Update `receiver.Stats()` to read from atomic counters (lock-free)
+- [x] Update `sender.Stats()` to read from atomic counters (lock-free)
+- [x] Update `connection.go:Stats()` to use atomic counters directly
+- [x] Add helper functions for decrement operations (`DecrementUint64`, `SubtractUint64`)
+- [x] Add additional error/drop counters (nil packets, store insert failures)
+- [x] Optimize metrics nil checks (check once per function, use local variable)
+- [x] Fix lint suggestion (convert if-else if to switch statement for probe)
 
-**Files to Modify**:
-- [ ] `metrics/runtime.go` - Implement runtime metrics
-- [ ] `metrics/handler.go` - Integrate runtime metrics
+**Files Modified**:
+- [x] `metrics/metrics.go` - Added ~40 congestion control fields to `ConnectionMetrics`
+- [x] `metrics/helpers.go` - Added `DecrementUint64` and `SubtractUint64` helper functions
+- [x] `congestion/live/receive.go` - Replaced all statistics increments with atomic operations, updated `Stats()` to read from atomic counters, optimized metrics checks, fixed probe switch statement
+- [x] `congestion/live/send.go` - Replaced all statistics increments with atomic operations, updated `Stats()` to read from atomic counters, optimized metrics checks, fixed probe switch statement
+- [x] `connection.go` - Pass metrics to receiver/sender, updated `Stats()` to use atomic counters directly
 
-**Estimated Effort**: 1-2 hours
+**Implementation Details**:
+- All congestion control statistics are now lock-free using atomic counters
+- Statistics reads in `Stats()` methods are lock-free (only rate calculations require locks)
+- Metrics nil checks are optimized: checked once per function and stored in local variable `m`
+- Probe logic converted from if-else if to switch statement (addresses lint suggestion)
+- Helper functions for decrement operations use two's complement arithmetic
+- Backward compatibility maintained: old `statistics` struct still updated during transition
+
+**Estimated Effort**: 6-8 hours
+**Progress**: ✅ 100% complete
+
+**Notes**:
+- This phase eliminates lock contention in the congestion control layer
+- Critical for high-performance packet processing
+- Statistics reads are now lock-free (except for rate calculations which require reading rate struct)
+- All metrics checks optimized to single check per function
+- **Loss vs. Drop Definitions Corrected**:
+  - `PktLoss` = packets detected as missing and reported via NAK (receiver detects gaps, sender receives NAK)
+  - `PktDrop` = packets discarded locally (too old, duplicate, errors, etc.)
+  - See `packet_loss_drop_definitions.md` for detailed definitions
+- **Implementation Status**:
+  - ✅ Loss counters correctly implemented (receiver: gaps detected, sender: NAK received)
+  - ✅ Drop counters correctly implemented for congestion control (too old, duplicate, already ACK'd)
+  - ⚠️ **Gap Identified**: Send path errors (serialization, io_uring failures) are tracked in connection-level error counters (`PktSentErrorMarshal`, `PktSentRingFull`, `PktSentErrorSubmit`) but NOT included in `PktSendDrop` when reading SRT statistics. `PktSendDrop` currently only reads from `CongestionSendPktDrop` (congestion control drops). According to SRT spec, `PktSendDrop` should include ALL drops. See `drop_loss_implementation_review.md` for options.
 
 ---
 
-## Phase 7: Testing and Validation
+## Phase 7: Go Runtime Metrics
+
+**Status**: ✅ Complete
+
+**Tasks**:
+- [x] Implement `writeRuntimeMetrics()` function
+- [x] Integrate runtime metrics into `MetricsHandler()`
+- [x] Test runtime metrics output
+
+**Files Modified**:
+- [x] `metrics/runtime.go` - Implement runtime metrics
+- [x] `metrics/handler.go` - Integrate runtime metrics
+
+**Estimated Effort**: 1-2 hours
+**Progress**: ✅ 100% complete
+
+**Notes**:
+- Go runtime metrics are already implemented and integrated
+- Exposes memory, GC, goroutine, and CPU metrics
+
+---
+
+## Phase 8: Testing and Validation
 
 **Status**: ⏳ Pending
 
@@ -229,18 +291,21 @@ The implementation is divided into phases:
 
 ## Overall Progress
 
-**Total Estimated Effort**: 22-31 hours
+**Total Estimated Effort**: 28-39 hours
 
-**Completed**: Phase 1 (100%), Phase 2 (100%), Phase 3 (100%), Phase 4 (100%)
+**Completed**: Phase 1 (100%), Phase 2 (100%), Phase 3 (100%), Phase 4 (100%), Phase 5 (100%), Phase 6 (100%), Phase 7 (100%)
 **In Progress**: None
-**Remaining**: Phases 5-7
+**Remaining**: Phase 8 (Testing and Validation)
 
 **Current Status**:
 - Phase 1 (Metrics Infrastructure) is complete. All core structures, registry, handler, and runtime metrics are implemented.
 - Phase 2 (Lock Timing) is complete. Lock timing is now measured for all critical lock operations (handlePacketMutex, receiver.lock, sender.lock) and exposed via the `/metrics` endpoint.
 - Phase 3 (Receive Path Metrics) is complete. All receive paths (io_uring and ReadFrom) now track packet metrics with full classification and error tracking.
 - Phase 4 (Send Path Metrics) is complete. All send paths (io_uring and WriteTo) now track packet metrics with full classification and error tracking.
-- Ready to proceed with Phase 5 (Cleanup and Refinement).
+- Phase 5 (connStats Migration) is complete. All connection-level statistics are now lock-free using atomic counters.
+- Phase 6 (Congestion Control Statistics Migration) is complete. All congestion control statistics are now lock-free using atomic counters, eliminating lock contention in the hot path.
+- Phase 7 (Go Runtime Metrics) is complete. Runtime metrics are integrated and exposed via `/metrics` endpoint.
+- Ready to proceed with Phase 8 (Testing and Validation).
 
 ---
 

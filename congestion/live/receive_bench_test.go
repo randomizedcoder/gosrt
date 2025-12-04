@@ -6,11 +6,20 @@ import (
 
 	"github.com/datarhei/gosrt/circular"
 	"github.com/datarhei/gosrt/congestion"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 )
 
 // Helper to create a receiver with specified algorithm
 func createBenchReceiver(algorithm string, degree int) congestion.Receiver {
+	// Initialize metrics for benchmarks
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44) // IPv4 + UDP + SRT header
+
 	return NewReceiver(ReceiveConfig{
 		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:    10,
@@ -20,6 +29,7 @@ func createBenchReceiver(algorithm string, degree int) congestion.Receiver {
 		OnSendACK:              func(seq circular.Number, light bool) {},
 		OnSendNAK:              func(list []circular.Number) {},
 		OnDeliver:              func(p packet.Packet) {},
+		ConnectionMetrics:     testMetrics,
 	})
 }
 

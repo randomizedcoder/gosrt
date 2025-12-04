@@ -21,6 +21,7 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 
 	if p == nil {
 		// No packet - can't classify type, but track error
+		// For parse errors, we typically don't have packet info, so use legacy counter
 		if !success {
 			m.PktRecvErrorParse.Add(1)
 		}
@@ -31,7 +32,11 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 	pktLen := uint64(p.Len())
 
 	if !success {
-		// Track error/drop based on reason
+		// Track error/drop using granular counters
+		// We have packet (already checked above) - use granular error drop counter
+		isData := !h.IsControlPacket
+		IncrementRecvErrorDrop(m, p, dropReason, isData)
+		// Also track legacy counters for backward compatibility
 		switch dropReason {
 		case "parse":
 			m.PktRecvErrorParse.Add(1)
@@ -50,7 +55,7 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 		case "queue_full":
 			m.PktRecvQueueFull.Add(1)
 		default:
-			// Generic error
+			// Unknown drop reason - track as parse error for safety
 			m.PktRecvErrorParse.Add(1)
 		}
 		return
@@ -147,23 +152,9 @@ func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 	pktLen := uint64(p.Len())
 
 	if !success {
-		// Track error/drop based on reason
-		switch dropReason {
-		case "marshal":
-			m.PktSentErrorMarshal.Add(1)
-		case "ring_full":
-			m.PktSentRingFull.Add(1)
-			m.PktSentDataDropped.Add(1) // Also track as dropped
-		case "submit":
-			m.PktSentErrorSubmit.Add(1)
-		case "iouring":
-			m.PktSentErrorIoUring.Add(1)
-		case "write":
-			m.PktSentDataError.Add(1)
-		default:
-			// Generic error
-			m.PktSentErrorMarshal.Add(1)
-		}
+		// Track error/drop using granular counters
+		// We have packet (already checked above) - use granular error drop counter
+		IncrementSendErrorDrop(m, p, dropReason, pktLen)
 		return
 	}
 

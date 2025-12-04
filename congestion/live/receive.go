@@ -23,6 +23,7 @@ type ReceiveConfig struct {
 	PacketReorderAlgorithm string                     // "list" (default) or "btree"
 	BTreeDegree            int                        // B-tree degree (default: 32, only used if PacketReorderAlgorithm == "btree")
 	LockTimingMetrics      *metrics.LockTimingMetrics // Optional lock timing metrics for performance monitoring
+	ConnectionMetrics      *metrics.ConnectionMetrics // For atomic statistics updates
 }
 
 // receiver implements the Receiver interface
@@ -33,6 +34,7 @@ type receiver struct {
 	packetStore                 packetStore
 	lock                        sync.RWMutex
 	lockTiming                  *metrics.LockTimingMetrics // Optional lock timing metrics
+	metrics                     *metrics.ConnectionMetrics // For atomic statistics updates
 
 	nPackets uint
 
@@ -47,8 +49,6 @@ type receiver struct {
 
 	probeTime    time.Time
 	probeNextSeq circular.Number
-
-	statistics congestion.ReceiveStats
 
 	rate struct {
 		last   uint64 // microseconds
@@ -90,6 +90,7 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		lastDeliveredSequenceNumber: config.InitialSequenceNumber.Dec(),
 		packetStore:                 store,
 		lockTiming:                  config.LockTimingMetrics,
+		metrics:                     config.ConnectionMetrics,
 
 		periodicACKInterval: config.PeriodicACKInterval,
 		periodicNAKInterval: config.PeriodicNAKInterval,
@@ -120,15 +121,48 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 }
 
 func (r *receiver) Stats() congestion.ReceiveStats {
-	r.lock.Lock()
-	defer r.lock.Unlock()
+	// Read lock only for rate calculations (not for statistics)
+	r.lock.RLock()
+	bytePayload := uint64(r.avgPayloadSize)
+	mbpsBandwidth := r.rate.bytesPerSecond * 8 / 1024 / 1024
+	mbpsLinkCapacity := r.avgLinkCapacity * packet.MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
+	pktLossRate := r.rate.pktLossRate
+	r.lock.RUnlock()
 
-	r.statistics.BytePayload = uint64(r.avgPayloadSize)
-	r.statistics.MbpsEstimatedRecvBandwidth = r.rate.bytesPerSecond * 8 / 1024 / 1024
-	r.statistics.MbpsEstimatedLinkCapacity = r.avgLinkCapacity * packet.MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
-	r.statistics.PktLossRate = r.rate.pktLossRate
+	// Metrics are always available (initialized in connection.go before NewReceiver)
+	m := r.metrics
 
-	return r.statistics
+	// Update atomic counters for instantaneous/calculated values
+	m.CongestionRecvBytePayload.Store(bytePayload)
+	m.CongestionRecvMbpsBandwidth.Store(uint64(mbpsBandwidth * 1000))
+	m.CongestionRecvMbpsLinkCapacity.Store(uint64(mbpsLinkCapacity * 1000))
+	m.CongestionRecvPktLossRate.Store(uint64(pktLossRate * 100))
+
+	// Build return struct from atomic counters (lock-free reads)
+	return congestion.ReceiveStats{
+		Pkt:         m.CongestionRecvPkt.Load(),
+		Byte:        m.CongestionRecvByte.Load(),
+		PktUnique:   m.CongestionRecvPktUnique.Load(),
+		ByteUnique:  m.CongestionRecvByteUnique.Load(),
+		PktLoss:     m.CongestionRecvPktLoss.Load(),
+		ByteLoss:    m.CongestionRecvByteLoss.Load(),
+		PktRetrans:  m.CongestionRecvPktRetrans.Load(),
+		ByteRetrans: m.CongestionRecvByteRetrans.Load(),
+		PktBelated:  m.CongestionRecvPktBelated.Load(),
+		ByteBelated: m.CongestionRecvByteBelated.Load(),
+		PktDrop: m.CongestionRecvDataDropTooOld.Load() +
+			m.CongestionRecvDataDropAlreadyAcked.Load() +
+			m.CongestionRecvDataDropDuplicate.Load() +
+			m.CongestionRecvDataDropStoreInsertFailed.Load(),
+		ByteDrop:                   m.CongestionRecvByteDrop.Load(), // ByteDrop is maintained by helper functions
+		PktBuf:                     m.CongestionRecvPktBuf.Load(),
+		ByteBuf:                    m.CongestionRecvByteBuf.Load(),
+		MsBuf:                      m.CongestionRecvMsBuf.Load(),
+		BytePayload:                bytePayload,
+		MbpsEstimatedRecvBandwidth: mbpsBandwidth,
+		MbpsEstimatedLinkCapacity:  mbpsLinkCapacity,
+		PktLossRate:                pktLossRate,
+	}
 }
 
 func (r *receiver) PacketRate() (pps, bps, capacity float64) {
@@ -162,7 +196,11 @@ func (r *receiver) Push(pkt packet.Packet) {
 }
 
 func (r *receiver) pushLocked(pkt packet.Packet) {
+	// Check metrics once at the beginning of the function
+	m := r.metrics
+
 	if pkt == nil {
+		m.CongestionRecvPktNil.Add(1)
 		return
 	}
 
@@ -171,17 +209,22 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 	// sent in pairs. This is used as a probe for the theoretical capacity of the link.
 	if !pkt.Header().RetransmittedPacketFlag {
 		probe := pkt.Header().PacketSequenceNumber.Val() & 0xF
-		if probe == 0 {
+		switch probe {
+		case 0:
 			r.probeTime = time.Now()
 			r.probeNextSeq = pkt.Header().PacketSequenceNumber.Inc()
-		} else if probe == 1 && pkt.Header().PacketSequenceNumber.Equals(r.probeNextSeq) && !r.probeTime.IsZero() && pkt.Len() != 0 {
-			// The time between packets scaled to a fully loaded packet
-			diff := float64(time.Since(r.probeTime).Microseconds()) * (packet.MAX_PAYLOAD_SIZE / float64(pkt.Len()))
-			if diff != 0 {
-				// Here we're doing an average of the measurements.
-				r.avgLinkCapacity = 0.875*r.avgLinkCapacity + 0.125*1_000_000/diff
+		case 1:
+			if pkt.Header().PacketSequenceNumber.Equals(r.probeNextSeq) && !r.probeTime.IsZero() && pkt.Len() != 0 {
+				// The time between packets scaled to a fully loaded packet
+				diff := float64(time.Since(r.probeTime).Microseconds()) * (packet.MAX_PAYLOAD_SIZE / float64(pkt.Len()))
+				if diff != 0 {
+					// Here we're doing an average of the measurements.
+					r.avgLinkCapacity = 0.875*r.avgLinkCapacity + 0.125*1_000_000/diff
+				}
+			} else {
+				r.probeTime = time.Time{}
 			}
-		} else {
+		default:
 			r.probeTime = time.Time{}
 		}
 	} else {
@@ -195,13 +238,13 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 	r.rate.packets++
 	r.rate.bytes += pktLen
 
-	r.statistics.Pkt++
-	r.statistics.Byte += pktLen
+	m.CongestionRecvPkt.Add(1)
+	m.CongestionRecvByte.Add(uint64(pktLen))
 
 	//pkt.PktTsbpdTime = pkt.Timestamp + r.delay
 	if pkt.Header().RetransmittedPacketFlag {
-		r.statistics.PktRetrans++
-		r.statistics.ByteRetrans += pktLen
+		m.CongestionRecvPktRetrans.Add(1)
+		m.CongestionRecvByteRetrans.Add(uint64(pktLen))
 
 		r.rate.bytesRetrans += pktLen
 	}
@@ -211,20 +254,15 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 
 	if pkt.Header().PacketSequenceNumber.Lte(r.lastDeliveredSequenceNumber) {
 		// Too old, because up until r.lastDeliveredSequenceNumber, we already delivered
-		r.statistics.PktBelated++
-		r.statistics.ByteBelated += pktLen
-
-		r.statistics.PktDrop++
-		r.statistics.ByteDrop += pktLen
-
+		m.CongestionRecvPktBelated.Add(1)
+		m.CongestionRecvByteBelated.Add(uint64(pktLen))
+		metrics.IncrementRecvDataDrop(m, "too_old", uint64(pktLen))
 		return
 	}
 
 	if pkt.Header().PacketSequenceNumber.Lt(r.lastACKSequenceNumber) {
 		// Already acknowledged, ignoring
-		r.statistics.PktDrop++
-		r.statistics.ByteDrop += pktLen
-
+		metrics.IncrementRecvDataDrop(m, "already_acked", uint64(pktLen))
 		return
 	}
 
@@ -235,23 +273,21 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 		// Out of order, is it a missing piece? put it in the correct position
 		if r.packetStore.Has(pkt.Header().PacketSequenceNumber) {
 			// Already received (has been sent more than once), ignoring
-			r.statistics.PktDrop++
-			r.statistics.ByteDrop += pktLen
+			metrics.IncrementRecvDataDrop(m, "duplicate", uint64(pktLen))
 			return
 		}
 
 		// Insert in correct position (packetStore handles ordering)
 		if r.packetStore.Insert(pkt) {
 			// Late arrival, this fills a gap
-			r.statistics.PktBuf++
-			r.statistics.PktUnique++
-
-			r.statistics.ByteBuf += pktLen
-			r.statistics.ByteUnique += pktLen
+			m.CongestionRecvPktBuf.Add(1)
+			m.CongestionRecvPktUnique.Add(1)
+			m.CongestionRecvByteBuf.Add(uint64(pktLen))
+			m.CongestionRecvByteUnique.Add(uint64(pktLen))
 		} else {
 			// Duplicate (shouldn't happen after Has check, but be safe)
-			r.statistics.PktDrop++
-			r.statistics.ByteDrop += pktLen
+			m.CongestionRecvPktStoreInsertFailed.Add(1)
+			metrics.IncrementRecvDataDrop(m, "store_insert_failed", uint64(pktLen))
 		}
 
 		return
@@ -264,17 +300,16 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 		})
 
 		len := uint64(pkt.Header().PacketSequenceNumber.Distance(r.maxSeenSequenceNumber))
-		r.statistics.PktLoss += len
-		r.statistics.ByteLoss += len * uint64(r.avgPayloadSize)
+		m.CongestionRecvPktLoss.Add(len)
+		m.CongestionRecvByteLoss.Add(len * uint64(r.avgPayloadSize))
 
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
 	}
 
-	r.statistics.PktBuf++
-	r.statistics.PktUnique++
-
-	r.statistics.ByteBuf += pktLen
-	r.statistics.ByteUnique += pktLen
+	m.CongestionRecvPktBuf.Add(1)
+	m.CongestionRecvPktUnique.Add(1)
+	m.CongestionRecvByteBuf.Add(uint64(pktLen))
+	m.CongestionRecvByteUnique.Add(uint64(pktLen))
 
 	r.packetStore.Insert(pkt)
 }
@@ -354,6 +389,8 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 }
 
 func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSequenceNumber circular.Number, minPktTsbpdTime, maxPktTsbpdTime uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
+	// Check metrics once at the beginning of the function
+	m := r.metrics
 
 	// Re-check conditions (may have changed between read and write lock)
 	// If interval check still applies and we don't need lite ACK, return early
@@ -376,7 +413,8 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 	r.lastPeriodicACK = now
 	r.nPackets = 0
 
-	r.statistics.MsBuf = (maxPktTsbpdTime - minPktTsbpdTime) / 1_000
+	msBuf := (maxPktTsbpdTime - minPktTsbpdTime) / 1_000
+	m.CongestionRecvMsBuf.Store(msBuf)
 
 	return
 }
@@ -443,6 +481,8 @@ func (r *receiver) Tick(now uint64) {
 	}
 
 	// Deliver packets whose PktTsbpdTime is ripe
+	// Capture metrics once to avoid repeated checks in closures
+	m := r.metrics
 	if r.lockTiming != nil {
 		var removed int
 		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
@@ -453,8 +493,9 @@ func (r *receiver) Tick(now uint64) {
 					return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
 				},
 				func(p packet.Packet) {
-					r.statistics.PktBuf--
-					r.statistics.ByteBuf -= p.Len()
+					metrics.DecrementUint64(&m.CongestionRecvPktBuf)
+					metrics.SubtractUint64(&m.CongestionRecvByteBuf, uint64(p.Len()))
+					// PktBuf and ByteBuf are decremented in atomic counters above
 
 					// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 					h := p.Header()
@@ -474,8 +515,8 @@ func (r *receiver) Tick(now uint64) {
 				return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
 			},
 			func(p packet.Packet) {
-				r.statistics.PktBuf--
-				r.statistics.ByteBuf -= p.Len()
+				metrics.DecrementUint64(&m.CongestionRecvPktBuf)
+				metrics.SubtractUint64(&m.CongestionRecvByteBuf, uint64(p.Len()))
 
 				// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 				h := p.Header()

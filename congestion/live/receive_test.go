@@ -5,11 +5,20 @@ import (
 	"testing"
 
 	"github.com/datarhei/gosrt/circular"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 	"github.com/stretchr/testify/require"
 )
 
 func mockLiveRecv(onSendACK func(seq circular.Number, light bool), onSendNAK func(list []circular.Number), onDeliver func(p packet.Packet)) *receiver {
+	// Initialize metrics for tests
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44) // IPv4 + UDP + SRT header
+
 	recv := NewReceiver(ReceiveConfig{
 		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:   10,
@@ -17,6 +26,7 @@ func mockLiveRecv(onSendACK func(seq circular.Number, light bool), onSendNAK fun
 		OnSendACK:             onSendACK,
 		OnSendNAK:             onSendNAK,
 		OnDeliver:             onDeliver,
+		ConnectionMetrics:     testMetrics,
 	})
 
 	return recv.(*receiver)
@@ -631,6 +641,14 @@ func TestListVsBTreeEquivalence(t *testing.T) {
 
 	// Helper to create a receiver with specified algorithm
 	createReceiver := func(algorithm string) *receiver {
+		// Initialize metrics for tests
+		testMetrics := &metrics.ConnectionMetrics{
+			HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+			ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+			SenderLockTiming:       &metrics.LockTimingMetrics{},
+		}
+		testMetrics.HeaderSize.Store(44) // IPv4 + UDP + SRT header
+
 		recv := NewReceiver(ReceiveConfig{
 			InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
 			PeriodicACKInterval:    10,
@@ -640,6 +658,7 @@ func TestListVsBTreeEquivalence(t *testing.T) {
 			OnSendACK:              func(seq circular.Number, light bool) {},
 			OnSendNAK:              func(list []circular.Number) {},
 			OnDeliver:              func(p packet.Packet) {},
+			ConnectionMetrics:      testMetrics,
 		})
 		return recv.(*receiver)
 	}
@@ -725,7 +744,9 @@ func TestListVsBTreeEquivalence(t *testing.T) {
 		recvBTree.Push(p2BTree)
 
 		require.Equal(t, recvList.packetStore.Len(), recvBTree.packetStore.Len())
-		require.Equal(t, recvList.statistics.PktDrop, recvBTree.statistics.PktDrop)
+		statsList := recvList.Stats()
+		statsBTree := recvBTree.Stats()
+		require.Equal(t, statsList.PktDrop, statsBTree.PktDrop)
 	})
 
 	// Test 4: Iteration order

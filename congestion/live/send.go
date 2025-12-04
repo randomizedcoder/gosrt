@@ -21,6 +21,7 @@ type SendConfig struct {
 	OverheadBW            int64
 	OnDeliver             func(p packet.Packet)
 	LockTimingMetrics     *metrics.LockTimingMetrics // Optional lock timing metrics for performance monitoring
+	ConnectionMetrics     *metrics.ConnectionMetrics // For atomic statistics updates
 }
 
 // sender implements the Sender interface
@@ -32,14 +33,13 @@ type sender struct {
 	lossList   *list.List
 	lock       sync.RWMutex
 	lockTiming *metrics.LockTimingMetrics // Optional lock timing metrics
+	metrics    *metrics.ConnectionMetrics // For atomic statistics updates
 
 	avgPayloadSize float64 // bytes
 	pktSndPeriod   float64 // microseconds
 	maxBW          float64 // bytes/s
 	inputBW        float64 // bytes/s
 	overheadBW     float64 // percent
-
-	statistics congestion.SendStats
 
 	probeTime uint64
 
@@ -68,6 +68,7 @@ func NewSender(config SendConfig) congestion.Sender {
 		packetList:         list.New(),
 		lossList:           list.New(),
 		lockTiming:         config.LockTimingMetrics,
+		metrics:            config.ConnectionMetrics,
 
 		avgPayloadSize: packet.MAX_PAYLOAD_SIZE, //  5.1.2. SRT's Default LiveCC Algorithm
 		maxBW:          float64(config.MaxBW),
@@ -91,26 +92,57 @@ func NewSender(config SendConfig) congestion.Sender {
 }
 
 func (s *sender) Stats() congestion.SendStats {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	s.statistics.UsPktSndPeriod = s.pktSndPeriod
-	s.statistics.BytePayload = uint64(s.avgPayloadSize)
-	s.statistics.MsBuf = 0
-
+	// Read lock only for rate calculations
+	s.lock.RLock()
+	usPktSndPeriod := s.pktSndPeriod
+	bytePayload := uint64(s.avgPayloadSize)
+	msBuf := uint64(0)
 	max := s.lossList.Back()
 	min := s.lossList.Front()
-
 	if max != nil && min != nil {
-		s.statistics.MsBuf = (max.Value.(packet.Packet).Header().PktTsbpdTime - min.Value.(packet.Packet).Header().PktTsbpdTime) / 1_000
+		msBuf = (max.Value.(packet.Packet).Header().PktTsbpdTime - min.Value.(packet.Packet).Header().PktTsbpdTime) / 1_000
 	}
+	mbpsInputBW := s.rate.estimatedInputBW * 8 / 1024 / 1024
+	mbpsSentBW := s.rate.estimatedSentBW * 8 / 1024 / 1024
+	pktLossRate := s.rate.pktLossRate
+	s.lock.RUnlock()
 
-	s.statistics.MbpsEstimatedInputBandwidth = s.rate.estimatedInputBW * 8 / 1024 / 1024
-	s.statistics.MbpsEstimatedSentBandwidth = s.rate.estimatedSentBW * 8 / 1024 / 1024
+	// Metrics are always available (initialized in connection.go before NewSender)
+	m := s.metrics
 
-	s.statistics.PktLossRate = s.rate.pktLossRate
+	// Update atomic counters for instantaneous/calculated values
+	m.CongestionSendUsPktSndPeriod.Store(uint64(usPktSndPeriod))
+	m.CongestionSendBytePayload.Store(bytePayload)
+	m.CongestionSendMsBuf.Store(msBuf)
+	m.CongestionSendMbpsInputBandwidth.Store(uint64(mbpsInputBW * 1000))
+	m.CongestionSendMbpsSentBandwidth.Store(uint64(mbpsSentBW * 1000))
+	m.CongestionSendPktLossRate.Store(uint64(pktLossRate * 100))
 
-	return s.statistics
+	// Build return struct from atomic counters (lock-free reads)
+	// PktLoss = packets reported as lost via NAK (incremented in nakLocked when NAK received)
+	// PktDrop = packets dropped locally (too old, errors, etc.) - separate from loss
+	return congestion.SendStats{
+		Pkt:                         m.CongestionSendPkt.Load(),
+		Byte:                        m.CongestionSendByte.Load(),
+		PktUnique:                   m.CongestionSendPktUnique.Load(),
+		ByteUnique:                  m.CongestionSendByteUnique.Load(),
+		PktLoss:                     m.CongestionSendPktLoss.Load(),
+		ByteLoss:                    m.CongestionSendByteLoss.Load(),
+		PktRetrans:                  m.CongestionSendPktRetrans.Load(),
+		ByteRetrans:                 m.CongestionSendByteRetrans.Load(),
+		UsSndDuration:               m.CongestionSendUsSndDuration.Load(),
+		PktDrop:                     m.CongestionSendDataDropTooOld.Load(), // Only congestion control drops
+		ByteDrop:                    m.CongestionSendByteDrop.Load(),       // ByteDrop is maintained by helper functions
+		PktBuf:                      m.CongestionSendPktBuf.Load(),
+		ByteBuf:                     m.CongestionSendByteBuf.Load(),
+		MsBuf:                       msBuf,
+		PktFlightSize:               m.CongestionSendPktFlightSize.Load(),
+		UsPktSndPeriod:              usPktSndPeriod,
+		BytePayload:                 bytePayload,
+		MbpsEstimatedInputBandwidth: mbpsInputBW,
+		MbpsEstimatedSentBandwidth:  mbpsSentBW,
+		PktLossRate:                 pktLossRate,
+	}
 }
 
 func (s *sender) Flush() {
@@ -138,6 +170,9 @@ func (s *sender) pushLocked(p packet.Packet) {
 		return
 	}
 
+	// Check metrics once at the beginning of the function
+	m := s.metrics
+
 	// Give to the packet a sequence number
 	p.Header().PacketSequenceNumber = s.nextSequenceNumber
 	p.Header().PacketPositionFlag = packet.SinglePacket
@@ -148,8 +183,8 @@ func (s *sender) pushLocked(p packet.Packet) {
 
 	pktLen := p.Len()
 
-	s.statistics.PktBuf++
-	s.statistics.ByteBuf += pktLen
+	m.CongestionSendPktBuf.Add(1)
+	m.CongestionSendByteBuf.Add(uint64(pktLen))
 
 	// Input bandwidth calculation
 	s.rate.bytes += pktLen
@@ -163,15 +198,17 @@ func (s *sender) pushLocked(p packet.Packet) {
 	// can modify it because it has already been used to set the packet's
 	// timestamp.
 	probe := p.Header().PacketSequenceNumber.Val() & 0xF
-	if probe == 0 {
+	switch probe {
+	case 0:
 		s.probeTime = p.Header().PktTsbpdTime
-	} else if probe == 1 {
+	case 1:
 		p.Header().PktTsbpdTime = s.probeTime
 	}
 
 	s.packetList.PushBack(p)
 
-	s.statistics.PktFlightSize = uint64(s.packetList.Len())
+	flightSize := uint64(s.packetList.Len())
+	m.CongestionSendPktFlightSize.Store(flightSize)
 }
 
 func (s *sender) Tick(now uint64) {
@@ -206,19 +243,20 @@ func (s *sender) Tick(now uint64) {
 }
 
 func (s *sender) tickDeliverPackets(now uint64) {
+	// Check metrics once at the beginning of the function
+	m := s.metrics
+
 	removeList := make([]*list.Element, 0, s.packetList.Len())
 	for e := s.packetList.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
 		if p.Header().PktTsbpdTime <= now {
-			s.statistics.Pkt++
-			s.statistics.PktUnique++
-
 			pktLen := p.Len()
 
-			s.statistics.Byte += pktLen
-			s.statistics.ByteUnique += pktLen
-
-			s.statistics.UsSndDuration += uint64(s.pktSndPeriod)
+			m.CongestionSendPkt.Add(1)
+			m.CongestionSendPktUnique.Add(1)
+			m.CongestionSendByte.Add(uint64(pktLen))
+			m.CongestionSendByteUnique.Add(uint64(pktLen))
+			m.CongestionSendUsSndDuration.Add(uint64(s.pktSndPeriod))
 
 			//  5.1.2. SRT's Default LiveCC Algorithm
 			s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
@@ -239,16 +277,19 @@ func (s *sender) tickDeliverPackets(now uint64) {
 }
 
 func (s *sender) tickDropOldPackets(now uint64) {
+	// Check metrics once at the beginning of the function
+	m := s.metrics
+
 	removeList := make([]*list.Element, 0, s.lossList.Len())
 	for e := s.lossList.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
 
 		if p.Header().PktTsbpdTime+s.dropThreshold <= now {
-			// Dropped packet because too old
-			s.statistics.PktDrop++
-			s.statistics.PktLoss++
-			s.statistics.ByteDrop += p.Len()
-			s.statistics.ByteLoss += p.Len()
+			// Dropped packet because too old (local drop, not a loss)
+			// Note: PktDrop = local drops (too old, errors, etc.)
+			// Note: PktLoss = packets reported as lost via NAK (incremented in nakLocked when NAK received)
+			pktLen := p.Len()
+			metrics.IncrementSendDataDrop(m, "too_old", uint64(pktLen))
 
 			removeList = append(removeList, e)
 		}
@@ -258,8 +299,9 @@ func (s *sender) tickDropOldPackets(now uint64) {
 	for _, e := range removeList {
 		p := e.Value.(packet.Packet)
 
-		s.statistics.PktBuf--
-		s.statistics.ByteBuf -= p.Len()
+		metrics.DecrementUint64(&m.CongestionSendPktBuf)
+		metrics.SubtractUint64(&m.CongestionSendByteBuf, uint64(p.Len()))
+		// PktBuf and ByteBuf are decremented in atomic counters above
 
 		s.lossList.Remove(e)
 
@@ -301,6 +343,9 @@ func (s *sender) ACK(sequenceNumber circular.Number) {
 }
 
 func (s *sender) ackLocked(sequenceNumber circular.Number) {
+	// Check metrics once at the beginning of the function
+	m := s.metrics
+
 	removeList := make([]*list.Element, 0, s.lossList.Len())
 	for e := s.lossList.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
@@ -316,8 +361,9 @@ func (s *sender) ackLocked(sequenceNumber circular.Number) {
 	for _, e := range removeList {
 		p := e.Value.(packet.Packet)
 
-		s.statistics.PktBuf--
-		s.statistics.ByteBuf -= p.Len()
+		metrics.DecrementUint64(&m.CongestionSendPktBuf)
+		metrics.SubtractUint64(&m.CongestionSendByteBuf, uint64(p.Len()))
+		// PktBuf and ByteBuf are decremented in atomic counters above
 
 		s.lossList.Remove(e)
 
@@ -347,26 +393,44 @@ func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 }
 
 func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
-	retransCount := uint64(0)
+	// Check metrics once at the beginning of the function
+	m := s.metrics
 
+	// First, count all packets reported as lost in the NAK (all reported losses)
+	// This represents packets that the receiver detected as missing
+	totalLossCount := uint64(0)
+	totalLossBytes := uint64(0)
+	for i := 0; i < len(sequenceNumbers); i += 2 {
+		start := sequenceNumbers[i]
+		end := sequenceNumbers[i+1]
+		lossCount := uint64(end.Distance(start)) + 1
+		totalLossCount += lossCount
+		// Estimate bytes based on average payload size
+		totalLossBytes += lossCount * uint64(s.avgPayloadSize)
+	}
+
+	// Increment loss counters for all reported losses (packets in NAK list)
+	m.CongestionSendPktLoss.Add(totalLossCount)
+	m.CongestionSendByteLoss.Add(totalLossBytes)
+
+	// Now, retransmit packets that we can find in our buffer
+	retransCount := uint64(0)
 	for e := s.lossList.Back(); e != nil; e = e.Prev() {
 		p := e.Value.(packet.Packet)
 
 		for i := 0; i < len(sequenceNumbers); i += 2 {
 			if p.Header().PacketSequenceNumber.Gte(sequenceNumbers[i]) && p.Header().PacketSequenceNumber.Lte(sequenceNumbers[i+1]) {
-				s.statistics.PktRetrans++
-				s.statistics.Pkt++
-				s.statistics.PktLoss++
-
-				s.statistics.ByteRetrans += p.Len()
-				s.statistics.Byte += p.Len()
-				s.statistics.ByteLoss += p.Len()
+				pktLen := p.Len()
+				m.CongestionSendPktRetrans.Add(1)
+				m.CongestionSendPkt.Add(1)
+				m.CongestionSendByteRetrans.Add(uint64(pktLen))
+				m.CongestionSendByte.Add(uint64(pktLen))
 
 				//  5.1.2. SRT's Default LiveCC Algorithm
-				s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(p.Len())
+				s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
 
-				s.rate.bytesSent += p.Len()
-				s.rate.bytesRetrans += p.Len()
+				s.rate.bytesSent += pktLen
+				s.rate.bytesRetrans += pktLen
 
 				p.Header().RetransmittedPacketFlag = true
 				s.deliver(p)

@@ -4,6 +4,8 @@
 
 This document provides a comprehensive design for a unified metrics and statistics system for the GoSRT library. It reviews the current implementation, identifies gaps, and proposes a holistic approach to metrics collection with Prometheus integration and lock timing measurements.
 
+**Important**: For detailed definitions of packet loss vs. packet drop counters, see [Packet Loss vs. Packet Drop Definitions](./packet_loss_drop_definitions.md).
+
 ## Table of Contents
 
 1. [Current Statistics Implementation Review](#current-statistics-implementation-review)
@@ -491,13 +493,13 @@ if ringFull {
 - No breaking changes
 
 **Phase 2: Update Statistics Method**
-- Update `Stats()` to read from new metrics
-- Maintain backward compatibility with existing `Statistics` struct
+- Update `Stats()` to read from new atomic metrics
+- Fully migrate to atomic-based system
 
 **Phase 3: Remove Old Counters**
-- Remove `connStats` struct
-- Remove `statisticsLock` (if all counters are atomic)
-- Clean up old increment code
+- Remove `connStats` struct completely
+- Remove `statisticsLock` (all counters are atomic)
+- Clean up all old increment code
 
 ---
 
@@ -1166,6 +1168,1107 @@ conn.Stats(stats)
 
 ---
 
+## Detailed Migration Guide: Congestion Control Statistics to Atomic Counters
+
+This section documents the migration of congestion control statistics from lock-protected structs to atomic counters in `ConnectionMetrics`. This migration will eliminate lock contention in the congestion control layer and make all statistics reads lock-free.
+
+### Current Congestion Control Statistics Structure
+
+**Location**: `congestion/live/receive.go:51`, `congestion/live/send.go:42`
+
+**Receiver Statistics** (`congestion.ReceiveStats`):
+```go
+type ReceiveStats struct {
+    Pkt  uint64
+    Byte uint64
+    PktUnique  uint64
+    ByteUnique uint64
+    PktLoss  uint64
+    ByteLoss uint64
+    PktRetrans  uint64
+    ByteRetrans uint64
+    PktBelated  uint64
+    ByteBelated uint64
+    PktDrop  uint64
+    ByteDrop uint64
+    // instantaneous
+    PktBuf  uint64
+    ByteBuf uint64
+    MsBuf   uint64
+    BytePayload uint64
+    MbpsEstimatedRecvBandwidth float64
+    MbpsEstimatedLinkCapacity  float64
+    PktLossRate float64
+}
+```
+
+**Sender Statistics** (`congestion.SendStats`):
+```go
+type SendStats struct {
+    Pkt  uint64
+    Byte uint64
+    PktUnique  uint64
+    ByteUnique uint64
+    PktLoss  uint64
+    ByteLoss uint64
+    PktRetrans  uint64
+    ByteRetrans uint64
+    UsSndDuration uint64 // microseconds
+    PktDrop  uint64
+    ByteDrop uint64
+    // instantaneous
+    PktBuf  uint64
+    ByteBuf uint64
+    MsBuf   uint64
+    PktFlightSize uint64
+    UsPktSndPeriod float64 // microseconds
+    BytePayload    uint64
+    MbpsEstimatedInputBandwidth float64
+    MbpsEstimatedSentBandwidth  float64
+    PktLossRate float64
+}
+```
+
+**Current Locking Strategy**:
+- **Receiver**: `sync.RWMutex` (`r.lock`) protects `r.statistics` field
+- **Sender**: `sync.RWMutex` (`s.lock`) protects `s.statistics` field
+- **Write operations**: All increments happen while holding write lock (`Lock()`)
+- **Read operations**: `Stats()` method acquires read lock (`RLock()`) or write lock (`Lock()`)
+- **Frequency**: Very high (every packet push, tick, ACK, NAK)
+
+**Current Usage Pattern**:
+```go
+// Write (in pushLocked, tickDeliverPackets, etc.)
+r.lock.Lock()
+r.statistics.Pkt++
+r.statistics.Byte += pktLen
+r.lock.Unlock()
+
+// Read (in Stats())
+r.lock.Lock()
+defer r.lock.Unlock()
+return r.statistics  // Returns struct copy
+```
+
+### Migration Mapping: Congestion Control → `ConnectionMetrics`
+
+**Design Decision**: Add congestion control statistics to `ConnectionMetrics` struct as atomic counters. The congestion control layer will increment these atomic counters directly, eliminating the need for locks during statistics updates.
+
+| `ReceiveStats` Field | `ConnectionMetrics` Field | Type | Notes |
+|---------------------|---------------------------|------|-------|
+| `Pkt` | `CongestionRecvPkt` | `atomic.Uint64` | Total packets received |
+| `Byte` | `CongestionRecvByte` | `atomic.Uint64` | Total bytes received |
+| `PktUnique` | `CongestionRecvPktUnique` | `atomic.Uint64` | Unique packets received |
+| `ByteUnique` | `CongestionRecvByteUnique` | `atomic.Uint64` | Unique bytes received |
+| `PktLoss` | `CongestionRecvPktLoss` | `atomic.Uint64` | Packets lost (gaps detected by receiver, before sending NAK) |
+| `ByteLoss` | `CongestionRecvByteLoss` | `atomic.Uint64` | Bytes lost (gaps detected by receiver, before sending NAK) |
+| `PktRetrans` | `CongestionRecvPktRetrans` | `atomic.Uint64` | Retransmitted packets received |
+| `ByteRetrans` | `CongestionRecvByteRetrans` | `atomic.Uint64` | Retransmitted bytes received |
+| `PktBelated` | `CongestionRecvPktBelated` | `atomic.Uint64` | Belated packets (too old) |
+| `ByteBelated` | `CongestionRecvByteBelated` | `atomic.Uint64` | Belated bytes |
+| `PktDrop` | `CongestionRecvPktDrop` | `atomic.Uint64` | Packets dropped locally (too old, duplicate, already ACK'd, etc.) |
+| `ByteDrop` | `CongestionRecvByteDrop` | `atomic.Uint64` | Bytes dropped locally (too old, duplicate, already ACK'd, etc.) |
+| `PktBuf` | `CongestionRecvPktBuf` | `atomic.Uint64` | Instantaneous: packets in buffer |
+| `ByteBuf` | `CongestionRecvByteBuf` | `atomic.Uint64` | Instantaneous: bytes in buffer |
+| `MsBuf` | `CongestionRecvMsBuf` | `atomic.Uint64` | Instantaneous: buffer time (milliseconds) |
+| `BytePayload` | `CongestionRecvBytePayload` | `atomic.Uint64` | Average payload size |
+| `MbpsEstimatedRecvBandwidth` | `CongestionRecvMbpsBandwidth` | `atomic.Uint64` | Store as uint64 (Mbps * 1000) |
+| `MbpsEstimatedLinkCapacity` | `CongestionRecvMbpsLinkCapacity` | `atomic.Uint64` | Store as uint64 (Mbps * 1000) |
+| `PktLossRate` | `CongestionRecvPktLossRate` | `atomic.Uint64` | Store as uint64 (percentage * 100) |
+
+| `SendStats` Field | `ConnectionMetrics` Field | Type | Notes |
+|------------------|---------------------------|------|-------|
+| `Pkt` | `CongestionSendPkt` | `atomic.Uint64` | Total packets sent |
+| `Byte` | `CongestionSendByte` | `atomic.Uint64` | Total bytes sent |
+| `PktUnique` | `CongestionSendPktUnique` | `atomic.Uint64` | Unique packets sent |
+| `ByteUnique` | `CongestionSendByteUnique` | `atomic.Uint64` | Unique bytes sent |
+| `PktLoss` | `CongestionSendPktLoss` | `atomic.Uint64` | Packets lost (reported via NAK from receiver) |
+| `ByteLoss` | `CongestionSendByteLoss` | `atomic.Uint64` | Bytes lost (reported via NAK from receiver) |
+| `PktRetrans` | `CongestionSendPktRetrans` | `atomic.Uint64` | Packets retransmitted |
+| `ByteRetrans` | `CongestionSendPktRetrans` | `atomic.Uint64` | Bytes retransmitted |
+| `UsSndDuration` | `CongestionSendUsSndDuration` | `atomic.Uint64` | Send duration (microseconds) |
+| `PktDrop` | `CongestionSendPktDrop` | `atomic.Uint64` | Packets dropped locally (too old, serialization errors, io_uring failures, etc.) |
+| `ByteDrop` | `CongestionSendByteDrop` | `atomic.Uint64` | Bytes dropped locally (too old, serialization errors, io_uring failures, etc.) |
+| `PktBuf` | `CongestionSendPktBuf` | `atomic.Uint64` | Instantaneous: packets in buffer |
+| `ByteBuf` | `CongestionSendByteBuf` | `atomic.Uint64` | Instantaneous: bytes in buffer |
+| `MsBuf` | `CongestionSendMsBuf` | `atomic.Uint64` | Instantaneous: buffer time (milliseconds) |
+| `PktFlightSize` | `CongestionSendPktFlightSize` | `atomic.Uint64` | Instantaneous: packets in flight |
+| `UsPktSndPeriod` | `CongestionSendUsPktSndPeriod` | `atomic.Uint64` | Store as uint64 (microseconds) |
+| `BytePayload` | `CongestionSendBytePayload` | `atomic.Uint64` | Average payload size |
+| `MbpsEstimatedInputBandwidth` | `CongestionSendMbpsInputBandwidth` | `atomic.Uint64` | Store as uint64 (Mbps * 1000) |
+| `MbpsEstimatedSentBandwidth` | `CongestionSendMbpsSentBandwidth` | `atomic.Uint64` | Store as uint64 (Mbps * 1000) |
+| `PktLossRate` | `CongestionSendPktLossRate` | `atomic.Uint64` | Store as uint64 (percentage * 100) |
+
+**Note**: Instantaneous values (`PktBuf`, `ByteBuf`, `MsBuf`, `PktFlightSize`) are calculated on-the-fly in `Stats()` and don't need atomic storage. However, we can still track them atomically for consistency and to enable lock-free reads.
+
+### Locations Requiring Updates
+
+#### 1. Add Congestion Control Fields to `ConnectionMetrics`
+
+**File**: `metrics/metrics.go`
+
+**Add new fields to `ConnectionMetrics` struct**:
+```go
+// Congestion control - Receiver statistics
+CongestionRecvPkt              atomic.Uint64
+CongestionRecvByte             atomic.Uint64
+CongestionRecvPktUnique        atomic.Uint64
+CongestionRecvByteUnique        atomic.Uint64
+CongestionRecvPktLoss           atomic.Uint64
+CongestionRecvByteLoss          atomic.Uint64
+CongestionRecvPktRetrans        atomic.Uint64
+CongestionRecvByteRetrans       atomic.Uint64
+CongestionRecvPktBelated        atomic.Uint64
+CongestionRecvByteBelated       atomic.Uint64
+CongestionRecvPktDrop           atomic.Uint64
+CongestionRecvByteDrop          atomic.Uint64
+CongestionRecvPktBuf            atomic.Uint64
+CongestionRecvByteBuf           atomic.Uint64
+CongestionRecvMsBuf            atomic.Uint64
+CongestionRecvBytePayload      atomic.Uint64
+CongestionRecvMbpsBandwidth     atomic.Uint64 // Mbps * 1000
+CongestionRecvMbpsLinkCapacity  atomic.Uint64 // Mbps * 1000
+CongestionRecvPktLossRate       atomic.Uint64 // Percentage * 100
+
+// Congestion control - Sender statistics
+CongestionSendPkt               atomic.Uint64
+CongestionSendByte              atomic.Uint64
+CongestionSendPktUnique         atomic.Uint64
+CongestionSendByteUnique        atomic.Uint64
+CongestionSendPktLoss           atomic.Uint64
+CongestionSendByteLoss          atomic.Uint64
+CongestionSendPktRetrans        atomic.Uint64
+CongestionSendByteRetrans       atomic.Uint64
+CongestionSendUsSndDuration     atomic.Uint64
+CongestionSendPktDrop           atomic.Uint64
+CongestionSendByteDrop          atomic.Uint64
+CongestionSendPktBuf            atomic.Uint64
+CongestionSendByteBuf           atomic.Uint64
+CongestionSendMsBuf             atomic.Uint64
+CongestionSendPktFlightSize     atomic.Uint64
+CongestionSendUsPktSndPeriod    atomic.Uint64
+CongestionSendBytePayload       atomic.Uint64
+CongestionSendMbpsInputBandwidth atomic.Uint64 // Mbps * 1000
+CongestionSendMbpsSentBandwidth  atomic.Uint64 // Mbps * 1000
+CongestionSendPktLossRate        atomic.Uint64 // Percentage * 100
+```
+
+#### 2. Pass `ConnectionMetrics` to Congestion Control
+
+**File**: `connection.go` (in `newSRTConn()`)
+
+**Update receiver and sender initialization**:
+```go
+// BEFORE:
+c.recv = live.NewReceiver(live.ReceiveConfig{
+    // ... config ...
+})
+
+// AFTER:
+c.recv = live.NewReceiver(live.ReceiveConfig{
+    // ... config ...
+    ConnectionMetrics: c.metrics, // Pass metrics for atomic updates
+})
+
+// Similar for sender
+c.snd = live.NewSender(live.SendConfig{
+    // ... config ...
+    ConnectionMetrics: c.metrics, // Pass metrics for atomic updates
+})
+```
+
+**Update `ReceiveConfig` and `SendConfig` structs**:
+```go
+// congestion/live/receive.go
+type ReceiveConfig struct {
+    // ... existing fields ...
+    ConnectionMetrics *metrics.ConnectionMetrics // For atomic statistics updates
+}
+
+// congestion/live/send.go
+type SendConfig struct {
+    // ... existing fields ...
+    ConnectionMetrics *metrics.ConnectionMetrics // For atomic statistics updates
+}
+```
+
+#### 3. Receiver Statistics Updates
+
+**File**: `congestion/live/receive.go`
+
+**3.1. `pushLocked()` Method** (Lines 164-280)
+
+**Replace all `r.statistics.*` increments with atomic operations**:
+```go
+// BEFORE:
+r.statistics.Pkt++
+r.statistics.Byte += pktLen
+
+// AFTER:
+if r.metrics != nil {
+    r.metrics.CongestionRecvPkt.Add(1)
+    r.metrics.CongestionRecvByte.Add(uint64(pktLen))
+}
+// Old statistics struct removed - fully migrated to atomic counters
+```
+
+**All locations in `pushLocked()`**:
+- Line 198: `r.statistics.Pkt++` → `r.metrics.CongestionRecvPkt.Add(1)`
+- Line 199: `r.statistics.Byte += pktLen` → `r.metrics.CongestionRecvByte.Add(uint64(pktLen))`
+- Line 203: `r.statistics.PktRetrans++` → `r.metrics.CongestionRecvPktRetrans.Add(1)`
+- Line 204: `r.statistics.ByteRetrans += pktLen` → `r.metrics.CongestionRecvByteRetrans.Add(uint64(pktLen))`
+- Line 214: `r.statistics.PktBelated++` → `r.metrics.CongestionRecvPktBelated.Add(1)`
+- Line 215: `r.statistics.ByteBelated += pktLen` → `r.metrics.CongestionRecvByteBelated.Add(uint64(pktLen))`
+- Line 217: `r.statistics.PktDrop++` → `r.metrics.CongestionRecvPktDrop.Add(1)`
+- Line 218: `r.statistics.ByteDrop += pktLen` → `r.metrics.CongestionRecvByteDrop.Add(uint64(pktLen))`
+- Line 225: `r.statistics.PktDrop++` → `r.metrics.CongestionRecvPktDrop.Add(1)`
+- Line 226: `r.statistics.ByteDrop += pktLen` → `r.metrics.CongestionRecvByteDrop.Add(uint64(pktLen))`
+- Line 238: `r.statistics.PktDrop++` → `r.metrics.CongestionRecvPktDrop.Add(1)`
+- Line 239: `r.statistics.ByteDrop += pktLen` → `r.metrics.CongestionRecvByteDrop.Add(uint64(pktLen))`
+- Line 246: `r.statistics.PktBuf++` → `r.metrics.CongestionRecvPktBuf.Add(1)`
+- Line 247: `r.statistics.PktUnique++` → `r.metrics.CongestionRecvPktUnique.Add(1)`
+- Line 249: `r.statistics.ByteBuf += pktLen` → `r.metrics.CongestionRecvByteBuf.Add(uint64(pktLen))`
+- Line 250: `r.statistics.ByteUnique += pktLen` → `r.metrics.CongestionRecvByteUnique.Add(uint64(pktLen))`
+- Line 253: `r.statistics.PktDrop++` → `r.metrics.CongestionRecvPktDrop.Add(1)`
+- Line 254: `r.statistics.ByteDrop += pktLen` → `r.metrics.CongestionRecvByteDrop.Add(uint64(pktLen))`
+- Line 267: `r.statistics.PktLoss += len` → `r.metrics.CongestionRecvPktLoss.Add(len)`
+- Line 268: `r.statistics.ByteLoss += len * uint64(r.avgPayloadSize)` → `r.metrics.CongestionRecvByteLoss.Add(len * uint64(r.avgPayloadSize))`
+- Line 273: `r.statistics.PktBuf++` → `r.metrics.CongestionRecvPktBuf.Add(1)`
+- Line 274: `r.statistics.PktUnique++` → `r.metrics.CongestionRecvPktUnique.Add(1)`
+- Line 276: `r.statistics.ByteBuf += pktLen` → `r.metrics.CongestionRecvByteBuf.Add(uint64(pktLen))`
+- Line 277: `r.statistics.ByteUnique += pktLen` → `r.metrics.CongestionRecvByteUnique.Add(uint64(pktLen))`
+
+**3.2. `Tick()` Method** (Lines 436-501)
+
+**Update buffer decrements**:
+- Line 456: `r.statistics.PktBuf--` → `r.metrics.CongestionRecvPktBuf.Add(^uint64(0))` (decrement via add of max)
+- Line 457: `r.statistics.ByteBuf -= p.Len()` → `r.metrics.CongestionRecvByteBuf.Add(^uint64(p.Len() - 1))` (decrement)
+- Line 477: `r.statistics.PktBuf--` → `r.metrics.CongestionRecvPktBuf.Add(^uint64(0))`
+- Line 478: `r.statistics.ByteBuf -= p.Len()` → `r.metrics.CongestionRecvByteBuf.Add(^uint64(p.Len() - 1))`
+
+**Note**: For decrements, we can use a helper function or subtract directly. However, atomic doesn't have `Sub()` for `Uint64`, so we use `Add(^uint64(0))` for decrement by 1, or `Add(^uint64(n-1))` for decrement by n. Alternatively, we can store the current value, subtract, and use `CompareAndSwap`, but that's more complex. The simplest approach is to use signed atomic operations or track increments/decrements separately.
+
+**Better approach**: Use `atomic.AddUint64` with two's complement for subtraction:
+```go
+// Decrement by 1
+r.metrics.CongestionRecvPktBuf.Add(^uint64(0))  // Add max uint64 = subtract 1
+
+// Decrement by n
+r.metrics.CongestionRecvByteBuf.Add(^uint64(p.Len() - 1))  // Add complement
+```
+
+**3.3. `Stats()` Method** (Lines 122-132)
+
+**Update to read from atomic counters and calculate instantaneous values**:
+```go
+// BEFORE:
+func (r *receiver) Stats() congestion.ReceiveStats {
+    r.lock.Lock()
+    defer r.lock.Unlock()
+
+    r.statistics.BytePayload = uint64(r.avgPayloadSize)
+    r.statistics.MbpsEstimatedRecvBandwidth = r.rate.bytesPerSecond * 8 / 1024 / 1024
+    r.statistics.MbpsEstimatedLinkCapacity = r.avgLinkCapacity * packet.MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
+    r.statistics.PktLossRate = r.rate.pktLossRate
+
+    return r.statistics
+}
+
+// AFTER:
+func (r *receiver) Stats() congestion.ReceiveStats {
+    // Read lock only for rate calculations (not for statistics)
+    r.lock.RLock()
+    bytePayload := uint64(r.avgPayloadSize)
+    mbpsBandwidth := r.rate.bytesPerSecond * 8 / 1024 / 1024
+    mbpsLinkCapacity := r.avgLinkCapacity * packet.MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
+    pktLossRate := r.rate.pktLossRate
+    r.lock.RUnlock()
+
+    // Update atomic counters for instantaneous/calculated values
+    if r.metrics != nil {
+        r.metrics.CongestionRecvBytePayload.Store(bytePayload)
+        r.metrics.CongestionRecvMbpsBandwidth.Store(uint64(mbpsBandwidth * 1000))
+        r.metrics.CongestionRecvMbpsLinkCapacity.Store(uint64(mbpsLinkCapacity * 1000))
+        r.metrics.CongestionRecvPktLossRate.Store(uint64(pktLossRate * 100))
+    }
+
+    // Build return struct from atomic counters (lock-free reads)
+    return congestion.ReceiveStats{
+        Pkt:                      r.metrics.CongestionRecvPkt.Load(),
+        Byte:                     r.metrics.CongestionRecvByte.Load(),
+        PktUnique:                r.metrics.CongestionRecvPktUnique.Load(),
+        ByteUnique:               r.metrics.CongestionRecvByteUnique.Load(),
+        PktLoss:                  r.metrics.CongestionRecvPktLoss.Load(),
+        ByteLoss:                 r.metrics.CongestionRecvByteLoss.Load(),
+        PktRetrans:               r.metrics.CongestionRecvPktRetrans.Load(),
+        ByteRetrans:              r.metrics.CongestionRecvByteRetrans.Load(),
+        PktBelated:               r.metrics.CongestionRecvPktBelated.Load(),
+        ByteBelated:              r.metrics.CongestionRecvByteBelated.Load(),
+        PktDrop:                  r.metrics.CongestionRecvPktDrop.Load(),
+        ByteDrop:                 r.metrics.CongestionRecvByteDrop.Load(),
+        PktBuf:                   r.metrics.CongestionRecvPktBuf.Load(),
+        ByteBuf:                  r.metrics.CongestionRecvByteBuf.Load(),
+        MsBuf:                    r.metrics.CongestionRecvMsBuf.Load(),
+        BytePayload:              bytePayload,
+        MbpsEstimatedRecvBandwidth: mbpsBandwidth,
+        MbpsEstimatedLinkCapacity:  mbpsLinkCapacity,
+        PktLossRate:              pktLossRate,
+    }
+}
+```
+
+**3.4. `periodicACK()` Method** (Line 379)
+
+**Update `MsBuf` calculation**:
+```go
+// BEFORE:
+r.statistics.MsBuf = (maxPktTsbpdTime - minPktTsbpdTime) / 1_000
+
+// AFTER:
+msBuf := (maxPktTsbpdTime - minPktTsbpdTime) / 1_000
+if r.metrics != nil {
+    r.metrics.CongestionRecvMsBuf.Store(msBuf)
+}
+// Old statistics struct removed - fully migrated to atomic counters
+```
+
+#### 4. Sender Statistics Updates
+
+**File**: `congestion/live/send.go`
+
+**4.1. `pushLocked()` Method** (Lines 136-175)
+
+**Replace statistics increments**:
+- Line 151: `s.statistics.PktBuf++` → `s.metrics.CongestionSendPktBuf.Add(1)`
+- Line 152: `s.statistics.ByteBuf += pktLen` → `s.metrics.CongestionSendByteBuf.Add(uint64(pktLen))`
+- Line 174: `s.statistics.PktFlightSize = uint64(s.packetList.Len())` → `s.metrics.CongestionSendPktFlightSize.Store(uint64(s.packetList.Len()))`
+
+**4.2. `tickDeliverPackets()` Method** (Lines 208-239)
+
+**Replace statistics increments**:
+- Line 213: `s.statistics.Pkt++` → `s.metrics.CongestionSendPkt.Add(1)`
+- Line 214: `s.statistics.PktUnique++` → `s.metrics.CongestionSendPktUnique.Add(1)`
+- Line 218: `s.statistics.Byte += pktLen` → `s.metrics.CongestionSendByte.Add(uint64(pktLen))`
+- Line 219: `s.statistics.ByteUnique += pktLen` → `s.metrics.CongestionSendByteUnique.Add(uint64(pktLen))`
+- Line 221: `s.statistics.UsSndDuration += uint64(s.pktSndPeriod)` → `s.metrics.CongestionSendUsSndDuration.Add(uint64(s.pktSndPeriod))`
+
+**4.3. `tickDropOldPackets()` Method** (Lines 241-269)
+
+**Replace statistics increments**:
+- Line 248: `s.statistics.PktDrop++` → `s.metrics.CongestionSendPktDrop.Add(1)`
+- **Note**: `PktLoss` should NOT be incremented here - this is a local drop (too old), not a loss. Loss is only incremented when NAK is received (see `nakLocked()`).
+- Line 250: `s.statistics.ByteDrop += p.Len()` → `s.metrics.CongestionSendByteDrop.Add(uint64(p.Len()))`
+- **Note**: `ByteLoss` should NOT be incremented here - this is a local drop, not a loss.
+- Line 261: `s.statistics.PktBuf--` → `s.metrics.CongestionSendPktBuf.Add(^uint64(0))`
+- Line 262: `s.statistics.ByteBuf -= p.Len()` → `s.metrics.CongestionSendByteBuf.Add(^uint64(p.Len() - 1))`
+
+**4.4. `ackLocked()` Method** (Lines 303-329)
+
+**Replace buffer decrements**:
+- Line 319: `s.statistics.PktBuf--` → `s.metrics.CongestionSendPktBuf.Add(^uint64(0))`
+- Line 320: `s.statistics.ByteBuf -= p.Len()` → `s.metrics.CongestionSendByteBuf.Add(^uint64(p.Len() - 1))`
+
+**4.5. `nakLocked()` Method** (Lines 349-388)
+
+**Replace statistics increments**:
+- **First, count ALL packets in NAK list (all reported losses)**:
+  - For each range in `sequenceNumbers` (pairs of [start, end]), count packets: `lossCount = end.Distance(start) + 1`
+  - Increment `CongestionSendPktLoss` by total loss count (all packets in NAK)
+  - Increment `CongestionSendByteLoss` by estimated bytes (lossCount * avgPayloadSize)
+- **Then, retransmit packets we can find**:
+  - Line 357: `s.statistics.PktRetrans++` → `s.metrics.CongestionSendPktRetrans.Add(1)` (for each retransmitted packet)
+  - Line 358: `s.statistics.Pkt++` → `s.metrics.CongestionSendPkt.Add(1)` (for each retransmitted packet)
+  - Line 361: `s.statistics.ByteRetrans += p.Len()` → `s.metrics.CongestionSendByteRetrans.Add(uint64(p.Len()))` (for each retransmitted packet)
+  - Line 362: `s.statistics.Byte += p.Len()` → `s.metrics.CongestionSendByte.Add(uint64(p.Len()))` (for each retransmitted packet)
+- **Note**: `PktLoss` is incremented for ALL packets in NAK (reported losses), not just retransmitted ones. Some packets may not be retransmitted if they're no longer in the buffer.
+
+**4.6. `Stats()` Method** (Lines 93-112)
+
+**Update to read from atomic counters**:
+```go
+// BEFORE:
+func (s *sender) Stats() congestion.SendStats {
+    s.lock.Lock()
+    defer s.lock.Unlock()
+
+    s.statistics.UsPktSndPeriod = s.pktSndPeriod
+    s.statistics.BytePayload = uint64(s.avgPayloadSize)
+    s.statistics.MsBuf = 0
+    // ... calculate MsBuf ...
+    s.statistics.MbpsEstimatedInputBandwidth = s.rate.estimatedInputBW * 8 / 1024 / 1024
+    s.statistics.MbpsEstimatedSentBandwidth = s.rate.estimatedSentBW * 8 / 1024 / 1024
+    s.statistics.PktLossRate = s.rate.pktLossRate
+
+    return s.statistics
+}
+
+// AFTER:
+func (s *sender) Stats() congestion.SendStats {
+    // Read lock only for rate calculations
+    s.lock.RLock()
+    usPktSndPeriod := s.pktSndPeriod
+    bytePayload := uint64(s.avgPayloadSize)
+    msBuf := uint64(0)
+    max := s.lossList.Back()
+    min := s.lossList.Front()
+    if max != nil && min != nil {
+        msBuf = (max.Value.(packet.Packet).Header().PktTsbpdTime - min.Value.(packet.Packet).Header().PktTsbpdTime) / 1_000
+    }
+    mbpsInputBW := s.rate.estimatedInputBW * 8 / 1024 / 1024
+    mbpsSentBW := s.rate.estimatedSentBW * 8 / 1024 / 1024
+    pktLossRate := s.rate.pktLossRate
+    s.lock.RUnlock()
+
+    // Update atomic counters for instantaneous/calculated values
+    if s.metrics != nil {
+        s.metrics.CongestionSendUsPktSndPeriod.Store(uint64(usPktSndPeriod))
+        s.metrics.CongestionSendBytePayload.Store(bytePayload)
+        s.metrics.CongestionSendMsBuf.Store(msBuf)
+        s.metrics.CongestionSendMbpsInputBandwidth.Store(uint64(mbpsInputBW * 1000))
+        s.metrics.CongestionSendMbpsSentBandwidth.Store(uint64(mbpsSentBW * 1000))
+        s.metrics.CongestionSendPktLossRate.Store(uint64(pktLossRate * 100))
+    }
+
+    // Build return struct from atomic counters (lock-free reads)
+    return congestion.SendStats{
+        Pkt:                        s.metrics.CongestionSendPkt.Load(),
+        Byte:                       s.metrics.CongestionSendByte.Load(),
+        PktUnique:                  s.metrics.CongestionSendPktUnique.Load(),
+        ByteUnique:                 s.metrics.CongestionSendByteUnique.Load(),
+        PktLoss:                    s.metrics.CongestionSendPktLoss.Load(),
+        ByteLoss:                   s.metrics.CongestionSendByteLoss.Load(),
+        PktRetrans:                 s.metrics.CongestionSendPktRetrans.Load(),
+        ByteRetrans:                s.metrics.CongestionSendByteRetrans.Load(),
+        UsSndDuration:              s.metrics.CongestionSendUsSndDuration.Load(),
+        PktDrop:                    s.metrics.CongestionSendPktDrop.Load(),
+        ByteDrop:                   s.metrics.CongestionSendByteDrop.Load(),
+        PktBuf:                     s.metrics.CongestionSendPktBuf.Load(),
+        ByteBuf:                    s.metrics.CongestionSendByteBuf.Load(),
+        MsBuf:                      msBuf,
+        PktFlightSize:              s.metrics.CongestionSendPktFlightSize.Load(),
+        UsPktSndPeriod:             usPktSndPeriod,
+        BytePayload:                bytePayload,
+        MbpsEstimatedInputBandwidth: mbpsInputBW,
+        MbpsEstimatedSentBandwidth:  mbpsSentBW,
+        PktLossRate:                pktLossRate,
+    }
+}
+```
+
+#### 5. Update `connection.go:Stats()` to Use Atomic Counters
+
+**File**: `connection.go` (Lines 1823-1953)
+
+**Replace congestion control statistics reads**:
+```go
+// BEFORE:
+send := c.snd.Stats()  // Acquires lock internally
+recv := c.recv.Stats() // Acquires lock internally
+
+s.Accumulated = StatisticsAccumulated{
+    PktSent:           send.Pkt,
+    PktRecv:           recv.Pkt,
+    // ... etc
+}
+
+// AFTER:
+// Read directly from atomic counters (lock-free)
+s.Accumulated = StatisticsAccumulated{
+    PktSent:           c.metrics.CongestionSendPkt.Load(),
+    PktRecv:           c.metrics.CongestionRecvPkt.Load(),
+    PktSentUnique:     c.metrics.CongestionSendPktUnique.Load(),
+    PktRecvUnique:     c.metrics.CongestionRecvPktUnique.Load(),
+    PktSendLoss:       c.metrics.CongestionSendPktLoss.Load(),
+    PktRecvLoss:       c.metrics.CongestionRecvPktLoss.Load(),
+    PktRetrans:        c.metrics.CongestionSendPktRetrans.Load(),
+    PktRecvRetrans:    c.metrics.CongestionRecvPktRetrans.Load(),
+    UsSndDuration:     c.metrics.CongestionSendUsSndDuration.Load(),
+    PktSendDrop:       c.metrics.CongestionSendPktDrop.Load(),
+    PktRecvDrop:       c.metrics.CongestionRecvPktDrop.Load(),
+    ByteSent:          c.metrics.CongestionSendByte.Load() + (c.metrics.CongestionSendPkt.Load() * headerSize),
+    ByteRecv:          c.metrics.CongestionRecvByte.Load() + (c.metrics.CongestionRecvPkt.Load() * headerSize),
+    // ... etc
+}
+```
+
+**Note**: We still need to call `c.snd.Stats()` and `c.recv.Stats()` to update instantaneous values (like `MsBuf`, `MbpsEstimatedBandwidth`, etc.), but we can read the cumulative counters directly from atomic variables.
+
+**Alternative approach**: Keep calling `Stats()` but make it lock-free by reading from atomic counters. The `Stats()` methods will still need locks for rate calculations, but the statistics reads will be lock-free.
+
+### Migration Strategy
+
+**Phase 1: Add Atomic Counters (Parallel)**
+- Add congestion control fields to `ConnectionMetrics`
+- Pass `ConnectionMetrics` to receiver and sender
+- Increment both old and new counters during transition
+- No breaking changes
+
+**Phase 2: Update Statistics Reads**
+- Update `Stats()` methods to read from atomic counters (lock-free)
+- Update `connection.go:Stats()` to use atomic counters directly
+- Fully migrate to atomic-based system
+
+**Phase 3: Remove Old Statistics Structs**
+- Remove `r.statistics` and `s.statistics` fields completely
+- Remove all locks from `Stats()` methods (fully lock-free)
+- Clean up all old increment code
+
+**Phase 4: Optimize Lock Usage**
+- Reduce lock scope in `Stats()` methods (only for rate calculations)
+- Consider removing locks entirely if rate calculations can be made lock-free
+
+### Benefits After Migration
+
+- ✅ **No lock contention**: All statistics operations are lock-free
+- ✅ **Better performance**: Atomic operations are faster than mutex locks
+- ✅ **Simpler code**: No need to manage locks for statistics
+- ✅ **Thread-safe**: Atomic operations are inherently thread-safe
+- ✅ **Consistent**: All statistics use the same atomic counter pattern
+- ✅ **Lock-free reads**: `Stats()` calls don't require locks (except for rate calculations)
+
+### Challenges and Solutions
+
+**Challenge 1: Decrement Operations**
+- **Problem**: `atomic.Uint64` doesn't have `Sub()` method
+- **Solution**: Use two's complement arithmetic: `Add(^uint64(0))` for decrement by 1, `Add(^uint64(n-1))` for decrement by n
+- **Alternative 1**: Use signed `atomic.Int64` for values that can decrease (but requires type change)
+- **Alternative 2**: Add helper functions in `metrics/helpers.go` for clarity:
+  ```go
+  // DecrementUint64 decrements an atomic uint64 by 1
+  func DecrementUint64(addr *atomic.Uint64) {
+      addr.Add(^uint64(0))  // Add max uint64 = subtract 1
+  }
+
+  // SubtractUint64 subtracts n from an atomic uint64
+  func SubtractUint64(addr *atomic.Uint64, n uint64) {
+      addr.Add(^uint64(n - 1))  // Add complement
+  }
+  ```
+- **Recommendation**: Use helper functions for clarity and maintainability
+
+**Challenge 2: Instantaneous Values**
+- **Problem**: `PktBuf`, `ByteBuf`, `MsBuf` are calculated on-the-fly
+- **Solution**: Update atomic counters when these values change (increment/decrement), and read them atomically in `Stats()`
+
+**Challenge 3: Rate Calculations Still Need Locks**
+- **Problem**: `MbpsEstimatedBandwidth`, `PktLossRate` require reading `r.rate` struct
+- **Solution**: Keep read locks for rate calculations only, make statistics reads lock-free
+
+### Summary of Changes
+
+**Total Locations to Update**: ~60 locations
+
+1. **Add fields to `ConnectionMetrics`**: ~40 new atomic counter fields
+2. **Receiver statistics increments**: ~20 locations in `pushLocked()`, `Tick()`, `periodicACK()`
+3. **Sender statistics increments**: ~15 locations in `pushLocked()`, `tickDeliverPackets()`, `tickDropOldPackets()`, `ackLocked()`, `nakLocked()`
+4. **Statistics reads**: 2 methods (`receiver.Stats()`, `sender.Stats()`) - now fully lock-free
+5. **Connection statistics aggregation**: 1 method (`connection.go:Stats()`) - now fully lock-free
+6. **Remove old statistics structs**: Remove `r.statistics` and `s.statistics` fields completely
+
+**Performance Improvement**: All statistics operations are now lock-free, eliminating contention in the hot path
+
+### Granular Drop Counters Design (Option B: Full Granularity)
+
+**Design Decision**: Implement granular drop counters for ALL drop points, with separate counters for DATA vs control packets. This provides complete visibility into which specific drop types are occurring, while maintaining aggregate counters for SRT RFC compliance.
+
+**Key Principles**:
+1. **Granular Counters**: One counter per drop reason (for debugging)
+2. **Aggregate Counter**: Sum of all granular counters (for SRT RFC compliance)
+3. **DATA vs Control**: Separate counters for DATA and control packets (control drops are more serious)
+4. **Helper Functions**: Use helper functions to ensure granular + aggregate stay in sync
+
+#### Granular Drop Counter Structure
+
+**Congestion Control - Receiver (DATA packets only)**:
+- `CongestionRecvDataDropTooOld` - Belated, past play time
+- `CongestionRecvDataDropAlreadyAcked` - Already acknowledged
+- `CongestionRecvDataDropDuplicate` - Duplicate (already in store)
+- `CongestionRecvDataDropStoreInsertFailed` - Store insert failed
+
+**Congestion Control - Sender (DATA packets only)**:
+- `CongestionSendDataDropTooOld` - Exceed drop threshold
+
+**Connection-Level - Receive (DATA and Control packets)**:
+- `PktRecvDataErrorParse` - DATA packet parse errors
+- `PktRecvControlErrorParse` - Control packet parse errors
+- `PktRecvDataErrorIoUring` - DATA packet io_uring errors
+- `PktRecvControlErrorIoUring` - Control packet io_uring errors
+- `PktRecvDataErrorEmpty` - DATA packet empty datagrams
+- `PktRecvControlErrorEmpty` - Control packet empty datagrams
+- `PktRecvDataErrorRoute` - DATA packet routing failures
+- `PktRecvControlErrorRoute` - Control packet routing failures
+
+**Connection-Level - Send (DATA and Control packets)**:
+- `PktSentDataErrorMarshal` - DATA packet marshal errors
+- `PktSentControlErrorMarshal` - Control packet marshal errors
+- `PktSentDataRingFull` - DATA packet ring full
+- `PktSentControlRingFull` - Control packet ring full
+- `PktSentDataErrorSubmit` - DATA packet submit errors
+- `PktSentControlErrorSubmit` - Control packet submit errors
+- `PktSentDataErrorIoUring` - DATA packet io_uring completion errors
+- `PktSentControlErrorIoUring` - Control packet io_uring completion errors
+
+#### Aggregate Counter Calculation
+
+The aggregate counters (`CongestionRecvPktDrop`, `CongestionSendPktDrop`) will be calculated from granular counters in `Stats()` methods:
+
+```go
+// Receiver aggregate
+PktRecvDrop = CongestionRecvDataDropTooOld +
+              CongestionRecvDataDropAlreadyAcked +
+              CongestionRecvDataDropDuplicate +
+              CongestionRecvDataDropStoreInsertFailed
+
+// Sender aggregate (DATA packets only)
+PktSendDrop = CongestionSendDataDropTooOld +
+              PktSentDataErrorMarshal +
+              PktSentDataRingFull +
+              PktSentDataErrorSubmit +
+              PktSentDataErrorIoUring
+```
+
+**Note**: Control packet drops are tracked separately and are NOT included in the aggregate `PktSendDrop` / `PktRecvDrop` counters, as these are SRT RFC counters for DATA packets only.
+
+#### Helper Functions
+
+Helper functions will be created to increment both granular and aggregate counters atomically:
+
+```go
+// metrics/helpers.go
+
+// IncrementRecvDataDrop increments both granular and aggregate drop counters for receiver
+func IncrementRecvDataDrop(m *ConnectionMetrics, reason string, pktLen uint64) {
+    if m == nil {
+        return
+    }
+
+    // Increment granular counter
+    switch reason {
+    case "too_old":
+        m.CongestionRecvDataDropTooOld.Add(1)
+    case "already_acked":
+        m.CongestionRecvDataDropAlreadyAcked.Add(1)
+    case "duplicate":
+        m.CongestionRecvDataDropDuplicate.Add(1)
+    case "store_insert_failed":
+        m.CongestionRecvDataDropStoreInsertFailed.Add(1)
+    }
+
+    // Always increment aggregate
+    m.CongestionRecvPktDrop.Add(1)
+    m.CongestionRecvByteDrop.Add(pktLen)
+}
+
+// IncrementSendDataDrop increments both granular and aggregate drop counters for sender
+func IncrementSendDataDrop(m *ConnectionMetrics, reason string, pktLen uint64) {
+    if m == nil {
+        return
+    }
+
+    // Increment granular counter
+    switch reason {
+    case "too_old":
+        m.CongestionSendDataDropTooOld.Add(1)
+    }
+
+    // Always increment aggregate
+    m.CongestionSendPktDrop.Add(1)
+    m.CongestionSendByteDrop.Add(pktLen)
+}
+
+// IncrementSendErrorDrop increments granular error counters and aggregate for DATA packets
+func IncrementSendErrorDrop(m *ConnectionMetrics, p packet.Packet, reason string, pktLen uint64) {
+    if m == nil {
+        return
+    }
+
+    isData := p != nil && !p.Header().IsControlPacket
+
+    // Increment granular counter based on packet type
+    switch reason {
+    case "marshal":
+        if isData {
+            m.PktSentDataErrorMarshal.Add(1)
+            m.CongestionSendPktDrop.Add(1) // Aggregate for DATA only
+            m.CongestionSendByteDrop.Add(pktLen)
+        } else {
+            m.PktSentControlErrorMarshal.Add(1)
+        }
+    case "ring_full":
+        if isData {
+            m.PktSentDataRingFull.Add(1)
+            m.CongestionSendPktDrop.Add(1) // Aggregate for DATA only
+            m.CongestionSendByteDrop.Add(pktLen)
+        } else {
+            m.PktSentControlRingFull.Add(1)
+        }
+    case "submit":
+        if isData {
+            m.PktSentDataErrorSubmit.Add(1)
+            m.CongestionSendPktDrop.Add(1) // Aggregate for DATA only
+            m.CongestionSendByteDrop.Add(pktLen)
+        } else {
+            m.PktSentControlErrorSubmit.Add(1)
+        }
+    case "iouring":
+        if isData {
+            m.PktSentDataErrorIoUring.Add(1)
+            m.CongestionSendPktDrop.Add(1) // Aggregate for DATA only
+            m.CongestionSendByteDrop.Add(pktLen)
+        } else {
+            m.PktSentControlErrorIoUring.Add(1)
+        }
+    }
+}
+```
+
+#### Implementation Locations
+
+**Congestion Control - Receiver** (`congestion/live/receive.go`):
+- Line 283: Too old → `IncrementRecvDataDrop(m, "too_old", pktLen)`
+- Line 298: Already ACK'd → `IncrementRecvDataDrop(m, "already_acked", pktLen)`
+- Line 315: Duplicate → `IncrementRecvDataDrop(m, "duplicate", pktLen)`
+- Line 341: Store insert failed → `IncrementRecvDataDrop(m, "store_insert_failed", pktLen)`
+
+**Congestion Control - Sender** (`congestion/live/send.go`):
+- Line 329: Too old → `IncrementSendDataDrop(m, "too_old", pktLen)`
+
+**Connection-Level - Send** (`connection_linux.go`, `connection.go`, `listen.go`, `dial.go`):
+- Marshal errors → `IncrementSendErrorDrop(m, p, "marshal", pktLen)`
+- Ring full → `IncrementSendErrorDrop(m, p, "ring_full", pktLen)`
+- Submit errors → `IncrementSendErrorDrop(m, p, "submit", pktLen)`
+- io_uring errors → `IncrementSendErrorDrop(m, p, "iouring", pktLen)`
+
+**Connection-Level - Receive** (`listen_linux.go`, `dial_linux.go`, `listen.go`, `dial.go`):
+- Parse errors → Check packet type, increment `PktRecvDataErrorParse` or `PktRecvControlErrorParse`
+- io_uring errors → Check packet type, increment `PktRecvDataErrorIoUring` or `PktRecvControlErrorIoUring`
+- Empty datagrams → Check packet type, increment `PktRecvDataErrorEmpty` or `PktRecvControlErrorEmpty`
+- Routing failures → Check packet type, increment `PktRecvDataErrorRoute` or `PktRecvControlErrorRoute`
+
+**Note**: For receive path, we may not have a packet object when errors occur (parse failures, empty datagrams). In these cases, we'll need to track the error type separately and attempt to classify based on context (e.g., handshake packets are control, data packets are DATA).
+
+#### Stats() Method Updates
+
+**Receiver Stats()** (`congestion/live/receive.go`):
+```go
+PktDrop: CongestionRecvDataDropTooOld.Load() +
+         CongestionRecvDataDropAlreadyAcked.Load() +
+         CongestionRecvDataDropDuplicate.Load() +
+         CongestionRecvDataDropStoreInsertFailed.Load()
+```
+
+**Sender Stats()** (`congestion/live/send.go`):
+```go
+PktDrop: CongestionSendDataDropTooOld.Load()
+```
+
+**Connection Stats()** (`connection.go`):
+```go
+PktSendDrop: CongestionSendDataDropTooOld.Load() +
+             PktSentDataErrorMarshal.Load() +
+             PktSentDataRingFull.Load() +
+             PktSentDataErrorSubmit.Load() +
+             PktSentDataErrorIoUring.Load()
+
+PktRecvDrop: CongestionRecvDataDropTooOld.Load() +
+             CongestionRecvDataDropAlreadyAcked.Load() +
+             CongestionRecvDataDropDuplicate.Load() +
+             CongestionRecvDataDropStoreInsertFailed.Load()
+```
+
+#### Prometheus Metrics
+
+Granular counters will be exposed in Prometheus with labels:
+
+```
+gosrt_connection_congestion_recv_data_drop_total{reason="too_old",socket_id="..."} 10
+gosrt_connection_congestion_recv_data_drop_total{reason="already_acked",socket_id="..."} 5
+gosrt_connection_congestion_recv_data_drop_total{reason="duplicate",socket_id="..."} 2
+gosrt_connection_congestion_recv_data_drop_total{reason="store_insert_failed",socket_id="..."} 1
+gosrt_connection_congestion_send_data_drop_total{reason="too_old",socket_id="..."} 3
+gosrt_connection_send_data_drop_total{reason="marshal",socket_id="..."} 0
+gosrt_connection_send_data_drop_total{reason="ring_full",socket_id="..."} 0
+gosrt_connection_send_data_drop_total{reason="submit",socket_id="..."} 0
+gosrt_connection_send_control_drop_total{reason="marshal",socket_id="..."} 0
+gosrt_connection_send_control_drop_total{reason="ring_full",socket_id="..."} 0
+```
+
+---
+
+### Additional Error and Drop Counters for Congestion Control
+
+After reviewing the congestion control code paths, we identified several error conditions and failure cases that are not currently tracked. These should be added to provide complete visibility into congestion control behavior.
+
+#### Missing Counters in Receiver
+
+**1. Nil Packet Handling** (`receive.go:165`)
+- **Current**: `if pkt == nil { return }` - silently ignored
+- **Proposed**: `CongestionRecvPktNil` - count nil packets received
+- **Rationale**: Indicates upstream issues (packet parsing failures, memory issues)
+
+**2. Packet Store Insertion Failures** (`receive.go:244`)
+- **Current**: `Insert()` returns `false` for duplicates, tracked as generic `PktDrop`
+- **Proposed**: `CongestionRecvPktStoreInsertFailed` - count insertion failures
+- **Rationale**: Distinguish duplicate packets from other drop reasons
+- **Note**: Currently `Insert()` only fails for duplicates (after `Has()` check), but this could change if we add capacity limits
+
+**3. Delivery Failures** (`receive.go:463, 484`)
+- **Current**: `r.deliver(p)` called, but no tracking if delivery fails
+- **Proposed**: `CongestionRecvDeliveryFailed` - count delivery callback failures
+- **Rationale**: `OnDeliver` callback could fail (e.g., application buffer full, write error)
+- **Implementation**: Wrap `OnDeliver` call in try-catch or check return value if callback is modified to return error
+
+**4. Packet Store Capacity** (Future)
+- **Current**: No capacity limit on packet store
+- **Proposed**: `CongestionRecvPktStoreFull` - count packets dropped due to store capacity
+- **Rationale**: If we add capacity limits in the future, track when store is full
+
+#### Missing Counters in Sender
+
+**1. Delivery Failures** (`send.go:228, 372`)
+- **Current**: `s.deliver(p)` called, but no tracking if delivery fails
+- **Proposed**: `CongestionSendDeliveryFailed` - count delivery callback failures
+- **Rationale**: `OnDeliver` callback could fail (e.g., network write error, buffer full)
+- **Implementation**: Wrap `OnDeliver` call in try-catch or check return value if callback is modified to return error
+
+**2. NAK Requests for Missing Packets** (`send.go:349-388`)
+- **Current**: `nakLocked()` only retransmits packets in `lossList`
+- **Proposed**: `CongestionSendNAKNotFound` - count NAK requests for packets not in lossList
+- **Rationale**: Indicates packets were already ACK'd and removed, or never sent
+- **Implementation**: Track when NAK sequence number is not found in lossList
+
+**3. Buffer Capacity** (Future)
+- **Current**: No capacity limit on `packetList` or `lossList`
+- **Proposed**: `CongestionSendBufferFull` - count packets dropped due to buffer capacity
+- **Rationale**: If we add capacity limits in the future, track when buffer is full
+
+#### Additional Counters to Add
+
+**Receiver**:
+```go
+CongestionRecvPktNil              atomic.Uint64  // Nil packets received
+CongestionRecvPktStoreInsertFailed atomic.Uint64 // Packet store insertion failures
+CongestionRecvDeliveryFailed      atomic.Uint64  // Delivery callback failures
+CongestionRecvPktStoreFull       atomic.Uint64  // Packets dropped due to store capacity (future)
+```
+
+**Sender**:
+```go
+CongestionSendDeliveryFailed      atomic.Uint64  // Delivery callback failures
+CongestionSendNAKNotFound         atomic.Uint64  // NAK requests for packets not in lossList
+CongestionSendBufferFull          atomic.Uint64  // Packets dropped due to buffer capacity (future)
+```
+
+### Latency Measurements for Congestion Control
+
+Currently, the design includes lock timing metrics, but we should also track packet processing latencies to understand end-to-end performance. These measurements help identify bottlenecks and optimize the congestion control layer.
+
+#### Proposed Latency Metrics
+
+**1. Packet Processing Latency (Receiver)**
+- **Metric**: `CongestionRecvProcessingLatencyNs` (nanoseconds)
+- **Definition**: Time from `Push()` call to packet delivery (via `OnDeliver`)
+- **Measurement**: Record timestamp in `Push()`, calculate latency in `Tick()` when delivering
+- **Use Case**: Identify slow packet processing, buffer delays
+- **Implementation**: Use `LockTimingMetrics` pattern with ring buffer for recent samples
+
+**2. Buffer Latency (Receiver)**
+- **Metric**: `CongestionRecvBufferLatencyNs` (nanoseconds)
+- **Definition**: Time packets spend in buffer (from insertion to delivery)
+- **Measurement**: `PktTsbpdTime - now` when packet is inserted, actual latency when delivered
+- **Use Case**: Monitor buffer delays, identify late packets
+- **Implementation**: Track per-packet or aggregate statistics
+
+**3. Retransmission Latency (Sender)**
+- **Metric**: `CongestionSendRetransLatencyNs` (nanoseconds)
+- **Definition**: Time from NAK receipt to packet retransmission
+- **Measurement**: Record timestamp when NAK received, calculate when packet retransmitted
+- **Use Case**: Monitor retransmission performance, identify slow retransmissions
+- **Implementation**: Track in `nakLocked()` method
+
+**4. NAK Response Time (Receiver)**
+- **Metric**: `CongestionRecvNAKResponseTimeNs` (nanoseconds)
+- **Definition**: Time from detecting gap to sending NAK
+- **Measurement**: Record timestamp when gap detected, calculate when NAK sent
+- **Use Case**: Monitor NAK generation performance
+- **Implementation**: Track in `pushLocked()` when gap detected, in `periodicNAK()` when NAK sent
+
+**5. ACK Generation Latency (Receiver)**
+- **Metric**: `CongestionRecvACKLatencyNs` (nanoseconds)
+- **Definition**: Time from packet receipt to ACK generation
+- **Measurement**: Record timestamp in `Push()`, calculate when ACK sent
+- **Use Case**: Monitor ACK generation performance
+- **Implementation**: Track in `periodicACK()` method
+
+#### Latency Metrics Structure
+
+**Add to `ConnectionMetrics`**:
+```go
+// Congestion control latency metrics (using LockTimingMetrics pattern)
+CongestionRecvProcessingLatency *LockTimingMetrics  // Push to delivery
+CongestionRecvBufferLatency     *LockTimingMetrics  // Buffer time
+CongestionSendRetransLatency   *LockTimingMetrics  // NAK to retransmission
+CongestionRecvNAKResponseTime  *LockTimingMetrics  // Gap detection to NAK
+CongestionRecvACKLatency       *LockTimingMetrics  // Packet receipt to ACK
+```
+
+**Implementation Pattern**:
+- Use same `LockTimingMetrics` structure (ring buffer with atomic values)
+- Record timestamps at key points, calculate latency when events occur
+- Store average and max values for each latency type
+- Expose via Prometheus as `gosrt_connection_congestion_*_latency_seconds_avg` and `_max`
+
+**Example Implementation**:
+```go
+// In receiver.pushLocked()
+pushTime := time.Now()
+// ... process packet ...
+
+// In receiver.Tick() when delivering
+if r.metrics != nil && r.metrics.CongestionRecvProcessingLatency != nil {
+    latency := time.Since(pushTime)
+    r.metrics.CongestionRecvProcessingLatency.RecordHoldTime(latency)
+}
+```
+
+**Note**: For per-packet latency tracking, we may need to store timestamps with packets or use a different approach (e.g., aggregate statistics rather than per-packet).
+
+### Prometheus Metrics for Congestion Control
+
+The congestion control statistics should be exposed in Prometheus alongside connection-level metrics. This provides complete visibility into packet flow, drops, losses, and latencies.
+
+#### Metric Naming Convention
+
+**Format**: `gosrt_connection_congestion_{direction}_{metric}_{unit}`
+
+- **Direction**: `recv`, `send`
+- **Metric**: `packets_total`, `bytes_total`, `packets_dropped_total`, `packets_lost_total`, `packets_retrans_total`, `packets_belated_total`, `buffer_packets`, `buffer_bytes`, `buffer_time_seconds`, `latency_seconds`
+- **Unit**: `total`, `bytes`, `seconds`
+
+#### Example Prometheus Metrics
+
+**Receiver Statistics**:
+```
+gosrt_connection_congestion_recv_packets_total{socket_id="0x12345678"} 1000000
+gosrt_connection_congestion_recv_bytes_total{socket_id="0x12345678"} 1456000000
+gosrt_connection_congestion_recv_packets_dropped_total{socket_id="0x12345678"} 18
+gosrt_connection_congestion_recv_data_drop_total{socket_id="0x12345678",reason="too_old"} 10
+gosrt_connection_congestion_recv_data_drop_total{socket_id="0x12345678",reason="already_acked"} 5
+gosrt_connection_congestion_recv_data_drop_total{socket_id="0x12345678",reason="duplicate"} 2
+gosrt_connection_congestion_recv_data_drop_total{socket_id="0x12345678",reason="store_insert_failed"} 1
+gosrt_connection_congestion_recv_packets_lost_total{socket_id="0x12345678"} 100
+gosrt_connection_congestion_recv_packets_retrans_total{socket_id="0x12345678"} 50
+gosrt_connection_congestion_recv_packets_belated_total{socket_id="0x12345678"} 10
+gosrt_connection_congestion_recv_buffer_packets{socket_id="0x12345678"} 100
+gosrt_connection_congestion_recv_buffer_bytes{socket_id="0x12345678"} 145600
+gosrt_connection_congestion_recv_buffer_time_seconds{socket_id="0x12345678"} 0.1
+gosrt_connection_congestion_recv_processing_latency_seconds_avg{socket_id="0x12345678"} 0.001
+gosrt_connection_congestion_recv_processing_latency_seconds_max{socket_id="0x12345678"} 0.01
+gosrt_connection_congestion_recv_buffer_latency_seconds_avg{socket_id="0x12345678"} 0.05
+gosrt_connection_congestion_recv_buffer_latency_seconds_max{socket_id="0x12345678"} 0.2
+```
+
+**Sender Statistics**:
+```
+gosrt_connection_congestion_send_packets_total{socket_id="0x12345678"} 1000000
+gosrt_connection_congestion_send_bytes_total{socket_id="0x12345678"} 1456000000
+gosrt_connection_congestion_send_packets_dropped_total{socket_id="0x12345678"} 8
+gosrt_connection_congestion_send_data_drop_total{socket_id="0x12345678",reason="too_old"} 3
+gosrt_connection_send_data_drop_total{socket_id="0x12345678",reason="marshal"} 2
+gosrt_connection_send_data_drop_total{socket_id="0x12345678",reason="ring_full"} 1
+gosrt_connection_send_data_drop_total{socket_id="0x12345678",reason="submit"} 1
+gosrt_connection_send_data_drop_total{socket_id="0x12345678",reason="iouring"} 1
+gosrt_connection_send_control_drop_total{socket_id="0x12345678",reason="marshal"} 0
+gosrt_connection_send_control_drop_total{socket_id="0x12345678",reason="ring_full"} 0
+gosrt_connection_send_control_drop_total{socket_id="0x12345678",reason="submit"} 0
+gosrt_connection_send_control_drop_total{socket_id="0x12345678",reason="iouring"} 0
+gosrt_connection_congestion_send_packets_lost_total{socket_id="0x12345678"} 100
+gosrt_connection_congestion_send_packets_retrans_total{socket_id="0x12345678"} 50
+gosrt_connection_congestion_send_buffer_packets{socket_id="0x12345678"} 200
+gosrt_connection_congestion_send_buffer_bytes{socket_id="0x12345678"} 291200
+gosrt_connection_congestion_send_retrans_latency_seconds_avg{socket_id="0x12345678"} 0.0005
+gosrt_connection_congestion_send_retrans_latency_seconds_max{socket_id="0x12345678"} 0.005
+```
+
+**Error Counters**:
+```
+gosrt_connection_congestion_recv_packets_nil_total{socket_id="0x12345678"} 0
+gosrt_connection_congestion_recv_store_insert_failed_total{socket_id="0x12345678"} 2
+gosrt_connection_congestion_recv_delivery_failed_total{socket_id="0x12345678"} 0
+gosrt_connection_congestion_send_delivery_failed_total{socket_id="0x12345678"} 0
+gosrt_connection_congestion_send_nak_not_found_total{socket_id="0x12345678"} 0
+```
+
+#### Implementation in Metrics Handler
+
+**Update `metrics/handler.go`** to include congestion control metrics:
+
+```go
+// In MetricsHandler(), after connection-level metrics
+// Write congestion control receiver metrics
+writeCounterValue(b, "gosrt_connection_congestion_recv_packets_total",
+    metrics.CongestionRecvPkt.Load(),
+    "socket_id", socketIdStr)
+writeCounterValue(b, "gosrt_connection_congestion_recv_bytes_total",
+    metrics.CongestionRecvByte.Load(),
+    "socket_id", socketIdStr)
+writeCounterValue(b, "gosrt_connection_congestion_recv_packets_dropped_total",
+    metrics.CongestionRecvPktDrop.Load(),
+    "socket_id", socketIdStr, "reason", "total")
+writeCounterValue(b, "gosrt_connection_congestion_recv_packets_lost_total",
+    metrics.CongestionRecvPktLoss.Load(),
+    "socket_id", socketIdStr)
+// ... (similar for all receiver metrics)
+
+// Write congestion control sender metrics
+writeCounterValue(b, "gosrt_connection_congestion_send_packets_total",
+    metrics.CongestionSendPkt.Load(),
+    "socket_id", socketIdStr)
+// ... (similar for all sender metrics)
+
+// Write latency metrics
+if metrics.CongestionRecvProcessingLatency != nil {
+    holdAvg, holdMax, _, _ := metrics.CongestionRecvProcessingLatency.GetStats()
+    writeGauge(b, "gosrt_connection_congestion_recv_processing_latency_seconds_avg",
+        holdAvg, "socket_id", socketIdStr)
+    writeGauge(b, "gosrt_connection_congestion_recv_processing_latency_seconds_max",
+        holdMax, "socket_id", socketIdStr)
+}
+// ... (similar for all latency metrics)
+```
+
+#### Example Prometheus Queries
+
+**Packet Drop Rate**:
+```promql
+rate(gosrt_connection_congestion_recv_packets_dropped_total[5m]) /
+rate(gosrt_connection_congestion_recv_packets_total[5m]) * 100
+```
+
+**Retransmission Rate**:
+```promql
+rate(gosrt_connection_congestion_recv_packets_retrans_total[5m]) /
+rate(gosrt_connection_congestion_recv_packets_total[5m]) * 100
+```
+
+**Average Buffer Latency**:
+```promql
+gosrt_connection_congestion_recv_buffer_latency_seconds_avg
+```
+
+**Processing Latency Trend**:
+```promql
+rate(gosrt_connection_congestion_recv_processing_latency_seconds_avg[5m])
+```
+
+**Error Rate**:
+```promql
+rate(gosrt_connection_congestion_recv_delivery_failed_total[5m]) +
+rate(gosrt_connection_congestion_recv_store_insert_failed_total[5m])
+```
+
+---
+
 ## Prometheus Integration
 
 ### Design Decision: Custom /metrics Handler (No Prometheus Client Library)
@@ -1791,20 +2894,94 @@ if metrics.HandlePacketLockTiming != nil {
 
 **Estimated Effort**: 3-4 hours
 
-### Phase 5: Statistics Migration (Backward Compatibility)
+### Phase 5: Statistics Migration (Full Migration to Atomic Counters)
 
 **Tasks**:
-1. Update `Stats()` method to read from new metrics
-2. Maintain backward compatibility with existing `Statistics` struct
-3. Add migration path documentation
+1. Update `Stats()` method to read from atomic metrics (lock-free)
+2. Remove old `connStats` struct and `statisticsLock`
+3. Clean up all old increment code
+4. Verify all statistics are now lock-free
 
 **Files**:
-- `connection.go` - Update `Stats()` method
-- `statistics.go` - Update if needed
+- `connection.go` - Update `Stats()` method, remove old structs
+- Remove all references to `c.statistics` and `c.statisticsLock`
 
 **Estimated Effort**: 2-3 hours
 
-### Phase 6: Testing and Validation
+**Note**: This phase completes the full migration to atomic counters, eliminating all lock contention in statistics collection.
+
+### Phase 6: Congestion Control Statistics Migration (Lock-Free Statistics)
+
+**Tasks**:
+1. Add congestion control fields to `ConnectionMetrics` struct
+2. Pass `ConnectionMetrics` to receiver and sender via config
+3. Replace all `r.statistics.*` and `s.statistics.*` increments with atomic operations
+4. Update `Stats()` methods to read from atomic counters (lock-free)
+5. Update `connection.go:Stats()` to use atomic counters directly
+6. Remove old `statistics` structs and associated locks completely
+
+**Files**:
+- `metrics/metrics.go` - Add congestion control fields
+- `congestion/live/receive.go` - Replace statistics increments, update `Stats()`
+- `congestion/live/send.go` - Replace statistics increments, update `Stats()`
+- `connection.go` - Pass metrics to receiver/sender, update `Stats()` to use atomic counters
+
+**Estimated Effort**: 6-8 hours
+
+**Note**: This phase eliminates lock contention in the congestion control layer, which is critical for high-performance packet processing.
+
+### Phase 7: Granular Drop Counters (Option B: Full Granularity)
+
+**Goal**: Implement granular drop counters for all drop points, with separate counters for DATA vs control packets, while maintaining aggregate counters for SRT RFC compliance.
+
+**Tasks**:
+1. Add granular drop counter fields to `ConnectionMetrics` struct
+   - Congestion control: 5 counters (receiver: 4, sender: 1)
+   - Connection-level receive: 8 counters (DATA + control for 4 error types)
+   - Connection-level send: 8 counters (DATA + control for 4 error types)
+   - Total: 21 new atomic counters
+2. Create helper functions for incrementing granular + aggregate counters
+   - `IncrementRecvDataDrop()` - Congestion control receiver drops
+   - `IncrementSendDataDrop()` - Congestion control sender drops
+   - `IncrementSendErrorDrop()` - Connection-level send errors (DATA vs control)
+   - `IncrementRecvErrorDrop()` - Connection-level receive errors (DATA vs control)
+3. Update congestion control drop points
+   - `congestion/live/receive.go`: 4 locations (too old, already ACK'd, duplicate, store insert failed)
+   - `congestion/live/send.go`: 1 location (too old)
+4. Update connection-level error handlers
+   - `connection_linux.go`: Marshal, ring full, submit, io_uring errors
+   - `connection.go`: Marshal errors (fallback path)
+   - `listen.go`, `dial.go`: Marshal, write errors (fallback path)
+   - `listen_linux.go`, `dial_linux.go`: Parse, io_uring, empty, route errors
+5. Update `Stats()` methods to calculate aggregates from granular counters
+   - `congestion/live/receive.go:Stats()`
+   - `congestion/live/send.go:Stats()`
+   - `connection.go:Stats()`
+6. Update Prometheus metrics handler to expose granular counters with labels
+   - Add labels for drop reasons
+   - Separate metrics for DATA vs control packets
+7. Update `IncrementSendMetrics` and `IncrementRecvMetrics` to use granular counters
+   - Check packet type (DATA vs control)
+   - Increment appropriate granular counter
+   - Increment aggregate for DATA packets only
+
+**Files to Modify**:
+- `metrics/metrics.go` - Add 21 new atomic counter fields
+- `metrics/helpers.go` - Add helper functions for granular drops
+- `metrics/packet_classifier.go` - Update to use granular counters
+- `congestion/live/receive.go` - Update 4 drop points
+- `congestion/live/send.go` - Update 1 drop point
+- `connection_linux.go` - Update error handlers
+- `connection.go` - Update error handlers and Stats()
+- `listen.go`, `dial.go` - Update error handlers
+- `listen_linux.go`, `dial_linux.go` - Update error handlers
+- `metrics/handler.go` - Expose granular counters in Prometheus
+
+**Estimated Effort**: 6-8 hours
+
+**Note**: This phase provides complete visibility into drop reasons, enabling precise debugging. The helper function approach ensures granular and aggregate counters stay in sync.
+
+### Phase 8: Testing and Validation
 
 **Tasks**:
 1. Unit tests for metrics collection
@@ -1814,7 +2991,9 @@ if metrics.HandlePacketLockTiming != nil {
 
 **Estimated Effort**: 4-6 hours
 
-### Total Estimated Effort: 20-28 hours
+### Total Estimated Effort: 32-44 hours
+
+**Note**: Phase 6 (Congestion Control Statistics Migration) is critical for eliminating lock contention in the hot path (packet processing). It should be prioritized after Phase 5. Phase 7 (Granular Drop Counters) provides enhanced debugging capabilities and should be implemented after Phase 6.
 
 ---
 
@@ -1861,7 +3040,7 @@ rate(gosrt_connection_lock_acquisitions_total[5m])
 8. **Monitoring**: Prometheus-compatible format enables real-time monitoring
 9. **Consistency**: Unified approach across all metrics
 10. **Extensibility**: Easy to add new metrics as needed
-11. **Backward Compatible**: Can migrate gradually from existing statistics system
+11. **Complete Migration**: Fully lock-free statistics system, no legacy code
 
 ---
 

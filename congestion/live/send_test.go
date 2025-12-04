@@ -5,15 +5,25 @@ import (
 	"testing"
 
 	"github.com/datarhei/gosrt/circular"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 	"github.com/stretchr/testify/require"
 )
 
 func mockLiveSend(onDeliver func(p packet.Packet)) *sender {
+	// Initialize metrics for tests
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44) // IPv4 + UDP + SRT header
+
 	send := NewSender(SendConfig{
 		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
 		DropThreshold:         10,
 		OnDeliver:             onDeliver,
+		ConnectionMetrics:     testMetrics,
 	})
 
 	return send.(*sender)

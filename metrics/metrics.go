@@ -118,8 +118,85 @@ type ConnectionMetrics struct {
 	ByteRecvUndecrypt atomic.Uint64
 	PktRecvInvalid    atomic.Uint64
 	PktRetransFromNAK atomic.Uint64
-	HeaderSize         atomic.Uint64
-	MbpsLinkCapacity   atomic.Uint64 // Stored as uint64 (Mbps * 1000)
+	HeaderSize        atomic.Uint64
+	MbpsLinkCapacity  atomic.Uint64 // Stored as uint64 (Mbps * 1000)
+
+	// Congestion control - Receiver statistics
+	CongestionRecvPkt              atomic.Uint64
+	CongestionRecvByte             atomic.Uint64
+	CongestionRecvPktUnique        atomic.Uint64
+	CongestionRecvByteUnique       atomic.Uint64
+	CongestionRecvPktLoss          atomic.Uint64
+	CongestionRecvByteLoss         atomic.Uint64
+	CongestionRecvPktRetrans       atomic.Uint64
+	CongestionRecvByteRetrans      atomic.Uint64
+	CongestionRecvPktBelated       atomic.Uint64
+	CongestionRecvByteBelated      atomic.Uint64
+	CongestionRecvPktDrop          atomic.Uint64
+	CongestionRecvByteDrop         atomic.Uint64
+	CongestionRecvPktBuf           atomic.Uint64
+	CongestionRecvByteBuf          atomic.Uint64
+	CongestionRecvMsBuf            atomic.Uint64
+	CongestionRecvBytePayload      atomic.Uint64
+	CongestionRecvMbpsBandwidth    atomic.Uint64 // Mbps * 1000
+	CongestionRecvMbpsLinkCapacity atomic.Uint64 // Mbps * 1000
+	CongestionRecvPktLossRate      atomic.Uint64 // Percentage * 100
+
+	// Congestion control - Sender statistics
+	CongestionSendPkt                atomic.Uint64
+	CongestionSendByte               atomic.Uint64
+	CongestionSendPktUnique          atomic.Uint64
+	CongestionSendByteUnique         atomic.Uint64
+	CongestionSendPktLoss            atomic.Uint64
+	CongestionSendByteLoss           atomic.Uint64
+	CongestionSendPktRetrans         atomic.Uint64
+	CongestionSendByteRetrans        atomic.Uint64
+	CongestionSendUsSndDuration      atomic.Uint64
+	CongestionSendPktDrop            atomic.Uint64
+	CongestionSendByteDrop           atomic.Uint64
+	CongestionSendPktBuf             atomic.Uint64
+	CongestionSendByteBuf            atomic.Uint64
+	CongestionSendMsBuf              atomic.Uint64
+	CongestionSendPktFlightSize      atomic.Uint64
+	CongestionSendUsPktSndPeriod     atomic.Uint64
+	CongestionSendBytePayload        atomic.Uint64
+	CongestionSendMbpsInputBandwidth atomic.Uint64 // Mbps * 1000
+	CongestionSendMbpsSentBandwidth  atomic.Uint64 // Mbps * 1000
+	CongestionSendPktLossRate        atomic.Uint64 // Percentage * 100
+
+	// Additional error/drop counters for congestion control
+	CongestionRecvPktNil               atomic.Uint64 // Nil packets received
+	CongestionRecvPktStoreInsertFailed atomic.Uint64 // Packet store insertion failures
+	CongestionRecvDeliveryFailed       atomic.Uint64 // Delivery callback failures
+	CongestionSendDeliveryFailed       atomic.Uint64 // Delivery callback failures
+	CongestionSendNAKNotFound          atomic.Uint64 // NAK requests for packets not in lossList
+
+	// Granular drop counters - Congestion control (DATA packets only)
+	CongestionRecvDataDropTooOld            atomic.Uint64 // Belated, past play time
+	CongestionRecvDataDropAlreadyAcked      atomic.Uint64 // Already acknowledged
+	CongestionRecvDataDropDuplicate         atomic.Uint64 // Duplicate (already in store)
+	CongestionRecvDataDropStoreInsertFailed atomic.Uint64 // Store insert failed
+	CongestionSendDataDropTooOld            atomic.Uint64 // Exceed drop threshold
+
+	// Granular error counters - Connection-level receive (DATA and Control packets)
+	PktRecvDataErrorParse      atomic.Uint64 // DATA packet parse errors
+	PktRecvControlErrorParse   atomic.Uint64 // Control packet parse errors
+	PktRecvDataErrorIoUring    atomic.Uint64 // DATA packet io_uring errors
+	PktRecvControlErrorIoUring atomic.Uint64 // Control packet io_uring errors
+	PktRecvDataErrorEmpty      atomic.Uint64 // DATA packet empty datagrams
+	PktRecvControlErrorEmpty   atomic.Uint64 // Control packet empty datagrams
+	PktRecvDataErrorRoute      atomic.Uint64 // DATA packet routing failures
+	PktRecvControlErrorRoute   atomic.Uint64 // Control packet routing failures
+
+	// Granular error counters - Connection-level send (DATA and Control packets)
+	PktSentDataErrorMarshal    atomic.Uint64 // DATA packet marshal errors
+	PktSentControlErrorMarshal atomic.Uint64 // Control packet marshal errors
+	PktSentDataRingFull        atomic.Uint64 // DATA packet ring full
+	PktSentControlRingFull     atomic.Uint64 // Control packet ring full
+	PktSentDataErrorSubmit     atomic.Uint64 // DATA packet submit errors
+	PktSentControlErrorSubmit  atomic.Uint64 // Control packet submit errors
+	PktSentDataErrorIoUring    atomic.Uint64 // DATA packet io_uring completion errors
+	PktSentControlErrorIoUring atomic.Uint64 // Control packet io_uring completion errors
 }
 
 // LockTimingMetrics tracks lock hold and wait times
@@ -243,4 +320,3 @@ func (ltm *LockTimingMetrics) SnapshotWaitTimes() [LockTimingSamples]int64 {
 	}
 	return out
 }
-

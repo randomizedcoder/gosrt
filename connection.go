@@ -134,26 +134,7 @@ func (r *rtt) NAKInterval() float64 {
 	return nakInterval
 }
 
-type connStats struct {
-	headerSize        uint64
-	pktSentACK        uint64
-	pktRecvACK        uint64
-	pktSentACKACK     uint64
-	pktRecvACKACK     uint64
-	pktSentNAK        uint64
-	pktRecvNAK        uint64
-	pktRetransFromNAK uint64
-	pktSentKM         uint64
-	pktRecvKM         uint64
-	pktRecvUndecrypt  uint64
-	byteRecvUndecrypt uint64
-	pktRecvInvalid    uint64
-	pktSentKeepalive  uint64
-	pktRecvKeepalive  uint64
-	pktSentShutdown   uint64
-	pktRecvShutdown   uint64
-	mbpsLinkCapacity  float64
-}
+// connStats struct removed - all statistics now use atomic counters in metrics.ConnectionMetrics
 
 // Check if we implement the net.Conn interface
 var _ net.Conn = &srtConn{}
@@ -229,8 +210,7 @@ type srtConn struct {
 	ctx       context.Context
 	cancelCtx context.CancelFunc
 
-	statistics     connStats
-	statisticsLock sync.RWMutex
+	// statistics and statisticsLock removed - all statistics now use atomic counters in metrics.ConnectionMetrics
 
 	// Metrics for Prometheus (atomic counters, lock-free)
 	metrics *metrics.ConnectionMetrics
@@ -382,6 +362,28 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		go c.close()
 	})
 
+	c.debug.expectedRcvPacketSequenceNumber = c.initialPacketSequenceNumber
+	c.debug.expectedReadPacketSequenceNumber = c.initialPacketSequenceNumber
+
+	// Calculate header size (needed for metrics initialization)
+	headerSize := uint64(8 + 16) // 8 bytes UDP + 16 bytes SRT
+	if strings.Count(c.localAddr.String(), ":") < 2 {
+		headerSize += 20 // 20 bytes IPv4 header
+	} else {
+		headerSize += 40 // 40 bytes IPv6 header
+	}
+
+	// Initialize metrics BEFORE creating receiver and sender (they need metrics)
+	c.metrics = &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	c.metrics.HeaderSize.Store(headerSize)
+
+	// Register with metrics registry
+	metrics.RegisterConnection(c.socketId, c.metrics)
+
 	c.tick = 10 * time.Millisecond
 
 	// 4.8.1.  Packet Acknowledgement (ACKs, ACKACKs) -> periodicACK = 10 milliseconds
@@ -396,6 +398,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		PacketReorderAlgorithm: c.config.PacketReorderAlgorithm,
 		BTreeDegree:            c.config.BTreeDegree,
 		LockTimingMetrics:      c.metrics.ReceiverLockTiming,
+		ConnectionMetrics:      c.metrics,
 	})
 
 	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second
@@ -415,6 +418,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		OverheadBW:            c.config.OverheadBW,
 		OnDeliver:             c.pop,
 		LockTimingMetrics:     c.metrics.SenderLockTiming,
+		ConnectionMetrics:     c.metrics,
 	})
 
 	c.ctx, c.cancelCtx = context.WithCancel(context.Background())
@@ -428,27 +432,6 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	go c.networkQueueReader(c.ctx)
 	go c.writeQueueReader(c.ctx)
 	go c.ticker(c.ctx)
-
-	c.debug.expectedRcvPacketSequenceNumber = c.initialPacketSequenceNumber
-	c.debug.expectedReadPacketSequenceNumber = c.initialPacketSequenceNumber
-
-	c.statistics.headerSize = 8 + 16 // 8 bytes UDP + 16 bytes SRT
-	if strings.Count(c.localAddr.String(), ":") < 2 {
-		c.statistics.headerSize += 20 // 20 bytes IPv4 header
-	} else {
-		c.statistics.headerSize += 40 // 40 bytes IPv6 header
-	}
-
-	// Initialize metrics
-	c.metrics = &metrics.ConnectionMetrics{
-		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
-		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
-		SenderLockTiming:       &metrics.LockTimingMetrics{},
-	}
-	c.metrics.HeaderSize.Store(uint64(c.statistics.headerSize))
-
-	// Register with metrics registry
-	metrics.RegisterConnection(c.socketId, c.metrics)
 
 	if c.version == 4 && c.isCaller {
 		var hsrequestsCtx context.Context
@@ -919,16 +902,16 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	if c.crypto != nil {
 		if header.KeyBaseEncryptionFlag != 0 {
 			if err := c.crypto.EncryptOrDecryptPayload(p.Data(), header.KeyBaseEncryptionFlag, header.PacketSequenceNumber.Val()); err != nil {
-				c.statisticsLock.Lock()
-				c.statistics.pktRecvUndecrypt++
-				c.statistics.byteRecvUndecrypt += p.Len()
-				c.statisticsLock.Unlock()
+				if c.metrics != nil {
+					c.metrics.PktRecvUndecrypt.Add(1)
+					c.metrics.ByteRecvUndecrypt.Add(uint64(p.Len()))
+				}
 			}
 		} else {
-			c.statisticsLock.Lock()
-			c.statistics.pktRecvUndecrypt++
-			c.statistics.byteRecvUndecrypt += p.Len()
-			c.statisticsLock.Unlock()
+			if c.metrics != nil {
+				c.metrics.PktRecvUndecrypt.Add(1)
+				c.metrics.ByteRecvUndecrypt.Add(uint64(p.Len()))
+			}
 		}
 	}
 	c.cryptoLock.Unlock()
@@ -941,10 +924,8 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 func (c *srtConn) handleKeepAlive(p packet.Packet) {
 	c.log("control:recv:keepalive:dump", func() string { return p.Dump() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktRecvKeepalive++
-	c.statistics.pktSentKeepalive++
-	c.statisticsLock.Unlock()
+	// Note: Keepalive metrics are tracked via packet classifier in send/recv paths
+	// No need to increment here - metrics already tracked
 
 	c.peerIdleTimeout.Reset(c.config.PeerIdleTimeout)
 	c.peerIdleTimeoutLastReset = time.Now()
@@ -958,9 +939,8 @@ func (c *srtConn) handleKeepAlive(p packet.Packet) {
 func (c *srtConn) handleShutdown(p packet.Packet) {
 	c.log("control:recv:shutdown:dump", func() string { return p.Dump() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktRecvShutdown++
-	c.statisticsLock.Unlock()
+	// Note: Shutdown metrics are tracked via packet classifier in recv path
+	// No need to increment here - metrics already tracked
 
 	c.log("connection:close:reason", func() string {
 		return "shutdown packet received from peer"
@@ -973,16 +953,15 @@ func (c *srtConn) handleShutdown(p packet.Packet) {
 func (c *srtConn) handleACK(p packet.Packet) {
 	c.log("control:recv:ACK:dump", func() string { return p.Dump() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktRecvACK++
-	c.statisticsLock.Unlock()
+	// Note: ACK metrics are tracked via packet classifier in recv path
+	// No need to increment here - metrics already tracked
 
 	cif := &packet.CIFACK{}
 
 	if err := p.UnmarshalCIF(cif); err != nil {
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 		c.log("control:recv:ACK:error", func() string { return fmt.Sprintf("invalid ACK: %s", err) })
 		return
 	}
@@ -996,9 +975,11 @@ func (c *srtConn) handleACK(p packet.Packet) {
 		c.recalculateRTT(time.Duration(int64(cif.RTT)) * time.Microsecond)
 
 		// Estimated Link Capacity (from packets/s to Mbps)
-		c.statisticsLock.Lock()
-		c.statistics.mbpsLinkCapacity = float64(cif.EstimatedLinkCapacity) * MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
-		c.statisticsLock.Unlock()
+		// Store as uint64 (Mbps * 1000) for atomic operations
+		if c.metrics != nil {
+			mbps := float64(cif.EstimatedLinkCapacity) * MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
+			c.metrics.MbpsLinkCapacity.Store(uint64(mbps * 1000))
+		}
 
 		c.sendACKACK(p.Header().TypeSpecific)
 	}
@@ -1008,16 +989,15 @@ func (c *srtConn) handleACK(p packet.Packet) {
 func (c *srtConn) handleNAK(p packet.Packet) {
 	c.log("control:recv:NAK:dump", func() string { return p.Dump() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktRecvNAK++
-	c.statisticsLock.Unlock()
+	// Note: NAK metrics are tracked via packet classifier in recv path
+	// No need to increment here - metrics already tracked
 
 	cif := &packet.CIFNAK{}
 
 	if err := p.UnmarshalCIF(cif); err != nil {
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 		c.log("control:recv:NAK:error", func() string { return fmt.Sprintf("invalid NAK: %s", err) })
 		return
 	}
@@ -1027,9 +1007,9 @@ func (c *srtConn) handleNAK(p packet.Packet) {
 	// Inform congestion control about lost packets and track retransmissions
 	retransCount := c.snd.NAK(cif.LostPacketSequenceNumber)
 	if retransCount > 0 {
-		c.statisticsLock.Lock()
-		c.statistics.pktRetransFromNAK += retransCount
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRetransFromNAK.Add(uint64(retransCount))
+		}
 	}
 }
 
@@ -1044,12 +1024,13 @@ type ExtendedStatistics struct {
 // GetExtendedStatistics returns all extended statistics in a single call with a single lock.
 // This implements the Conn interface.
 func (c *srtConn) GetExtendedStatistics() *ExtendedStatistics {
-	c.statisticsLock.RLock()
-	defer c.statisticsLock.RUnlock()
+	if c.metrics == nil {
+		return &ExtendedStatistics{}
+	}
 	return &ExtendedStatistics{
-		PktSentACKACK:     c.statistics.pktSentACKACK,
-		PktRecvACKACK:     c.statistics.pktRecvACKACK,
-		PktRetransFromNAK: c.statistics.pktRetransFromNAK,
+		PktSentACKACK:     c.metrics.PktSentACKACKSuccess.Load(),
+		PktRecvACKACK:     c.metrics.PktRecvACKACKSuccess.Load(),
+		PktRetransFromNAK: c.metrics.PktRetransFromNAK.Load(),
 	}
 }
 
@@ -1057,9 +1038,8 @@ func (c *srtConn) GetExtendedStatistics() *ExtendedStatistics {
 func (c *srtConn) handleACKACK(p packet.Packet) {
 	c.ackLock.Lock()
 
-	c.statisticsLock.Lock()
-	c.statistics.pktRecvACKACK++
-	c.statisticsLock.Unlock()
+	// Note: ACKACK metrics are tracked via packet classifier in recv path
+	// No need to increment here - metrics already tracked
 
 	c.log("control:recv:ACKACK:dump", func() string { return p.Dump() })
 
@@ -1070,9 +1050,9 @@ func (c *srtConn) handleACKACK(p packet.Packet) {
 		delete(c.ackNumbers, p.Header().TypeSpecific)
 	} else {
 		c.log("control:recv:ACKACK:error", func() string { return fmt.Sprintf("got unknown ACKACK (%d)", p.Header().TypeSpecific) })
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 	}
 
 	for i := range c.ackNumbers {
@@ -1102,9 +1082,9 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 	cif := &packet.CIFHandshakeExtension{}
 
 	if err := p.UnmarshalCIF(cif); err != nil {
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 		c.log("control:recv:HSReq:error", func() string { return fmt.Sprintf("invalid HSReq: %s", err) })
 		return
 	}
@@ -1214,9 +1194,9 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 	cif := &packet.CIFHandshakeExtension{}
 
 	if err := p.UnmarshalCIF(cif); err != nil {
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 		c.log("control:recv:HSRes:error", func() string { return fmt.Sprintf("invalid HSRes: %s", err) })
 		return
 	}
@@ -1319,16 +1299,15 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 func (c *srtConn) handleKMRequest(p packet.Packet) {
 	c.log("control:recv:KMReq:dump", func() string { return p.Dump() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktRecvKM++
-	c.statisticsLock.Unlock()
+	// Note: KM metrics are tracked via packet classifier in recv path
+	// No need to increment here - metrics already tracked
 
 	cif := &packet.CIFKeyMaterialExtension{}
 
 	if err := p.UnmarshalCIF(cif); err != nil {
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 		c.log("control:recv:KMReq:error", func() string { return fmt.Sprintf("invalid KMReq: %s", err) })
 		return
 	}
@@ -1360,9 +1339,9 @@ func (c *srtConn) handleKMRequest(p packet.Packet) {
 	}
 
 	if cif.KeyBasedEncryption == c.keyBaseEncryption {
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 		c.log("control:recv:KMReq:error", func() string {
 			return "invalid KM request. wants to reset the key that is already in use"
 		})
@@ -1371,9 +1350,9 @@ func (c *srtConn) handleKMRequest(p packet.Packet) {
 	}
 
 	if err := c.crypto.UnmarshalKM(cif, c.config.Passphrase); err != nil {
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 		c.log("control:recv:KMReq:error", func() string { return fmt.Sprintf("invalid KMReq: %s", err) })
 		c.cryptoLock.Unlock()
 		return
@@ -1387,9 +1366,8 @@ func (c *srtConn) handleKMRequest(p packet.Packet) {
 	// Send KM Response
 	p.Header().SubType = packet.EXTTYPE_KMRSP
 
-	c.statisticsLock.Lock()
-	c.statistics.pktSentKM++
-	c.statisticsLock.Unlock()
+	// Note: KM metrics are tracked via packet classifier in send path
+	// No need to increment here - metrics already tracked
 
 	c.pop(p)
 }
@@ -1398,16 +1376,15 @@ func (c *srtConn) handleKMRequest(p packet.Packet) {
 func (c *srtConn) handleKMResponse(p packet.Packet) {
 	c.log("control:recv:KMRes:dump", func() string { return p.Dump() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktRecvKM++
-	c.statisticsLock.Unlock()
+	// Note: KM metrics are tracked via packet classifier in recv path
+	// No need to increment here - metrics already tracked
 
 	cif := &packet.CIFKeyMaterialExtension{}
 
 	if err := p.UnmarshalCIF(cif); err != nil {
-		c.statisticsLock.Lock()
-		c.statistics.pktRecvInvalid++
-		c.statisticsLock.Unlock()
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+		}
 		c.log("control:recv:KMRes:error", func() string { return fmt.Sprintf("invalid KMRes: %s", err) })
 		return
 	}
@@ -1468,9 +1445,8 @@ func (c *srtConn) sendShutdown() {
 	c.log("control:send:shutdown:dump", func() string { return p.Dump() })
 	c.log("control:send:shutdown:cif", func() string { return cif.String() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktSentShutdown++
-	c.statisticsLock.Unlock()
+	// Note: Shutdown metrics are tracked via packet classifier in send path
+	// No need to increment here - metrics already tracked
 
 	c.pop(p)
 }
@@ -1493,9 +1469,8 @@ func (c *srtConn) sendNAK(list []circular.Number) {
 	c.log("control:send:NAK:dump", func() string { return p.Dump() })
 	c.log("control:send:NAK:cif", func() string { return cif.String() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktSentNAK++
-	c.statisticsLock.Unlock()
+	// Note: NAK metrics are tracked via packet classifier in send path
+	// No need to increment here - metrics already tracked
 
 	c.pop(p)
 }
@@ -1544,9 +1519,8 @@ func (c *srtConn) sendACK(seq circular.Number, lite bool) {
 	c.log("control:send:ACK:dump", func() string { return p.Dump() })
 	c.log("control:send:ACK:cif", func() string { return cif.String() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktSentACK++
-	c.statisticsLock.Unlock()
+	// Note: ACK metrics are tracked via packet classifier in send path
+	// No need to increment here - metrics already tracked
 
 	c.pop(p)
 }
@@ -1564,9 +1538,8 @@ func (c *srtConn) sendACKACK(ackSequence uint32) {
 
 	c.log("control:send:ACKACK:dump", func() string { return p.Dump() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktSentACKACK++
-	c.statisticsLock.Unlock()
+	// Note: ACKACK metrics are tracked via packet classifier in send path
+	// No need to increment here - metrics already tracked
 
 	c.pop(p)
 }
@@ -1652,9 +1625,8 @@ func (c *srtConn) sendKMRequest(key packet.PacketEncryption) {
 	c.log("control:send:KMReq:dump", func() string { return p.Dump() })
 	c.log("control:send:KMReq:cif", func() string { return cif.String() })
 
-	c.statisticsLock.Lock()
-	c.statistics.pktSentKM++
-	c.statisticsLock.Unlock()
+	// Note: KM metrics are tracked via packet classifier in send path
+	// No need to increment here - metrics already tracked
 
 	c.pop(p)
 }
@@ -1858,45 +1830,59 @@ func (c *srtConn) Stats(s *Statistics) {
 
 	now := uint64(time.Since(c.start).Milliseconds())
 
+	// Read from atomic counters directly (lock-free)
+	// Still call Stats() to update instantaneous values (MsBuf, bandwidth, etc.)
 	send := c.snd.Stats()
 	recv := c.recv.Stats()
 
 	previous := s.Accumulated
 	interval := now - s.MsTimeStamp
 
-	c.statisticsLock.RLock()
-	defer c.statisticsLock.RUnlock()
+	// Read from atomic counters (no lock needed)
+	if c.metrics == nil {
+		// Fallback if metrics not initialized (shouldn't happen)
+		return
+	}
 
-	// Accumulated
+	headerSize := c.metrics.HeaderSize.Load()
+
+	// Accumulated - read directly from atomic counters (lock-free)
 	s.Accumulated = StatisticsAccumulated{
-		PktSent:           send.Pkt,
-		PktRecv:           recv.Pkt,
-		PktSentUnique:     send.PktUnique,
-		PktRecvUnique:     recv.PktUnique,
-		PktSendLoss:       send.PktLoss,
-		PktRecvLoss:       recv.PktLoss,
-		PktRetrans:        send.PktRetrans,
-		PktRecvRetrans:    recv.PktRetrans,
-		PktSentACK:        c.statistics.pktSentACK,
-		PktRecvACK:        c.statistics.pktRecvACK,
-		PktSentNAK:        c.statistics.pktSentNAK,
-		PktRecvNAK:        c.statistics.pktRecvNAK,
-		PktSentKM:         c.statistics.pktSentKM,
-		PktRecvKM:         c.statistics.pktRecvKM,
-		UsSndDuration:     send.UsSndDuration,
-		PktSendDrop:       send.PktDrop,
-		PktRecvDrop:       recv.PktDrop,
-		PktRecvUndecrypt:  c.statistics.pktRecvUndecrypt,
-		ByteSent:          send.Byte + (send.Pkt * c.statistics.headerSize),
-		ByteRecv:          recv.Byte + (recv.Pkt * c.statistics.headerSize),
-		ByteSentUnique:    send.ByteUnique + (send.PktUnique * c.statistics.headerSize),
-		ByteRecvUnique:    recv.ByteUnique + (recv.PktUnique * c.statistics.headerSize),
-		ByteRecvLoss:      recv.ByteLoss + (recv.PktLoss * c.statistics.headerSize),
-		ByteRetrans:       send.ByteRetrans + (send.PktRetrans * c.statistics.headerSize),
-		ByteRecvRetrans:   recv.ByteRetrans + (recv.PktRetrans * c.statistics.headerSize),
-		ByteSendDrop:      send.ByteDrop + (send.PktDrop * c.statistics.headerSize),
-		ByteRecvDrop:      recv.ByteDrop + (recv.PktDrop * c.statistics.headerSize),
-		ByteRecvUndecrypt: c.statistics.byteRecvUndecrypt + (c.statistics.pktRecvUndecrypt * c.statistics.headerSize),
+		PktSent:        c.metrics.CongestionSendPkt.Load(),
+		PktRecv:        c.metrics.CongestionRecvPkt.Load(),
+		PktSentUnique:  c.metrics.CongestionSendPktUnique.Load(),
+		PktRecvUnique:  c.metrics.CongestionRecvPktUnique.Load(),
+		PktSendLoss:    c.metrics.CongestionSendPktLoss.Load(),
+		PktRecvLoss:    c.metrics.CongestionRecvPktLoss.Load(),
+		PktRetrans:     c.metrics.CongestionSendPktRetrans.Load(),
+		PktRecvRetrans: c.metrics.CongestionRecvPktRetrans.Load(),
+		PktSentACK:     c.metrics.PktSentACKSuccess.Load(),
+		PktRecvACK:     c.metrics.PktRecvACKSuccess.Load(),
+		PktSentNAK:     c.metrics.PktSentNAKSuccess.Load(),
+		PktRecvNAK:     c.metrics.PktRecvNAKSuccess.Load(),
+		PktSentKM:      c.metrics.PktSentKMSuccess.Load(),
+		PktRecvKM:      c.metrics.PktRecvKMSuccess.Load(),
+		UsSndDuration:  c.metrics.CongestionSendUsSndDuration.Load(),
+		PktSendDrop: c.metrics.CongestionSendDataDropTooOld.Load() +
+			c.metrics.PktSentDataErrorMarshal.Load() +
+			c.metrics.PktSentDataRingFull.Load() +
+			c.metrics.PktSentDataErrorSubmit.Load() +
+			c.metrics.PktSentDataErrorIoUring.Load(),
+		PktRecvDrop: c.metrics.CongestionRecvDataDropTooOld.Load() +
+			c.metrics.CongestionRecvDataDropAlreadyAcked.Load() +
+			c.metrics.CongestionRecvDataDropDuplicate.Load() +
+			c.metrics.CongestionRecvDataDropStoreInsertFailed.Load(),
+		PktRecvUndecrypt:  c.metrics.PktRecvUndecrypt.Load(),
+		ByteSent:          c.metrics.CongestionSendByte.Load() + (c.metrics.CongestionSendPkt.Load() * headerSize),
+		ByteRecv:          c.metrics.CongestionRecvByte.Load() + (c.metrics.CongestionRecvPkt.Load() * headerSize),
+		ByteSentUnique:    c.metrics.CongestionSendByteUnique.Load() + (c.metrics.CongestionSendPktUnique.Load() * headerSize),
+		ByteRecvUnique:    c.metrics.CongestionRecvByteUnique.Load() + (c.metrics.CongestionRecvPktUnique.Load() * headerSize),
+		ByteRecvLoss:      c.metrics.CongestionRecvByteLoss.Load() + (c.metrics.CongestionRecvPktLoss.Load() * headerSize),
+		ByteRetrans:       c.metrics.CongestionSendByteRetrans.Load() + (c.metrics.CongestionSendPktRetrans.Load() * headerSize),
+		ByteRecvRetrans:   c.metrics.CongestionRecvByteRetrans.Load() + (c.metrics.CongestionRecvPktRetrans.Load() * headerSize),
+		ByteSendDrop:      c.metrics.CongestionSendByteDrop.Load() + (s.Accumulated.PktSendDrop * headerSize),
+		ByteRecvDrop:      c.metrics.CongestionRecvByteDrop.Load() + (s.Accumulated.PktRecvDrop * headerSize),
+		ByteRecvUndecrypt: c.metrics.ByteRecvUndecrypt.Load() + (c.metrics.PktRecvUndecrypt.Load() * headerSize),
 	}
 
 	// Interval
@@ -1965,7 +1951,9 @@ func (c *srtConn) Stats(s *Statistics) {
 	// If we're only sending, the receiver congestion control value for the link capacity is zero,
 	// use the value that we got from the receiver via the ACK packets.
 	if s.Instantaneous.MbpsLinkCapacity == 0 {
-		s.Instantaneous.MbpsLinkCapacity = c.statistics.mbpsLinkCapacity
+		// Convert from uint64 (Mbps * 1000) back to float64 (Mbps)
+		mbpsLinkCapacity := float64(c.metrics.MbpsLinkCapacity.Load()) / 1000.0
+		s.Instantaneous.MbpsLinkCapacity = mbpsLinkCapacity
 	}
 
 	if c.config.MaxBW < 0 {
