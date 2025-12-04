@@ -71,6 +71,10 @@ var (
 
 	// Statistics configuration flags
 	StatisticsPrintInterval = flag.Duration("statisticsinterval", 0, "Interval for printing connection statistics (e.g., 10s). 0 disables periodic statistics printing")
+
+	// Timeout and shutdown configuration flags
+	HandshakeTimeout = flag.Duration("handshaketimeout", 0, "Maximum time allowed for complete handshake exchange (e.g., 1.5s). Must be less than peeridletimeo")
+	ShutdownDelay    = flag.Duration("shutdowndelay", 0, "Time to wait for graceful shutdown after signal (e.g., 5s)")
 )
 
 // ParseFlags parses command-line flags and populates FlagSet map
@@ -231,5 +235,11 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["statisticsinterval"] {
 		config.StatisticsPrintInterval = *StatisticsPrintInterval
+	}
+	if FlagSet["handshaketimeout"] {
+		config.HandshakeTimeout = *HandshakeTimeout
+	}
+	if FlagSet["shutdowndelay"] {
+		config.ShutdownDelay = *ShutdownDelay
 	}
 }

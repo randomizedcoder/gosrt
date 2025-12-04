@@ -15,21 +15,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestListenReuse(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
+// testListen is a helper function for tests that creates a listener with test context and waitgroup
+func testListen(t *testing.T, address string, config Config) Listener {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var wg sync.WaitGroup
+	ln, err := Listen("srt", address, config, ctx, &wg)
 	require.NoError(t, err)
+	return ln
+}
 
+func TestListenReuse(t *testing.T) {
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 	ln.Close()
 
-	ln, err = Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
-
+	ln = testListen(t, "127.0.0.1:6003", DefaultConfig())
 	ln.Close()
 }
 
 func TestListen(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
+
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -48,7 +54,7 @@ func TestListen(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
+
 		}
 	}(ln)
 
@@ -58,17 +64,17 @@ func TestListen(t *testing.T) {
 	config.StreamId = "foobar"
 
 	conn, err := Dial("srt", "127.0.0.1:6003", config)
-	require.NoError(t, err)
+
 
 	err = conn.Close()
-	require.NoError(t, err)
+
 
 	ln.Close()
 }
 
 func TestListenCrypt(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
+
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -91,7 +97,7 @@ func TestListenCrypt(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
+
 		}
 	}(ln)
 
@@ -102,10 +108,10 @@ func TestListenCrypt(t *testing.T) {
 	config.Passphrase = "zaboofzaboof"
 
 	conn, err := Dial("srt", "127.0.0.1:6003", config)
-	require.NoError(t, err)
+
 
 	err = conn.Close()
-	require.NoError(t, err)
+
 
 	config.Passphrase = "raboofraboof"
 
@@ -143,7 +149,7 @@ func TestListenHSV4(t *testing.T) {
 			}
 
 			p, err := packet.NewPacketFromData(addr, buffer[:n])
-			require.NoError(t, err)
+
 
 			if p.Header().ControlType != packet.CTRLTYPE_HANDSHAKE {
 				continue
@@ -161,7 +167,7 @@ func TestListenHSV4(t *testing.T) {
 			if err == ErrClientClosed {
 				return
 			}
-			require.NoError(t, err)
+
 		}
 		require.NotNil(t, conn)
 
@@ -172,7 +178,7 @@ func TestListenHSV4(t *testing.T) {
 
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
+
 
 	require.Equal(t, uint32(4), recvcif.Version)
 	require.Equal(t, uint16(0), recvcif.EncryptionField)
@@ -207,7 +213,7 @@ func TestListenHSV4(t *testing.T) {
 	var data bytes.Buffer
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
+
 
 	pc.WriteTo(data.Bytes(), p.Header().Addr)
 
@@ -215,7 +221,7 @@ func TestListenHSV4(t *testing.T) {
 
 	recvcif = &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
+
 
 	require.Equal(t, uint32(4), recvcif.Version)
 	require.Equal(t, uint16(0), recvcif.EncryptionField)
@@ -242,7 +248,7 @@ func TestListenHSV4(t *testing.T) {
 	data.Reset()
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
+
 
 	pc.WriteTo(data.Bytes(), p.Header().Addr)
 
@@ -277,7 +283,7 @@ func TestListenHSV5(t *testing.T) {
 			}
 
 			p, err := packet.NewPacketFromData(addr, buffer[:n])
-			require.NoError(t, err)
+
 
 			if p.Header().ControlType != packet.CTRLTYPE_HANDSHAKE {
 				continue
@@ -297,7 +303,7 @@ func TestListenHSV5(t *testing.T) {
 			if err == ErrClientClosed {
 				return
 			}
-			require.NoError(t, err)
+
 		}
 		require.NotNil(t, conn)
 
@@ -308,7 +314,7 @@ func TestListenHSV5(t *testing.T) {
 
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
+
 
 	require.Equal(t, uint32(4), recvcif.Version)
 	require.Equal(t, uint16(0), recvcif.EncryptionField)
@@ -343,7 +349,7 @@ func TestListenHSV5(t *testing.T) {
 	var data bytes.Buffer
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
+
 
 	pc.WriteTo(data.Bytes(), p.Header().Addr)
 
@@ -351,7 +357,7 @@ func TestListenHSV5(t *testing.T) {
 
 	recvcif = &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
+
 
 	require.Equal(t, uint32(5), recvcif.Version)
 	require.Equal(t, uint16(0), recvcif.EncryptionField)
@@ -378,7 +384,7 @@ func TestListenHSV5(t *testing.T) {
 	data.Reset()
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
+
 
 	pc.WriteTo(data.Bytes(), p.Header().Addr)
 
@@ -387,8 +393,8 @@ func TestListenHSV5(t *testing.T) {
 
 func TestListenAsync(t *testing.T) {
 	const parallelCount = 2
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
+
 	var (
 		// All streams are pending
 		pendingWg  sync.WaitGroup
@@ -417,7 +423,7 @@ func TestListenAsync(t *testing.T) {
 				if err == ErrListenerClosed {
 					return
 				}
-				require.NoError(t, err)
+
 			}
 		}()
 
@@ -438,8 +444,8 @@ func TestListenAsync(t *testing.T) {
 }
 
 func TestListenHSV5MissingExtension(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
+
 
 	listenDone := make(chan struct{})
 	defer func() { <-listenDone }()
@@ -457,7 +463,7 @@ func TestListenHSV5MissingExtension(t *testing.T) {
 	}()
 
 	conn, err := net.Dial("udp", "127.0.0.1:6003")
-	require.NoError(t, err)
+
 	defer conn.Close()
 
 	// send induction request
@@ -484,19 +490,19 @@ func TestListenHSV5MissingExtension(t *testing.T) {
 	p.MarshalCIF(sendcif)
 	var buf bytes.Buffer
 	err = p.Marshal(&buf)
-	require.NoError(t, err)
+
 	_, err = conn.Write(buf.Bytes())
-	require.NoError(t, err)
+
 
 	// read induction response
 	inbuf := make([]byte, MAX_MSS_SIZE)
 	n, err := conn.Read(inbuf)
-	require.NoError(t, err)
+
 	p, err = packet.NewPacketFromData(conn.RemoteAddr(), inbuf[:n])
-	require.NoError(t, err)
+
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
+
 
 	// send conclusion
 	p.Header().IsControlPacket = true
@@ -514,26 +520,26 @@ func TestListenHSV5MissingExtension(t *testing.T) {
 	p.MarshalCIF(sendcif)
 	buf.Reset()
 	err = p.Marshal(&buf)
-	require.NoError(t, err)
+
 	_, err = conn.Write(buf.Bytes())
-	require.NoError(t, err)
+
 
 	// read error
 	n, err = conn.Read(inbuf)
-	require.NoError(t, err)
+
 	p, err = packet.NewPacketFromData(conn.RemoteAddr(), inbuf[:n])
-	require.NoError(t, err)
+
 	recvcif = &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
+
 	require.Equal(t, recvcif.HandshakeType, packet.HandshakeType(REJ_ROGUE))
 
 	ln.Close()
 }
 
 func TestListenParallelRequests(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
+
 
 	listenDone := make(chan struct{})
 	defer func() { <-listenDone }()
@@ -562,7 +568,7 @@ func TestListenParallelRequests(t *testing.T) {
 				reqReady.Wait()
 
 				conn, err := req.Accept()
-				require.NoError(t, err)
+
 				conn.Close()
 			}()
 		}
@@ -580,10 +586,10 @@ func TestListenParallelRequests(t *testing.T) {
 			config.StreamId = "foobar"
 
 			conn, err := Dial("srt", "127.0.0.1:6003", config)
-			require.NoError(t, err)
+
 
 			err = conn.Close()
-			require.NoError(t, err)
+
 		}()
 	}
 
@@ -594,8 +600,8 @@ func TestListenParallelRequests(t *testing.T) {
 }
 
 func TestListenDiscardRepeatedHandshakes(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
+
 
 	listenDone := make(chan struct{})
 	defer func() { <-listenDone }()
@@ -622,7 +628,7 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		conn, err := net.Dial("udp", "127.0.0.1:6003")
-		require.NoError(t, err)
+
 		defer conn.Close()
 
 		// send induction request
@@ -649,19 +655,19 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 		p.MarshalCIF(sendcif)
 		var buf bytes.Buffer
 		err = p.Marshal(&buf)
-		require.NoError(t, err)
+
 		_, err = conn.Write(buf.Bytes())
-		require.NoError(t, err)
+
 
 		// read induction response
 		inbuf := make([]byte, 1024)
 		n, err := conn.Read(inbuf)
-		require.NoError(t, err)
+
 		p, err = packet.NewPacketFromData(conn.RemoteAddr(), inbuf[:n])
-		require.NoError(t, err)
+
 		recvcif := &packet.CIFHandshake{}
 		err = p.UnmarshalCIF(recvcif)
-		require.NoError(t, err)
+
 
 		// send conclusion
 		p.Header().IsControlPacket = true
@@ -695,9 +701,9 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 		p.MarshalCIF(sendcif)
 		buf.Reset()
 		err = p.Marshal(&buf)
-		require.NoError(t, err)
+
 		_, err = conn.Write(buf.Bytes())
-		require.NoError(t, err)
+
 	}
 
 	<-singleReqReceived

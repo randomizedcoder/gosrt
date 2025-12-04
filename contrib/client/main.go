@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	srt "github.com/datarhei/gosrt"
@@ -151,14 +153,25 @@ func main() {
 		}
 	}()
 
-	r, err := openReader(*from, logger)
+	// Create root context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create root waitgroup for tracking all shutdown operations
+	var shutdownWg sync.WaitGroup
+	shutdownWg.Add(1) // Increment for client shutdown
+
+	// Setup signal handler that cancels context (Option 3: Context-Driven Shutdown)
+	setupSignalHandler(ctx, cancel)
+
+	r, err := openReader(*from, logger, ctx, &shutdownWg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: from: %v\n", err)
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	w, err := openWriter(*to, logger)
+	w, err := openWriter(*to, logger, ctx, &shutdownWg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
 		flag.PrintDefaults()
@@ -218,38 +231,57 @@ func main() {
 		s.init(STATS_PERIOD)
 
 		for {
-			n, err := r.Read(buffer)
-			if err != nil {
-				doneChan <- fmt.Errorf("read: %w", err)
+			select {
+			case <-ctx.Done():
+				// Context cancelled - exit gracefully
 				return
-			}
+			default:
+				n, err := r.Read(buffer)
+				if err != nil {
+					doneChan <- fmt.Errorf("read: %w", err)
+					return
+				}
 
-			s.update(uint64(n))
+				s.update(uint64(n))
 
-			if _, err := w.Write(buffer[:n]); err != nil {
-				doneChan <- fmt.Errorf("write: %w", err)
-				return
+				if _, err := w.Write(buffer[:n]); err != nil {
+					doneChan <- fmt.Errorf("write: %w", err)
+					return
+				}
 			}
 		}
 	}()
 
-	go func() {
-		quit := make(chan os.Signal, 1)
-		signal.Notify(quit, os.Interrupt)
-		<-quit
-
-		// Explicitly stop profiling before exiting to ensure profile is written
-		if prof != nil {
-			prof.Stop()
+	// Wait for either error or context cancellation
+	select {
+	case err := <-doneChan:
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		} else {
+			fmt.Fprint(os.Stderr, "\n")
 		}
-
-		doneChan <- nil
-	}()
-
-	if err := <-doneChan; err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-	} else {
+	case <-ctx.Done():
+		// Context cancelled - graceful shutdown
 		fmt.Fprint(os.Stderr, "\n")
+	}
+
+	// Explicitly stop profiling before exiting to ensure profile is written
+	if prof != nil {
+		prof.Stop()
+	}
+
+	// Wait for graceful shutdown to complete (with timeout as safety net)
+	done := make(chan struct{})
+	go func() {
+		shutdownWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All shutdown operations completed
+	case <-time.After(config.ShutdownDelay):
+		// Timeout - proceed with exit (safety net)
 	}
 
 	w.Close()
@@ -289,6 +321,25 @@ func main() {
 	}
 }
 
+// setupSignalHandler sets up OS signal handling to cancel the root context
+// Option 3: Context-Driven Shutdown - signal handler only cancels context
+func setupSignalHandler(ctx context.Context, cancel context.CancelFunc) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		select {
+		case <-sigChan:
+			// Signal received - cancel root context to initiate graceful shutdown
+			// Components will detect context cancellation and shutdown automatically
+			cancel()
+		case <-ctx.Done():
+			// Context already cancelled - exit
+			return
+		}
+	}()
+}
+
 // NullWriter is an io.WriteCloser that discards all data.
 // Useful for profiling and testing SRT connections without output overhead.
 type NullWriter struct{}
@@ -301,7 +352,7 @@ func (n *NullWriter) Close() error {
 	return nil
 }
 
-func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
+func openReader(addr string, logger srt.Logger, ctx context.Context, shutdownWg *sync.WaitGroup) (io.ReadCloser, error) {
 	if len(addr) == 0 {
 		return nil, fmt.Errorf("the address must not be empty")
 	}
@@ -350,7 +401,7 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 		mode := u.Query().Get("mode")
 
 		if mode == "listener" {
-			ln, err := srt.Listen("srt", u.Host, config)
+			ln, err := srt.Listen("srt", u.Host, config, ctx, shutdownWg)
 			if err != nil {
 				return nil, err
 			}
@@ -405,7 +456,7 @@ func openReader(addr string, logger srt.Logger) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("unsupported reader")
 }
 
-func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
+func openWriter(addr string, logger srt.Logger, ctx context.Context, shutdownWg *sync.WaitGroup) (io.WriteCloser, error) {
 	// Handle no-output mode: empty string, "null", or "discard"
 	if len(addr) == 0 || addr == "null" || addr == "discard" {
 		return &NullWriter{}, nil
@@ -446,7 +497,7 @@ func openWriter(addr string, logger srt.Logger) (io.WriteCloser, error) {
 		mode := u.Query().Get("mode")
 
 		if mode == "listener" {
-			ln, err := srt.Listen("srt", u.Host, config)
+			ln, err := srt.Listen("srt", u.Host, config, ctx, shutdownWg)
 			if err != nil {
 				return nil, err
 			}

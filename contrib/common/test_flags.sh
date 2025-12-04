@@ -148,7 +148,28 @@ run_test "StatisticsPrintInterval flag (5s)" "-statisticsinterval 5s" '"Statisti
 # Test 19: StatisticsPrintInterval flag (1 minute)
 run_test "StatisticsPrintInterval flag (1m)" "-statisticsinterval 1m" '"StatisticsPrintInterval" *: *60000000000' "$CLIENT_BIN"
 
-# Test 20: All flag types combined (excluding drifttracer=false due to known limitation)
+# Test 20: HandshakeTimeout flag (1.5 seconds)
+run_test "HandshakeTimeout flag (1.5s)" "-handshaketimeout 1.5s" '"HandshakeTimeout" *: *1500000000' "$CLIENT_BIN"
+
+# Test 21: HandshakeTimeout flag (2 seconds)
+run_test "HandshakeTimeout flag (2s)" "-handshaketimeout 2s" '"HandshakeTimeout" *: *2000000000' "$CLIENT_BIN"
+
+# Test 22: HandshakeTimeout flag (500 milliseconds)
+run_test "HandshakeTimeout flag (500ms)" "-handshaketimeout 500ms" '"HandshakeTimeout" *: *500000000' "$CLIENT_BIN"
+
+# Test 23: ShutdownDelay flag (5 seconds)
+run_test "ShutdownDelay flag (5s)" "-shutdowndelay 5s" '"ShutdownDelay" *: *5000000000' "$CLIENT_BIN"
+
+# Test 24: ShutdownDelay flag (10 seconds)
+run_test "ShutdownDelay flag (10s)" "-shutdowndelay 10s" '"ShutdownDelay" *: *10000000000' "$CLIENT_BIN"
+
+# Test 25: ShutdownDelay flag (1 second)
+run_test "ShutdownDelay flag (1s)" "-shutdowndelay 1s" '"ShutdownDelay" *: *1000000000' "$CLIENT_BIN"
+
+# Test 26: HandshakeTimeout and ShutdownDelay together
+run_test "HandshakeTimeout and ShutdownDelay together" "-handshaketimeout 1.5s -shutdowndelay 5s" '"HandshakeTimeout" *: *1500000000.*"ShutdownDelay" *: *5000000000' "$CLIENT_BIN"
+
+# Test 27: All flag types combined (excluding drifttracer=false due to known limitation)
 # Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
 run_test "All flag types" "-statisticsinterval 10s -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 

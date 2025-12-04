@@ -235,6 +235,15 @@ type Config struct {
 	// If empty, metrics server is not started
 	// Default: "" (disabled)
 	MetricsListenAddr string
+
+	// Handshake timeout for complete handshake exchange (induction + conclusion)
+	// Must be less than PeerIdleTimeout
+	// Default: 1.5 seconds (SRT is designed for low loss/low RTT networks)
+	HandshakeTimeout time.Duration
+
+	// Shutdown delay - time to wait for graceful shutdown after signal before application exit
+	// Default: 5 seconds
+	ShutdownDelay time.Duration
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -290,7 +299,9 @@ var defaultConfig Config = Config{
 	IoUringRecvBatchSize:      256,
 	StatisticsPrintInterval:   0, // Disabled by default
 	MetricsEnabled:            false,
-	MetricsListenAddr:         "", // Disabled by default
+	MetricsListenAddr:         "",                      // Disabled by default
+	HandshakeTimeout:          1500 * time.Millisecond, // 1.5 seconds (must be < PeerIdleTimeout)
+	ShutdownDelay:             5 * time.Second,         // 5 seconds
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
@@ -856,6 +867,22 @@ func (c *Config) Validate() error {
 		if c.IoUringRecvBatchSize < 1 || c.IoUringRecvBatchSize > 32768 {
 			return fmt.Errorf("config: IoUringRecvBatchSize must be between 1 and 32768")
 		}
+	}
+
+	// Validate HandshakeTimeout
+	if c.HandshakeTimeout <= 0 {
+		return fmt.Errorf("config: HandshakeTimeout must be greater than 0")
+	}
+
+	// Validate HandshakeTimeout < PeerIdleTimeout
+	if c.HandshakeTimeout >= c.PeerIdleTimeout {
+		return fmt.Errorf("config: HandshakeTimeout (%v) must be less than PeerIdleTimeout (%v)",
+			c.HandshakeTimeout, c.PeerIdleTimeout)
+	}
+
+	// Validate ShutdownDelay
+	if c.ShutdownDelay <= 0 {
+		return fmt.Errorf("config: ShutdownDelay must be greater than 0")
 	}
 
 	return nil

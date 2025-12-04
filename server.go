@@ -1,9 +1,11 @@
 package srt
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/datarhei/gosrt/metrics"
 )
@@ -28,7 +30,15 @@ type Server struct {
 	// HandlePublish will be called for a subscribing connection.
 	HandleSubscribe func(conn Conn)
 
+	// Context is the root context for the server. When cancelled, the server will shutdown gracefully.
+	Context context.Context
+
+	// ShutdownWg is the root waitgroup for tracking all shutdown operations.
+	// When this waitgroup reaches zero, all shutdown operations are complete.
+	ShutdownWg *sync.WaitGroup
+
 	ln           Listener
+	listenerWg   sync.WaitGroup // Waitgroup for listener shutdown
 	metricsServer *http.Server // Optional metrics HTTP server
 	metricsServerOnce sync.Once // Ensure metrics server is started only once
 }
@@ -64,9 +74,14 @@ func (s *Server) Listen() error {
 		s.Config = &config
 	}
 
+	// Increment listener waitgroup
+	s.listenerWg.Add(1)
+
 	// Start listening for incoming connections.
-	ln, err := Listen("srt", s.Addr, *s.Config)
+	// Pass context and waitgroup to listener
+	ln, err := Listen("srt", s.Addr, *s.Config, s.Context, &s.listenerWg)
 	if err != nil {
+		s.listenerWg.Done() // Decrement on error
 		return err
 	}
 
@@ -83,8 +98,20 @@ func (s *Server) Listen() error {
 // Serve starts accepting connections. It must be called after Listen().
 // It blocks until an error happens.
 // If the error is ErrServerClosed the server has shutdown normally.
+// Option 3: Context-Driven Shutdown - Serve() watches context and automatically calls Shutdown() when cancelled.
 func (s *Server) Serve() error {
 	for {
+		// Check for context cancellation first (Option 3: Context-Driven Shutdown)
+		if s.Context != nil {
+			select {
+			case <-s.Context.Done():
+				// Context cancelled - shutdown automatically
+				s.Shutdown()
+				return ErrServerClosed
+			default:
+			}
+		}
+
 		// Wait for connections.
 		req, err := s.ln.Accept2()
 		if err != nil {
@@ -145,11 +172,41 @@ func (s *Server) startMetricsServer() {
 // Shutdown will shutdown the server. ListenAndServe will return a ErrServerClosed
 func (s *Server) Shutdown() {
 	if s.ln == nil {
+		// No listener - just notify root waitgroup if set
+		if s.ShutdownWg != nil {
+			s.ShutdownWg.Done()
+		}
 		return
 	}
 
-	// Close the listener
+	// Close the listener (this will trigger listener shutdown)
 	s.ln.Close()
+
+	// Wait for listener to shutdown
+	done := make(chan struct{})
+	go func() {
+		s.listenerWg.Wait()
+		close(done)
+	}()
+
+	// Use config shutdown delay as timeout, or default to 5 seconds
+	timeout := 5 * time.Second
+	if s.Config != nil && s.Config.ShutdownDelay > 0 {
+		timeout = s.Config.ShutdownDelay
+	}
+
+	select {
+	case <-done:
+		// Listener shutdown complete
+	case <-time.After(timeout):
+		// Timeout - log warning but continue
+		// Note: In production, we might want to log this, but logger might not be available
+	}
+
+	// Notify root waitgroup
+	if s.ShutdownWg != nil {
+		s.ShutdownWg.Done()
+	}
 }
 
 func (s *Server) defaultHandler(conn Conn) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	srt "github.com/datarhei/gosrt"
@@ -196,15 +198,65 @@ func main() {
 		}()
 	}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt)
-	<-quit
+	// Create root context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	s.Shutdown()
+	// Create root waitgroup for tracking all shutdown operations
+	var shutdownWg sync.WaitGroup
+	shutdownWg.Add(1) // Increment for server shutdown
+
+	// Setup signal handler that cancels context (Option 3: Context-Driven Shutdown)
+	setupSignalHandler(ctx, cancel)
+
+	// Pass context and waitgroup to server
+	s.server.Context = ctx
+	s.server.ShutdownWg = &shutdownWg
+
+	// Start server (will shutdown automatically when context cancelled)
+	go func() {
+		if err := s.ListenAndServe(); err != nil && err != srt.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "SRT Server: %s\n", err)
+			os.Exit(2)
+		}
+	}()
+
+	// Wait for graceful shutdown to complete (with timeout as safety net)
+	done := make(chan struct{})
+	go func() {
+		shutdownWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All shutdown operations completed
+	case <-time.After(config.ShutdownDelay):
+		// Timeout - proceed with exit (safety net)
+	}
 
 	if config.Logger != nil {
 		config.Logger.Close()
 	}
+}
+
+// setupSignalHandler sets up OS signal handling to cancel the root context
+// Option 3: Context-Driven Shutdown - signal handler only cancels context
+func setupSignalHandler(ctx context.Context, cancel context.CancelFunc) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		select {
+		case <-sigChan:
+			// Signal received - cancel root context to initiate graceful shutdown
+			// Server.Serve() will detect context cancellation and shutdown automatically
+			cancel()
+		case <-ctx.Done():
+			// Context already cancelled - exit
+			return
+		}
+	}()
 }
 
 func (s *server) log(who, action, path, message string, client net.Addr) {

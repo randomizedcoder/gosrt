@@ -149,6 +149,11 @@ type listener struct {
 	doneErr  error
 	doneOnce sync.Once
 
+	// Context and waitgroup for graceful shutdown
+	ctx        context.Context // Context for listener (inherited from server)
+	shutdownWg *sync.WaitGroup // Server waitgroup (from Server)
+	connWg     sync.WaitGroup  // Waitgroup for all connections
+
 	// io_uring receive path (Linux only)
 	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
 	recvRingFd      int                            // UDP socket file descriptor
@@ -168,10 +173,10 @@ type listener struct {
 //
 // Examples:
 //
-//	Listen("srt", "127.0.0.1:3000", DefaultConfig())
+//	Listen("srt", "127.0.0.1:3000", DefaultConfig(), ctx, shutdownWg)
 //
 // In case of an error, the returned Listener is nil and the error is non-nil.
-func Listen(network, address string, config Config) (Listener, error) {
+func Listen(network, address string, config Config, ctx context.Context, shutdownWg *sync.WaitGroup) (Listener, error) {
 	if network != "srt" {
 		return nil, fmt.Errorf("listen: the network must be 'srt'")
 	}
@@ -185,7 +190,9 @@ func Listen(network, address string, config Config) (Listener, error) {
 	}
 
 	ln := &listener{
-		config: config,
+		config:     config,
+		ctx:        ctx,
+		shutdownWg: shutdownWg,
 	}
 
 	lc := net.ListenConfig{
@@ -395,17 +402,56 @@ func (ln *listener) Close() {
 		ln.shutdown = true
 		ln.shutdownLock.Unlock()
 
+		// Cancel context if set (triggers goroutines to exit)
+		if ln.stopReader != nil {
+			ln.stopReader()
+		}
+
+		// Close all connections (triggers connection shutdowns)
 		// sync.Map handles locking internally
 		ln.conns.Range(func(key, value interface{}) bool {
 			conn := value.(*srtConn)
 			if conn == nil {
 				return true // continue iteration
 			}
-			conn.close()
-			return true // continue iteration
+			conn.close() // Connection will call connWg.Done() when done (Phase 5)
+			return true  // continue iteration
 		})
 
-		ln.stopReader()
+		// Wait for all connections to shutdown
+		done := make(chan struct{})
+		go func() {
+			ln.connWg.Wait()
+			close(done)
+		}()
+
+		// Use config shutdown delay as timeout, or default to 5 seconds
+		timeout := 5 * time.Second
+		if ln.config.ShutdownDelay > 0 {
+			timeout = ln.config.ShutdownDelay
+		}
+
+		select {
+		case <-done:
+			// All connections closed
+		case <-time.After(timeout):
+			// Timeout - log warning but continue
+			// Note: In production, we might want to log this
+		}
+
+		// Wait for receive completion handler (io_uring)
+		done = make(chan struct{})
+		go func() {
+			ln.recvCompWg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Receive handler exited
+		case <-time.After(timeout):
+			// Timeout - log warning but continue
+		}
 
 		// Cleanup io_uring receive ring (if initialized)
 		ln.cleanupIoUringRecv()
@@ -413,6 +459,11 @@ func (ln *listener) Close() {
 		ln.log("listen", func() string { return "closing socket" })
 
 		ln.pc.Close()
+
+		// Notify server waitgroup
+		if ln.shutdownWg != nil {
+			ln.shutdownWg.Done()
+		}
 	})
 }
 

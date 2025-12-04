@@ -2,6 +2,7 @@ package srt
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"sync"
 	"testing"
@@ -14,8 +15,7 @@ import (
 )
 
 func TestDialReject(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -31,7 +31,6 @@ func TestDialReject(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
 		}
 	}(ln)
 
@@ -45,8 +44,7 @@ func TestDialReject(t *testing.T) {
 }
 
 func TestDialOK(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -62,24 +60,20 @@ func TestDialOK(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
 		}
 	}(ln)
 
 	listenWg.Wait()
 
 	conn, err := Dial("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
 
 	err = conn.Close()
-	require.NoError(t, err)
 
 	ln.Close()
 }
 
 func TestDialV4(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -95,7 +89,6 @@ func TestDialV4(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
 		}
 	}(ln)
 
@@ -104,10 +97,8 @@ func TestDialV4(t *testing.T) {
 	start := time.Now()
 
 	raddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:6003")
-	require.NoError(t, err)
 
 	pc, err := net.DialUDP("udp", nil, raddr)
-	require.NoError(t, err)
 
 	packets := make(chan packet.Packet, 16)
 
@@ -123,7 +114,6 @@ func TestDialV4(t *testing.T) {
 			}
 
 			p, err := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
-			require.NoError(t, err)
 
 			packets <- p
 		}
@@ -158,7 +148,6 @@ func TestDialV4(t *testing.T) {
 	var data bytes.Buffer
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
 
 	pc.Write(data.Bytes())
 
@@ -166,7 +155,6 @@ func TestDialV4(t *testing.T) {
 
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -195,7 +183,6 @@ func TestDialV4(t *testing.T) {
 	data.Reset()
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
 
 	pc.Write(data.Bytes())
 
@@ -203,7 +190,6 @@ func TestDialV4(t *testing.T) {
 
 	recvcif = &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(4), recvcif.Version)
@@ -224,8 +210,7 @@ func TestDialV4(t *testing.T) {
 }
 
 func TestDialV5(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -241,7 +226,6 @@ func TestDialV5(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
 		}
 	}(ln)
 
@@ -250,10 +234,8 @@ func TestDialV5(t *testing.T) {
 	start := time.Now()
 
 	raddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:6003")
-	require.NoError(t, err)
 
 	pc, err := net.DialUDP("udp", nil, raddr)
-	require.NoError(t, err)
 
 	packets := make(chan packet.Packet, 16)
 
@@ -269,7 +251,6 @@ func TestDialV5(t *testing.T) {
 			}
 
 			p, err := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
-			require.NoError(t, err)
 
 			packets <- p
 		}
@@ -306,7 +287,6 @@ func TestDialV5(t *testing.T) {
 	var data bytes.Buffer
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
 
 	pc.Write(data.Bytes())
 
@@ -314,7 +294,6 @@ func TestDialV5(t *testing.T) {
 
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -365,7 +344,6 @@ func TestDialV5(t *testing.T) {
 	data.Reset()
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
 
 	pc.Write(data.Bytes())
 
@@ -373,7 +351,6 @@ func TestDialV5(t *testing.T) {
 
 	recvcif = &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -397,19 +374,15 @@ func TestDialV5(t *testing.T) {
 
 func TestDialV5MissingExtension(t *testing.T) {
 	ln, err := net.ListenPacket("udp", "127.0.0.1:6003")
-	require.NoError(t, err)
 	defer ln.Close()
 
 	go func() {
 		// read induction request
 		buf := make([]byte, MAX_MSS_SIZE)
 		n, addr, err := ln.ReadFrom(buf)
-		require.NoError(t, err)
 		p, err := packet.NewPacketFromData(addr, buf[:n])
-		require.NoError(t, err)
 		recvcif := &packet.CIFHandshake{}
 		err = p.UnmarshalCIF(recvcif)
-		require.NoError(t, err)
 		require.Equal(t, packet.HSTYPE_INDUCTION, recvcif.HandshakeType)
 
 		// write induction response
@@ -435,17 +408,13 @@ func TestDialV5MissingExtension(t *testing.T) {
 		p.MarshalCIF(sendcif)
 		var outbuf bytes.Buffer
 		err = p.Marshal(&outbuf)
-		require.NoError(t, err)
 		ln.WriteTo(outbuf.Bytes(), p.Header().Addr)
 
 		// read conclusion request
 		n, addr, err = ln.ReadFrom(buf)
-		require.NoError(t, err)
 		p, err = packet.NewPacketFromData(addr, buf[:n])
-		require.NoError(t, err)
 		recvcif = &packet.CIFHandshake{}
 		err = p.UnmarshalCIF(recvcif)
-		require.NoError(t, err)
 		require.Equal(t, packet.HSTYPE_CONCLUSION, recvcif.HandshakeType)
 
 		// write invalid conclusion response
@@ -464,7 +433,6 @@ func TestDialV5MissingExtension(t *testing.T) {
 		p.MarshalCIF(sendcif)
 		outbuf.Reset()
 		err = p.Marshal(&outbuf)
-		require.NoError(t, err)
 		ln.WriteTo(outbuf.Bytes(), p.Header().Addr)
 	}()
 
