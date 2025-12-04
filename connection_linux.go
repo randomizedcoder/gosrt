@@ -476,3 +476,23 @@ func (c *srtConn) drainCompletions() {
 		}
 	}
 }
+
+// send submits a packet to the connection's io_uring send ring
+func (c *srtConn) send(p packet.Packet) {
+	// If io_uring is not enabled or ring is not available, fall back to original send
+	if c.sendRing == nil {
+		// This shouldn't happen if io_uring is enabled, but handle gracefully
+		c.log("connection:send:error", func() string {
+			return "io_uring ring not available, packet dropped"
+		})
+		// Track error (ring not available)
+		if c.metrics != nil {
+			metrics.IncrementSendErrorMetrics(c.metrics, true, metrics.DropReasonIoUring)
+		}
+		p.Decommission()
+		return
+	}
+
+	// Call Linux-specific send implementation
+	c.sendIoUring(p)
+}
