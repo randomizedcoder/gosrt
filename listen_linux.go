@@ -508,7 +508,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 			})
 			// Track metrics for wrong peer (we have connection now)
 			if conn.metrics != nil {
-				metrics.IncrementRecvErrorMetrics(conn.metrics, true, "wrong_peer")
+				metrics.IncrementRecvErrorMetrics(conn.metrics, true, metrics.DropReasonWrongPeer)
 			}
 			ring.CQESeen(cqe)
 			p.Decommission()
@@ -518,7 +518,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 
 	// Track successful receive (io_uring path)
 	if conn.metrics != nil {
-		metrics.IncrementRecvMetrics(conn.metrics, p, true, true, "")
+		metrics.IncrementRecvMetrics(conn.metrics, p, true, true, 0)
 	}
 
 	// Direct call to handlePacket (blocking mutex - never drops packets)

@@ -289,7 +289,7 @@ func (s *sender) tickDropOldPackets(now uint64) {
 			// Note: PktDrop = local drops (too old, errors, etc.)
 			// Note: PktLoss = packets reported as lost via NAK (incremented in nakLocked when NAK received)
 			pktLen := p.Len()
-			metrics.IncrementSendDataDrop(m, "too_old", uint64(pktLen))
+			metrics.IncrementSendDataDrop(m, metrics.DropReasonTooOldSend, uint64(pktLen))
 
 			removeList = append(removeList, e)
 		}
@@ -299,8 +299,8 @@ func (s *sender) tickDropOldPackets(now uint64) {
 	for _, e := range removeList {
 		p := e.Value.(packet.Packet)
 
-		metrics.DecrementUint64(&m.CongestionSendPktBuf)
-		metrics.SubtractUint64(&m.CongestionSendByteBuf, uint64(p.Len()))
+		m.CongestionSendPktBuf.Add(^uint64(0))                    // Decrement by 1
+		m.CongestionSendByteBuf.Add(^uint64(uint64(p.Len()) - 1)) // Subtract pktLen
 		// PktBuf and ByteBuf are decremented in atomic counters above
 
 		s.lossList.Remove(e)
@@ -361,8 +361,8 @@ func (s *sender) ackLocked(sequenceNumber circular.Number) {
 	for _, e := range removeList {
 		p := e.Value.(packet.Packet)
 
-		metrics.DecrementUint64(&m.CongestionSendPktBuf)
-		metrics.SubtractUint64(&m.CongestionSendByteBuf, uint64(p.Len()))
+		m.CongestionSendPktBuf.Add(^uint64(0))                    // Decrement by 1
+		m.CongestionSendByteBuf.Add(^uint64(uint64(p.Len()) - 1)) // Subtract pktLen
 		// PktBuf and ByteBuf are decremented in atomic counters above
 
 		s.lossList.Remove(e)

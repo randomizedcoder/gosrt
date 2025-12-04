@@ -7,7 +7,8 @@ import (
 // IncrementRecvMetrics increments the appropriate receive metrics based on packet type and outcome
 // This is a helper function to reduce code duplication in receive paths
 // Exported for use in receive paths (listen_linux.go, dial_linux.go, etc.)
-func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool, success bool, dropReason string) {
+// dropReason should be DropReason(0) for success cases
+func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool, success bool, dropReason DropReason) {
 	if m == nil {
 		return
 	}
@@ -21,9 +22,18 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 
 	if p == nil {
 		// No packet - can't classify type, but track error
-		// For parse errors, we typically don't have packet info, so use legacy counter
+		// For parse errors, we typically don't have packet info
 		if !success {
-			m.PktRecvErrorParse.Add(1)
+			// If we have a specific drop reason, use it; otherwise default to parse error
+			if dropReason == DropReasonParse {
+				m.PktRecvErrorParse.Add(1)
+			} else if dropReason != 0 {
+				// Unknown drop reason when we have no packet
+				m.PktRecvErrorUnknown.Add(1)
+			} else {
+				// No drop reason specified - assume parse error (most common when p == nil)
+				m.PktRecvErrorParse.Add(1)
+			}
 		}
 		return
 	}
@@ -38,25 +48,25 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 		IncrementRecvErrorDrop(m, p, dropReason, isData)
 		// Also track legacy counters for backward compatibility
 		switch dropReason {
-		case "parse":
+		case DropReasonParse:
 			m.PktRecvErrorParse.Add(1)
-		case "route":
+		case DropReasonRoute:
 			m.PktRecvErrorRoute.Add(1)
-		case "empty":
+		case DropReasonEmpty:
 			m.PktRecvErrorEmpty.Add(1)
-		case "unknown_socket":
+		case DropReasonUnknownSocket:
 			m.PktRecvUnknownSocketId.Add(1)
-		case "nil_connection":
+		case DropReasonNilConnection:
 			m.PktRecvNilConnection.Add(1)
-		case "wrong_peer":
+		case DropReasonWrongPeer:
 			m.PktRecvWrongPeer.Add(1)
-		case "backlog_full":
+		case DropReasonBacklogFull:
 			m.PktRecvBacklogFull.Add(1)
-		case "queue_full":
+		case DropReasonQueueFull:
 			m.PktRecvQueueFull.Add(1)
 		default:
-			// Unknown drop reason - track as parse error for safety
-			m.PktRecvErrorParse.Add(1)
+			// Unknown drop reason - track as unknown error
+			m.PktRecvErrorUnknown.Add(1)
 		}
 		return
 	}
@@ -99,7 +109,7 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 
 // IncrementRecvErrorMetrics increments error metrics for cases where we don't have a packet
 // Exported for use in receive paths
-func IncrementRecvErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType string) {
+func IncrementRecvErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType DropReason) {
 	if m == nil {
 		return
 	}
@@ -114,21 +124,22 @@ func IncrementRecvErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType s
 
 	// Track error type
 	switch errorType {
-	case "parse":
+	case DropReasonParse:
 		m.PktRecvErrorParse.Add(1)
-	case "empty":
+	case DropReasonEmpty:
 		m.PktRecvErrorEmpty.Add(1)
-	case "iouring":
+	case DropReasonIoUring:
 		m.PktRecvErrorIoUring.Add(1)
 	default:
-		m.PktRecvErrorParse.Add(1)
+		m.PktRecvErrorUnknown.Add(1)
 	}
 }
 
 // IncrementSendMetrics increments the appropriate send metrics based on packet type and outcome
 // This is a helper function to reduce code duplication in send paths
 // Exported for use in send paths (connection_linux.go, connection.go, etc.)
-func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool, success bool, dropReason string) {
+// dropReason should be DropReason(0) for success cases
+func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool, success bool, dropReason DropReason) {
 	if m == nil {
 		return
 	}
@@ -143,7 +154,16 @@ func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 	if p == nil {
 		// No packet - can't classify type, but track error
 		if !success {
-			m.PktSentErrorMarshal.Add(1)
+			// If we have a specific drop reason, use it; otherwise default to marshal error
+			if dropReason == DropReasonMarshal {
+				m.PktSentErrorMarshal.Add(1)
+			} else if dropReason != 0 {
+				// Unknown drop reason when we have no packet
+				m.PktSentErrorUnknown.Add(1)
+			} else {
+				// No drop reason specified - assume marshal error (most common when p == nil)
+				m.PktSentErrorMarshal.Add(1)
+			}
 		}
 		return
 	}
@@ -195,7 +215,7 @@ func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 
 // IncrementSendErrorMetrics increments error metrics for cases where we don't have a packet
 // Exported for use in send paths
-func IncrementSendErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType string) {
+func IncrementSendErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType DropReason) {
 	if m == nil {
 		return
 	}
@@ -210,16 +230,15 @@ func IncrementSendErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType s
 
 	// Track error type
 	switch errorType {
-	case "marshal":
+	case DropReasonMarshal:
 		m.PktSentErrorMarshal.Add(1)
-	case "ring_full":
+	case DropReasonRingFull:
 		m.PktSentRingFull.Add(1)
-	case "submit":
+	case DropReasonSubmit:
 		m.PktSentErrorSubmit.Add(1)
-	case "iouring":
+	case DropReasonIoUring:
 		m.PktSentErrorIoUring.Add(1)
 	default:
-		m.PktSentErrorMarshal.Add(1)
+		m.PktSentErrorUnknown.Add(1)
 	}
 }
-

@@ -295,7 +295,7 @@ func (dl *dialer) reader(ctx context.Context) {
 
 			// Track successful receive (ReadFrom path)
 			if conn.metrics != nil {
-				metrics.IncrementRecvMetrics(conn.metrics, p, false, true, "")
+				metrics.IncrementRecvMetrics(conn.metrics, p, false, true, 0)
 			}
 
 			conn.push(p)
@@ -320,7 +320,7 @@ func (dl *dialer) send(p packet.Packet) {
 		conn := dl.conn
 		dl.connLock.RUnlock()
 		if conn != nil && conn.metrics != nil {
-			metrics.IncrementSendMetrics(conn.metrics, p, false, false, "marshal")
+			metrics.IncrementSendMetrics(conn.metrics, p, false, false, metrics.DropReasonMarshal)
 		}
 		return
 	}
@@ -338,7 +338,7 @@ func (dl *dialer) send(p packet.Packet) {
 		conn := dl.conn
 		dl.connLock.RUnlock()
 		if conn != nil && conn.metrics != nil {
-			metrics.IncrementSendMetrics(conn.metrics, p, false, false, "write")
+			metrics.IncrementSendMetrics(conn.metrics, p, false, false, metrics.DropReasonWrite)
 		}
 	} else {
 		// Success - try to find connection for metrics tracking
@@ -346,7 +346,7 @@ func (dl *dialer) send(p packet.Packet) {
 		conn := dl.conn
 		dl.connLock.RUnlock()
 		if conn != nil && conn.metrics != nil {
-			metrics.IncrementSendMetrics(conn.metrics, p, false, true, "")
+			metrics.IncrementSendMetrics(conn.metrics, p, false, true, 0)
 		}
 	}
 

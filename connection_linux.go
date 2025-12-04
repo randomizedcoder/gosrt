@@ -131,7 +131,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		})
 		// Track error (ring type assertion failed)
 		if c.metrics != nil {
-			metrics.IncrementSendErrorMetrics(c.metrics, true, "iouring")
+			metrics.IncrementSendErrorMetrics(c.metrics, true, metrics.DropReasonIoUring)
 		}
 		p.Decommission()
 		return
@@ -146,7 +146,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		c.sendBufferPool.Put(sendBuffer)
 		// Track marshal error
 		if c.metrics != nil {
-			metrics.IncrementSendMetrics(c.metrics, p, true, false, "marshal")
+			metrics.IncrementSendMetrics(c.metrics, p, true, false, metrics.DropReasonMarshal)
 		}
 		p.Decommission()
 		c.log("connection:send:error", func() string {
@@ -189,7 +189,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 
 	// Create minimal completion info (buffer and packet info for metrics)
 	compInfo := &sendCompletionInfo{
-		buffer:    sendBuffer, // Keep buffer alive until send completes
+		buffer:    sendBuffer,       // Keep buffer alive until send completes
 		packet:    packetForMetrics, // Packet for metrics (nil for control packets)
 		isIoUring: true,             // Track path
 	}
@@ -226,7 +226,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		// Track ring full error (packet dropped)
 		if c.metrics != nil {
 			// Use packetForMetrics if available, otherwise nil (will track as generic error)
-			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, "ring_full")
+			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, metrics.DropReasonRingFull)
 		}
 
 		c.log("connection:send:error", func() string {
@@ -276,7 +276,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 
 		// Track submit error
 		if c.metrics != nil {
-			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, "submit")
+			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, metrics.DropReasonSubmit)
 		}
 
 		c.log("connection:send:error", func() string {
@@ -290,7 +290,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	// 1. Control packets are decommissioned, so we can't get type in completion handler
 	// 2. Submission success means the packet will be sent (completion errors are rare)
 	if c.metrics != nil {
-		metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, true, "")
+		metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, true, 0)
 	}
 
 	// Completion will be handled asynchronously by completion handler
@@ -374,10 +374,10 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 			if c.metrics != nil {
 				if compInfo.packet != nil {
 					// We have the packet - track with type
-					metrics.IncrementSendMetrics(c.metrics, compInfo.packet, compInfo.isIoUring, false, "iouring")
+					metrics.IncrementSendMetrics(c.metrics, compInfo.packet, compInfo.isIoUring, false, metrics.DropReasonIoUring)
 				} else {
 					// No packet (control packet decommissioned) - track generic error
-					metrics.IncrementSendErrorMetrics(c.metrics, compInfo.isIoUring, "iouring")
+					metrics.IncrementSendErrorMetrics(c.metrics, compInfo.isIoUring, metrics.DropReasonIoUring)
 				}
 			}
 		} else {
@@ -389,9 +389,9 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 				// Partial send - track as error
 				if c.metrics != nil {
 					if compInfo.packet != nil {
-						metrics.IncrementSendMetrics(c.metrics, compInfo.packet, compInfo.isIoUring, false, "iouring")
+						metrics.IncrementSendMetrics(c.metrics, compInfo.packet, compInfo.isIoUring, false, metrics.DropReasonIoUring)
 					} else {
-						metrics.IncrementSendErrorMetrics(c.metrics, compInfo.isIoUring, "iouring")
+						metrics.IncrementSendErrorMetrics(c.metrics, compInfo.isIoUring, metrics.DropReasonIoUring)
 					}
 				}
 			}

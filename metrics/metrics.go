@@ -88,9 +88,11 @@ type ConnectionMetrics struct {
 	PktRecvErrorParse   atomic.Uint64
 	PktRecvErrorRoute   atomic.Uint64
 	PktRecvErrorEmpty   atomic.Uint64
+	PktRecvErrorUnknown atomic.Uint64 // Unknown/unexpected error (unrecognized drop reason)
 	PktSentErrorIoUring atomic.Uint64
 	PktSentErrorMarshal atomic.Uint64
 	PktSentErrorSubmit  atomic.Uint64
+	PktSentErrorUnknown atomic.Uint64 // Unknown/unexpected error (unrecognized drop reason)
 
 	// Routing failure counters
 	PktRecvUnknownSocketId atomic.Uint64

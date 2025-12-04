@@ -474,7 +474,7 @@ func (ln *listener) reader(ctx context.Context) {
 					// https://haivision.github.io/srt-rfc/draft-sharabayko-srt.html#name-security-considerations
 					// Track metrics for wrong peer (we have connection now)
 					if conn.metrics != nil {
-						metrics.IncrementRecvErrorMetrics(conn.metrics, false, "wrong_peer")
+						metrics.IncrementRecvErrorMetrics(conn.metrics, false, metrics.DropReasonWrongPeer)
 					}
 					break
 				}
@@ -482,7 +482,7 @@ func (ln *listener) reader(ctx context.Context) {
 
 			// Track successful receive (ReadFrom path)
 			if conn.metrics != nil {
-				metrics.IncrementRecvMetrics(conn.metrics, p, false, true, "")
+				metrics.IncrementRecvMetrics(conn.metrics, p, false, true, 0)
 			}
 
 			conn.push(p)
@@ -508,7 +508,7 @@ func (ln *listener) send(p packet.Packet) {
 			val, ok := ln.conns.Load(h.DestinationSocketId)
 			if ok {
 				if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
-					metrics.IncrementSendMetrics(conn.metrics, p, false, false, "marshal")
+					metrics.IncrementSendMetrics(conn.metrics, p, false, false, metrics.DropReasonMarshal)
 				}
 			}
 		}
@@ -529,7 +529,7 @@ func (ln *listener) send(p packet.Packet) {
 			val, ok := ln.conns.Load(h.DestinationSocketId)
 			if ok {
 				if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
-					metrics.IncrementSendMetrics(conn.metrics, p, false, false, "write")
+					metrics.IncrementSendMetrics(conn.metrics, p, false, false, metrics.DropReasonWrite)
 				}
 			}
 		}
@@ -540,7 +540,7 @@ func (ln *listener) send(p packet.Packet) {
 			val, ok := ln.conns.Load(h.DestinationSocketId)
 			if ok {
 				if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
-					metrics.IncrementSendMetrics(conn.metrics, p, false, true, "")
+					metrics.IncrementSendMetrics(conn.metrics, p, false, true, 0)
 				}
 			}
 		}

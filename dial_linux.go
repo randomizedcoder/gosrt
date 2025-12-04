@@ -333,7 +333,7 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 
 	// Track successful receive (io_uring path)
 	if conn.metrics != nil {
-		metrics.IncrementRecvMetrics(conn.metrics, p, true, true, "")
+		metrics.IncrementRecvMetrics(conn.metrics, p, true, true, 0)
 	}
 
 	// Direct call to handlePacket (blocking mutex - never drops packets)

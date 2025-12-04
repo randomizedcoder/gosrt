@@ -681,7 +681,7 @@ func (c *srtConn) send(p packet.Packet) {
 		})
 		// Track error (ring not available)
 		if c.metrics != nil {
-			metrics.IncrementSendErrorMetrics(c.metrics, true, "iouring")
+			metrics.IncrementSendErrorMetrics(c.metrics, true, metrics.DropReasonIoUring)
 		}
 		p.Decommission()
 		return

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/datarhei/gosrt/packet"
@@ -148,37 +147,19 @@ func WithWLockTiming(metrics *LockTimingMetrics, mutex interface {
 	fn()
 }
 
-// DecrementUint64 decrements an atomic uint64 by 1
-// Uses two's complement arithmetic: Add(^uint64(0)) = subtract 1
-func DecrementUint64(addr *atomic.Uint64) {
-	addr.Add(^uint64(0)) // Add max uint64 = subtract 1
-}
-
-// SubtractUint64 subtracts n from an atomic uint64
-// Uses two's complement arithmetic: Add(^uint64(n-1)) = subtract n
-func SubtractUint64(addr *atomic.Uint64, n uint64) {
-	if n == 0 {
-		return
-	}
-	addr.Add(^uint64(n - 1)) // Add complement
-}
-
 // IncrementRecvDataDrop increments both granular and aggregate drop counters for receiver
 // This ensures granular and aggregate counters stay in sync
-func IncrementRecvDataDrop(m *ConnectionMetrics, reason string, pktLen uint64) {
-	if m == nil {
-		return
-	}
-
-	// Increment granular counter based on reason
+// Metrics are guaranteed to be non-nil (initialized in connection.go before NewReceiver)
+func IncrementRecvDataDrop(m *ConnectionMetrics, reason DropReason, pktLen uint64) {
+	// Increment granular counter based on reason (enum comparison is fast)
 	switch reason {
-	case "too_old":
+	case DropReasonTooOld:
 		m.CongestionRecvDataDropTooOld.Add(1)
-	case "already_acked":
+	case DropReasonAlreadyAcked:
 		m.CongestionRecvDataDropAlreadyAcked.Add(1)
-	case "duplicate":
+	case DropReasonDuplicate:
 		m.CongestionRecvDataDropDuplicate.Add(1)
-	case "store_insert_failed":
+	case DropReasonStoreInsertFailed:
 		m.CongestionRecvDataDropStoreInsertFailed.Add(1)
 	}
 
@@ -189,14 +170,11 @@ func IncrementRecvDataDrop(m *ConnectionMetrics, reason string, pktLen uint64) {
 
 // IncrementSendDataDrop increments both granular and aggregate drop counters for sender
 // This ensures granular and aggregate counters stay in sync
-func IncrementSendDataDrop(m *ConnectionMetrics, reason string, pktLen uint64) {
-	if m == nil {
-		return
-	}
-
-	// Increment granular counter based on reason
+// Metrics are guaranteed to be non-nil (initialized in connection.go before NewSender)
+func IncrementSendDataDrop(m *ConnectionMetrics, reason DropReason, pktLen uint64) {
+	// Increment granular counter based on reason (enum comparison is fast)
 	switch reason {
-	case "too_old":
+	case DropReasonTooOldSend:
 		m.CongestionSendDataDropTooOld.Add(1)
 	}
 
@@ -207,17 +185,14 @@ func IncrementSendDataDrop(m *ConnectionMetrics, reason string, pktLen uint64) {
 
 // IncrementSendErrorDrop increments granular error counters and aggregate for DATA packets
 // For control packets, only increments granular counter (not included in aggregate)
-func IncrementSendErrorDrop(m *ConnectionMetrics, p packet.Packet, reason string, pktLen uint64) {
-	if m == nil {
-		return
-	}
-
+// Metrics are guaranteed to be non-nil (initialized in connection.go before NewSender)
+func IncrementSendErrorDrop(m *ConnectionMetrics, p packet.Packet, reason DropReason, pktLen uint64) {
 	// Determine if packet is DATA or control
 	isData := p != nil && !p.Header().IsControlPacket
 
-	// Increment granular counter based on packet type and reason
+	// Increment granular counter based on packet type and reason (enum comparison is fast)
 	switch reason {
-	case "marshal":
+	case DropReasonMarshal:
 		if isData {
 			m.PktSentDataErrorMarshal.Add(1)
 			m.CongestionSendPktDrop.Add(1) // Aggregate for DATA only
@@ -225,7 +200,7 @@ func IncrementSendErrorDrop(m *ConnectionMetrics, p packet.Packet, reason string
 		} else {
 			m.PktSentControlErrorMarshal.Add(1)
 		}
-	case "ring_full":
+	case DropReasonRingFull:
 		if isData {
 			m.PktSentDataRingFull.Add(1)
 			m.CongestionSendPktDrop.Add(1) // Aggregate for DATA only
@@ -233,7 +208,7 @@ func IncrementSendErrorDrop(m *ConnectionMetrics, p packet.Packet, reason string
 		} else {
 			m.PktSentControlRingFull.Add(1)
 		}
-	case "submit":
+	case DropReasonSubmit:
 		if isData {
 			m.PktSentDataErrorSubmit.Add(1)
 			m.CongestionSendPktDrop.Add(1) // Aggregate for DATA only
@@ -241,7 +216,7 @@ func IncrementSendErrorDrop(m *ConnectionMetrics, p packet.Packet, reason string
 		} else {
 			m.PktSentControlErrorSubmit.Add(1)
 		}
-	case "iouring":
+	case DropReasonIoUring:
 		if isData {
 			m.PktSentDataErrorIoUring.Add(1)
 			m.CongestionSendPktDrop.Add(1) // Aggregate for DATA only
@@ -255,32 +230,29 @@ func IncrementSendErrorDrop(m *ConnectionMetrics, p packet.Packet, reason string
 // IncrementRecvErrorDrop increments granular error counters for receive path
 // For DATA packets, also increments aggregate (if applicable)
 // Note: For receive path, we may not have a packet object when errors occur
-func IncrementRecvErrorDrop(m *ConnectionMetrics, p packet.Packet, reason string, isData bool) {
-	if m == nil {
-		return
-	}
-
-	// Increment granular counter based on packet type and reason
+// Metrics are guaranteed to be non-nil (initialized in connection.go before NewReceiver)
+func IncrementRecvErrorDrop(m *ConnectionMetrics, p packet.Packet, reason DropReason, isData bool) {
+	// Increment granular counter based on packet type and reason (enum comparison is fast)
 	switch reason {
-	case "parse":
+	case DropReasonParse:
 		if isData {
 			m.PktRecvDataErrorParse.Add(1)
 		} else {
 			m.PktRecvControlErrorParse.Add(1)
 		}
-	case "iouring":
+	case DropReasonIoUring:
 		if isData {
 			m.PktRecvDataErrorIoUring.Add(1)
 		} else {
 			m.PktRecvControlErrorIoUring.Add(1)
 		}
-	case "empty":
+	case DropReasonEmpty:
 		if isData {
 			m.PktRecvDataErrorEmpty.Add(1)
 		} else {
 			m.PktRecvControlErrorEmpty.Add(1)
 		}
-	case "route":
+	case DropReasonRoute:
 		if isData {
 			m.PktRecvDataErrorRoute.Add(1)
 		} else {

@@ -256,13 +256,13 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 		// Too old, because up until r.lastDeliveredSequenceNumber, we already delivered
 		m.CongestionRecvPktBelated.Add(1)
 		m.CongestionRecvByteBelated.Add(uint64(pktLen))
-		metrics.IncrementRecvDataDrop(m, "too_old", uint64(pktLen))
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, uint64(pktLen))
 		return
 	}
 
 	if pkt.Header().PacketSequenceNumber.Lt(r.lastACKSequenceNumber) {
 		// Already acknowledged, ignoring
-		metrics.IncrementRecvDataDrop(m, "already_acked", uint64(pktLen))
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, uint64(pktLen))
 		return
 	}
 
@@ -273,7 +273,7 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 		// Out of order, is it a missing piece? put it in the correct position
 		if r.packetStore.Has(pkt.Header().PacketSequenceNumber) {
 			// Already received (has been sent more than once), ignoring
-			metrics.IncrementRecvDataDrop(m, "duplicate", uint64(pktLen))
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, uint64(pktLen))
 			return
 		}
 
@@ -287,7 +287,7 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 		} else {
 			// Duplicate (shouldn't happen after Has check, but be safe)
 			m.CongestionRecvPktStoreInsertFailed.Add(1)
-			metrics.IncrementRecvDataDrop(m, "store_insert_failed", uint64(pktLen))
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonStoreInsertFailed, uint64(pktLen))
 		}
 
 		return
@@ -493,8 +493,8 @@ func (r *receiver) Tick(now uint64) {
 					return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
 				},
 				func(p packet.Packet) {
-					metrics.DecrementUint64(&m.CongestionRecvPktBuf)
-					metrics.SubtractUint64(&m.CongestionRecvByteBuf, uint64(p.Len()))
+					m.CongestionRecvPktBuf.Add(^uint64(0))                    // Decrement by 1
+					m.CongestionRecvByteBuf.Add(^uint64(uint64(p.Len()) - 1)) // Subtract pktLen
 					// PktBuf and ByteBuf are decremented in atomic counters above
 
 					// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
@@ -515,8 +515,8 @@ func (r *receiver) Tick(now uint64) {
 				return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
 			},
 			func(p packet.Packet) {
-				metrics.DecrementUint64(&m.CongestionRecvPktBuf)
-				metrics.SubtractUint64(&m.CongestionRecvByteBuf, uint64(p.Len()))
+				m.CongestionRecvPktBuf.Add(^uint64(0))                    // Decrement by 1
+				m.CongestionRecvByteBuf.Add(^uint64(uint64(p.Len()) - 1)) // Subtract pktLen
 
 				// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 				h := p.Header()
