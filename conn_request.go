@@ -465,6 +465,7 @@ func (req *connRequest) Accept() (Conn, error) {
 	}
 
 	// Create a new connection
+	req.ln.connWg.Add(1) // Increment waitgroup before creating connection
 	conn := newSRTConn(srtConnConfig{
 		version:                     req.handshake.Version,
 		localAddr:                   req.ln.addr,
@@ -483,6 +484,8 @@ func (req *connRequest) Accept() (Conn, error) {
 		onShutdown:                  req.ln.handleShutdown,
 		logger:                      req.config.Logger,
 		socketFd:                    socketFd,
+		parentCtx:                   req.ln.ctx,
+		parentWg:                    &req.ln.connWg,
 	})
 
 	req.ln.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })

@@ -4,7 +4,9 @@
 package srt
 
 import (
+	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +75,11 @@ func createTestConnectionWithIoUring(tb testing.TB, enableIoUring bool) (*srtCon
 		config.IoUringSendRingSize = 64
 	}
 
+	// Create test context and waitgroup
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+
 	// Create connection config
 	connConfig := srtConnConfig{
 		version:                     5,
@@ -93,8 +100,11 @@ func createTestConnectionWithIoUring(tb testing.TB, enableIoUring bool) (*srtCon
 		onShutdown:                  func(socketId uint32) {},
 		logger:                      NewLogger(nil),
 		socketFd:                    socketFd,
+		parentCtx:                   ctx,
+		parentWg:                    &wg,
 	}
 
+	wg.Add(1) // Increment waitgroup before creating connection
 	conn := newSRTConn(connConfig)
 
 	cleanup := func() {

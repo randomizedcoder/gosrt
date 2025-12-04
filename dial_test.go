@@ -14,6 +14,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testDial is a helper function for tests that creates a dialer with test context and waitgroup
+func testDial(t *testing.T, address string, config Config) (Conn, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var wg sync.WaitGroup
+	return Dial("srt", address, config, ctx, &wg)
+}
+
 func TestDialReject(t *testing.T) {
 	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
@@ -36,7 +44,7 @@ func TestDialReject(t *testing.T) {
 
 	listenWg.Wait()
 
-	conn, err := Dial("srt", "127.0.0.1:6003", DefaultConfig())
+	conn, err := testDial(t, "127.0.0.1:6003", DefaultConfig())
 	require.Error(t, err)
 	require.Nil(t, conn)
 
@@ -65,9 +73,11 @@ func TestDialOK(t *testing.T) {
 
 	listenWg.Wait()
 
-	conn, err := Dial("srt", "127.0.0.1:6003", DefaultConfig())
+	conn, err := testDial(t, "127.0.0.1:6003", DefaultConfig())
+	require.NoError(t, err)
 
 	err = conn.Close()
+	require.NoError(t, err)
 
 	ln.Close()
 }
@@ -97,8 +107,10 @@ func TestDialV4(t *testing.T) {
 	start := time.Now()
 
 	raddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:6003")
+	require.NoError(t, err)
 
 	pc, err := net.DialUDP("udp", nil, raddr)
+	require.NoError(t, err)
 
 	packets := make(chan packet.Packet, 16)
 
@@ -234,8 +246,10 @@ func TestDialV5(t *testing.T) {
 	start := time.Now()
 
 	raddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:6003")
+	require.NoError(t, err)
 
 	pc, err := net.DialUDP("udp", nil, raddr)
+	require.NoError(t, err)
 
 	packets := make(chan packet.Packet, 16)
 
@@ -380,7 +394,9 @@ func TestDialV5MissingExtension(t *testing.T) {
 		// read induction request
 		buf := make([]byte, MAX_MSS_SIZE)
 		n, addr, err := ln.ReadFrom(buf)
+		require.NoError(t, err)
 		p, err := packet.NewPacketFromData(addr, buf[:n])
+		require.NoError(t, err)
 		recvcif := &packet.CIFHandshake{}
 		err = p.UnmarshalCIF(recvcif)
 		require.Equal(t, packet.HSTYPE_INDUCTION, recvcif.HandshakeType)
@@ -436,6 +452,9 @@ func TestDialV5MissingExtension(t *testing.T) {
 		ln.WriteTo(outbuf.Bytes(), p.Header().Addr)
 	}()
 
-	_, err = Dial("srt", "127.0.0.1:6003", DefaultConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var wg sync.WaitGroup
+	_, err = Dial("srt", "127.0.0.1:6003", DefaultConfig(), ctx, &wg)
 	require.EqualError(t, err, "missing handshake extension")
 }

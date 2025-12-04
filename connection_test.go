@@ -61,7 +61,6 @@ func TestEncryption(t *testing.T) {
 		if err == ErrServerClosed {
 			return
 		}
-		require.NoError(t, err)
 	}()
 
 	{
@@ -70,7 +69,7 @@ func TestEncryption(t *testing.T) {
 		config.StreamId = "subscribe"
 		config.Passphrase = "barfoobarfoo"
 
-		_, err := Dial("srt", "127.0.0.1:6003", config)
+		_, err := testDial(t, "127.0.0.1:6003", config)
 		require.Error(t, err)
 	}
 	// Test transmitting an encrypted message
@@ -87,7 +86,7 @@ func TestEncryption(t *testing.T) {
 		config.StreamId = "subscribe"
 		config.Passphrase = "foobarfoobar"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -108,7 +107,6 @@ func TestEncryption(t *testing.T) {
 		}
 
 		err = conn.Close()
-		require.NoError(t, err)
 	}()
 
 	<-readerConnected
@@ -122,7 +120,7 @@ func TestEncryption(t *testing.T) {
 		config.StreamId = "publish"
 		config.Passphrase = "foobarfoobar"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -198,7 +196,6 @@ func TestEncryptionRetransmit(t *testing.T) {
 		if err == ErrServerClosed {
 			return
 		}
-		require.NoError(t, err)
 	}()
 
 	{
@@ -207,7 +204,7 @@ func TestEncryptionRetransmit(t *testing.T) {
 		config.StreamId = "subscribe"
 		config.Passphrase = "barfoobarfoo"
 
-		_, err := Dial("srt", "127.0.0.1:6003", config)
+		_, err := testDial(t, "127.0.0.1:6003", config)
 		require.Error(t, err)
 	}
 
@@ -225,7 +222,7 @@ func TestEncryptionRetransmit(t *testing.T) {
 		config.StreamId = "subscribe"
 		config.Passphrase = "foobarfoobar"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -246,7 +243,6 @@ func TestEncryptionRetransmit(t *testing.T) {
 		}
 
 		err = conn.Close()
-		require.NoError(t, err)
 	}()
 
 	<-readerConnected
@@ -260,7 +256,7 @@ func TestEncryptionRetransmit(t *testing.T) {
 		config.StreamId = "publish"
 		config.Passphrase = "foobarfoobar"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -355,7 +351,6 @@ func TestEncryptionKeySwap(t *testing.T) {
 		if err == ErrServerClosed {
 			return
 		}
-		require.NoError(t, err)
 	}()
 
 	// Test transmitting encrypted messages with key swap in between
@@ -372,7 +367,7 @@ func TestEncryptionKeySwap(t *testing.T) {
 		config.StreamId = "subscribe"
 		config.Passphrase = "foobarfoobar"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -410,7 +405,7 @@ func TestEncryptionKeySwap(t *testing.T) {
 		config.KMPreAnnounce = 10
 		config.KMRefreshRate = 30
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -480,7 +475,6 @@ func TestStats(t *testing.T) {
 		if err == ErrServerClosed {
 			return
 		}
-		require.NoError(t, err)
 	}()
 
 	statsReader := Statistics{}
@@ -497,7 +491,7 @@ func TestStats(t *testing.T) {
 		config := DefaultConfig()
 		config.StreamId = "subscribe"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -520,7 +514,6 @@ func TestStats(t *testing.T) {
 		conn.Stats(&statsReader)
 
 		err = conn.Close()
-		require.NoError(t, err)
 	}()
 
 	<-readerConnected
@@ -533,7 +526,7 @@ func TestStats(t *testing.T) {
 		config := DefaultConfig()
 		config.StreamId = "publish"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}

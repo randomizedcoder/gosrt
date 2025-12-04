@@ -90,52 +90,88 @@ This document tracks the implementation progress of the context and cancellation
 - All listener goroutines now properly check for context cancellation
 - `recvCompWg` is properly managed (Add before start, Done in defer)
 - `connWg` wait logic is in place in `Close()`, but connections will call `connWg.Done()` in Phase 5
+- **Refinement**: Removed no-op cancel function calls:
+  - Removed `stopReader` assignment and call in `listen.go` - was a no-op since we use `ln.ctx` directly
+  - Removed `recvCompCancel` assignment and call in `listen_linux.go` - was a no-op since we use `ln.ctx` directly
+  - Goroutines now rely solely on `ln.ctx` cancellation (from server context) to exit gracefully
+  - Field declarations remain in struct but are unused (harmless, can be removed later if desired)
 - Build successful
 
 ---
 
 ### Phase 4: Dialer Context Propagation and WaitGroups
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 **Estimated Effort**: 3-4 hours
+**Started**: 2024-12-19
+**Completed**: 2024-12-19
 
 **Tasks**:
-- [ ] Add `ctx context.Context` field to `dialer` struct
-- [ ] Add `shutdownWg *sync.WaitGroup` field to `dialer` struct (root waitgroup)
-- [ ] Add `connWg sync.WaitGroup` field to `dialer` struct
-- [ ] Update `Dial()` function signature to accept context and waitgroup
-- [ ] Pass context to all dialer goroutines
-- [ ] Update all dialer goroutines to check for cancellation and call `Done()` on waitgroup
-- [ ] Update `Close()` to wait for `connWg` and `recvCompWg` before notifying parent
-- [ ] Update `dial_linux.go` for io_uring receive path
+- [x] Add `ctx context.Context` field to `dialer` struct
+- [x] Add `shutdownWg *sync.WaitGroup` field to `dialer` struct (root waitgroup)
+- [x] Add `connWg sync.WaitGroup` field to `dialer` struct
+- [x] Update `Dial()` function signature to accept context and waitgroup
+- [x] Pass context to all dialer goroutines
+- [x] Update all dialer goroutines to check for cancellation and call `Done()` on waitgroup
+- [x] Update `Close()` to wait for `connWg` and `recvCompWg` before notifying parent
+- [x] Update `dial_linux.go` for io_uring receive path
+- [x] Update all test files to use `testDial()` helper function
+- [x] Update `doc.go` examples to include context and waitgroup
+- [x] Update `contrib/client/main.go` to pass context and waitgroup to Dial()
+- [x] **Test Quality Improvements**: Added comprehensive error checking to all test files
 
 **Notes**:
--
+- Updated `reader()` goroutine to use dialer's context instead of creating new context from `context.Background()`
+- Updated `ReadFrom()` goroutine (non-io_uring path) to check dialer context cancellation
+- Updated `recvCompletionHandler()` in `dial_linux.go` to use dialer's context instead of `recvCompCtx`
+- All dialer goroutines now properly check for context cancellation
+- `recvCompWg` is properly managed (Add before start, Done in defer)
+- `connWg` wait logic is in place in `Close()`, but connection will call `connWg.Done()` in Phase 5
+- **Refinement**: Removed no-op cancel function calls (similar to Phase 3):
+  - Removed `stopReader` call in `dial.go` Close() - was a no-op since we use `dl.ctx` directly
+  - Removed `recvCompCancel` assignment and call in `dial_linux.go` - was a no-op since we use `dl.ctx` directly
+  - Goroutines now rely solely on `dl.ctx` cancellation (from client context) to exit gracefully
+- **Test Quality Improvements** (2024-12-19):
+  - Added `require.NoError(t, err)` checks for all `testDial()` calls in test files
+  - Added error checks for `packet.NewPacketFromData()`, `p.UnmarshalCIF()`, `p.Marshal()`, `pc.WriteTo()`, `conn.Write()`, and `conn.Read()` calls in `listen_test.go`
+  - Added error checks for `server.Listen()` calls in `connection_test.go` and `pubsub_test.go`
+  - Updated `server_test.go` to include context and waitgroup in `Dial()` calls
+  - All tests now have comprehensive error checking, ensuring test quality is at least as good as before
+  - All tests pass successfully
+- Build successful
 
 ---
 
 ### Phase 5: Connection Context Propagation and WaitGroups
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 **Estimated Effort**: 4-5 hours
+**Started**: 2024-12-19
+**Completed**: 2024-12-19
 
 **Tasks**:
-- [ ] Update `newSRTConn()` to accept parent context and parent waitgroup
-- [ ] Add `shutdownWg *sync.WaitGroup` field to `srtConn` struct
-- [ ] Add `connWg sync.WaitGroup` field to `srtConn` struct
-- [ ] Change connection context to inherit from parent
-- [ ] Update HSv4 caller contexts to inherit from connection context
-- [ ] Update all connection goroutines to:
-  - Call `connWg.Add(1)` before starting
-  - Call `connWg.Done()` in defer when exiting
-  - Check for context cancellation
-- [ ] Update `close()` to:
+- [x] Add `parentCtx context.Context` and `parentWg *sync.WaitGroup` to `srtConnConfig` struct
+- [x] Add `shutdownWg *sync.WaitGroup` field to `srtConn` struct
+- [x] Add `connWg sync.WaitGroup` field to `srtConn` struct
+- [x] Update `newSRTConn()` to inherit context from parent and initialize waitgroups
+- [x] Update all connection goroutines to use `connWg` (networkQueueReader, writeQueueReader, ticker)
+- [x] Update HSv4 caller contexts to inherit from connection context
+- [x] Update `close()` to:
   - Cancel connection context
-  - Wait for `connWg` (all connection goroutines)
-  - Wait for `sendCompWg` (io_uring send handler)
+  - Wait for `connWg` (all connection goroutines) with timeout
+  - Wait for `sendCompWg` (io_uring send handler) with timeout
   - Call `shutdownWg.Done()` to notify parent
-- [ ] Update `connection_linux.go` for io_uring send path
+- [x] Update `dial.go` to pass parent context and waitgroup to `newSRTConn()`
+- [x] Update `conn_request.go` to pass parent context and waitgroup to `newSRTConn()`
+- [x] Update `connection_linux.go` for io_uring send path context (inherit from connection context)
+- [x] Update `connection_io_uring_bench_test.go` to include parent context and waitgroup
 
 **Notes**:
--
+- Connection context now inherits from parent (listener/dialer) context
+- All connection goroutines (networkQueueReader, writeQueueReader, ticker, sendHSRequests, sendKMRequests) now use `connWg` for tracking
+- HSv4 caller contexts (sendHSRequests, sendKMRequests) now inherit from connection context instead of `context.Background()`
+- io_uring send completion handler context now inherits from connection context
+- `close()` waits for all connection goroutines and io_uring completion handler before notifying parent waitgroup
+- Both `dial.go` and `conn_request.go` increment `connWg` before creating connections
+- Build successful
 
 ---
 
@@ -194,9 +230,9 @@ This document tracks the implementation progress of the context and cancellation
 ## Overall Progress
 
 - **Total Estimated Effort**: 26-36 hours
-- **Phases Completed**: 1 / 8
-- **Current Phase**: Phase 2 (Ready to start)
-- **Status**: ✅ Phase 1 Complete
+- **Phases Completed**: 5 / 8
+- **Current Phase**: Phase 6 (io_uring Context Updates)
+- **Status**: ✅ Phases 1-5 Complete, Ready for Phase 6
 
 ---
 

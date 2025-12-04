@@ -60,6 +60,11 @@ type dialer struct {
 
 	doneChan chan error
 
+	// Context and waitgroup for graceful shutdown
+	ctx        context.Context // Context for dialer (inherited from client)
+	shutdownWg *sync.WaitGroup // Root waitgroup (from client)
+	connWg     sync.WaitGroup  // Waitgroup for connection
+
 	// io_uring receive path (Linux only)
 	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
 	recvRingFd      int                            // UDP socket file descriptor
@@ -84,10 +89,10 @@ type connResponse struct {
 //
 // Example:
 //
-//	Dial("srt", "127.0.0.1:3000", DefaultConfig())
+//	Dial("srt", "127.0.0.1:3000", DefaultConfig(), ctx, shutdownWg)
 //
 // In case of an error the returned Conn is nil and the error is non-nil.
-func Dial(network, address string, config Config) (Conn, error) {
+func Dial(network, address string, config Config, ctx context.Context, shutdownWg *sync.WaitGroup) (Conn, error) {
 	if network != "srt" {
 		return nil, fmt.Errorf("the network must be 'srt'")
 	}
@@ -101,7 +106,9 @@ func Dial(network, address string, config Config) (Conn, error) {
 	}
 
 	dl := &dialer{
-		config: config,
+		config:     config,
+		ctx:        ctx,
+		shutdownWg: shutdownWg,
 	}
 
 	netdialer := net.Dialer{
@@ -167,9 +174,21 @@ func Dial(network, address string, config Config) (Conn, error) {
 	// When io_uring is enabled and initialized, the completion handler processes packets
 	if !ioUringInitialized {
 		go func() {
+			defer func() {
+				dl.log("dial", func() string { return "ReadFrom goroutine exited" })
+			}()
+
 			buffer := make([]byte, MAX_MSS_SIZE) // MTU size
 
 			for {
+				// Check for context cancellation first
+				select {
+				case <-dl.ctx.Done():
+					dl.doneChan <- ErrClientClosed
+					return
+				default:
+				}
+
 				if dl.isShutdown() {
 					dl.doneChan <- ErrClientClosed
 					return
@@ -180,6 +199,14 @@ func Dial(network, address string, config Config) (Conn, error) {
 				if err != nil {
 					if errors.Is(err, os.ErrDeadlineExceeded) {
 						continue
+					}
+
+					// Check context again after read error
+					select {
+					case <-dl.ctx.Done():
+						dl.doneChan <- ErrClientClosed
+						return
+					default:
 					}
 
 					if dl.isShutdown() {
@@ -199,6 +226,11 @@ func Dial(network, address string, config Config) (Conn, error) {
 
 				// non-blocking
 				select {
+				case <-dl.ctx.Done():
+					// Context cancelled - decommission packet and exit
+					p.Decommission()
+					dl.doneChan <- ErrClientClosed
+					return
 				case dl.rcvQueue <- p:
 					// Success - packet queued (metrics tracked in reader())
 				default:
@@ -210,9 +242,9 @@ func Dial(network, address string, config Config) (Conn, error) {
 		}()
 	}
 
-	var readerCtx context.Context
-	readerCtx, dl.stopReader = context.WithCancel(context.Background())
-	go dl.reader(readerCtx)
+	// Start reader goroutine with dialer context
+	// Note: reader will exit when dl.ctx is cancelled (via client context cancellation)
+	go dl.reader(dl.ctx)
 
 	// Send the initial handshake request
 	dl.sendInduction()
@@ -590,6 +622,7 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 		}
 
 		// Create a new connection
+		dl.connWg.Add(1) // Increment waitgroup before creating connection
 		conn := newSRTConn(srtConnConfig{
 			version:                     cif.Version,
 			isCaller:                    true,
@@ -609,6 +642,8 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			onShutdown:                  func(socketId uint32) { dl.Close() },
 			logger:                      dl.config.Logger,
 			socketFd:                    socketFd,
+			parentCtx:                   dl.ctx,
+			parentWg:                    &dl.connWg,
 		})
 
 		dl.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })
@@ -772,13 +807,49 @@ func (dl *dialer) Close() error {
 		dl.shutdown = true
 		dl.shutdownLock.Unlock()
 
+		// Note: All goroutines will exit when dl.ctx is cancelled (via client context cancellation)
+		// No need to call stopReader() - it was a no-op anyway since we use dl.ctx directly
+
 		dl.connLock.RLock()
 		if dl.conn != nil {
-			dl.conn.Close()
+			dl.conn.Close() // Connection will call connWg.Done() when done (Phase 5)
 		}
 		dl.connLock.RUnlock()
 
-		dl.stopReader()
+		// Wait for connection to shutdown
+		done := make(chan struct{})
+		go func() {
+			dl.connWg.Wait()
+			close(done)
+		}()
+
+		// Use config shutdown delay as timeout, or default to 5 seconds
+		timeout := 5 * time.Second
+		if dl.config.ShutdownDelay > 0 {
+			timeout = dl.config.ShutdownDelay
+		}
+
+		select {
+		case <-done:
+			// Connection closed
+		case <-time.After(timeout):
+			// Timeout - log warning but continue
+			// Note: In production, we might want to log this
+		}
+
+		// Wait for receive completion handler (io_uring)
+		done = make(chan struct{})
+		go func() {
+			dl.recvCompWg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Receive handler exited
+		case <-time.After(timeout):
+			// Timeout - log warning but continue
+		}
 
 		// Cleanup io_uring receive ring (if initialized)
 		dl.cleanupIoUringRecv()
@@ -789,6 +860,11 @@ func (dl *dialer) Close() error {
 		select {
 		case <-dl.doneChan:
 		default:
+		}
+
+		// Notify root waitgroup
+		if dl.shutdownWg != nil {
+			dl.shutdownWg.Done()
 		}
 	})
 

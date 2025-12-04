@@ -62,8 +62,8 @@ func (c *srtConn) initializeIoUring(config srtConnConfig) {
 	// Initialize completion tracking
 	c.sendCompletions = make(map[uint64]*sendCompletionInfo)
 
-	// Create context for completion handler
-	c.sendCompCtx, c.sendCompCancel = context.WithCancel(context.Background())
+	// Create context for completion handler (inherits from connection context)
+	c.sendCompCtx, c.sendCompCancel = context.WithCancel(c.ctx)
 
 	// Start completion handler goroutine (polls CQEs directly)
 	c.sendCompWg.Add(1)

@@ -430,7 +430,7 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 				return conn, nil
 			}
 		} else if mode == "caller" {
-			conn, err := srt.Dial("srt", u.Host, config)
+			conn, err := srt.Dial("srt", u.Host, config, ctx, shutdownWg)
 			if err != nil {
 				return nil, err
 			}
@@ -526,7 +526,7 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 				return conn, nil
 			}
 		} else if mode == "caller" {
-			conn, err := srt.Dial("srt", u.Host, config)
+			conn, err := srt.Dial("srt", u.Host, config, ctx, shutdownWg)
 			if err != nil {
 				return nil, err
 			}

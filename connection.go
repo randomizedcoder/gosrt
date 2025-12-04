@@ -210,6 +210,10 @@ type srtConn struct {
 	ctx       context.Context
 	cancelCtx context.CancelFunc
 
+	// Waitgroups for graceful shutdown
+	shutdownWg *sync.WaitGroup // Parent waitgroup (from listener/dialer)
+	connWg     sync.WaitGroup  // Waitgroup for all connection goroutines
+
 	// statistics and statisticsLock removed - all statistics now use atomic counters in metrics.ConnectionMetrics
 
 	// Metrics for Prometheus (atomic counters, lock-free)
@@ -280,7 +284,9 @@ type srtConnConfig struct {
 	onSend                      func(p packet.Packet)
 	onShutdown                  func(socketId uint32)
 	logger                      Logger
-	socketFd                    int // File descriptor for the UDP socket (for io_uring)
+	socketFd                    int             // File descriptor for the UDP socket (for io_uring)
+	parentCtx                   context.Context // Parent context (from listener/dialer)
+	parentWg                    *sync.WaitGroup // Parent waitgroup (from listener/dialer)
 }
 
 func newSRTConn(config srtConnConfig) *srtConn {
@@ -421,7 +427,11 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		ConnectionMetrics:     c.metrics,
 	})
 
-	c.ctx, c.cancelCtx = context.WithCancel(context.Background())
+	// Store parent waitgroup
+	c.shutdownWg = config.parentWg
+
+	// Create connection context from parent context
+	c.ctx, c.cancelCtx = context.WithCancel(config.parentCtx)
 
 	// Initialize control packet dispatch tables (must be done before connection is used)
 	c.initializeControlHandlers()
@@ -429,19 +439,43 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	// Initialize io_uring send ring if enabled (Linux-specific)
 	c.initializeIoUring(config)
 
-	go c.networkQueueReader(c.ctx)
-	go c.writeQueueReader(c.ctx)
-	go c.ticker(c.ctx)
+	// Start connection goroutines with waitgroup tracking
+	c.connWg.Add(1)
+	go func() {
+		defer c.connWg.Done()
+		c.networkQueueReader(c.ctx)
+	}()
+
+	c.connWg.Add(1)
+	go func() {
+		defer c.connWg.Done()
+		c.writeQueueReader(c.ctx)
+	}()
+
+	c.connWg.Add(1)
+	go func() {
+		defer c.connWg.Done()
+		c.ticker(c.ctx)
+	}()
 
 	if c.version == 4 && c.isCaller {
+		// HSv4 caller contexts inherit from connection context
 		var hsrequestsCtx context.Context
-		hsrequestsCtx, c.stopHSRequests = context.WithCancel(context.Background())
-		go c.sendHSRequests(hsrequestsCtx)
+		hsrequestsCtx, c.stopHSRequests = context.WithCancel(c.ctx)
+		c.connWg.Add(1)
+		go func() {
+			defer c.connWg.Done()
+			c.sendHSRequests(hsrequestsCtx)
+		}()
 
 		if c.crypto != nil {
 			var kmrequestsCtx context.Context
-			kmrequestsCtx, c.stopKMRequests = context.WithCancel(context.Background())
-			go c.sendKMRequests(kmrequestsCtx)
+			kmrequestsCtx, c.stopKMRequests = context.WithCancel(c.ctx)
+			c.connWg.Add(1)
+			go func() {
+				defer c.connWg.Done()
+				c.sendKMRequests(kmrequestsCtx)
+			}()
 		}
 	}
 
@@ -1682,7 +1716,25 @@ func (c *srtConn) close() {
 
 		c.log("connection:close", func() string { return "stopping all routines and channels" })
 
+		// Cancel connection context to signal all goroutines to exit
 		c.cancelCtx()
+
+		// Wait for all connection goroutines to finish (with timeout)
+		c.log("connection:close", func() string { return "waiting for connection goroutines" })
+		done := make(chan struct{})
+		go func() {
+			c.connWg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// All connection goroutines finished
+		case <-time.After(5 * time.Second):
+			c.log("connection:close:warning", func() string {
+				return "timeout waiting for connection goroutines"
+			})
+		}
 
 		// Clean up io_uring resources if enabled
 		if c.sendRing != nil {
@@ -1694,7 +1746,7 @@ func (c *srtConn) close() {
 			}
 
 			// Wait for completion handler to finish (with timeout)
-			done := make(chan struct{})
+			done = make(chan struct{})
 			go func() {
 				c.sendCompWg.Wait()
 				close(done)
@@ -1738,6 +1790,11 @@ func (c *srtConn) close() {
 		go func() {
 			c.onShutdown(c.socketId)
 		}()
+
+		// Notify parent waitgroup that this connection has shut down
+		if c.shutdownWg != nil {
+			c.shutdownWg.Done()
+		}
 	})
 }
 

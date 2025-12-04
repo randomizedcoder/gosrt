@@ -1,12 +1,18 @@
 package srt
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestServer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var wg sync.WaitGroup
+
 	server := Server{
 		Addr: "127.0.0.1:6003",
 		HandleConnect: func(req ConnRequest) ConnType {
@@ -20,6 +26,8 @@ func TestServer(t *testing.T) {
 
 			return REJECT
 		},
+		Context:    ctx,
+		ShutdownWg: &wg,
 	}
 
 	err := server.Listen()
@@ -38,7 +46,7 @@ func TestServer(t *testing.T) {
 	config := DefaultConfig()
 	config.StreamId = "publish"
 
-	conn, err := Dial("srt", "127.0.0.1:6003", config)
+	conn, err := Dial("srt", "127.0.0.1:6003", config, ctx, &wg)
 	require.NoError(t, err)
 
 	err = conn.Close()
@@ -47,7 +55,7 @@ func TestServer(t *testing.T) {
 	config = DefaultConfig()
 	config.StreamId = "subscribe"
 
-	conn, err = Dial("srt", "127.0.0.1:6003", config)
+	conn, err = Dial("srt", "127.0.0.1:6003", config, ctx, &wg)
 	require.NoError(t, err)
 
 	err = conn.Close()
@@ -56,6 +64,6 @@ func TestServer(t *testing.T) {
 	config = DefaultConfig()
 	config.StreamId = "nothing"
 
-	_, err = Dial("srt", "127.0.0.1:6003", config)
+	_, err = Dial("srt", "127.0.0.1:6003", config, ctx, &wg)
 	require.Error(t, err)
 }

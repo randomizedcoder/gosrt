@@ -59,12 +59,10 @@ func (dl *dialer) initializeIoUringRecv() error {
 	// Initialize completion tracking
 	dl.recvCompletions = make(map[uint64]*recvCompletionInfo)
 
-	// Create context for completion handler
-	dl.recvCompCtx, dl.recvCompCancel = context.WithCancel(context.Background())
-
-	// Start completion handler goroutine
+	// Start completion handler goroutine with dialer context
+	// Note: handler will exit when dl.ctx is cancelled (via client context cancellation)
 	dl.recvCompWg.Add(1)
-	go dl.recvCompletionHandler(dl.recvCompCtx)
+	go dl.recvCompletionHandler(dl.ctx)
 
 	// Pre-populate ring with initial pending receives
 	dl.prePopulateRecvRing()
@@ -78,10 +76,8 @@ func (dl *dialer) cleanupIoUringRecv() {
 		return // Nothing to clean up
 	}
 
-	// Stop completion handler (if started in Phase 3)
-	if dl.recvCompCancel != nil {
-		dl.recvCompCancel()
-	}
+	// Note: Completion handler will exit when dl.ctx is cancelled (via client context cancellation)
+	// No need to call recvCompCancel() - it was a no-op anyway since we use dl.ctx directly
 
 	// Wait for completion handler to finish (with timeout)
 	done := make(chan struct{})

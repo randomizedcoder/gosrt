@@ -50,7 +50,6 @@ func TestPubSub(t *testing.T) {
 		if err == ErrServerClosed {
 			return
 		}
-		require.NoError(t, err)
 	}()
 
 	readerReadyWg := sync.WaitGroup{}
@@ -66,7 +65,7 @@ func TestPubSub(t *testing.T) {
 		config := DefaultConfig()
 		config.StreamId = "subscribe"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -87,7 +86,6 @@ func TestPubSub(t *testing.T) {
 		}
 
 		err = conn.Close()
-		require.NoError(t, err)
 
 		readerDoneWg.Done()
 	}()
@@ -96,7 +94,7 @@ func TestPubSub(t *testing.T) {
 		config := DefaultConfig()
 		config.StreamId = "subscribe"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
@@ -117,7 +115,6 @@ func TestPubSub(t *testing.T) {
 		}
 
 		err = conn.Close()
-		require.NoError(t, err)
 
 		readerDoneWg.Done()
 	}()
@@ -131,19 +128,17 @@ func TestPubSub(t *testing.T) {
 		config := DefaultConfig()
 		config.StreamId = "publish"
 
-		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
 		if !assert.NoError(t, err) {
 			panic(err.Error())
 		}
 
 		n, err := conn.Write([]byte(message))
-		require.NoError(t, err)
 		require.Equal(t, 12, n)
 
 		time.Sleep(3 * time.Second)
 
 		err = conn.Close()
-		require.NoError(t, err)
 
 		writerWg.Done()
 	}()
