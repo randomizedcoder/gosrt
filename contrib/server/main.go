@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 
 	srt "github.com/datarhei/gosrt"
 	"github.com/datarhei/gosrt/contrib/common"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/pkg/profile"
 )
 
@@ -64,6 +66,10 @@ var (
 	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
 	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
 	printConfig = flag.Bool("printconfig", false, "Print config")
+
+	// Metrics endpoint flags
+	metricsEnabled    = flag.Bool("metricsenabled", false, "Enable Prometheus metrics endpoint")
+	metricsListenAddr = flag.String("metricslistenaddr", ":9090", "Address for metrics endpoint (e.g., :9090 or 127.0.0.10:9090)")
 )
 
 func main() {
@@ -169,6 +175,12 @@ func main() {
 	// Setup signal handler that cancels context (Option 3: Context-Driven Shutdown)
 	setupSignalHandler(ctx, cancel, &shutdownWg, config.ShutdownDelay)
 
+	// Start metrics server if enabled
+	if *metricsEnabled {
+		startMetricsServer(*metricsListenAddr, ctx)
+		fmt.Fprintf(os.Stderr, "Metrics server started on %s\n", *metricsListenAddr)
+	}
+
 	s.server = &srt.Server{
 		Addr:            s.addr,
 		HandleConnect:   s.handleConnect,
@@ -229,6 +241,38 @@ func main() {
 	if config.Logger != nil {
 		config.Logger.Close()
 	}
+}
+
+// startMetricsServer starts an HTTP server for Prometheus metrics
+// Returns the server so it can be shut down gracefully
+func startMetricsServer(addr string, ctx context.Context) *http.Server {
+	if addr == "" {
+		return nil
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.MetricsHandler())
+
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "Metrics server error: %v\n", err)
+		}
+	}()
+
+	// Shutdown server when context is cancelled
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(shutdownCtx)
+	}()
+
+	return server
 }
 
 // setupSignalHandler sets up OS signal handling to cancel the root context

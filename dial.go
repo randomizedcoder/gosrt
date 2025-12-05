@@ -105,6 +105,12 @@ func Dial(network, address string, config Config, ctx context.Context, shutdownW
 		config.Logger = NewLogger(nil)
 	}
 
+	// Increment waitgroup early, before any code that might call Close()
+	// This ensures shutdownWg.Done() in Close() won't cause a negative counter
+	if shutdownWg != nil {
+		shutdownWg.Add(1)
+	}
+
 	dl := &dialer{
 		config:     config,
 		ctx:        ctx,

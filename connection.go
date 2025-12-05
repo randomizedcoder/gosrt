@@ -1717,7 +1717,6 @@ func (c *srtConn) getTotalReceivedPackets() uint64 {
 
 // watchPeerIdleTimeout watches for timeout using atomic counter checks
 func (c *srtConn) watchPeerIdleTimeout() {
-	defer c.connWg.Done()
 
 	// Get initial packet count
 	initialCount := c.getTotalReceivedPackets()

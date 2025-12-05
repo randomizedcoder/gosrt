@@ -189,6 +189,12 @@ func Listen(network, address string, config Config, ctx context.Context, shutdow
 		config.Logger = NewLogger(nil)
 	}
 
+	// Increment waitgroup early, before any code that might call Close()
+	// This ensures shutdownWg.Done() in Close() won't cause a negative counter
+	if shutdownWg != nil {
+		shutdownWg.Add(1)
+	}
+
 	ln := &listener{
 		config:     config,
 		ctx:        ctx,

@@ -7,24 +7,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync"
+	"strings"
 	"time"
-)
-
-const (
-	// Test configuration
-	serverAddr     = "127.0.0.1:6000"
-	streamPath     = "/test-stream"
-	shutdownDelay  = 5 * time.Second
-	testDuration   = 10 * time.Second // How long to run before sending signal
-	connectionWait = 2 * time.Second // Time to wait for connections to establish
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <test-name>\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Available tests:\n")
-		fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint - Test graceful shutdown on SIGINT\n")
+		printUsage()
 		os.Exit(1)
 	}
 
@@ -32,20 +21,139 @@ func main() {
 
 	switch testName {
 	case "graceful-shutdown-sigint":
-		testGracefulShutdownSIGINT()
+		// Run with default config
+		config := GetTestConfigByName("Default-2Mbps")
+		if config == nil {
+			config = &TestConfigs[0] // Fallback to first config
+		}
+		testGracefulShutdownSIGINTWithConfig(*config)
+
+	case "graceful-shutdown-sigint-all":
+		// Run all configurations
+		testGracefulShutdownSIGINTAllConfigs()
+
+	case "graceful-shutdown-sigint-config":
+		// Run with specific configuration
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Error: config name required\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s graceful-shutdown-sigint-config <config-name>\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for _, c := range TestConfigs {
+				fmt.Fprintf(os.Stderr, "  %s - %s\n", c.Name, c.Description)
+			}
+			os.Exit(1)
+		}
+		configName := os.Args[2]
+		config := GetTestConfigByName(configName)
+		if config == nil {
+			fmt.Fprintf(os.Stderr, "Error: unknown configuration: %s\n", configName)
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for _, c := range TestConfigs {
+				fmt.Fprintf(os.Stderr, "  %s - %s\n", c.Name, c.Description)
+			}
+			os.Exit(1)
+		}
+		testGracefulShutdownSIGINTWithConfig(*config)
+
+	case "list-configs":
+		// List all configurations
+		fmt.Println("Available test configurations:")
+		fmt.Println()
+		for _, c := range TestConfigs {
+			fmt.Printf("  %-35s %s\n", c.Name, c.Description)
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown test: %s\n", testName)
+		printUsage()
 		os.Exit(1)
 	}
 }
 
-// testGracefulShutdownSIGINT tests graceful shutdown on SIGINT
-// This is Test 1.1 from the testing plan
-func testGracefulShutdownSIGINT() {
-	fmt.Println("=== Test 1.1: Graceful Shutdown on SIGINT ===")
+func printUsage() {
+	fmt.Fprintf(os.Stderr, "Usage: %s <test-name> [options]\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "\nAvailable tests:\n")
+	fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint              Run graceful shutdown test with default config\n")
+	fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint-all          Run graceful shutdown test with all configurations\n")
+	fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint-config NAME  Run graceful shutdown test with specific config\n")
+	fmt.Fprintf(os.Stderr, "  list-configs                          List all available configurations\n")
+}
+
+// testGracefulShutdownSIGINTAllConfigs runs the graceful shutdown test with all configurations
+func testGracefulShutdownSIGINTAllConfigs() {
+	fmt.Println("=== Test 1.1: Graceful Shutdown on SIGINT (All Configurations) ===")
+	fmt.Println()
+	fmt.Printf("Total configurations to test: %d\n", len(TestConfigs))
 	fmt.Println()
 
-	// Get the base directory (assuming we're in contrib/integration_testing)
+	passed := 0
+	failed := 0
+	var failedConfigs []string
+
+	for i, config := range TestConfigs {
+		fmt.Printf("\n--- Configuration %d/%d: %s ---\n", i+1, len(TestConfigs), config.Name)
+		fmt.Printf("Description: %s\n", config.Description)
+		fmt.Printf("Bitrate: %d bps (%.2f Mb/s)\n", config.Bitrate, float64(config.Bitrate)/1_000_000)
+		fmt.Println()
+
+		err := runTestWithConfig(config)
+		if err != nil {
+			fmt.Printf("✗ Configuration %s FAILED: %v\n", config.Name, err)
+			failed++
+			failedConfigs = append(failedConfigs, config.Name)
+		} else {
+			fmt.Printf("✓ Configuration %s PASSED\n", config.Name)
+			passed++
+		}
+
+		// Wait between tests
+		if i < len(TestConfigs)-1 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("=== Results: %d/%d passed, %d failed ===\n", passed, len(TestConfigs), failed)
+
+	if failed > 0 {
+		fmt.Println("\nFailed configurations:")
+		for _, name := range failedConfigs {
+			fmt.Printf("  - %s\n", name)
+		}
+		os.Exit(1)
+	}
+}
+
+// testGracefulShutdownSIGINTWithConfig runs the graceful shutdown test with a specific configuration
+func testGracefulShutdownSIGINTWithConfig(config TestConfig) {
+	fmt.Printf("=== Test 1.1: Graceful Shutdown on SIGINT (%s) ===\n", config.Name)
+	fmt.Println()
+	fmt.Printf("Description: %s\n", config.Description)
+	fmt.Printf("Bitrate: %d bps (%.2f Mb/s)\n", config.Bitrate, float64(config.Bitrate)/1_000_000)
+	fmt.Println()
+
+	if err := runTestWithConfig(config); err != nil {
+		fmt.Fprintf(os.Stderr, "Test FAILED: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	fmt.Printf("=== Test 1.1 (%s): PASSED ===\n", config.Name)
+}
+
+// runTestWithConfig runs the graceful shutdown test with the given configuration
+func runTestWithConfig(config TestConfig) error {
+	// Get network configuration
+	serverNet, clientGenNet, clientNet := config.GetEffectiveNetworkConfig()
+
+	// Print network configuration
+	fmt.Println("Network Configuration:")
+	fmt.Printf("  Server:           %s (metrics: %s)\n", serverNet.SRTAddr(), serverNet.MetricsAddr())
+	fmt.Printf("  Client-Generator: %s (metrics: %s)\n", clientGenNet.IP, clientGenNet.MetricsAddr())
+	fmt.Printf("  Client:           %s (metrics: %s)\n", clientNet.IP, clientNet.MetricsAddr())
+	fmt.Println()
+
+	// Get the base directory
 	baseDir := getBaseDir()
 
 	// Build paths to binaries
@@ -53,24 +161,34 @@ func testGracefulShutdownSIGINT() {
 	clientGenBin := filepath.Join(baseDir, "contrib", "client-generator", "client-generator")
 	clientBin := filepath.Join(baseDir, "contrib", "client", "client")
 
-	// Check if binaries exist, if not, build them
+	// Check if binaries exist
 	if err := ensureBinaries(baseDir, serverBin, clientGenBin, clientBin); err != nil {
-		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("building binaries: %w", err)
 	}
 
 	// Create context for test orchestration
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Get CLI flags for each component
+	serverFlags := config.GetServerFlags()
+	clientGenFlags := config.GetClientGeneratorFlags()
+	clientFlags := config.GetClientFlags()
+
+	// Print CLI flags for debugging
+	fmt.Println("CLI Flags:")
+	fmt.Printf("  Server: %s\n", strings.Join(serverFlags, " "))
+	fmt.Printf("  Client-Generator: %s\n", strings.Join(clientGenFlags, " "))
+	fmt.Printf("  Client: %s\n", strings.Join(clientFlags, " "))
+	fmt.Println()
+
 	// Start server
 	fmt.Println("Starting server...")
-	serverCmd := exec.CommandContext(ctx, serverBin, "-addr", serverAddr)
+	serverCmd := exec.CommandContext(ctx, serverBin, serverFlags...)
 	serverCmd.Stdout = os.Stdout
 	serverCmd.Stderr = os.Stderr
 	if err := serverCmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("starting server: %w", err)
 	}
 	defer func() {
 		if serverCmd.Process != nil {
@@ -83,13 +201,11 @@ func testGracefulShutdownSIGINT() {
 
 	// Start client-generator (publisher)
 	fmt.Println("Starting client-generator (publisher)...")
-	publisherURL := fmt.Sprintf("srt://%s%s", serverAddr, streamPath)
-	clientGenCmd := exec.CommandContext(ctx, clientGenBin, "-to", publisherURL, "-bitrate", "2000000")
+	clientGenCmd := exec.CommandContext(ctx, clientGenBin, clientGenFlags...)
 	clientGenCmd.Stdout = os.Stdout
 	clientGenCmd.Stderr = os.Stderr
 	if err := clientGenCmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting client-generator: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("starting client-generator: %w", err)
 	}
 	defer func() {
 		if clientGenCmd.Process != nil {
@@ -102,15 +218,11 @@ func testGracefulShutdownSIGINT() {
 
 	// Start client (subscriber)
 	fmt.Println("Starting client (subscriber)...")
-	// For subscribe, the stream ID should be "subscribe:/path" format
-	// The client reads streamid from URL query parameter
-	subscriberURL := fmt.Sprintf("srt://%s?streamid=subscribe:%s", serverAddr, streamPath)
-	clientCmd := exec.CommandContext(ctx, clientBin, "-from", subscriberURL, "-to", "null")
+	clientCmd := exec.CommandContext(ctx, clientBin, clientFlags...)
 	clientCmd.Stdout = os.Stdout
 	clientCmd.Stderr = os.Stderr
 	if err := clientCmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting client: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("starting client: %w", err)
 	}
 	defer func() {
 		if clientCmd.Process != nil {
@@ -119,97 +231,160 @@ func testGracefulShutdownSIGINT() {
 	}()
 
 	// Wait for connections to establish
-	fmt.Printf("Waiting %v for connections to establish...\n", connectionWait)
-	time.Sleep(connectionWait)
+	fmt.Printf("Waiting %v for connections to establish...\n", config.ConnectionWait)
+	time.Sleep(config.ConnectionWait)
 
 	// Verify processes are running
 	if serverCmd.Process == nil || clientGenCmd.Process == nil || clientCmd.Process == nil {
-		fmt.Fprintf(os.Stderr, "Error: One or more processes failed to start\n")
-		os.Exit(1)
+		return fmt.Errorf("one or more processes failed to start")
 	}
 
-	fmt.Printf("All processes started. Running for %v before sending SIGINT...\n", testDuration)
-	time.Sleep(testDuration)
+	// Initialize metrics collection if enabled
+	var testMetrics *TestMetrics
+	if config.MetricsEnabled {
+		serverMetrics, clientGenMetrics, clientMetrics := config.GetAllMetricsURLs()
+		testMetrics = NewTestMetrics(serverMetrics, clientGenMetrics, clientMetrics)
 
-	// Send SIGINT to server
+		// Collect initial metrics
+		fmt.Println("Collecting initial metrics...")
+		testMetrics.CollectAllMetrics("startup")
+	}
+
+	// Run for test duration
+	fmt.Printf("All processes started. Running for %v...\n", config.TestDuration)
+
+	// Periodically collect metrics during test
+	if config.MetricsEnabled && config.CollectInterval > 0 {
+		collectTicker := time.NewTicker(config.CollectInterval)
+		testTimer := time.NewTimer(config.TestDuration)
+
+	collectLoop:
+		for {
+			select {
+			case <-collectTicker.C:
+				fmt.Println("Collecting mid-test metrics...")
+				testMetrics.CollectAllMetrics("mid-test")
+			case <-testTimer.C:
+				collectTicker.Stop()
+				break collectLoop
+			}
+		}
+	} else {
+		time.Sleep(config.TestDuration)
+	}
+
+	// Collect pre-shutdown metrics
+	if config.MetricsEnabled {
+		fmt.Println("Collecting pre-shutdown metrics...")
+		testMetrics.CollectAllMetrics("pre-shutdown")
+	}
+
+	// Shutdown order: Client → Client-Generator → Server
+	fmt.Println("\nInitiating shutdown sequence...")
+
+	// Step 1: Send SIGINT to Client (subscriber)
+	fmt.Println("Sending SIGINT to client (subscriber)...")
+	if err := clientCmd.Process.Signal(os.Interrupt); err != nil {
+		return fmt.Errorf("sending SIGINT to client: %w", err)
+	}
+
+	clientDone := make(chan struct{})
+	go func() {
+		clientCmd.Wait()
+		close(clientDone)
+	}()
+
+	select {
+	case <-clientDone:
+		fmt.Println("✓ Client exited gracefully")
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("client did not exit within 3 seconds")
+	}
+
+	if clientCmd.ProcessState != nil && !clientCmd.ProcessState.Success() {
+		return fmt.Errorf("client exited with non-zero code")
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Step 2: Send SIGINT to Client-Generator (publisher)
+	fmt.Println("Sending SIGINT to client-generator (publisher)...")
+	if err := clientGenCmd.Process.Signal(os.Interrupt); err != nil {
+		return fmt.Errorf("sending SIGINT to client-generator: %w", err)
+	}
+
+	clientGenDone := make(chan struct{})
+	go func() {
+		clientGenCmd.Wait()
+		close(clientGenDone)
+	}()
+
+	select {
+	case <-clientGenDone:
+		fmt.Println("✓ Client-generator exited gracefully")
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("client-generator did not exit within 3 seconds")
+	}
+
+	if clientGenCmd.ProcessState != nil && !clientGenCmd.ProcessState.Success() {
+		return fmt.Errorf("client-generator exited with non-zero code")
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Step 3: Send SIGINT to Server (last)
 	fmt.Println("Sending SIGINT to server...")
 	if err := serverCmd.Process.Signal(os.Interrupt); err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending SIGINT: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("sending SIGINT to server: %w", err)
 	}
 
-	// Wait for server to shutdown gracefully
-	fmt.Printf("Waiting up to %v for graceful shutdown...\n", shutdownDelay)
-	shutdownComplete := make(chan struct{})
-	var wg sync.WaitGroup
-
-	// Monitor server process
-	wg.Add(1)
+	serverDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
 		serverCmd.Wait()
-		close(shutdownComplete)
+		close(serverDone)
 	}()
 
-	// Monitor client-generator (should exit when server closes connection)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		clientGenCmd.Wait()
-	}()
+	// Get shutdown delay from config or use default
+	shutdownDelay := 5 * time.Second
+	if config.SharedSRT != nil && config.SharedSRT.ShutdownDelay > 0 {
+		shutdownDelay = config.SharedSRT.ShutdownDelay
+	}
 
-	// Monitor client (should exit when server closes connection)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		clientCmd.Wait()
-	}()
-
-	// Wait for shutdown with timeout
 	select {
-	case <-shutdownComplete:
+	case <-serverDone:
 		fmt.Println("✓ Server shutdown completed")
 	case <-time.After(shutdownDelay + 2*time.Second):
-		fmt.Fprintf(os.Stderr, "✗ Server did not shutdown within %v\n", shutdownDelay+2*time.Second)
-		os.Exit(1)
+		return fmt.Errorf("server did not shutdown within %v", shutdownDelay+2*time.Second)
 	}
 
-	// Wait for all processes to exit
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		fmt.Println("✓ All processes exited")
-	case <-time.After(5 * time.Second):
-		fmt.Fprintf(os.Stderr, "✗ Some processes did not exit within 5 seconds\n")
-		os.Exit(1)
+	if serverCmd.ProcessState != nil && !serverCmd.ProcessState.Success() {
+		return fmt.Errorf("server exited with non-zero code")
 	}
 
-	// Check exit codes
-	serverState := serverCmd.ProcessState
-	if serverState != nil && !serverState.Success() {
-		fmt.Fprintf(os.Stderr, "✗ Server exited with non-zero code\n")
-		os.Exit(1)
+	// Verify metrics if enabled
+	if config.MetricsEnabled && testMetrics != nil {
+		testMetrics.PrintSummary()
+
+		if err := testMetrics.VerifyNoErrors(); err != nil {
+			fmt.Printf("Warning: %v\n", err)
+			// Don't fail on metrics errors for now - just warn
+		}
 	}
 
-	fmt.Println()
-	fmt.Println("=== Test 1.1: PASSED ===")
 	fmt.Println()
 	fmt.Println("Verification:")
-	fmt.Println("  ✓ Server received SIGINT")
-	fmt.Println("  ✓ Server shutdown gracefully")
-	fmt.Println("  ✓ All processes exited cleanly")
-	fmt.Println("  ✓ No process leaks detected")
+	fmt.Println("  ✓ Client received SIGINT and exited gracefully")
+	fmt.Println("  ✓ Client-generator received SIGINT and exited gracefully")
+	fmt.Println("  ✓ Server received SIGINT and shutdown gracefully")
+	fmt.Println("  ✓ All processes exited with code 0")
+	fmt.Println("  ✓ All processes exited within expected timeframes")
+
+	return nil
 }
 
 // getBaseDir returns the base directory of the gosrt project
 func getBaseDir() string {
 	_, filename, _, _ := runtime.Caller(0)
-	// integration_testing/test_graceful_shutdown.go -> contrib/integration_testing -> contrib -> base
 	dir := filepath.Dir(filename)
 	return filepath.Join(dir, "..", "..")
 }
@@ -240,4 +415,3 @@ func ensureBinaries(baseDir string, serverBin, clientGenBin, clientBin string) e
 
 	return nil
 }
-

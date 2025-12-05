@@ -258,7 +258,12 @@ This document tracks the implementation progress of the context and cancellation
   - Server receives SIGINT and shuts down gracefully
   - All processes (server, client-generator, client) exit cleanly
   - Test completes within shutdown delay
-  - **Known Issue**: WaitGroup panic during shutdown (does not block test completion, needs investigation)
+  - **Fixes Applied**:
+    - Fixed client mode handling: default to "caller" mode when mode not specified
+    - Fixed WaitGroup panic in `watchPeerIdleTimeout()`: removed duplicate `Done()` call
+    - Fixed client-generator WaitGroup: moved `Done()` call to main function after cleanup
+    - Stream ID is set via config (from URL query parameter) before dialing, not after
+  - **Status**: ✅ Fully working, no panics or blocking issues
 
 **Testing Plan Created** (2024-12-19):
 - Created `context_cancellation_testing_plan.md` with comprehensive test strategy

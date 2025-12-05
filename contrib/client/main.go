@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -18,6 +20,7 @@ import (
 
 	srt "github.com/datarhei/gosrt"
 	"github.com/datarhei/gosrt/contrib/common"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/pkg/profile"
 )
 
@@ -38,7 +41,7 @@ type stats struct {
 	last   time.Time
 }
 
-func (s *stats) init(period time.Duration) {
+func (s *stats) init(period time.Duration, ctx context.Context) {
 	s.bprev = 0
 	s.btotal = 0
 	s.prev = 0
@@ -47,27 +50,33 @@ func (s *stats) init(period time.Duration) {
 	s.period = period
 	s.last = time.Now()
 
-	go s.tick()
+	go s.tick(ctx)
 }
 
-func (s *stats) tick() {
+func (s *stats) tick(ctx context.Context) {
 	ticker := time.NewTicker(s.period)
 	defer ticker.Stop()
 
-	for c := range ticker.C {
-		s.lock.Lock()
-		diff := c.Sub(s.last)
+	for {
+		select {
+		case <-ctx.Done():
+			// Context cancelled - exit gracefully
+			return
+		case c := <-ticker.C:
+			s.lock.Lock()
+			diff := c.Sub(s.last)
 
-		bavg := float64(s.btotal-s.bprev) * 8 / (1000 * 1000 * diff.Seconds())
-		avg := float64(s.total-s.prev) / diff.Seconds()
+			bavg := float64(s.btotal-s.bprev) * 8 / (1000 * 1000 * diff.Seconds())
+			avg := float64(s.total-s.prev) / diff.Seconds()
 
-		s.bprev = s.btotal
-		s.prev = s.total
-		s.last = c
+			s.bprev = s.btotal
+			s.prev = s.total
+			s.last = c
 
-		s.lock.Unlock()
+			s.lock.Unlock()
 
-		fmt.Fprintf(os.Stderr, "\r%-54s: %8.3f kpackets (%8.3f packets/s), %8.3f mbytes (%8.3f Mbps)", c, float64(s.total)/1024, avg, float64(s.btotal)/1024/1024, bavg)
+			fmt.Fprintf(os.Stderr, "\r%-54s: %8.3f kpackets (%8.3f packets/s), %8.3f mbytes (%8.3f Mbps)", c, float64(s.total)/1024, avg, float64(s.btotal)/1024/1024, bavg)
+		}
 	}
 }
 
@@ -86,6 +95,10 @@ var (
 	logtopics   = flag.String("logtopics", "", "topics for the log output")
 	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
 	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
+
+	// Metrics endpoint flags
+	metricsEnabled    = flag.Bool("metricsenabled", false, "Enable Prometheus metrics endpoint")
+	metricsListenAddr = flag.String("metricslistenaddr", ":9092", "Address for metrics endpoint (e.g., :9092 or 127.0.0.30:9092)")
 )
 
 func main() {
@@ -158,11 +171,18 @@ func main() {
 	defer cancel()
 
 	// Create root waitgroup for tracking all shutdown operations
+	// Note: This waitgroup is used by SRT connections (Dial/Listen) to track their goroutines
+	// We increment it for each connection (reader and writer) that we create
 	var shutdownWg sync.WaitGroup
-	shutdownWg.Add(1) // Increment for client shutdown
 
 	// Setup signal handler that cancels context (Option 3: Context-Driven Shutdown)
 	setupSignalHandler(ctx, cancel)
+
+	// Start metrics server if enabled
+	if *metricsEnabled {
+		startMetricsServer(*metricsListenAddr, ctx)
+		fmt.Fprintf(os.Stderr, "Metrics server started on %s\n", *metricsListenAddr)
+	}
 
 	r, err := openReader(*from, logger, ctx, &shutdownWg)
 	if err != nil {
@@ -171,12 +191,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Note: The dialer/listener itself manages the shutdownWg Add/Done
+
 	w, err := openWriter(*to, logger, ctx, &shutdownWg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
+
+	// Note: The dialer/listener itself manages the shutdownWg Add/Done
 
 	// Get config to check for statistics interval
 	config := srt.DefaultConfig()
@@ -228,23 +252,115 @@ func main() {
 		buffer := make([]byte, CHANNEL_SIZE)
 
 		s := stats{}
-		s.init(STATS_PERIOD)
+		s.init(STATS_PERIOD, ctx)
+
+		// Check if reader is an SRT connection (supports SetReadDeadline)
+		var srtConn srt.Conn
+		if conn, ok := r.(srt.Conn); ok {
+			srtConn = conn
+		}
 
 		for {
+			// Check context cancellation first
 			select {
 			case <-ctx.Done():
 				// Context cancelled - exit gracefully
 				return
 			default:
-				n, err := r.Read(buffer)
-				if err != nil {
-					doneChan <- fmt.Errorf("read: %w", err)
+			}
+
+			// Set read deadline to allow periodic context checks
+			// This prevents Read() from blocking indefinitely
+			if srtConn != nil {
+				srtConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			}
+
+			// Perform the read operation
+			n, err := r.Read(buffer)
+
+			// Handle read result
+			if err != nil {
+				// Check if context was cancelled
+				select {
+				case <-ctx.Done():
+					// Context cancelled - exit gracefully (don't report error)
+					return
+				default:
+				}
+
+				// Check if error is a timeout (expected - allows context check)
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					// Timeout occurred - continue loop to check context again
+					continue
+				}
+
+				// Check if error is due to connection being closed (expected during shutdown)
+				errStr := err.Error()
+				if strings.Contains(errStr, "connection refused") ||
+					strings.Contains(errStr, "use of closed network connection") ||
+					strings.Contains(errStr, "broken pipe") {
+					// Connection closed during shutdown - exit gracefully (don't report error)
 					return
 				}
 
-				s.update(uint64(n))
+				// Check for net.OpError which indicates connection issues
+				if opErr, ok := err.(*net.OpError); ok {
+					if opErr.Err != nil {
+						errStr := opErr.Err.Error()
+						if strings.Contains(errStr, "connection refused") ||
+							strings.Contains(errStr, "broken pipe") {
+							// Connection closed during shutdown - exit gracefully (don't report error)
+							return
+						}
+						// Check if it's a timeout error
+						if errors.Is(opErr.Err, os.ErrDeadlineExceeded) {
+							// Timeout occurred - continue loop to check context again
+							continue
+						}
+					}
+				}
 
-				if _, err := w.Write(buffer[:n]); err != nil {
+				// Other error - report it
+				doneChan <- fmt.Errorf("read: %w", err)
+				return
+			}
+
+			s.update(uint64(n))
+
+			// Check context cancellation before write
+			select {
+			case <-ctx.Done():
+				// Context cancelled - exit gracefully
+				return
+			default:
+			}
+
+			if _, err := w.Write(buffer[:n]); err != nil {
+				// Check if context was cancelled or connection closed during shutdown
+				select {
+				case <-ctx.Done():
+					// Context cancelled - exit gracefully (don't report error)
+					return
+				default:
+					// Check if error is due to connection being closed (expected during shutdown)
+					errStr := err.Error()
+					if strings.Contains(errStr, "connection refused") ||
+						strings.Contains(errStr, "use of closed network connection") ||
+						strings.Contains(errStr, "broken pipe") {
+						// Connection closed during shutdown - exit gracefully (don't report error)
+						return
+					}
+					// Check for net.OpError which indicates connection issues
+					if opErr, ok := err.(*net.OpError); ok {
+						if opErr.Err != nil {
+							errStr := opErr.Err.Error()
+							if strings.Contains(errStr, "connection refused") ||
+								strings.Contains(errStr, "broken pipe") {
+								// Connection closed during shutdown - exit gracefully (don't report error)
+								return
+							}
+						}
+					}
 					doneChan <- fmt.Errorf("write: %w", err)
 					return
 				}
@@ -253,6 +369,8 @@ func main() {
 	}()
 
 	// Wait for either error or context cancellation
+	// When read/write goroutines exit, we should exit immediately
+	// The waitgroup is only for explicit graceful shutdown
 	select {
 	case err := <-doneChan:
 		if err != nil {
@@ -260,64 +378,19 @@ func main() {
 		} else {
 			fmt.Fprint(os.Stderr, "\n")
 		}
+		// Read/write goroutine exited - close connections and exit
+		// Don't wait for waitgroup - just close and exit
+		w.Close()
+		r.Close()
+		return
 	case <-ctx.Done():
 		// Context cancelled - graceful shutdown
 		fmt.Fprint(os.Stderr, "\n")
-	}
-
-	// Explicitly stop profiling before exiting to ensure profile is written
-	if prof != nil {
-		prof.Stop()
-	}
-
-	// Wait for graceful shutdown to complete (with timeout as safety net)
-	done := make(chan struct{})
-	go func() {
-		shutdownWg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// All shutdown operations completed
-	case <-time.After(config.ShutdownDelay):
-		// Timeout - proceed with exit (safety net)
-	}
-
-	w.Close()
-
-	// Only print writer stats if it's an SRT connection (not NullWriter)
-	if srtconn, ok := w.(srt.Conn); ok {
-		stats := &srt.Statistics{}
-		srtconn.Stats(stats)
-
-		data, err := json.MarshalIndent(stats, "", "   ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "writer: %+v\n", stats)
-		} else {
-			fmt.Fprintf(os.Stderr, "writer: %s\n", string(data))
-		}
-	} else if _, ok := w.(*NullWriter); ok {
-		// NullWriter - no stats to print, but indicate output was discarded
-		fmt.Fprintf(os.Stderr, "writer: output discarded (null mode)\n")
-	}
-
-	r.Close()
-
-	if srtconn, ok := r.(srt.Conn); ok {
-		stats := &srt.Statistics{}
-		srtconn.Stats(stats)
-
-		data, err := json.MarshalIndent(stats, "", "   ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "reader: %+v\n", stats)
-		} else {
-			fmt.Fprintf(os.Stderr, "reader: %s\n", string(data))
-		}
-	}
-
-	if logger != nil {
-		logger.Close()
+		// Close connections and exit immediately
+		// Signal handler already cancelled context, so exit now
+		w.Close()
+		r.Close()
+		return
 	}
 }
 
@@ -338,6 +411,38 @@ func setupSignalHandler(ctx context.Context, cancel context.CancelFunc) {
 			return
 		}
 	}()
+}
+
+// startMetricsServer starts an HTTP server for Prometheus metrics
+// Returns the server so it can be shut down gracefully
+func startMetricsServer(addr string, ctx context.Context) *http.Server {
+	if addr == "" {
+		return nil
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.MetricsHandler())
+
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "Metrics server error: %v\n", err)
+		}
+	}()
+
+	// Shutdown server when context is cancelled
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(shutdownCtx)
+	}()
+
+	return server
 }
 
 // NullWriter is an io.WriteCloser that discards all data.
@@ -429,7 +534,9 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 
 				return conn, nil
 			}
-		} else if mode == "caller" {
+		} else if mode == "caller" || mode == "" {
+			// Default to caller mode if mode not specified
+			// Stream ID is set in config via UnmarshalQuery (from URL query parameter)
 			conn, err := srt.Dial("srt", u.Host, config, ctx, shutdownWg)
 			if err != nil {
 				return nil, err
@@ -437,7 +544,7 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 
 			return conn, nil
 		} else {
-			return nil, fmt.Errorf("unsupported mode")
+			return nil, fmt.Errorf("unsupported mode: %s", mode)
 		}
 	} else if u.Scheme == "udp" {
 		laddr, err := net.ResolveUDPAddr("udp", u.Host)
@@ -525,7 +632,9 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 
 				return conn, nil
 			}
-		} else if mode == "caller" {
+		} else if mode == "caller" || mode == "" {
+			// Default to caller mode if mode not specified
+			// Stream ID is set in config via UnmarshalQuery (from URL query parameter)
 			conn, err := srt.Dial("srt", u.Host, config, ctx, shutdownWg)
 			if err != nil {
 				return nil, err
@@ -533,7 +642,7 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 
 			return conn, nil
 		} else {
-			return nil, fmt.Errorf("unsupported mode")
+			return nil, fmt.Errorf("unsupported mode: %s", mode)
 		}
 	} else if u.Scheme == "udp" {
 		raddr, err := net.ResolveUDPAddr("udp", u.Host)

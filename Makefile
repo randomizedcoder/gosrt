@@ -17,7 +17,19 @@ test-flags-integration: client server
 
 ## test-integration: Run integration tests (context cancellation, graceful shutdown, etc.)
 test-integration: client server client-generator
-	@cd contrib/integration_testing && go run test_graceful_shutdown.go graceful-shutdown-sigint
+	@cd contrib/integration_testing && go run . graceful-shutdown-sigint
+
+## test-integration-all: Run integration tests with all configurations
+test-integration-all: client server client-generator
+	@cd contrib/integration_testing && go run . graceful-shutdown-sigint-all
+
+## test-integration-config: Run integration test with specific configuration (use CONFIG=name)
+test-integration-config: client server client-generator
+	@cd contrib/integration_testing && go run . graceful-shutdown-sigint-config $(CONFIG)
+
+## test-integration-list: List available integration test configurations
+test-integration-list:
+	@cd contrib/integration_testing && go run . list-configs
 
 test-congestion-live:
 	go test -v ./congestion/live
@@ -133,7 +145,7 @@ nixshell:
 	nix-shell -p gcc pkg-config zlib
 
 # Testing targets
-.PHONY: test test-flags test-flags-integration test-congestion-live test-packet-pool test-packet fuzz coverage
+.PHONY: test test-flags test-flags-integration test-integration test-integration-all test-integration-config test-integration-list test-congestion-live test-packet-pool test-packet fuzz coverage
 # Benchmark targets
 .PHONY: bench-packet bench-packet-all bench-packet-pool bench-circular
 # Code quality targets
