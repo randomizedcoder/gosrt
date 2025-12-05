@@ -15,6 +15,10 @@ test-flags:
 test-flags-integration: client server
 	@./contrib/common/test_flags.sh
 
+## test-integration: Run integration tests (context cancellation, graceful shutdown, etc.)
+test-integration: client server client-generator
+	@cd contrib/integration_testing && go run test_graceful_shutdown.go graceful-shutdown-sigint
+
 test-congestion-live:
 	go test -v ./congestion/live
 
@@ -94,6 +98,14 @@ server:
 server-debug:
 	cd contrib/server && CGO_ENABLED=0 go build -o server-debug -a
 
+## client-generator: Build client-generator binary
+client-generator:
+	cd contrib/client-generator && CGO_ENABLED=0 go build -o client-generator -ldflags="-s -w" -a
+
+## client-generator-debug: Build client-generator binary with debug symbols
+client-generator-debug:
+	cd contrib/client-generator && CGO_ENABLED=0 go build -o client-generator-debug -a
+
 server-profile:
 	go tool pprof -http=0.0.0.0:8080 ./contrib/server/server-debug cpu.pprof
 
@@ -129,7 +141,7 @@ nixshell:
 # Dependency management targets
 .PHONY: update tidy vendor
 # Build targets
-.PHONY: client client-debug server server-debug
+.PHONY: client client-debug client-generator client-generator-debug server server-debug
 # Other targets
 .PHONY: commit docker logtopics help
 

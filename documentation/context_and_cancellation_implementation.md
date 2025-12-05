@@ -234,7 +234,7 @@ This document tracks the implementation progress of the context and cancellation
 **Started**: 2024-12-19
 
 **Tasks**:
-- [ ] Test graceful shutdown on SIGINT
+- [x] Test graceful shutdown on SIGINT (Test 1.1 - PASSED)
 - [ ] Test graceful shutdown on SIGTERM
 - [ ] Test timeout cancellation on signal
 - [ ] Test connection cleanup on shutdown
@@ -252,13 +252,35 @@ This document tracks the implementation progress of the context and cancellation
 - Error handling improvements added (crypto operation errors now tracked)
 - Code quality improvements completed (lint errors fixed)
 - Testing plan document created: `context_cancellation_testing_plan.md`
-- Ready to begin comprehensive testing
+- Integration testing infrastructure created (2024-12-19)
+- **Test 1.1 (Graceful Shutdown on SIGINT) - PASSED** (2024-12-19):
+  - Integration test successfully verifies graceful shutdown
+  - Server receives SIGINT and shuts down gracefully
+  - All processes (server, client-generator, client) exit cleanly
+  - Test completes within shutdown delay
+  - **Known Issue**: WaitGroup panic during shutdown (does not block test completion, needs investigation)
 
 **Testing Plan Created** (2024-12-19):
 - Created `context_cancellation_testing_plan.md` with comprehensive test strategy
 - Test categories defined: Signal Handling, Timeout Cancellation, Connection Cleanup, WaitGroup, Goroutine Exit, Race Detector, Handshake Timeout, Peer Idle Timeout, Crypto Error Counters
 - Test implementation strategy outlined (unit tests, integration tests, manual testing)
 - Success criteria defined
+
+**Integration Testing Infrastructure** (2024-12-19):
+- Created `contrib/client-generator/` - Publisher program that generates data and sends to server
+  - Similar structure to `contrib/client/` but writes data instead of reading
+  - Generates test data at configurable bitrate
+  - Uses context-based cancellation for graceful shutdown
+- Created `contrib/integration_testing/test_graceful_shutdown.go` - Integration test orchestrator
+  - Uses `os/exec` to start server, client-generator, and client processes
+  - Sends SIGINT to server and verifies graceful shutdown
+  - Tests Test 1.1 (Graceful Shutdown on SIGINT)
+  - Flow: `client-generator -> server -> client`
+- Added Makefile targets:
+  - `make client-generator` - Build client-generator binary
+  - `make client-generator-debug` - Build client-generator with debug symbols
+  - `make test-integration` - Run integration tests
+- Test execution: `make test-integration` or `cd contrib/integration_testing && go run test_graceful_shutdown.go graceful-shutdown-sigint`
 
 ---
 

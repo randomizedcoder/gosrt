@@ -278,10 +278,20 @@ Create test files:
 
 ### Integration Tests
 
-Create integration test scripts:
-- `test_shutdown.sh` - Tests graceful shutdown scenarios
-- `test_signals.sh` - Tests signal handling
-- `test_timeouts.sh` - Tests timeout behavior
+**Automated Integration Tests** (Implemented):
+- `contrib/integration_testing/test_graceful_shutdown.go` - Go program that orchestrates server, client-generator, and client processes
+- Uses `os/exec` to start processes
+- Sends signals and verifies graceful shutdown
+- Tests Test 1.1 (Graceful Shutdown on SIGINT)
+
+**Components Created**:
+- `contrib/client-generator/` - Publisher that generates data and sends to server
+- Flow: `client-generator -> server -> client`
+- All components use context-based cancellation
+
+**Makefile Targets**:
+- `make client-generator` - Build client-generator binary
+- `make test-integration` - Run integration tests
 
 ### Manual Testing
 

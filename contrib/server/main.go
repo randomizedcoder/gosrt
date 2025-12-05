@@ -158,12 +158,25 @@ func main() {
 		fmt.Println(string(data))
 	}
 
+	// Create root context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create root waitgroup for tracking all shutdown operations
+	var shutdownWg sync.WaitGroup
+	shutdownWg.Add(1) // Increment for server shutdown
+
+	// Setup signal handler that cancels context (Option 3: Context-Driven Shutdown)
+	setupSignalHandler(ctx, cancel, &shutdownWg, config.ShutdownDelay)
+
 	s.server = &srt.Server{
 		Addr:            s.addr,
 		HandleConnect:   s.handleConnect,
 		HandlePublish:   s.handlePublish,
 		HandleSubscribe: s.handleSubscribe,
 		Config:          &config,
+		Context:         ctx,         // Set context before ListenAndServe
+		ShutdownWg:      &shutdownWg, // Set waitgroup before ListenAndServe
 	}
 
 	fmt.Fprintf(os.Stderr, "Listening on %s\n", s.addr)
@@ -175,13 +188,6 @@ func main() {
 
 		for m := range config.Logger.Listen() {
 			fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n", m.SocketId, m.Topic, m.File, m.Line, m.Message)
-		}
-	}()
-
-	go func() {
-		if err := s.ListenAndServe(); err != nil && err != srt.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "SRT Server: %s\n", err)
-			os.Exit(2)
 		}
 	}()
 
@@ -197,21 +203,6 @@ func main() {
 			}
 		}()
 	}
-
-	// Create root context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Create root waitgroup for tracking all shutdown operations
-	var shutdownWg sync.WaitGroup
-	shutdownWg.Add(1) // Increment for server shutdown
-
-	// Setup signal handler that cancels context (Option 3: Context-Driven Shutdown)
-	setupSignalHandler(ctx, cancel)
-
-	// Pass context and waitgroup to server
-	s.server.Context = ctx
-	s.server.ShutdownWg = &shutdownWg
 
 	// Start server (will shutdown automatically when context cancelled)
 	go func() {
@@ -242,7 +233,7 @@ func main() {
 
 // setupSignalHandler sets up OS signal handling to cancel the root context
 // Option 3: Context-Driven Shutdown - signal handler only cancels context
-func setupSignalHandler(ctx context.Context, cancel context.CancelFunc) {
+func setupSignalHandler(ctx context.Context, cancel context.CancelFunc, shutdownWg *sync.WaitGroup, shutdownDelay time.Duration) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -252,6 +243,21 @@ func setupSignalHandler(ctx context.Context, cancel context.CancelFunc) {
 			// Signal received - cancel root context to initiate graceful shutdown
 			// Server.Serve() will detect context cancellation and shutdown automatically
 			cancel()
+
+			// Wait for graceful shutdown to complete (via waitgroups with timeout)
+			done := make(chan struct{})
+			go func() {
+				shutdownWg.Wait() // Wait for all waitgroups to complete
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				// All waitgroups completed - graceful shutdown successful
+			case <-time.After(shutdownDelay):
+				// Timeout - proceed with exit even if waitgroups not complete
+				fmt.Fprintf(os.Stderr, "Graceful shutdown timed out after %s. Exiting.\n", shutdownDelay)
+			}
 		case <-ctx.Done():
 			// Context already cancelled - exit
 			return
