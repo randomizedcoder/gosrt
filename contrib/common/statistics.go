@@ -58,7 +58,8 @@ func RunThroughputDisplay(ctx context.Context, period time.Duration, getter Thro
 			// Format time with 2 decimal places: HH:MM:SS.xx
 			timeStr := now.Format("15:04:05.00")
 
-			// Fixed-width columns for alignment (supports up to 99.999 Mb/so			// Format: time | kpkt/s | pkt/s | MB | Mb/s | success(k) / loss ~= %
+			// Fixed-width columns for alignment (supports up to 99.999 Mb/s)
+			// Format: time | kpkt/s | pkt/s | MB | Mb/s | success(k) / loss ~= %
 			// Success: 10 chars in thousands (up to 9999999.99k = ~10 billion packets)
 			// Loss: 6 chars raw count (up to 999999 lost packets)
 			fmt.Fprintf(os.Stderr, "\r%s | %8.2f kpkt/s | %7.2f pkt/s | %8.2f MB | %6.3f Mb/s | %10.2fk ok / %6d loss ~= %.3f%%",

@@ -542,7 +542,7 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 func openWriter(addr string, logger srt.Logger, ctx context.Context, wg *sync.WaitGroup) (io.WriteCloser, error) {
 	// Handle no-output mode: empty string, "null", or "discard"
 	if len(addr) == 0 || addr == "null" || addr == "discard" {
-		return &NullWriter{}, nil
+		return &common.NullWriter{}, nil
 	}
 
 	if addr == "-" {
@@ -550,17 +550,14 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 			return nil, fmt.Errorf("stdout is not defined")
 		}
 
-		return NewNonblockingWriter(os.Stdout, 2048), nil
+		// Use DirectWriter for stdout - zero locks, direct syscall
+		return common.NewStdoutWriter(), nil
 	}
 
 	if strings.HasPrefix(addr, "file://") {
 		path := strings.TrimPrefix(addr, "file://")
-		file, err := os.Create(path)
-		if err != nil {
-			return nil, err
-		}
-
-		return NewNonblockingWriter(file, 2048), nil
+		// Use DirectWriter for file output - zero locks, direct syscall
+		return common.NewFileWriter(path)
 	}
 
 	u, err := url.Parse(addr)
