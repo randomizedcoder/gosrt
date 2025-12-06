@@ -3,12 +3,12 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/datarhei/gosrt/contrib/common"
 )
 
 // MetricsSnapshot represents a single snapshot of Prometheus metrics
@@ -23,7 +23,7 @@ type MetricsSnapshot struct {
 // ComponentMetrics holds metrics for a single component
 type ComponentMetrics struct {
 	Component string             // Component identifier (server, client-generator, client)
-	Addr      string             // Metrics endpoint address
+	Endpoint  MetricsEndpoint    // Metrics endpoint configuration
 	Snapshots []*MetricsSnapshot // Collected snapshots
 }
 
@@ -32,57 +32,72 @@ type TestMetrics struct {
 	Server          ComponentMetrics
 	ClientGenerator ComponentMetrics
 	Client          ComponentMetrics
+	client          *common.MetricsClient // Reusable metrics client
 }
 
-// NewTestMetrics creates a new TestMetrics instance with the given URLs
-func NewTestMetrics(serverURL, clientGenURL, clientURL string) *TestMetrics {
+// NewTestMetrics creates a new TestMetrics instance with the given endpoints
+func NewTestMetrics(serverEndpoint, clientGenEndpoint, clientEndpoint MetricsEndpoint) *TestMetrics {
 	return &TestMetrics{
 		Server: ComponentMetrics{
 			Component: "server",
-			Addr:      serverURL,
+			Endpoint:  serverEndpoint,
 			Snapshots: make([]*MetricsSnapshot, 0),
 		},
 		ClientGenerator: ComponentMetrics{
 			Component: "client-generator",
-			Addr:      clientGenURL,
+			Endpoint:  clientGenEndpoint,
 			Snapshots: make([]*MetricsSnapshot, 0),
 		},
 		Client: ComponentMetrics{
 			Component: "client",
-			Addr:      clientURL,
+			Endpoint:  clientEndpoint,
 			Snapshots: make([]*MetricsSnapshot, 0),
 		},
+		client: common.NewMetricsClient(),
 	}
 }
 
-// CollectMetrics fetches metrics from a single URL
-func CollectMetrics(metricsURL, point string) *MetricsSnapshot {
+// NewTestMetricsFromURLs creates a new TestMetrics instance with HTTP URLs (backward compatibility)
+func NewTestMetricsFromURLs(serverURL, clientGenURL, clientURL string) *TestMetrics {
+	return NewTestMetrics(
+		MetricsEndpoint{HTTPAddr: extractAddr(serverURL)},
+		MetricsEndpoint{HTTPAddr: extractAddr(clientGenURL)},
+		MetricsEndpoint{HTTPAddr: extractAddr(clientURL)},
+	)
+}
+
+// extractAddr extracts the address from a URL (removes http:// prefix and /metrics suffix)
+func extractAddr(url string) string {
+	addr := strings.TrimPrefix(url, "http://")
+	addr = strings.TrimSuffix(addr, "/metrics")
+	return addr
+}
+
+// CollectMetricsFromEndpoint fetches metrics from an endpoint (HTTP or UDS)
+func CollectMetricsFromEndpoint(client *common.MetricsClient, endpoint MetricsEndpoint, point string) *MetricsSnapshot {
 	snapshot := &MetricsSnapshot{
 		Timestamp: time.Now(),
 		Point:     point,
 		Metrics:   make(map[string]float64),
 	}
 
-	if metricsURL == "" {
-		snapshot.Error = fmt.Errorf("empty metrics URL")
+	if !endpoint.IsConfigured() {
+		snapshot.Error = fmt.Errorf("no metrics endpoint configured")
 		return snapshot
 	}
 
-	resp, err := http.Get(metricsURL)
+	var body []byte
+	var err error
+
+	// Prefer UDS if configured (works across network namespaces)
+	if endpoint.UDSPath != "" {
+		body, err = client.FetchUDS(endpoint.UDSPath)
+	} else {
+		body, err = client.FetchHTTP(endpoint.HTTPAddr)
+	}
+
 	if err != nil {
 		snapshot.Error = fmt.Errorf("failed to fetch metrics: %w", err)
-		return snapshot
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		snapshot.Error = fmt.Errorf("metrics endpoint returned status %d", resp.StatusCode)
-		return snapshot
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		snapshot.Error = fmt.Errorf("failed to read metrics response: %w", err)
 		return snapshot
 	}
 
@@ -140,8 +155,8 @@ func (tm *TestMetrics) CollectAllMetrics(point string) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if tm.Server.Addr != "" {
-			snapshot := CollectMetrics(tm.Server.Addr, point)
+		if tm.Server.Endpoint.IsConfigured() {
+			snapshot := CollectMetricsFromEndpoint(tm.client, tm.Server.Endpoint, point)
 			tm.Server.Snapshots = append(tm.Server.Snapshots, snapshot)
 		}
 	}()
@@ -150,8 +165,8 @@ func (tm *TestMetrics) CollectAllMetrics(point string) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if tm.ClientGenerator.Addr != "" {
-			snapshot := CollectMetrics(tm.ClientGenerator.Addr, point)
+		if tm.ClientGenerator.Endpoint.IsConfigured() {
+			snapshot := CollectMetricsFromEndpoint(tm.client, tm.ClientGenerator.Endpoint, point)
 			tm.ClientGenerator.Snapshots = append(tm.ClientGenerator.Snapshots, snapshot)
 		}
 	}()
@@ -160,8 +175,8 @@ func (tm *TestMetrics) CollectAllMetrics(point string) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if tm.Client.Addr != "" {
-			snapshot := CollectMetrics(tm.Client.Addr, point)
+		if tm.Client.Endpoint.IsConfigured() {
+			snapshot := CollectMetricsFromEndpoint(tm.client, tm.Client.Endpoint, point)
 			tm.Client.Snapshots = append(tm.Client.Snapshots, snapshot)
 		}
 	}()
@@ -240,7 +255,7 @@ func (tm *TestMetrics) PrintSummary() {
 	fmt.Println("\n=== Metrics Summary ===")
 
 	for _, cm := range []*ComponentMetrics{&tm.Server, &tm.ClientGenerator, &tm.Client} {
-		fmt.Printf("\n%s (%s):\n", cm.Component, cm.Addr)
+		fmt.Printf("\n%s (%s):\n", cm.Component, cm.Endpoint.String())
 		fmt.Printf("  Snapshots collected: %d\n", len(cm.Snapshots))
 
 		if len(cm.Snapshots) == 0 {

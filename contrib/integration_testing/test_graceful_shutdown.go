@@ -242,8 +242,8 @@ func runTestWithConfig(config TestConfig) error {
 	// Initialize metrics collection if enabled
 	var testMetrics *TestMetrics
 	if config.MetricsEnabled {
-		serverMetrics, clientGenMetrics, clientMetrics := config.GetAllMetricsURLs()
-		testMetrics = NewTestMetrics(serverMetrics, clientGenMetrics, clientMetrics)
+		serverEndpoint, clientGenEndpoint, clientEndpoint := config.GetAllMetricsEndpoints()
+		testMetrics = NewTestMetrics(serverEndpoint, clientGenEndpoint, clientEndpoint)
 
 		// Collect initial metrics
 		fmt.Println("\nCollecting initial metrics...")

@@ -86,6 +86,18 @@ var (
 			"Uses the 'unsafe' package for io_uring's zero-copy interface. "+
 			"The unsafe code is isolated in contrib/common/writer_iouring_linux.go. "+
 			"For most use cases, the default DirectWriter is recommended.")
+
+	// Prometheus metrics endpoint flags
+	// These are application-level configuration, NOT part of srt.Config
+	// By default (when not specified), NO metrics listeners are opened
+	PromHTTPAddr = flag.String("promhttp", "",
+		"TCP address for Prometheus metrics HTTP endpoint (e.g., :9090 or 127.0.0.1:9090). "+
+			"If not specified, no TCP metrics listener is opened.")
+	PromUDSPath = flag.String("promuds", "",
+		"Unix Domain Socket path for Prometheus metrics endpoint "+
+			"(e.g., /tmp/srt_metrics_server.sock). "+
+			"If not specified, no UDS metrics listener is opened. "+
+			"UDS allows metrics collection from processes in isolated network namespaces.")
 )
 
 // ParseFlags parses command-line flags and populates FlagSet map

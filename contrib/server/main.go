@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -17,7 +16,6 @@ import (
 
 	srt "github.com/datarhei/gosrt"
 	"github.com/datarhei/gosrt/contrib/common"
-	"github.com/datarhei/gosrt/metrics"
 	"github.com/pkg/profile"
 )
 
@@ -66,10 +64,6 @@ var (
 	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
 	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
 	printConfig = flag.Bool("printconfig", false, "Print config")
-
-	// Metrics endpoint flags
-	metricsEnabled    = flag.Bool("metricsenabled", false, "Enable Prometheus metrics endpoint")
-	metricsListenAddr = flag.String("metricslistenaddr", ":9090", "Address for metrics endpoint (e.g., :9090 or 127.0.0.10:9090)")
 )
 
 func main() {
@@ -174,33 +168,11 @@ func main() {
 	var wg sync.WaitGroup
 
 	// ============================================================
-	// Start Prometheus Metrics HTTP Server (if enabled)
+	// Start Prometheus Metrics Server(s) (if configured)
 	// ============================================================
-	if *metricsEnabled {
-		promSrv := &http.Server{
-			Addr:    *metricsListenAddr,
-			Handler: metrics.MetricsHandler(),
-		}
-
-		// Shutdown watcher - cleanly shuts down Prometheus server when context cancelled
-		go func() {
-			<-ctx.Done()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := promSrv.Shutdown(shutdownCtx); err != nil {
-				fmt.Fprintf(os.Stderr, "Prometheus server shutdown error: %v\n", err)
-			}
-		}()
-
-		// Run Prometheus server
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fmt.Fprintf(os.Stderr, "Prometheus server started on %s\n", *metricsListenAddr)
-			if err := promSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				fmt.Fprintf(os.Stderr, "Prometheus server error: %v\n", err)
-			}
-		}()
+	if err := common.StartMetricsServers(ctx, &wg, *common.PromHTTPAddr, *common.PromUDSPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start metrics server: %v\n", err)
+		os.Exit(1)
 	}
 
 	// ============================================================

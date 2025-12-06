@@ -6,6 +6,28 @@ import (
 	"time"
 )
 
+// MetricsEndpoint represents a metrics endpoint configuration
+type MetricsEndpoint struct {
+	HTTPAddr string // TCP HTTP address (e.g., "127.0.0.10:5101") - empty if not used
+	UDSPath  string // Unix socket path (e.g., "/tmp/srt_metrics_server.sock") - empty if not used
+}
+
+// IsConfigured returns true if at least one endpoint is configured
+func (e *MetricsEndpoint) IsConfigured() bool {
+	return e.HTTPAddr != "" || e.UDSPath != ""
+}
+
+// String returns a string representation of the endpoint for logging
+func (e *MetricsEndpoint) String() string {
+	if e.UDSPath != "" {
+		return "unix:" + e.UDSPath
+	}
+	if e.HTTPAddr != "" {
+		return "http://" + e.HTTPAddr
+	}
+	return "(none)"
+}
+
 // SRTConfig represents SRT connection configuration parameters
 // This mirrors the srt.Config struct and can be converted to CLI flags
 type SRTConfig struct {
@@ -51,10 +73,6 @@ type SRTConfig struct {
 
 	// NAK reports
 	NAKReport bool // -nakreport
-
-	// Metrics
-	MetricsEnabled    bool   // -metricsenabled
-	MetricsListenAddr string // -metricslistenaddr
 }
 
 // ToCliFlags converts SRTConfig to CLI flag arguments
@@ -154,14 +172,6 @@ func (c *SRTConfig) ToCliFlags() []string {
 		flags = append(flags, "-nakreport")
 	}
 
-	// Metrics
-	if c.MetricsEnabled {
-		flags = append(flags, "-metricsenabled")
-	}
-	if c.MetricsListenAddr != "" {
-		flags = append(flags, "-metricslistenaddr", c.MetricsListenAddr)
-	}
-
 	return flags
 }
 
@@ -169,7 +179,8 @@ func (c *SRTConfig) ToCliFlags() []string {
 type NetworkConfig struct {
 	IP          string // IP address for the component (e.g., "127.0.0.10")
 	SRTPort     int    // SRT port (server only, clients use ephemeral)
-	MetricsPort int    // Metrics HTTP port (e.g., 9090, 9091, 9092)
+	MetricsPort int    // Metrics TCP HTTP port (e.g., 5101, 5102, 5103) - 0 = disabled
+	MetricsUDS  string // Metrics Unix socket path (e.g., "/tmp/srt_metrics_server.sock") - empty = disabled
 }
 
 // SRTAddr returns the SRT address string (e.g., "127.0.0.10:6000")
@@ -276,10 +287,14 @@ func (c *TestConfig) GetServerFlags() []string {
 
 	flags := []string{"-addr", serverNet.SRTAddr()}
 
-	// Add metrics address if port is configured
+	// Add metrics TCP endpoint if port is configured
 	if serverNet.MetricsPort > 0 {
-		flags = append(flags, "-metricsenabled")
-		flags = append(flags, "-metricslistenaddr", serverNet.MetricsAddr())
+		flags = append(flags, "-promhttp", serverNet.MetricsAddr())
+	}
+
+	// Add metrics UDS endpoint if path is configured
+	if serverNet.MetricsUDS != "" {
+		flags = append(flags, "-promuds", serverNet.MetricsUDS)
 	}
 
 	// Apply shared config first (if any)
@@ -310,10 +325,14 @@ func (c *TestConfig) GetClientGeneratorFlags() []string {
 		flags = append(flags, "-localaddr", clientGenNet.IP)
 	}
 
-	// Add metrics address if port is configured
+	// Add metrics TCP endpoint if port is configured
 	if clientGenNet.MetricsPort > 0 {
-		flags = append(flags, "-metricsenabled")
-		flags = append(flags, "-metricslistenaddr", clientGenNet.MetricsAddr())
+		flags = append(flags, "-promhttp", clientGenNet.MetricsAddr())
+	}
+
+	// Add metrics UDS endpoint if path is configured
+	if clientGenNet.MetricsUDS != "" {
+		flags = append(flags, "-promuds", clientGenNet.MetricsUDS)
 	}
 
 	// Apply shared config first (if any)
@@ -344,10 +363,14 @@ func (c *TestConfig) GetClientFlags() []string {
 		flags = append(flags, "-localaddr", clientNet.IP)
 	}
 
-	// Add metrics address if port is configured
+	// Add metrics TCP endpoint if port is configured
 	if clientNet.MetricsPort > 0 {
-		flags = append(flags, "-metricsenabled")
-		flags = append(flags, "-metricslistenaddr", clientNet.MetricsAddr())
+		flags = append(flags, "-promhttp", clientNet.MetricsAddr())
+	}
+
+	// Add metrics UDS endpoint if path is configured
+	if clientNet.MetricsUDS != "" {
+		flags = append(flags, "-promuds", clientNet.MetricsUDS)
 	}
 
 	// Add io_uring output flag if enabled (client-specific, Linux only)
@@ -366,8 +389,10 @@ func (c *TestConfig) GetClientFlags() []string {
 	return flags
 }
 
-// GetAllMetricsURLs returns the metrics URLs for all components
-func (c *TestConfig) GetAllMetricsURLs() (server, clientGen, client string) {
+// GetAllMetricsEndpoints returns the metrics endpoints for all components
+func (c *TestConfig) GetAllMetricsEndpoints() (server, clientGen, client MetricsEndpoint) {
 	serverNet, clientGenNet, clientNet := c.GetEffectiveNetworkConfig()
-	return serverNet.MetricsURL(), clientGenNet.MetricsURL(), clientNet.MetricsURL()
+	return MetricsEndpoint{HTTPAddr: serverNet.MetricsAddr(), UDSPath: serverNet.MetricsUDS},
+		MetricsEndpoint{HTTPAddr: clientGenNet.MetricsAddr(), UDSPath: clientGenNet.MetricsUDS},
+		MetricsEndpoint{HTTPAddr: clientNet.MetricsAddr(), UDSPath: clientNet.MetricsUDS}
 }
