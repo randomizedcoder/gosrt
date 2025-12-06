@@ -184,6 +184,10 @@ func (s *Server) Serve() error {
 		req, err := s.ln.Accept2()
 		if err != nil {
 			if err == ErrListenerClosed {
+				// Ensure listener is properly closed and shutdownWg.Done() is called
+				// This can happen when the reader goroutine detects ctx.Done() and
+				// closes doneChan before the top-of-loop context check runs
+				s.Shutdown()
 				return ErrServerClosed
 			}
 
