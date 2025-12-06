@@ -2618,6 +2618,37 @@ var (
 
 ---
 
+##### Test Configuration Summary
+
+The following test configurations cover various scenarios:
+
+| Category | Test Name | Description | Bitrate |
+|----------|-----------|-------------|---------|
+| **Basic Bandwidth** | Default-1Mbps | Default configuration at 1 Mb/s | 1 Mb/s |
+| | Default-2Mbps | Default configuration at 2 Mb/s | 2 Mb/s |
+| | Default-5Mbps | Default configuration at 5 Mb/s | 5 Mb/s |
+| | Default-10Mbps | Default configuration at 10 Mb/s | 10 Mb/s |
+| **Buffer Sizes** | SmallBuffers-2Mbps | Small buffers (120ms latency) | 2 Mb/s |
+| | LargeBuffers-2Mbps | Large buffers (3s latency) | 2 Mb/s |
+| **Packet Reordering** | BTree-2Mbps | B-tree packet reordering | 2 Mb/s |
+| | List-2Mbps | List-based packet reordering | 2 Mb/s |
+| **io_uring (SRT)** | IoUring-2Mbps | io_uring for SRT send/recv | 2 Mb/s |
+| | IoUring-10Mbps | io_uring for SRT send/recv | 10 Mb/s |
+| **Combined** | IoUring-LargeBuffers-BTree-10Mbps | io_uring + large buffers + B-tree | 10 Mb/s |
+| | AsymmetricLatency-2Mbps | Different latency per component | 2 Mb/s |
+| **io_uring Output** | IoUringOutput-2Mbps | Client io_uring output writer | 2 Mb/s |
+| | IoUringOutput-10Mbps | Client io_uring output writer | 10 Mb/s |
+| **Full io_uring Path** | FullIoUring-2Mbps | SRT + client output via io_uring | 2 Mb/s |
+| | FullIoUring-10Mbps | SRT + client output via io_uring | 10 Mb/s |
+| **High Performance** | HighPerf-10Mbps | Maximum performance config | 10 Mb/s |
+
+**io_uring Output Tests**: These tests validate the client's `-iouringoutput` flag, which uses io_uring for writing to stdout/file. This is a client-side optimization that uses the `unsafe` package for zero-copy writes. The tests verify:
+- `IoUringOutput-*`: Client uses io_uring for output (default DirectWriter for SRT)
+- `FullIoUring-*`: Both SRT and client output use io_uring
+- `HighPerf-*`: All optimizations enabled (io_uring everywhere + B-tree + large buffers)
+
+---
+
 ##### Test Configuration Table
 
 ```go

@@ -78,6 +78,14 @@ var (
 
 	// Local address binding for clients
 	LocalAddr = flag.String("localaddr", "", "Local IP address to bind to when connecting (e.g., 127.0.0.20)")
+
+	// io_uring output configuration flag (client-side)
+	// WARNING: This feature uses the 'unsafe' package for direct memory access.
+	IoUringOutput = flag.Bool("iouringoutput", false,
+		"Enable io_uring for output writes (Linux only, ADVANCED). "+
+			"Uses the 'unsafe' package for io_uring's zero-copy interface. "+
+			"The unsafe code is isolated in contrib/common/writer_iouring_linux.go. "+
+			"For most use cases, the default DirectWriter is recommended.")
 )
 
 // ParseFlags parses command-line flags and populates FlagSet map

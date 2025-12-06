@@ -160,6 +160,87 @@ var TestConfigs = []TestConfig{
 			},
 		},
 	},
+
+	// ========== io_uring Output Tests (Client-side) ==========
+	// These tests validate the client's io_uring output writer
+	// (uses unsafe package for zero-copy writes to stdout/file)
+	{
+		Name:            "IoUringOutput-2Mbps",
+		Description:     "Client with io_uring output enabled at 2 Mb/s",
+		Bitrate:         2_000_000,
+		TestDuration:    10 * time.Second,
+		ConnectionWait:  2 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		Client: ComponentConfig{
+			IoUringOutput: true, // Enable io_uring for client output
+		},
+	},
+	{
+		Name:            "IoUringOutput-10Mbps",
+		Description:     "Client with io_uring output enabled at 10 Mb/s - high throughput",
+		Bitrate:         10_000_000,
+		TestDuration:    10 * time.Second,
+		ConnectionWait:  2 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		Client: ComponentConfig{
+			IoUringOutput: true, // Enable io_uring for client output
+		},
+	},
+
+	// ========== Full io_uring Path Tests ==========
+	// These test io_uring for both SRT send/recv AND client output
+	{
+		Name:            "FullIoUring-2Mbps",
+		Description:     "Full io_uring path: SRT send/recv + client output at 2 Mb/s",
+		Bitrate:         2_000_000,
+		TestDuration:    10 * time.Second,
+		ConnectionWait:  2 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &IoUringSRTConfig, // io_uring for SRT
+		Client: ComponentConfig{
+			IoUringOutput: true, // io_uring for client output
+		},
+	},
+	{
+		Name:            "FullIoUring-10Mbps",
+		Description:     "Full io_uring path: SRT send/recv + client output at 10 Mb/s",
+		Bitrate:         10_000_000,
+		TestDuration:    10 * time.Second,
+		ConnectionWait:  2 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &IoUringSRTConfig, // io_uring for SRT
+		Client: ComponentConfig{
+			IoUringOutput: true, // io_uring for client output
+		},
+	},
+
+	// ========== High Performance Config ==========
+	{
+		Name:            "HighPerf-10Mbps",
+		Description:     "Maximum performance: io_uring everywhere + B-tree + large buffers at 10 Mb/s",
+		Bitrate:         10_000_000,
+		TestDuration:    15 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT: &SRTConfig{
+			ConnectionTimeout:      3000 * time.Millisecond,
+			PeerIdleTimeout:        30000 * time.Millisecond,
+			RecvLatency:            3000 * time.Millisecond,
+			PeerLatency:            3000 * time.Millisecond,
+			IoUringEnabled:         true,
+			IoUringRecvEnabled:     true,
+			PacketReorderAlgorithm: "btree",
+			TLPktDrop:              true,
+		},
+		Client: ComponentConfig{
+			IoUringOutput: true, // io_uring for client output
+		},
+	},
 }
 
 // GetTestConfigByName finds a test configuration by name

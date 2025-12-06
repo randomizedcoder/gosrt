@@ -200,6 +200,10 @@ func (n *NetworkConfig) MetricsURL() string {
 type ComponentConfig struct {
 	SRT        SRTConfig // SRT configuration (converted to CLI flags)
 	ExtraFlags []string  // Additional CLI flags not covered by SRTConfig
+
+	// Client-specific output options
+	// These only apply to the client component (not server or client-generator)
+	IoUringOutput bool // -iouringoutput (use io_uring for output writes, Linux only)
 }
 
 // ToCliFlags converts ComponentConfig to CLI flag arguments
@@ -344,6 +348,11 @@ func (c *TestConfig) GetClientFlags() []string {
 	if clientNet.MetricsPort > 0 {
 		flags = append(flags, "-metricsenabled")
 		flags = append(flags, "-metricslistenaddr", clientNet.MetricsAddr())
+	}
+
+	// Add io_uring output flag if enabled (client-specific, Linux only)
+	if c.Client.IoUringOutput {
+		flags = append(flags, "-iouringoutput")
 	}
 
 	// Apply shared config first (if any)
