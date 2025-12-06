@@ -499,25 +499,33 @@ type ProcessResult struct {
 
 ### 3.1 Packet Loss Injection
 
-**Status**: 🔲 To Be Designed
+**Status**: 🔲 Design In Progress
+
+**Detailed Design**: [packet_loss_injection_design.md](packet_loss_injection_design.md)
 
 SRT's core value proposition is ARQ-based loss recovery. To properly test this, we need to introduce controlled packet loss.
 
-#### Requirements
+#### Requirements Summary
 
-1. **Controlled Loss Rates**: Inject 1%, 2%, 5%, 10% packet loss
-2. **Burst Loss**: Simulate burst losses (e.g., 10 consecutive packets)
-3. **Asymmetric Loss**: Different loss rates for send vs receive paths
-4. **Reproducibility**: Deterministic loss patterns for debugging
+| Category | Requirements |
+|----------|--------------|
+| **Packet Loss** | Uniform loss (0.1-10%), burst loss, correlated loss |
+| **Latency** | Fixed delay, jitter, asymmetric latency |
+| **Outages** | Complete outage, periodic outage, Starlink pattern |
 
-#### Potential Approaches
+#### Starlink Pattern
 
-| Approach | Description | Pros | Cons |
-|----------|-------------|------|------|
-| **Linux TC/netem** | Kernel traffic control | Battle-tested, supports all patterns | Requires root, system-wide |
-| **Custom Proxy** | UDP proxy with loss injection | Fine control, no root needed | Additional component |
-| **Library Hook** | GoSRT internal loss injection | Maximum control | Modifies production code |
-| **iptables/nftables** | Firewall-based packet drop | System-level, reliable | Requires root |
+LEO satellite networks experience reconvergence events at seconds 12, 27, 42, 57 of each minute, causing **100% packet loss** for 50-70ms (complete outage, not partial loss).
+
+#### Implementation Options Under Evaluation
+
+| Option | Description | Assessment |
+|--------|-------------|------------|
+| **Namespaces + Netem** | Linux kernel network isolation with tc/netem | Likely best: low effort, high precision |
+| **Custom UDP Proxy** | Go-based packet manipulation | High effort, cross-platform |
+| **Existing Tools** | Toxiproxy, Comcast, etc. | Limited UDP support |
+
+**Reference**: `documentation/amt.sh` - Linux kernel network namespace example
 
 #### Key Metrics to Validate
 
@@ -954,10 +962,12 @@ contrib/integration_testing/
 
 | Document | Description |
 |----------|-------------|
+| `packet_loss_injection_design.md` | Packet loss injection design (detailed) |
 | `test_1.1_detailed_design.md` | Original graceful shutdown test design |
 | `context_and_cancellation_new_design.md` | Context cancellation patterns |
 | `metrics_and_statistics_design.md` | Metrics infrastructure design |
 | `client_performance_analysis.md` | Client optimization analysis |
+| `amt.sh` | Linux kernel network namespace reference |
 
 ---
 
