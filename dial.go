@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,10 +90,10 @@ type connResponse struct {
 //
 // Example:
 //
-//	Dial("srt", "127.0.0.1:3000", DefaultConfig(), ctx, shutdownWg)
+//	Dial(ctx, "srt", "127.0.0.1:3000", DefaultConfig(), shutdownWg)
 //
 // In case of an error the returned Conn is nil and the error is non-nil.
-func Dial(network, address string, config Config, ctx context.Context, shutdownWg *sync.WaitGroup) (Conn, error) {
+func Dial(ctx context.Context, network, address string, config Config, shutdownWg *sync.WaitGroup) (Conn, error) {
 	if network != "srt" {
 		return nil, fmt.Errorf("the network must be 'srt'")
 	}
@@ -119,6 +120,23 @@ func Dial(network, address string, config Config, ctx context.Context, shutdownW
 
 	netdialer := net.Dialer{
 		Control: DialControl(config),
+	}
+
+	// Set local address if specified (for binding to a specific interface/IP)
+	if config.LocalAddr != "" {
+		localAddr := config.LocalAddr
+		// Add port :0 if not specified (use ephemeral port)
+		if !strings.Contains(localAddr, ":") {
+			localAddr = localAddr + ":0"
+		}
+		laddr, err := net.ResolveUDPAddr("udp", localAddr)
+		if err != nil {
+			if shutdownWg != nil {
+				shutdownWg.Done() // Balance the Add(1) at start
+			}
+			return nil, fmt.Errorf("invalid local address %q: %w", config.LocalAddr, err)
+		}
+		netdialer.LocalAddr = laddr
 	}
 
 	conn, err := netdialer.Dial("udp", address)

@@ -2,6 +2,7 @@ package srt
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,9 @@ import (
 )
 
 func TestEncryption(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	message := "Hello World!"
 	passphrase := "foobarfoobar"
 	channel := NewPubSub(PubSubConfig{})
@@ -20,8 +24,9 @@ func TestEncryption(t *testing.T) {
 	config.EnforcedEncryption = true
 
 	server := Server{
-		Addr:   "127.0.0.1:6003",
-		Config: &config,
+		Addr:    "127.0.0.1:6003",
+		Config:  &config,
+		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			if req.IsEncrypted() {
 				if err := req.SetPassphrase(passphrase); err != nil {
@@ -147,6 +152,9 @@ func TestEncryption(t *testing.T) {
 
 // Test for https://github.com/datarhei/gosrt/pull/94
 func TestEncryptionRetransmit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	message := "Hello World!"
 	passphrase := "foobarfoobar"
 	channel := NewPubSub(PubSubConfig{})
@@ -155,8 +163,9 @@ func TestEncryptionRetransmit(t *testing.T) {
 	config.EnforcedEncryption = true
 
 	server := Server{
-		Addr:   "127.0.0.1:6003",
-		Config: &config,
+		Addr:    "127.0.0.1:6003",
+		Config:  &config,
+		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			if req.IsEncrypted() {
 				if err := req.SetPassphrase(passphrase); err != nil {
@@ -302,6 +311,9 @@ func TestEncryptionRetransmit(t *testing.T) {
 }
 
 func TestEncryptionKeySwap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	message := "Hello World!"
 	passphrase := "foobarfoobar"
 	channel := NewPubSub(PubSubConfig{})
@@ -310,8 +322,9 @@ func TestEncryptionKeySwap(t *testing.T) {
 	config.EnforcedEncryption = true
 
 	server := Server{
-		Addr:   "127.0.0.1:6003",
-		Config: &config,
+		Addr:    "127.0.0.1:6003",
+		Config:  &config,
+		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			if req.IsEncrypted() {
 				if err := req.SetPassphrase(passphrase); err != nil {
@@ -434,14 +447,18 @@ func TestEncryptionKeySwap(t *testing.T) {
 }
 
 func TestStats(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	message := "Hello World!"
 	channel := NewPubSub(PubSubConfig{})
 
 	config := DefaultConfig()
 
 	server := Server{
-		Addr:   "127.0.0.1:6003",
-		Config: &config,
+		Addr:    "127.0.0.1:6003",
+		Config:  &config,
+		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
 

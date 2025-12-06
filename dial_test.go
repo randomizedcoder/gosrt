@@ -19,7 +19,7 @@ func testDial(t *testing.T, address string, config Config) (Conn, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	var wg sync.WaitGroup
-	return Dial("srt", address, config, ctx, &wg)
+	return Dial(ctx, "srt", address, config, &wg)
 }
 
 func TestDialReject(t *testing.T) {
@@ -455,6 +455,6 @@ func TestDialV5MissingExtension(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	var wg sync.WaitGroup
-	_, err = Dial("srt", "127.0.0.1:6003", DefaultConfig(), ctx, &wg)
+	_, err = Dial(ctx, "srt", "127.0.0.1:6003", DefaultConfig(), &wg)
 	require.EqualError(t, err, "missing handshake extension")
 }

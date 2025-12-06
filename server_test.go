@@ -46,7 +46,7 @@ func TestServer(t *testing.T) {
 	config := DefaultConfig()
 	config.StreamId = "publish"
 
-	conn, err := Dial("srt", "127.0.0.1:6003", config, ctx, &wg)
+	conn, err := Dial(ctx, "srt", "127.0.0.1:6003", config, &wg)
 	require.NoError(t, err)
 
 	err = conn.Close()
@@ -55,7 +55,7 @@ func TestServer(t *testing.T) {
 	config = DefaultConfig()
 	config.StreamId = "subscribe"
 
-	conn, err = Dial("srt", "127.0.0.1:6003", config, ctx, &wg)
+	conn, err = Dial(ctx, "srt", "127.0.0.1:6003", config, &wg)
 	require.NoError(t, err)
 
 	err = conn.Close()
@@ -64,6 +64,6 @@ func TestServer(t *testing.T) {
 	config = DefaultConfig()
 	config.StreamId = "nothing"
 
-	_, err = Dial("srt", "127.0.0.1:6003", config, ctx, &wg)
+	_, err = Dial(ctx, "srt", "127.0.0.1:6003", config, &wg)
 	require.Error(t, err)
 }

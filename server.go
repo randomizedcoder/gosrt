@@ -5,10 +5,31 @@ import (
 	"errors"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/datarhei/gosrt/metrics"
 )
+
+// ServerConfig contains configuration for creating a new SRT server.
+type ServerConfig struct {
+	// Addr is the address the SRT server should listen on, e.g. ":6001".
+	Addr string
+
+	// Config is the SRT connection configuration.
+	Config *Config
+
+	// HandleConnect will be called for each incoming connection.
+	// This allows you to implement your own interpretation of the streamid
+	// and authorization. If nil, all connections will be rejected.
+	HandleConnect AcceptFunc
+
+	// HandlePublish will be called for a publishing connection.
+	// If nil, a default handler that closes the connection will be used.
+	HandlePublish func(conn Conn)
+
+	// HandleSubscribe will be called for a subscribing connection.
+	// If nil, a default handler that closes the connection will be used.
+	HandleSubscribe func(conn Conn)
+}
 
 // Server is a framework for a SRT server
 type Server struct {
@@ -27,7 +48,7 @@ type Server struct {
 	// HandlePublish will be called for a publishing connection.
 	HandlePublish func(conn Conn)
 
-	// HandlePublish will be called for a subscribing connection.
+	// HandleSubscribe will be called for a subscribing connection.
 	HandleSubscribe func(conn Conn)
 
 	// Context is the root context for the server. When cancelled, the server will shutdown gracefully.
@@ -37,14 +58,65 @@ type Server struct {
 	// When this waitgroup reaches zero, all shutdown operations are complete.
 	ShutdownWg *sync.WaitGroup
 
-	ln           Listener
-	listenerWg   sync.WaitGroup // Waitgroup for listener shutdown
-	metricsServer *http.Server // Optional metrics HTTP server
-	metricsServerOnce sync.Once // Ensure metrics server is started only once
+	ln                Listener
+	metricsServer     *http.Server // Optional metrics HTTP server
+	metricsServerOnce sync.Once    // Ensure metrics server is started only once
 }
 
 // ErrServerClosed is returned when the server is about to shutdown.
 var ErrServerClosed = errors.New("srt: server closed")
+
+// NewServer creates a new SRT server with the given context and configuration.
+// The context should be the root context that, when cancelled, triggers graceful shutdown.
+// The waitgroup is used to track when the server has fully shutdown.
+//
+// Example:
+//
+//	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+//	defer stop()
+//
+//	var wg sync.WaitGroup
+//
+//	server := srt.NewServer(ctx, &wg, srt.ServerConfig{
+//	    Addr:          ":6001",
+//	    Config:        &config,
+//	    HandleConnect: handleConnect,
+//	    HandlePublish: handlePublish,
+//	    HandleSubscribe: handleSubscribe,
+//	})
+//
+//	wg.Add(1)
+//	go func() {
+//	    defer wg.Done()
+//	    if err := server.ListenAndServe(); err != nil && err != srt.ErrServerClosed {
+//	        log.Printf("SRT Server: %s", err)
+//	    }
+//	}()
+func NewServer(ctx context.Context, wg *sync.WaitGroup, config ServerConfig) *Server {
+	s := &Server{
+		Addr:            config.Addr,
+		Config:          config.Config,
+		HandleConnect:   config.HandleConnect,
+		HandlePublish:   config.HandlePublish,
+		HandleSubscribe: config.HandleSubscribe,
+		Context:         ctx,
+		ShutdownWg:      wg,
+	}
+
+	// Set defaults
+	if s.HandlePublish == nil {
+		s.HandlePublish = s.defaultHandler
+	}
+	if s.HandleSubscribe == nil {
+		s.HandleSubscribe = s.defaultHandler
+	}
+	if s.Config == nil {
+		defaultConfig := DefaultConfig()
+		s.Config = &defaultConfig
+	}
+
+	return s
+}
 
 // ListenAndServe starts the SRT server. It blocks until an error happens.
 // If the error is ErrServerClosed the server has shutdown normally.
@@ -74,14 +146,10 @@ func (s *Server) Listen() error {
 		s.Config = &config
 	}
 
-	// Increment listener waitgroup
-	s.listenerWg.Add(1)
-
 	// Start listening for incoming connections.
-	// Pass context and waitgroup to listener
-	ln, err := Listen("srt", s.Addr, *s.Config, s.Context, &s.listenerWg)
+	// Pass ShutdownWg to listener - listener will Add(1) on start and Done() on close
+	ln, err := Listen(s.Context, "srt", s.Addr, *s.Config, s.ShutdownWg)
 	if err != nil {
-		s.listenerWg.Done() // Decrement on error
 		return err
 	}
 
@@ -170,43 +238,19 @@ func (s *Server) startMetricsServer() {
 }
 
 // Shutdown will shutdown the server. ListenAndServe will return a ErrServerClosed
+// Note: The caller is responsible for waiting on the waitgroup. Listener.Close()
+// will call shutdownWg.Done() when it finishes.
 func (s *Server) Shutdown() {
 	if s.ln == nil {
-		// No listener - just notify root waitgroup if set
-		if s.ShutdownWg != nil {
-			s.ShutdownWg.Done()
-		}
 		return
 	}
 
 	// Close the listener (this will trigger listener shutdown)
+	// Listener.Close() will:
+	// 1. Close all connections (each calls shutdownWg.Done() when done)
+	// 2. Wait for receive handlers to exit
+	// 3. Call shutdownWg.Done() to signal completion
 	s.ln.Close()
-
-	// Wait for listener to shutdown
-	done := make(chan struct{})
-	go func() {
-		s.listenerWg.Wait()
-		close(done)
-	}()
-
-	// Use config shutdown delay as timeout, or default to 5 seconds
-	timeout := 5 * time.Second
-	if s.Config != nil && s.Config.ShutdownDelay > 0 {
-		timeout = s.Config.ShutdownDelay
-	}
-
-	select {
-	case <-done:
-		// Listener shutdown complete
-	case <-time.After(timeout):
-		// Timeout - log warning but continue
-		// Note: In production, we might want to log this, but logger might not be available
-	}
-
-	// Notify root waitgroup
-	if s.ShutdownWg != nil {
-		s.ShutdownWg.Done()
-	}
 }
 
 func (s *Server) defaultHandler(conn Conn) {

@@ -169,7 +169,10 @@ run_test "ShutdownDelay flag (1s)" "-shutdowndelay 1s" '"ShutdownDelay" *: *1000
 # Test 26: HandshakeTimeout and ShutdownDelay together
 run_test "HandshakeTimeout and ShutdownDelay together" "-handshaketimeout 1.5s -shutdowndelay 5s" '"HandshakeTimeout" *: *1500000000.*"ShutdownDelay" *: *5000000000' "$CLIENT_BIN"
 
-# Test 27: All flag types combined (excluding drifttracer=false due to known limitation)
+# Test 27: LocalAddr flag
+run_test "LocalAddr flag" "-localaddr 127.0.0.20" '"LocalAddr" *: *"127.0.0.20"' "$CLIENT_BIN"
+
+# Test 28: All flag types combined (excluding drifttracer=false due to known limitation)
 # Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
 run_test "All flag types" "-statisticsinterval 10s -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 

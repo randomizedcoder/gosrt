@@ -164,149 +164,134 @@ func main() {
 		fmt.Println(string(data))
 	}
 
-	// Create root context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// ============================================================
+	// Create context that cancels on signal (replaces setupSignalHandler)
+	// ============================================================
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Create root waitgroup for tracking all shutdown operations
-	var shutdownWg sync.WaitGroup
-	shutdownWg.Add(1) // Increment for server shutdown
+	// Single waitgroup for all goroutines
+	var wg sync.WaitGroup
 
-	// Setup signal handler that cancels context (Option 3: Context-Driven Shutdown)
-	setupSignalHandler(ctx, cancel, &shutdownWg, config.ShutdownDelay)
-
-	// Start metrics server if enabled
+	// ============================================================
+	// Start Prometheus Metrics HTTP Server (if enabled)
+	// ============================================================
 	if *metricsEnabled {
-		startMetricsServer(*metricsListenAddr, ctx)
-		fmt.Fprintf(os.Stderr, "Metrics server started on %s\n", *metricsListenAddr)
-	}
-
-	s.server = &srt.Server{
-		Addr:            s.addr,
-		HandleConnect:   s.handleConnect,
-		HandlePublish:   s.handlePublish,
-		HandleSubscribe: s.handleSubscribe,
-		Config:          &config,
-		Context:         ctx,         // Set context before ListenAndServe
-		ShutdownWg:      &shutdownWg, // Set waitgroup before ListenAndServe
-	}
-
-	fmt.Fprintf(os.Stderr, "Listening on %s\n", s.addr)
-
-	go func() {
-		if config.Logger == nil {
-			return
+		promSrv := &http.Server{
+			Addr:    *metricsListenAddr,
+			Handler: metrics.MetricsHandler(),
 		}
 
-		for m := range config.Logger.Listen() {
-			fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n", m.SocketId, m.Topic, m.File, m.Line, m.Message)
-		}
-	}()
-
-	// Start periodic statistics printing if enabled
-	if config.StatisticsPrintInterval > 0 {
+		// Shutdown watcher - cleanly shuts down Prometheus server when context cancelled
 		go func() {
-			ticker := time.NewTicker(config.StatisticsPrintInterval)
-			defer ticker.Stop()
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := promSrv.Shutdown(shutdownCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "Prometheus server shutdown error: %v\n", err)
+			}
+		}()
 
-			for range ticker.C {
-				connections := s.server.GetConnections()
-				common.PrintConnectionStatistics(connections, config.StatisticsPrintInterval.String(), nil)
+		// Run Prometheus server
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Fprintf(os.Stderr, "Prometheus server started on %s\n", *metricsListenAddr)
+			if err := promSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				fmt.Fprintf(os.Stderr, "Prometheus server error: %v\n", err)
 			}
 		}()
 	}
 
-	// Start server (will shutdown automatically when context cancelled)
+	// ============================================================
+	// Start Logger Goroutine (if enabled)
+	// ============================================================
+	if config.Logger != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for m := range config.Logger.Listen() {
+				fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n",
+					m.SocketId, m.Topic, m.File, m.Line, m.Message)
+			}
+		}()
+	}
+
+	// ============================================================
+	// Start Statistics Ticker (if enabled)
+	// ============================================================
+	if config.StatisticsPrintInterval > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(config.StatisticsPrintInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					connections := s.server.GetConnections()
+					common.PrintConnectionStatistics(connections,
+						config.StatisticsPrintInterval.String(), nil)
+				}
+			}
+		}()
+	}
+
+	// ============================================================
+	// Setup and Start SRT Server
+	// ============================================================
+	s.server = srt.NewServer(ctx, &wg, srt.ServerConfig{
+		Addr:            s.addr,
+		Config:          &config,
+		HandleConnect:   s.handleConnect,
+		HandlePublish:   s.handlePublish,
+		HandleSubscribe: s.handleSubscribe,
+	})
+
+	fmt.Fprintf(os.Stderr, "Listening on %s\n", s.addr)
+
+	// Run SRT server
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if err := s.ListenAndServe(); err != nil && err != srt.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "SRT Server: %s\n", err)
 			os.Exit(2)
 		}
 	}()
 
-	// Wait for graceful shutdown to complete (with timeout as safety net)
+	// ============================================================
+	// Wait for Shutdown Signal
+	// ============================================================
+	<-ctx.Done()
+	fmt.Fprintf(os.Stderr, "\nShutdown signal received\n")
+
+	// ============================================================
+	// Cleanup
+	// ============================================================
+	// Close logger so its goroutine can exit (channel will close)
+	if config.Logger != nil {
+		config.Logger.Close()
+	}
+
+	// ============================================================
+	// Wait for All Goroutines with Timeout
+	// ============================================================
 	done := make(chan struct{})
 	go func() {
-		shutdownWg.Wait()
+		wg.Wait()
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		// All shutdown operations completed
+		fmt.Fprintf(os.Stderr, "Graceful shutdown complete\n")
 	case <-time.After(config.ShutdownDelay):
-		// Timeout - proceed with exit (safety net)
+		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s\n", config.ShutdownDelay)
 	}
-
-	if config.Logger != nil {
-		config.Logger.Close()
-	}
-}
-
-// startMetricsServer starts an HTTP server for Prometheus metrics
-// Returns the server so it can be shut down gracefully
-func startMetricsServer(addr string, ctx context.Context) *http.Server {
-	if addr == "" {
-		return nil
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.MetricsHandler())
-
-	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "Metrics server error: %v\n", err)
-		}
-	}()
-
-	// Shutdown server when context is cancelled
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
-
-	return server
-}
-
-// setupSignalHandler sets up OS signal handling to cancel the root context
-// Option 3: Context-Driven Shutdown - signal handler only cancels context
-func setupSignalHandler(ctx context.Context, cancel context.CancelFunc, shutdownWg *sync.WaitGroup, shutdownDelay time.Duration) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		select {
-		case <-sigChan:
-			// Signal received - cancel root context to initiate graceful shutdown
-			// Server.Serve() will detect context cancellation and shutdown automatically
-			cancel()
-
-			// Wait for graceful shutdown to complete (via waitgroups with timeout)
-			done := make(chan struct{})
-			go func() {
-				shutdownWg.Wait() // Wait for all waitgroups to complete
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				// All waitgroups completed - graceful shutdown successful
-			case <-time.After(shutdownDelay):
-				// Timeout - proceed with exit even if waitgroups not complete
-				fmt.Fprintf(os.Stderr, "Graceful shutdown timed out after %s. Exiting.\n", shutdownDelay)
-			}
-		case <-ctx.Done():
-			// Context already cancelled - exit
-			return
-		}
-	}()
 }
 
 func (s *server) log(who, action, path, message string, client net.Addr) {

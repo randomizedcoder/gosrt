@@ -243,23 +243,49 @@ func (tm *TestMetrics) PrintSummary() {
 		fmt.Printf("\n%s (%s):\n", cm.Component, cm.Addr)
 		fmt.Printf("  Snapshots collected: %d\n", len(cm.Snapshots))
 
-		if len(cm.Snapshots) > 0 {
-			last := cm.Snapshots[len(cm.Snapshots)-1]
-			if last.Error != nil {
-				fmt.Printf("  Last snapshot error: %v\n", last.Error)
-			} else {
-				fmt.Printf("  Metrics collected: %d\n", len(last.Metrics))
+		if len(cm.Snapshots) == 0 {
+			continue
+		}
 
-				// Print some key metrics
-				keyMetrics := []string{
-					"gosrt_pkt_sent_total",
-					"gosrt_pkt_recv_total",
-					"gosrt_pkt_retrans_total",
+		// Count successful and failed snapshots
+		successCount := 0
+		failCount := 0
+		var lastSuccessful *MetricsSnapshot
+		for i := range cm.Snapshots {
+			if cm.Snapshots[i].Error != nil {
+				failCount++
+			} else {
+				successCount++
+				lastSuccessful = cm.Snapshots[i]
+			}
+		}
+
+		fmt.Printf("  Successful: %d, Failed: %d\n", successCount, failCount)
+
+		// Show stats from the last successful snapshot
+		if lastSuccessful != nil {
+			fmt.Printf("  Metrics in last successful snapshot: %d\n", len(lastSuccessful.Metrics))
+
+			// Print some key metrics
+			keyMetrics := []string{
+				"gosrt_pkt_sent_total",
+				"gosrt_pkt_recv_total",
+				"gosrt_pkt_retrans_total",
+			}
+			for _, m := range keyMetrics {
+				if v, ok := lastSuccessful.Metrics[m]; ok {
+					fmt.Printf("  %s: %.0f\n", m, v)
 				}
-				for _, m := range keyMetrics {
-					if v, ok := last.Metrics[m]; ok {
-						fmt.Printf("  %s: %.0f\n", m, v)
-					}
+			}
+		}
+
+		// Note if there were any errors
+		if failCount > 0 {
+			// Find the last error for context
+			for i := len(cm.Snapshots) - 1; i >= 0; i-- {
+				if cm.Snapshots[i].Error != nil {
+					fmt.Printf("  Note: %d collection(s) failed (last error: %v)\n", failCount, cm.Snapshots[i].Error)
+					break
 				}
 			}
 		}

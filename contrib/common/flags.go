@@ -75,6 +75,9 @@ var (
 	// Timeout and shutdown configuration flags
 	HandshakeTimeout = flag.Duration("handshaketimeout", 0, "Maximum time allowed for complete handshake exchange (e.g., 1.5s). Must be less than peeridletimeo")
 	ShutdownDelay    = flag.Duration("shutdowndelay", 0, "Time to wait for graceful shutdown after signal (e.g., 5s)")
+
+	// Local address binding for clients
+	LocalAddr = flag.String("localaddr", "", "Local IP address to bind to when connecting (e.g., 127.0.0.20)")
 )
 
 // ParseFlags parses command-line flags and populates FlagSet map
@@ -241,5 +244,8 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["shutdowndelay"] {
 		config.ShutdownDelay = *ShutdownDelay
+	}
+	if FlagSet["localaddr"] {
+		config.LocalAddr = *LocalAddr
 	}
 }

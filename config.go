@@ -244,6 +244,12 @@ type Config struct {
 	// Shutdown delay - time to wait for graceful shutdown after signal before application exit
 	// Default: 5 seconds
 	ShutdownDelay time.Duration
+
+	// Local address to bind to when dialing (client only)
+	// Format: "IP" or "IP:port" (e.g., "127.0.0.20" or "127.0.0.20:0")
+	// If empty, the system chooses an ephemeral address
+	// Only used by Dial(), not Listen()
+	LocalAddr string
 }
 
 // DefaultConfig is the default configuration for a SRT connection

@@ -301,6 +301,11 @@ func (c *TestConfig) GetClientGeneratorFlags() []string {
 		"-bitrate", strconv.FormatInt(c.Bitrate, 10),
 	}
 
+	// Add local address binding (to use specific source IP)
+	if clientGenNet.IP != "" {
+		flags = append(flags, "-localaddr", clientGenNet.IP)
+	}
+
 	// Add metrics address if port is configured
 	if clientGenNet.MetricsPort > 0 {
 		flags = append(flags, "-metricsenabled")
@@ -328,6 +333,11 @@ func (c *TestConfig) GetClientFlags() []string {
 	flags := []string{
 		"-from", subscriberURL,
 		"-to", "null",
+	}
+
+	// Add local address binding (to use specific source IP)
+	if clientNet.IP != "" {
+		flags = append(flags, "-localaddr", clientNet.IP)
 	}
 
 	// Add metrics address if port is configured

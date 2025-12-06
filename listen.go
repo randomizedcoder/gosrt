@@ -173,10 +173,10 @@ type listener struct {
 //
 // Examples:
 //
-//	Listen("srt", "127.0.0.1:3000", DefaultConfig(), ctx, shutdownWg)
+//	Listen(ctx, "srt", "127.0.0.1:3000", DefaultConfig(), shutdownWg)
 //
 // In case of an error, the returned Listener is nil and the error is non-nil.
-func Listen(network, address string, config Config, ctx context.Context, shutdownWg *sync.WaitGroup) (Listener, error) {
+func Listen(ctx context.Context, network, address string, config Config, shutdownWg *sync.WaitGroup) (Listener, error) {
 	if network != "srt" {
 		return nil, fmt.Errorf("listen: the network must be 'srt'")
 	}
@@ -439,8 +439,12 @@ func (ln *listener) Close() {
 		// Close all connections (triggers connection shutdowns)
 		// sync.Map handles locking internally
 		ln.conns.Range(func(key, value interface{}) bool {
-			conn := value.(*srtConn)
-			if conn == nil {
+			// Check if value is nil BEFORE type assertion (nil is stored as placeholder)
+			if value == nil {
+				return true // continue iteration
+			}
+			conn, ok := value.(*srtConn)
+			if !ok || conn == nil {
 				return true // continue iteration
 			}
 			conn.close() // Connection will call connWg.Done() when done (Phase 5)

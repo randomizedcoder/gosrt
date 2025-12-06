@@ -9,9 +9,9 @@ The Dial function connects to a server:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var wg sync.WaitGroup
-	conn, err := srt.Dial("srt", "golang.org:6000", srt.Config{
+	conn, err := srt.Dial(ctx, "srt", "golang.org:6000", srt.Config{
 		StreamId: "...",
-	}, ctx, &wg)
+	}, &wg)
 	if err != nil {
 		// handle error
 	}
@@ -34,7 +34,7 @@ The Listen function creates servers:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var wg sync.WaitGroup
-	ln, err := srt.Listen("srt", ":6000", srt.Config{...}, ctx, &wg)
+	ln, err := srt.Listen(ctx, "srt", ":6000", srt.Config{...}, &wg)
 	if err != nil {
 		// handle error
 	}

@@ -3,23 +3,24 @@ package main
 import "time"
 
 // Default network configurations for each component
+// Using ports 5101-5103 for metrics to avoid conflicts with system Prometheus (9090)
 var (
 	DefaultServerNetwork = NetworkConfig{
 		IP:          "127.0.0.10",
 		SRTPort:     6000,
-		MetricsPort: 9090,
+		MetricsPort: 5101,
 	}
 
 	DefaultClientGeneratorNetwork = NetworkConfig{
 		IP:          "127.0.0.20",
 		SRTPort:     0, // Ephemeral port (client connects to server)
-		MetricsPort: 9091,
+		MetricsPort: 5102,
 	}
 
 	DefaultClientNetwork = NetworkConfig{
 		IP:          "127.0.0.30",
 		SRTPort:     0, // Ephemeral port (client connects to server)
-		MetricsPort: 9092,
+		MetricsPort: 5103,
 	}
 )
 
@@ -65,4 +66,3 @@ var (
 		PacketReorderAlgorithm: "list",
 	}
 )
-

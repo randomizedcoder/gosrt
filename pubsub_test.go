@@ -2,6 +2,7 @@ package srt
 
 import (
 	"bytes"
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -11,14 +12,18 @@ import (
 )
 
 func TestPubSub(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	message := "Hello World!"
 	channel := NewPubSub(PubSubConfig{})
 
 	config := DefaultConfig()
 
 	server := Server{
-		Addr:   "127.0.0.1:6003",
-		Config: &config,
+		Addr:    "127.0.0.1:6003",
+		Config:  &config,
+		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
 

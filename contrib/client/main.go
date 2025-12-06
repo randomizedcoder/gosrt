@@ -156,99 +156,138 @@ func main() {
 		logger = srt.NewLogger(strings.Split(*logtopics, ","))
 	}
 
-	go func() {
-		if logger == nil {
-			return
-		}
+	// Get config to check for statistics interval
+	config := srt.DefaultConfig()
+	common.ApplyFlagsToConfig(&config)
 
-		for m := range logger.Listen() {
-			fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n", m.SocketId, m.Topic, m.File, m.Line, m.Message)
-		}
-	}()
+	// ============================================================
+	// Create context that cancels on signal (replaces setupSignalHandler)
+	// ============================================================
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Create root context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Single waitgroup for all goroutines
+	var wg sync.WaitGroup
 
-	// Create root waitgroup for tracking all shutdown operations
-	// Note: This waitgroup is used by SRT connections (Dial/Listen) to track their goroutines
-	// We increment it for each connection (reader and writer) that we create
-	var shutdownWg sync.WaitGroup
-
-	// Setup signal handler that cancels context (Option 3: Context-Driven Shutdown)
-	setupSignalHandler(ctx, cancel)
-
-	// Start metrics server if enabled
+	// ============================================================
+	// Start Prometheus Metrics HTTP Server (if enabled)
+	// ============================================================
 	if *metricsEnabled {
-		startMetricsServer(*metricsListenAddr, ctx)
-		fmt.Fprintf(os.Stderr, "Metrics server started on %s\n", *metricsListenAddr)
+		promSrv := &http.Server{
+			Addr:    *metricsListenAddr,
+			Handler: metrics.MetricsHandler(),
+		}
+
+		// Shutdown watcher - cleanly shuts down Prometheus server when context cancelled
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := promSrv.Shutdown(shutdownCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "Prometheus server shutdown error: %v\n", err)
+			}
+		}()
+
+		// Run Prometheus server
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Fprintf(os.Stderr, "Prometheus server started on %s\n", *metricsListenAddr)
+			if err := promSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				fmt.Fprintf(os.Stderr, "Prometheus server error: %v\n", err)
+			}
+		}()
 	}
 
-	r, err := openReader(*from, logger, ctx, &shutdownWg)
+	// ============================================================
+	// Start Logger Goroutine (if enabled)
+	// ============================================================
+	if logger != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for m := range logger.Listen() {
+				fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n",
+					m.SocketId, m.Topic, m.File, m.Line, m.Message)
+			}
+		}()
+	}
+
+	// ============================================================
+	// Open Reader and Writer
+	// ============================================================
+	r, err := openReader(*from, logger, ctx, &wg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: from: %v\n", err)
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	// Note: The dialer/listener itself manages the shutdownWg Add/Done
-
-	w, err := openWriter(*to, logger, ctx, &shutdownWg)
+	w, err := openWriter(*to, logger, ctx, &wg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	// Note: The dialer/listener itself manages the shutdownWg Add/Done
-
-	// Get config to check for statistics interval
-	config := srt.DefaultConfig()
-	common.ApplyFlagsToConfig(&config)
-
-	// Start periodic statistics printing if enabled
+	// ============================================================
+	// Start Statistics Ticker (if enabled)
+	// ============================================================
 	if config.StatisticsPrintInterval > 0 {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			ticker := time.NewTicker(config.StatisticsPrintInterval)
 			defer ticker.Stop()
 
-			for range ticker.C {
-				var connections []srt.Conn
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					var connections []srt.Conn
 
-				// Check if reader is an SRT connection
-				if srtconn, ok := r.(srt.Conn); ok {
-					connections = append(connections, srtconn)
-				}
-
-				// Check if writer is an SRT connection (and not NullWriter)
-				if srtconn, ok := w.(srt.Conn); ok {
-					connections = append(connections, srtconn)
-				}
-
-				// Create labeler function for client (reader/writer labels)
-				labeler := func(index int, total int) string {
-					if index == 0 && total == 2 {
-						return "reader"
-					} else if index == 1 && total == 2 {
-						return "writer"
-					} else if total == 1 {
-						// Single connection - determine if reader or writer
-						if _, ok := r.(srt.Conn); ok {
-							return "reader"
-						}
-						return "writer"
+					// Check if reader is an SRT connection
+					if srtconn, ok := r.(srt.Conn); ok {
+						connections = append(connections, srtconn)
 					}
-					return ""
-				}
 
-				common.PrintConnectionStatistics(connections, config.StatisticsPrintInterval.String(), labeler)
+					// Check if writer is an SRT connection (and not NullWriter)
+					if srtconn, ok := w.(srt.Conn); ok {
+						connections = append(connections, srtconn)
+					}
+
+					// Create labeler function for client (reader/writer labels)
+					labeler := func(index int, total int) string {
+						if index == 0 && total == 2 {
+							return "reader"
+						} else if index == 1 && total == 2 {
+							return "writer"
+						} else if total == 1 {
+							// Single connection - determine if reader or writer
+							if _, ok := r.(srt.Conn); ok {
+								return "reader"
+							}
+							return "writer"
+						}
+						return ""
+					}
+
+					common.PrintConnectionStatistics(connections, config.StatisticsPrintInterval.String(), labeler)
+				}
 			}
 		}()
 	}
 
+	// ============================================================
+	// Main Read/Write Loop
+	// ============================================================
 	doneChan := make(chan error)
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		buffer := make([]byte, CHANNEL_SIZE)
 
 		s := stats{}
@@ -265,6 +304,7 @@ func main() {
 			select {
 			case <-ctx.Done():
 				// Context cancelled - exit gracefully
+				doneChan <- nil
 				return
 			default:
 			}
@@ -284,6 +324,7 @@ func main() {
 				select {
 				case <-ctx.Done():
 					// Context cancelled - exit gracefully (don't report error)
+					doneChan <- nil
 					return
 				default:
 				}
@@ -300,6 +341,7 @@ func main() {
 					strings.Contains(errStr, "use of closed network connection") ||
 					strings.Contains(errStr, "broken pipe") {
 					// Connection closed during shutdown - exit gracefully (don't report error)
+					doneChan <- nil
 					return
 				}
 
@@ -310,6 +352,7 @@ func main() {
 						if strings.Contains(errStr, "connection refused") ||
 							strings.Contains(errStr, "broken pipe") {
 							// Connection closed during shutdown - exit gracefully (don't report error)
+							doneChan <- nil
 							return
 						}
 						// Check if it's a timeout error
@@ -331,6 +374,7 @@ func main() {
 			select {
 			case <-ctx.Done():
 				// Context cancelled - exit gracefully
+				doneChan <- nil
 				return
 			default:
 			}
@@ -340,6 +384,7 @@ func main() {
 				select {
 				case <-ctx.Done():
 					// Context cancelled - exit gracefully (don't report error)
+					doneChan <- nil
 					return
 				default:
 					// Check if error is due to connection being closed (expected during shutdown)
@@ -348,6 +393,7 @@ func main() {
 						strings.Contains(errStr, "use of closed network connection") ||
 						strings.Contains(errStr, "broken pipe") {
 						// Connection closed during shutdown - exit gracefully (don't report error)
+						doneChan <- nil
 						return
 					}
 					// Check for net.OpError which indicates connection issues
@@ -357,6 +403,7 @@ func main() {
 							if strings.Contains(errStr, "connection refused") ||
 								strings.Contains(errStr, "broken pipe") {
 								// Connection closed during shutdown - exit gracefully (don't report error)
+								doneChan <- nil
 								return
 							}
 						}
@@ -368,9 +415,9 @@ func main() {
 		}
 	}()
 
-	// Wait for either error or context cancellation
-	// When read/write goroutines exit, we should exit immediately
-	// The waitgroup is only for explicit graceful shutdown
+	// ============================================================
+	// Wait for Completion or Context Cancellation
+	// ============================================================
 	select {
 	case err := <-doneChan:
 		if err != nil {
@@ -378,71 +425,38 @@ func main() {
 		} else {
 			fmt.Fprint(os.Stderr, "\n")
 		}
-		// Read/write goroutine exited - close connections and exit
-		// Don't wait for waitgroup - just close and exit
-		w.Close()
-		r.Close()
-		return
 	case <-ctx.Done():
 		// Context cancelled - graceful shutdown
-		fmt.Fprint(os.Stderr, "\n")
-		// Close connections and exit immediately
-		// Signal handler already cancelled context, so exit now
-		w.Close()
-		r.Close()
-		return
-	}
-}
-
-// setupSignalHandler sets up OS signal handling to cancel the root context
-// Option 3: Context-Driven Shutdown - signal handler only cancels context
-func setupSignalHandler(ctx context.Context, cancel context.CancelFunc) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		select {
-		case <-sigChan:
-			// Signal received - cancel root context to initiate graceful shutdown
-			// Components will detect context cancellation and shutdown automatically
-			cancel()
-		case <-ctx.Done():
-			// Context already cancelled - exit
-			return
-		}
-	}()
-}
-
-// startMetricsServer starts an HTTP server for Prometheus metrics
-// Returns the server so it can be shut down gracefully
-func startMetricsServer(addr string, ctx context.Context) *http.Server {
-	if addr == "" {
-		return nil
+		fmt.Fprintf(os.Stderr, "\nShutdown signal received\n")
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.MetricsHandler())
+	// ============================================================
+	// Cleanup
+	// ============================================================
+	// Close connections
+	w.Close()
+	r.Close()
 
-	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+	// Close logger so its goroutine can exit (channel will close)
+	if logger != nil {
+		logger.Close()
 	}
 
+	// ============================================================
+	// Wait for All Goroutines with Timeout
+	// ============================================================
+	done := make(chan struct{})
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "Metrics server error: %v\n", err)
-		}
+		wg.Wait()
+		close(done)
 	}()
 
-	// Shutdown server when context is cancelled
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
-
-	return server
+	select {
+	case <-done:
+		fmt.Fprintf(os.Stderr, "Graceful shutdown complete\n")
+	case <-time.After(config.ShutdownDelay):
+		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s\n", config.ShutdownDelay)
+	}
 }
 
 // NullWriter is an io.WriteCloser that discards all data.
@@ -457,7 +471,7 @@ func (n *NullWriter) Close() error {
 	return nil
 }
 
-func openReader(addr string, logger srt.Logger, ctx context.Context, shutdownWg *sync.WaitGroup) (io.ReadCloser, error) {
+func openReader(addr string, logger srt.Logger, ctx context.Context, wg *sync.WaitGroup) (io.ReadCloser, error) {
 	if len(addr) == 0 {
 		return nil, fmt.Errorf("the address must not be empty")
 	}
@@ -506,7 +520,7 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 		mode := u.Query().Get("mode")
 
 		if mode == "listener" {
-			ln, err := srt.Listen("srt", u.Host, config, ctx, shutdownWg)
+			ln, err := srt.Listen(ctx, "srt", u.Host, config, wg)
 			if err != nil {
 				return nil, err
 			}
@@ -537,7 +551,7 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 		} else if mode == "caller" || mode == "" {
 			// Default to caller mode if mode not specified
 			// Stream ID is set in config via UnmarshalQuery (from URL query parameter)
-			conn, err := srt.Dial("srt", u.Host, config, ctx, shutdownWg)
+			conn, err := srt.Dial(ctx, "srt", u.Host, config, wg)
 			if err != nil {
 				return nil, err
 			}
@@ -563,7 +577,7 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 	return nil, fmt.Errorf("unsupported reader")
 }
 
-func openWriter(addr string, logger srt.Logger, ctx context.Context, shutdownWg *sync.WaitGroup) (io.WriteCloser, error) {
+func openWriter(addr string, logger srt.Logger, ctx context.Context, wg *sync.WaitGroup) (io.WriteCloser, error) {
 	// Handle no-output mode: empty string, "null", or "discard"
 	if len(addr) == 0 || addr == "null" || addr == "discard" {
 		return &NullWriter{}, nil
@@ -604,7 +618,7 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 		mode := u.Query().Get("mode")
 
 		if mode == "listener" {
-			ln, err := srt.Listen("srt", u.Host, config, ctx, shutdownWg)
+			ln, err := srt.Listen(ctx, "srt", u.Host, config, wg)
 			if err != nil {
 				return nil, err
 			}
@@ -635,7 +649,7 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, shutdownWg 
 		} else if mode == "caller" || mode == "" {
 			// Default to caller mode if mode not specified
 			// Stream ID is set in config via UnmarshalQuery (from URL query parameter)
-			conn, err := srt.Dial("srt", u.Host, config, ctx, shutdownWg)
+			conn, err := srt.Dial(ctx, "srt", u.Host, config, wg)
 			if err != nil {
 				return nil, err
 			}
