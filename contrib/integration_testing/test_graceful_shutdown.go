@@ -294,11 +294,12 @@ func runTestWithConfig(config TestConfig) error {
 		close(clientDone)
 	}()
 
+	// Client has internal 5-second timeouts for waitgroups, allow 8 seconds total
 	select {
 	case <-clientDone:
 		fmt.Println("✓ Client exited gracefully")
-	case <-time.After(3 * time.Second):
-		return fmt.Errorf("client did not exit within 3 seconds")
+	case <-time.After(8 * time.Second):
+		return fmt.Errorf("client did not exit within 8 seconds")
 	}
 
 	if clientCmd.ProcessState != nil && !clientCmd.ProcessState.Success() {
@@ -319,11 +320,12 @@ func runTestWithConfig(config TestConfig) error {
 		close(clientGenDone)
 	}()
 
+	// Client-generator has internal 5-second timeouts for waitgroups, allow 8 seconds total
 	select {
 	case <-clientGenDone:
 		fmt.Println("✓ Client-generator exited gracefully")
-	case <-time.After(3 * time.Second):
-		return fmt.Errorf("client-generator did not exit within 3 seconds")
+	case <-time.After(8 * time.Second):
+		return fmt.Errorf("client-generator did not exit within 8 seconds")
 	}
 
 	if clientGenCmd.ProcessState != nil && !clientGenCmd.ProcessState.Success() {

@@ -282,7 +282,8 @@ func main() {
 	// ============================================================
 	// Main Read/Write Loop
 	// ============================================================
-	doneChan := make(chan error)
+	// Buffered channel prevents goroutine blocking if main receives ctx.Done() first
+	doneChan := make(chan error, 10)
 
 	wg.Add(1)
 	go func() {
