@@ -29,65 +29,6 @@ const (
 	CHANNEL_SIZE = 2048
 )
 
-type stats struct {
-	bprev  uint64
-	btotal uint64
-	prev   uint64
-	total  uint64
-
-	lock sync.Mutex
-
-	period time.Duration
-	last   time.Time
-}
-
-func (s *stats) init(period time.Duration, ctx context.Context) {
-	s.bprev = 0
-	s.btotal = 0
-	s.prev = 0
-	s.total = 0
-
-	s.period = period
-	s.last = time.Now()
-
-	go s.tick(ctx)
-}
-
-func (s *stats) tick(ctx context.Context) {
-	ticker := time.NewTicker(s.period)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			// Context cancelled - exit gracefully
-			return
-		case c := <-ticker.C:
-			s.lock.Lock()
-			diff := c.Sub(s.last)
-
-			bavg := float64(s.btotal-s.bprev) * 8 / (1000 * 1000 * diff.Seconds())
-			avg := float64(s.total-s.prev) / diff.Seconds()
-
-			s.bprev = s.btotal
-			s.prev = s.total
-			s.last = c
-
-			s.lock.Unlock()
-
-			fmt.Fprintf(os.Stderr, "\r%-54s: %8.3f kpackets (%8.3f packets/s), %8.3f mbytes (%8.3f Mbps)", c, float64(s.total)/1024, avg, float64(s.btotal)/1024/1024, bavg)
-		}
-	}
-}
-
-func (s *stats) update(n uint64) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	s.btotal += n
-	s.total++
-}
-
 var (
 	// Client-specific flags
 	from        = flag.String("from", "", "Address to read from, sources: srt://, udp://, - (stdin)")
@@ -280,6 +221,27 @@ func main() {
 	}
 
 	// ============================================================
+	// Create Client Metrics (lock-free atomic counters)
+	// ============================================================
+	clientMetrics := &metrics.ConnectionMetrics{}
+	// Register with socket ID 0 for client (unique identifier)
+	metrics.RegisterConnection(0, clientMetrics)
+	defer metrics.UnregisterConnection(0)
+
+	// Start throughput stats display loop (uses shared common function)
+	// Shows receive stats: bytes, packets, success count, and loss count
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		common.RunThroughputDisplay(ctx, STATS_PERIOD, func() (uint64, uint64, uint64, uint64) {
+			return clientMetrics.ByteRecvDataSuccess.Load(),
+				clientMetrics.PktRecvDataSuccess.Load(),
+				clientMetrics.PktRecvSuccess.Load(),
+				clientMetrics.CongestionRecvPktLoss.Load()
+		})
+	}()
+
+	// ============================================================
 	// Main Read/Write Loop
 	// ============================================================
 	// Buffered channel prevents goroutine blocking if main receives ctx.Done() first
@@ -290,9 +252,6 @@ func main() {
 		defer wg.Done()
 
 		buffer := make([]byte, CHANNEL_SIZE)
-
-		s := stats{}
-		s.init(STATS_PERIOD, ctx)
 
 		// Check if reader is an SRT connection (supports SetReadDeadline)
 		var srtConn srt.Conn
@@ -369,7 +328,9 @@ func main() {
 				return
 			}
 
-			s.update(uint64(n))
+			// Lock-free atomic increments for throughput tracking
+			clientMetrics.ByteRecvDataSuccess.Add(uint64(n))
+			clientMetrics.PktRecvDataSuccess.Add(1)
 
 			// Check context cancellation before write
 			select {

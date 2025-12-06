@@ -246,7 +246,7 @@ func runTestWithConfig(config TestConfig) error {
 		testMetrics = NewTestMetrics(serverMetrics, clientGenMetrics, clientMetrics)
 
 		// Collect initial metrics
-		fmt.Println("Collecting initial metrics...")
+		fmt.Println("\nCollecting initial metrics...")
 		testMetrics.CollectAllMetrics("startup")
 	}
 
@@ -262,7 +262,7 @@ func runTestWithConfig(config TestConfig) error {
 		for {
 			select {
 			case <-collectTicker.C:
-				fmt.Println("Collecting mid-test metrics...")
+				fmt.Println("\nCollecting mid-test metrics...")
 				testMetrics.CollectAllMetrics("mid-test")
 			case <-testTimer.C:
 				collectTicker.Stop()
@@ -275,7 +275,7 @@ func runTestWithConfig(config TestConfig) error {
 
 	// Collect pre-shutdown metrics
 	if config.MetricsEnabled {
-		fmt.Println("Collecting pre-shutdown metrics...")
+		fmt.Println("\nCollecting pre-shutdown metrics...")
 		testMetrics.CollectAllMetrics("pre-shutdown")
 	}
 

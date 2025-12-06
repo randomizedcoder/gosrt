@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,73 @@ import (
 
 	srt "github.com/datarhei/gosrt"
 )
+
+// ThroughputGetter is a function that returns current bytes, packets, success count, and loss count
+// This allows the display to work with any counter source (metrics.ConnectionMetrics, etc.)
+// Returns: (bytes, pkts, successPkts, lostPkts)
+//   - bytes: total bytes transferred (for MB display)
+//   - pkts: packets for rate calculation (for pkt/s display)
+//   - successPkts: total successful packets (for success rate)
+//   - lostPkts: total unrecoverable packet losses (for success rate)
+type ThroughputGetter func() (bytes uint64, pkts uint64, successPkts uint64, lostPkts uint64)
+
+// RunThroughputDisplay runs a throughput display loop that periodically prints stats
+// The getter function is called to retrieve current byte/packet/success/loss totals
+// The loop exits when ctx is cancelled
+//
+// Output format (fixed-width columns, supports up to 99.999 Mb/s):
+//
+//	HH:MM:SS.xx | 9999.99 kpkt/s | 999.99 pkt/s | 9999.99 MB | 99.999 Mb/s | 9999 ok / 0 loss ~= 100.000%
+func RunThroughputDisplay(ctx context.Context, period time.Duration, getter ThroughputGetter) {
+	ticker := time.NewTicker(period)
+	defer ticker.Stop()
+
+	var prevBytes, prevPkts uint64
+	last := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			currentBytes, currentPkts, successPkts, lostPkts := getter()
+
+			diff := now.Sub(last)
+			if diff.Seconds() <= 0 {
+				continue // Avoid division by zero
+			}
+
+			mbps := float64(currentBytes-prevBytes) * 8 / (1000 * 1000 * diff.Seconds())
+			pps := float64(currentPkts-prevPkts) / diff.Seconds()
+
+			// Calculate success percentage
+			total := successPkts + lostPkts
+			var successPct float64 = 100.0
+			if total > 0 {
+				successPct = float64(successPkts) / float64(total) * 100.0
+			}
+
+			// Format time with 2 decimal places: HH:MM:SS.xx
+			timeStr := now.Format("15:04:05.00")
+
+			// Fixed-width columns for alignment (supports up to 99.999 Mb/so			// Format: time | kpkt/s | pkt/s | MB | Mb/s | success(k) / loss ~= %
+			// Success: 10 chars in thousands (up to 9999999.99k = ~10 billion packets)
+			// Loss: 6 chars raw count (up to 999999 lost packets)
+			fmt.Fprintf(os.Stderr, "\r%s | %8.2f kpkt/s | %7.2f pkt/s | %8.2f MB | %6.3f Mb/s | %10.2fk ok / %6d loss ~= %.3f%%",
+				timeStr,
+				float64(currentPkts)/1000,
+				pps,
+				float64(currentBytes)/(1024*1024),
+				mbps,
+				float64(successPkts)/1000,
+				lostPkts,
+				successPct)
+
+			prevBytes, prevPkts = currentBytes, currentPkts
+			last = now
+		}
+	}
+}
 
 // ConnectionTypeLabeler is a function that returns a label for a connection at a given index.
 // Returns empty string if no label should be shown.
