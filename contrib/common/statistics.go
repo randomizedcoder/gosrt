@@ -25,7 +25,7 @@ type ThroughputGetter func() (bytes uint64, pkts uint64, successPkts uint64, los
 //
 // Output format (fixed-width columns, supports up to 99.999 Mb/s):
 //
-//	HH:MM:SS.xx | 9999.99 kpkt/s | 999.99 pkt/s | 9999.99 MB | 99.999 Mb/s | 9999 ok / 0 loss ~= 100.000%
+//	HH:MM:SS.xx | 9999.99 kpkt/s | 999.99 pkt/s | 9999.99 MB | 99.999 Mb/s | 9999 ok / 0 loss ~= 100.000% success
 func RunThroughputDisplay(ctx context.Context, period time.Duration, getter ThroughputGetter) {
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
@@ -59,10 +59,10 @@ func RunThroughputDisplay(ctx context.Context, period time.Duration, getter Thro
 			timeStr := now.Format("15:04:05.00")
 
 			// Fixed-width columns for alignment (supports up to 99.999 Mb/s)
-			// Format: time | kpkt/s | pkt/s | MB | Mb/s | success(k) / loss ~= %
+			// Format: time | kpkt/s | pkt/s | MB | Mb/s | success(k) / loss ~= % success
 			// Success: 10 chars in thousands (up to 9999999.99k = ~10 billion packets)
 			// Loss: 6 chars raw count (up to 999999 lost packets)
-			fmt.Fprintf(os.Stderr, "\r%s | %8.2f kpkt/s | %7.2f pkt/s | %8.2f MB | %6.3f Mb/s | %10.2fk ok / %6d loss ~= %.3f%%",
+			fmt.Fprintf(os.Stderr, "\r%s | %8.2f kpkt/s | %7.2f pkt/s | %8.2f MB | %6.3f Mb/s | %10.2fk ok / %6d loss ~= %.3f%% success",
 				timeStr,
 				float64(currentPkts)/1000,
 				pps,
