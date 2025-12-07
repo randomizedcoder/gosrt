@@ -237,8 +237,12 @@ type ErrorAnalysisResult struct {
 }
 
 // AnalyzeErrors checks that error counters are zero (or within expected bounds)
+// FAIL-SAFE: Defaults to failed, only passes when we confirm no unexpected errors
 func AnalyzeErrors(ts *TestMetricsTimeSeries, config *TestConfig) ErrorAnalysisResult {
-	result := ErrorAnalysisResult{Passed: true}
+	// FAIL-SAFE: Start with failed - we must explicitly confirm no errors
+	result := ErrorAnalysisResult{Passed: false}
+
+	componentsChecked := 0
 
 	// Analyze each component
 	for _, component := range []MetricsTimeSeries{ts.Server, ts.ClientGenerator, ts.Client} {
@@ -261,13 +265,14 @@ func AnalyzeErrors(ts *TestMetricsTimeSeries, config *TestConfig) ErrorAnalysisR
 			continue
 		}
 
+		componentsChecked++
+
 		// Check each error counter prefix
 		for _, prefix := range AnalysisErrorCounterPrefixes {
 			delta := getSumByPrefix(last, prefix) - getSumByPrefix(first, prefix)
 			if delta > 0 {
 				expected := getExpectedErrorCount(prefix, config)
 				if int64(delta) > expected {
-					result.Passed = false
 					result.Violations = append(result.Violations, ErrorViolation{
 						Counter:   prefix,
 						Component: component.Component,
@@ -279,6 +284,11 @@ func AnalyzeErrors(ts *TestMetricsTimeSeries, config *TestConfig) ErrorAnalysisR
 				}
 			}
 		}
+	}
+
+	// EXPLICIT PASS: Only pass if we checked components AND found no violations
+	if componentsChecked > 0 && len(result.Violations) == 0 {
+		result.Passed = true
 	}
 
 	return result
@@ -327,8 +337,10 @@ type PositiveSignals struct {
 }
 
 // ValidatePositiveSignals verifies that expected behaviors occurred
+// FAIL-SAFE: Defaults to failed, only passes when we confirm positive signals
 func ValidatePositiveSignals(ts *TestMetricsTimeSeries, config *TestConfig) PositiveSignalResult {
-	result := PositiveSignalResult{Passed: true}
+	// FAIL-SAFE: Start with failed - we must explicitly confirm positive signals
+	result := PositiveSignalResult{Passed: false}
 
 	expected := computeExpectedSignals(config)
 
@@ -337,26 +349,33 @@ func ValidatePositiveSignals(ts *TestMetricsTimeSeries, config *TestConfig) Posi
 	cgMetrics := ComputeDerivedMetrics(ts.ClientGenerator)
 	clientMetrics := ComputeDerivedMetrics(ts.Client)
 
+	// Track positive confirmations
+	serverDataFlowOK := false
+	clientDataFlowOK := false
+	ackExchangeOK := false
+
 	// Primary check: Server received packets (from client-generator publishing)
 	// The server receives the data from the publisher
 	serverDataRecv := serverMetrics.TotalPacketsRecv
-	if serverDataRecv < expected.MinPacketsRecv {
-		// Also check ACKs as an alternative signal
-		if serverMetrics.TotalACKsRecv == 0 {
-			result.Passed = false
-			result.Violations = append(result.Violations, SignalViolation{
-				Signal:    "ServerDataFlow",
-				Component: "server",
-				Expected:  fmt.Sprintf(">= %d packets or > 0 ACKs", expected.MinPacketsRecv),
-				Actual:    fmt.Sprintf("%d packets, %d ACKs", serverDataRecv, serverMetrics.TotalACKsRecv),
-				Message:   "Server not receiving expected data flow",
-			})
-		}
+	if serverDataRecv >= expected.MinPacketsRecv {
+		serverDataFlowOK = true
+	} else if serverMetrics.TotalACKsRecv > 0 {
+		// ACKs are an alternative signal that data is flowing
+		serverDataFlowOK = true
+	} else {
+		result.Violations = append(result.Violations, SignalViolation{
+			Signal:    "ServerDataFlow",
+			Component: "server",
+			Expected:  fmt.Sprintf(">= %d packets or > 0 ACKs", expected.MinPacketsRecv),
+			Actual:    fmt.Sprintf("%d packets, %d ACKs", serverDataRecv, serverMetrics.TotalACKsRecv),
+			Message:   "Server not receiving expected data flow",
+		})
 	}
 
 	// Secondary check: Client received packets (from server fanout)
-	if clientMetrics.TotalPacketsRecv < expected.MinPacketsRecv {
-		result.Passed = false
+	if clientMetrics.TotalPacketsRecv >= expected.MinPacketsRecv {
+		clientDataFlowOK = true
+	} else {
 		result.Violations = append(result.Violations, SignalViolation{
 			Signal:    "ClientDataFlow",
 			Component: "client",
@@ -369,8 +388,9 @@ func ValidatePositiveSignals(ts *TestMetricsTimeSeries, config *TestConfig) Posi
 	// Verify ACK exchange occurred (bidirectional SRT control path)
 	if expected.RequireACKs {
 		totalACKs := serverMetrics.TotalACKsRecv + cgMetrics.TotalACKsRecv + clientMetrics.TotalACKsRecv
-		if totalACKs == 0 {
-			result.Passed = false
+		if totalACKs > 0 {
+			ackExchangeOK = true
+		} else {
 			result.Violations = append(result.Violations, SignalViolation{
 				Signal:    "ACKExchange",
 				Component: "all",
@@ -379,6 +399,13 @@ func ValidatePositiveSignals(ts *TestMetricsTimeSeries, config *TestConfig) Posi
 				Message:   "No ACKs received - SRT control path may not be working",
 			})
 		}
+	} else {
+		ackExchangeOK = true // Not required, so OK
+	}
+
+	// EXPLICIT PASS: Only pass when ALL positive signals are confirmed
+	if serverDataFlowOK && clientDataFlowOK && ackExchangeOK {
+		result.Passed = true
 	}
 
 	return result
@@ -428,6 +455,9 @@ type AnalysisResult struct {
 	ErrorAnalysis   ErrorAnalysisResult
 	PositiveSignals PositiveSignalResult
 
+	// Runtime stability (for long-running tests)
+	RuntimeStability []RuntimeStabilityResult
+
 	// Derived metrics for each component
 	ServerMetrics    DerivedMetrics
 	ClientGenMetrics DerivedMetrics
@@ -440,13 +470,16 @@ type AnalysisResult struct {
 }
 
 // AnalyzeTestMetrics performs comprehensive analysis of test metrics
+// IMPORTANT: Follows fail-safe principle - defaults to FAILED, only PASSES when ALL checks confirm success
 func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisResult {
 	errorResult := AnalyzeErrors(ts, config)
 	signalResult := ValidatePositiveSignals(ts, config)
 
+	// FAIL-SAFE: Default to failed - only set to passed after ALL checks confirm success
 	result := AnalysisResult{
 		TestName:        ts.TestName,
 		TestConfig:      config,
+		Passed:          false, // NEVER assume success - must be explicitly confirmed
 		ErrorAnalysis:   errorResult,
 		PositiveSignals: signalResult,
 	}
@@ -456,12 +489,31 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	result.ClientGenMetrics = ComputeDerivedMetrics(ts.ClientGenerator)
 	result.ClientMetrics = ComputeDerivedMetrics(ts.Client)
 
-	// Aggregate pass/fail
-	result.Passed = errorResult.Passed && signalResult.Passed
-
-	// Count violations and warnings
+	// Count violations and warnings from error and signal analysis
 	result.TotalViolations = len(errorResult.Violations) + len(signalResult.Violations)
-	// TODO: Add warnings from statistical validation
+
+	// Track runtime stability pass/fail (for long-running tests)
+	runtimePassed := true // No runtime analysis = passes by default (not applicable)
+
+	// Perform runtime stability analysis for long-running tests (>= 30 min)
+	if config != nil && config.TestDuration >= 30*time.Minute {
+		result.RuntimeStability = AnalyzeRuntimeStabilityForAllComponents(ts, config.TestDuration)
+
+		// Check if any runtime analysis failed
+		for _, rs := range result.RuntimeStability {
+			if !rs.Passed {
+				runtimePassed = false
+				result.TotalViolations += len(rs.Violations)
+			}
+			result.TotalWarnings += len(rs.Warnings)
+		}
+	}
+
+	// EXPLICIT PASS CONDITION: Only set to passed when ALL checks explicitly confirm success
+	// This is the ONLY place where Passed can become true
+	if errorResult.Passed && signalResult.Passed && runtimePassed {
+		result.Passed = true
+	}
 
 	// Generate summary
 	if result.Passed {
@@ -516,6 +568,40 @@ func PrintAnalysisResult(result AnalysisResult) {
 		result.ClientGenMetrics.TotalACKsRecv)
 	fmt.Printf("  Client: recv'd %d packets, %d ACKs\n",
 		result.ClientMetrics.TotalPacketsRecv, result.ClientMetrics.TotalACKsRecv)
+
+	// Runtime Stability (for long-running tests)
+	if len(result.RuntimeStability) > 0 {
+		fmt.Println("\nRuntime Stability:")
+		allStable := true
+		for _, rs := range result.RuntimeStability {
+			status := "✓ STABLE"
+			if !rs.Passed {
+				status = "✗ UNSTABLE"
+				allStable = false
+			} else if len(rs.Warnings) > 0 {
+				status = "⚠ WARNINGS"
+			}
+			fmt.Printf("  %s: %s\n", rs.Component, status)
+
+			// Print brief summary for each component
+			if rs.Summary.HeapGrowthMBPerHour != 0 || !rs.Passed {
+				fmt.Printf("    Heap: %.2f MB/hr, Goroutines: %.1f/hr\n",
+					rs.Summary.HeapGrowthMBPerHour, rs.Summary.GoroutineGrowthRate)
+			}
+		}
+
+		// Print violations if any
+		for _, rs := range result.RuntimeStability {
+			for _, v := range rs.Violations {
+				fmt.Printf("  ✗ [%s] %s\n", rs.Component, v.Message)
+			}
+		}
+
+		// Option to print detailed analysis
+		if !allStable {
+			fmt.Println("\n  (Run with -verbose for detailed runtime analysis)")
+		}
+	}
 
 	// Final Result
 	if result.Passed {

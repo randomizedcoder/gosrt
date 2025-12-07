@@ -15,6 +15,52 @@ This document describes the comprehensive integration testing framework for the 
 7. **Long-Duration Stability**: Verify no memory leaks or degradation over 12-24 hour runs
 8. **Automated Profiling**: Capture and analyze CPU/memory profiles to detect performance regressions
 
+### Core Principles
+
+#### 1. Fail-Safe by Default (No False Positives)
+
+**The most critical principle**: Tests must **default to FAILED** and only be marked PASSED when
+all validation checks explicitly confirm success. We NEVER want automated tests to report a pass
+when the test actually failed.
+
+**Rationale**:
+- A false positive (reporting PASS when the test failed) destroys human confidence in the test suite
+- Developers will start ignoring test results if they can't trust them
+- It's far better to have a false negative (FAIL when it should pass) - this prompts investigation
+- False negatives are annoying but safe; false positives are dangerous
+
+**Implementation**:
+```go
+// CORRECT: Start with failed, explicitly set to passed
+result := AnalysisResult{Passed: false}  // Default to failed
+
+// Only after ALL checks pass do we set to true
+if errorAnalysis.Passed && positiveSignals.Passed && runtimeStability.Passed {
+    result.Passed = true
+}
+
+// WRONG: Never do this - assumes success
+result := AnalysisResult{Passed: true}  // Dangerous assumption!
+```
+
+**Code Pattern**: Every analysis function should:
+1. Initialize result as `Passed: false`
+2. Perform all validation checks
+3. Only set `Passed = true` at the end if ALL checks explicitly passed
+
+#### 2. Explicit Validation Over Implicit Assumptions
+
+Every test result must be based on explicit validation of metrics and behavior, not assumptions
+about what "should" happen. If we can't measure it, we can't validate it.
+
+#### 3. Defense in Depth
+
+Multiple layers of validation provide confidence:
+- Process lifecycle (did processes start/stop correctly?)
+- Error counters (are there unexpected errors?)
+- Positive signals (did data actually flow?)
+- Runtime stability (are resources stable over time?)
+
 ### Test Duration Categories
 
 | Category | Duration | Purpose |
@@ -1415,7 +1461,7 @@ make test-integration REPORT=html > report.html
 - [x] Graceful shutdown verification
 - [x] Process lifecycle management
 
-### Phase 2: Metrics Analysis ✅ Phase 1 Implemented
+### Phase 2: Metrics Analysis ✅ Phases 1 & 3 Implemented
 
 **Design Document**: [metrics_analysis_design.md](metrics_analysis_design.md)
 **Implementation Tracking**: [integration_testing_metrics_analysis_implementation.md](integration_testing_metrics_analysis_implementation.md)
@@ -1428,9 +1474,12 @@ make test-integration REPORT=html > report.html
 - [x] Implement positive signal validators (`ValidatePositiveSignals()`)
 - [x] Generate console output (`PrintAnalysisResult()`)
 - [x] Integrate with test framework (`runTestWithMetrics()` + `AnalyzeTestResults()`)
-- [ ] Implement statistical validation (loss rate tolerance) - Phase 2
-- [ ] Generate structured test reports (JSON) - Phase 2
-- [ ] Add configurable thresholds per test - Phase 2
+- [x] Add `montanaflynn/stats` dependency for linear regression
+- [x] Implement Go runtime stability analysis (`runtime_analysis.go`)
+- [x] Auto-analyze memory, goroutines, GC, CPU for tests ≥30 min
+- [ ] Implement statistical validation (loss rate tolerance) - needs network impairment tests
+- [ ] Generate structured test reports (JSON)
+- [ ] Add configurable thresholds per test
 
 ### Phase 3: Packet Loss Testing ✅ Design Complete
 
@@ -1518,4 +1567,6 @@ contrib/integration_testing/
 | 2024-12-06 | Documented metrics analysis design | - |
 | 2024-12-06 | Noted packet loss and video testing requirements | - |
 | 2024-12-07 | Implemented Phase 1 metrics analysis (error + signal validation) | - |
+| 2024-12-07 | Added montanaflynn/stats for linear regression | - |
+| 2024-12-07 | Implemented Go runtime stability analysis (Phase 3) | - |
 

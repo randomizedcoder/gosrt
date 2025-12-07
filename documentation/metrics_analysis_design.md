@@ -40,6 +40,60 @@ Compare metrics across test runs to detect performance regressions:
 
 ---
 
+## Core Principle: Fail-Safe by Default
+
+**The most critical design principle**: All analysis functions **default to FAILED** and are only
+marked PASSED when all validation checks explicitly confirm success.
+
+### Rationale
+
+- **No False Positives**: A test reporting PASS when it actually failed destroys confidence in
+  the test suite. Developers will ignore results they can't trust.
+- **Safe Failures**: A false negative (FAIL when it should pass) prompts investigation. It's
+  annoying but safe.
+- **Explicit Confirmation**: Success must be explicitly confirmed through positive validation,
+  not assumed by the absence of detected failures.
+
+### Implementation Pattern
+
+Every analysis function follows this pattern:
+
+```go
+func AnalyzeSomething(data *Data) AnalysisResult {
+    // FAIL-SAFE: Start with failed - must be explicitly confirmed
+    result := AnalysisResult{Passed: false}
+
+    // Track what we successfully validated
+    checksPerformed := 0
+    checksSucceeded := 0
+
+    // Perform validation checks...
+    if someCheck {
+        checksPerformed++
+        checksSucceeded++
+    } else {
+        checksPerformed++
+        result.Violations = append(result.Violations, ...)
+    }
+
+    // EXPLICIT PASS: Only at the end, after ALL checks confirm success
+    if checksPerformed > 0 && checksSucceeded == checksPerformed {
+        result.Passed = true
+    }
+
+    return result
+}
+```
+
+### What This Means
+
+1. Empty or missing data → FAILED (can't confirm success)
+2. Analysis error → FAILED (can't confirm success)
+3. No violations found but no checks performed → FAILED (no confirmation)
+4. All checks performed and all passed → PASSED (explicit confirmation)
+
+---
+
 ## Architecture
 
 ### Data Flow

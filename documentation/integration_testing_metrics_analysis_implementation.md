@@ -11,6 +11,30 @@ integration testing, based on the design in [metrics_analysis_design.md](metrics
 
 ---
 
+## Core Principle: Fail-Safe by Default
+
+All analysis functions follow the **fail-safe principle**: tests default to FAILED and are only
+marked PASSED when all validation checks explicitly confirm success. This prevents false positives
+which would destroy confidence in the test suite.
+
+**Implementation pattern** (used throughout):
+```go
+// Every analysis function:
+result := AnalysisResult{Passed: false}  // Start FAILED
+
+// Perform explicit validation checks...
+// Track what was validated successfully...
+
+// Only at the end, after ALL checks pass:
+if allChecksExplicitlyPassed {
+    result.Passed = true
+}
+```
+
+See [Integration Testing Design - Core Principles](integration_testing_design.md#core-principles) for details.
+
+---
+
 ## Implementation Status
 
 ### Phase 1: Basic Error and Signal Validation ✅ COMPLETE
@@ -39,17 +63,18 @@ integration testing, based on the design in [metrics_analysis_design.md](metrics
 | NAK behavior validation | 🔲 Pending | - | |
 | Recovery rate validation | 🔲 Pending | - | |
 
-### Phase 3: Go Runtime Stability Analysis
+### Phase 3: Go Runtime Stability Analysis ✅ COMPLETE
 
 | Task | Status | File | Notes |
 |------|--------|------|-------|
-| Add `montanaflynn/stats` dependency | 🔲 Pending | `go.mod` | For linear regression |
-| Warmup period detection | 🔲 Pending | - | |
-| Linear regression trend analysis | 🔲 Pending | - | |
-| Memory growth validation | 🔲 Pending | - | Heap, stack |
-| Goroutine count validation | 🔲 Pending | - | |
-| GC pause time analysis | 🔲 Pending | - | |
-| CPU variance analysis | 🔲 Pending | - | |
+| Add `montanaflynn/stats` dependency | ✅ Complete | `go.mod` | v0.7.1 |
+| Warmup period detection | ✅ Complete | `runtime_analysis.go` | `WarmupDuration()` |
+| Linear regression trend analysis | ✅ Complete | `runtime_analysis.go` | `AnalyzeTrend()` |
+| Memory growth validation | ✅ Complete | `runtime_analysis.go` | Heap growth rate |
+| Goroutine count validation | ✅ Complete | `runtime_analysis.go` | Goroutine growth rate |
+| GC pause time analysis | ✅ Complete | `runtime_analysis.go` | GC pause growth rate |
+| CPU variance analysis | ✅ Complete | `runtime_analysis.go` | Coefficient of variation |
+| Integration with main analysis | ✅ Complete | `analysis.go` | Auto-runs for tests ≥30 min |
 
 ### Phase 4: Integration
 
@@ -68,6 +93,7 @@ integration testing, based on the design in [metrics_analysis_design.md](metrics
 | File | Purpose |
 |------|---------|
 | `contrib/integration_testing/analysis.go` | Main metrics analysis implementation |
+| `contrib/integration_testing/runtime_analysis.go` | Go runtime stability analysis (memory, goroutines, GC, CPU) |
 
 ### Modified Files
 
@@ -262,6 +288,45 @@ go run . graceful-shutdown-sigint
 
 ---
 
+---
+
+## Runtime Stability Analysis (Phase 3)
+
+For long-running tests (≥30 minutes), the framework automatically performs runtime stability analysis
+using linear regression to detect memory leaks, goroutine leaks, and other resource issues.
+
+### Key Functions
+
+| Function | Purpose |
+|----------|---------|
+| `WarmupDuration()` | Determines how much initial data to skip (5-15 min based on test duration) |
+| `AnalyzeTrend()` | Linear regression using `montanaflynn/stats` to compute growth rate |
+| `ComputeVarianceStats()` | Calculates coefficient of variation for CPU stability |
+| `ValidateRuntimeStability()` | Main analysis function for a single component |
+
+### Thresholds (Defaults)
+
+| Metric | Threshold | Notes |
+|--------|-----------|-------|
+| Heap Growth | ≤ 1 MB/hour | Failure if exceeded |
+| Goroutine Growth | ≤ 1/hour | Failure if exceeded |
+| GC Pause Growth | ≤ 100 ms/hour | Warning only |
+| CPU Variance | ≤ 30% CV | Warning only |
+
+### Output Example (Long-Running Test)
+
+```
+Runtime Stability:
+  server: ✓ STABLE
+    Heap: 0.12 MB/hr, Goroutines: 0.0/hr
+  client-generator: ✓ STABLE
+    Heap: 0.08 MB/hr, Goroutines: 0.0/hr
+  client: ✓ STABLE
+    Heap: 0.15 MB/hr, Goroutines: 0.0/hr
+```
+
+---
+
 ## Change Log
 
 | Date | Change | Author |
@@ -270,4 +335,6 @@ go run . graceful-shutdown-sigint
 | 2024-12-07 | Implemented Phase 1: Error and Signal Validation | - |
 | 2024-12-07 | Fixed metric name matching for labeled Prometheus metrics | - |
 | 2024-12-07 | Verified integration test passing with metrics analysis | - |
+| 2024-12-07 | Added montanaflynn/stats dependency (v0.7.1) | - |
+| 2024-12-07 | Implemented Phase 3: Go Runtime Stability Analysis | - |
 
