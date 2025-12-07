@@ -24,18 +24,35 @@ This document describes the comprehensive integration testing framework for the 
 | **Extended** | 30-60 minutes | Stress testing, profiling analysis |
 | **Long-Duration** | 12-24 hours | Stability verification, memory leak detection |
 
+### Test Modes
+
+The framework supports two distinct test modes:
+
+| Mode | Network Setup | Purpose |
+|------|---------------|---------|
+| **Clean Network** | Default namespace, loopback interface | Validate GoSRT code without network variables. If a test fails, the issue is in the code, not the network. |
+| **Network Impairment** | Isolated namespaces, dual-router architecture | Test SRT loss recovery under controlled packet loss, latency, and jitter conditions. |
+
+**Key Insight**: Clean network tests establish a baseline. By running on loopback with no network
+impairment, any failures or anomalies must originate from the GoSRT implementation itself. Network
+impairment tests then layer on controlled network conditions to validate SRT's ARQ recovery.
+
+**Metrics Collection**: Both modes use **Unix Domain Sockets (UDS)** for Prometheus metrics. This
+provides consistency and enables metrics collection from namespace-isolated processes.
+
 ### Configuration Scenarios Summary
 
 The framework tests various SRT configuration dimensions:
 
 | Category | Scenarios | Description |
 |----------|-----------|-------------|
+| **Test Mode** | clean, network | Clean loopback vs namespace-isolated with impairment |
 | **Bandwidth** | 1, 2, 5, 10, 50 Mb/s | Various throughput levels |
 | **Latency/Buffers** | 120ms, 500ms, 3s | Small to large buffer configurations |
 | **Packet Reordering** | list, btree | Different reordering algorithms |
 | **io_uring** | disabled, send, recv, both, output | Async I/O configurations |
 | **Encryption** | none, AES-128, AES-192, AES-256 | Encryption modes (future) |
-| **Network Conditions** | clean, 1-10% loss, burst loss, jitter | Loss injection (future) |
+| **Network Conditions** | clean, 1-10% loss, burst loss, jitter | Loss injection (network mode only) |
 | **Content Type** | synthetic data, MPEG-TS, H.264 | Data source types |
 
 ### Scope
@@ -44,9 +61,13 @@ The framework tests various SRT configuration dimensions:
 |------|--------|-------------|
 | Basic Integration Tests | ✅ Implemented | Graceful shutdown, multiple configurations |
 | Configuration Permutations | ✅ Implemented | Buffer sizes, io_uring, packet reordering |
-| Metrics Collection | ✅ Implemented | Prometheus /metrics endpoint scraping |
-| Metrics Analysis | 🔲 Design Complete | Error detection, threshold validation |
-| Packet Loss Injection | 🔲 To Be Designed | Network impairment simulation |
+| Metrics Collection (TCP) | ✅ Implemented | Prometheus /metrics endpoint scraping |
+| Metrics Collection (UDS) | ✅ Implemented | Unix Domain Socket for namespace isolation |
+| Clean Network Tests | ✅ Implemented | Baseline tests on loopback, no impairment |
+| Test Mode Framework | 🔲 To Be Implemented | TestConfig.Mode field, namespace setup phases |
+| Metrics Analysis | ✅ Design Complete | Error detection, statistical validation ([design](metrics_analysis_design.md)) |
+| Packet Loss Injection | ✅ Design Complete | Namespace isolation, netem, nftables ([design](packet_loss_injection_design.md)) |
+| Network Impairment Tests | 🔲 To Be Implemented | Tests using namespace isolation |
 | Video Stream Testing | 🔲 To Be Designed | FFmpeg-based end-to-end validation |
 | Encryption Testing | 🔲 To Be Designed | AES encryption verification |
 | Long-Duration Testing | 🔲 To Be Designed | 12-24 hour stability runs |
@@ -87,6 +108,120 @@ For protocol testing, metrics validation, and configuration permutations:
 - Graceful shutdown validation
 - SRT metrics validation
 - Performance benchmarking
+
+---
+
+### 1.2 Test Modes: Clean Network vs Network Impairment
+
+The integration testing framework supports two test modes that differ in network isolation:
+
+#### Clean Network Mode (Default)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Default Network Namespace                           │
+│                                                                             │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐                   │
+│  │ Client-Gen  │────▶│   Server    │◀────│   Client    │                   │
+│  │ 127.0.0.20  │     │ 127.0.0.10  │     │ 127.0.0.30  │                   │
+│  └─────────────┘     └─────────────┘     └─────────────┘                   │
+│         │                   │                   │                          │
+│         └───────────────────┼───────────────────┘                          │
+│                             ▼                                               │
+│                    Loopback Interface (lo)                                  │
+│                    (Zero latency, zero loss)                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Characteristics**:
+- All processes run in the host's default namespace
+- Traffic flows through the loopback interface (lo)
+- Zero network latency, zero packet loss
+- Any test failures must originate from the GoSRT code
+
+**Purpose**: Establish a baseline. When tests run on a "perfect" network with no impairment,
+any anomalies, errors, or failures are definitively caused by the GoSRT implementation.
+
+#### Network Impairment Mode
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌───────────┐ │
+│  │  ns_pub     │     │ ns_router_a │═════│ ns_router_b │     │  ns_srv   │ │
+│  │ Client-Gen  │────▶│  (netem)    │     │  (netem)    │────▶│  Server   │ │
+│  └─────────────┘     │  (nftables) │     └─────────────┘     └───────────┘ │
+│                      └─────────────┘                               ▲       │
+│                            ▲                                       │       │
+│  ┌─────────────┐           │                                       │       │
+│  │  ns_sub     │───────────┘                                       │       │
+│  │  Client     │───────────────────────────────────────────────────┘       │
+│  └─────────────┘                                                           │
+│                                                                             │
+│  ══════ = Multiple parallel links with fixed latency (0/10/60/130/300ms)   │
+│  Latency switching via routing, loss injection via nftables DROP           │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Characteristics**:
+- Each process runs in an isolated network namespace
+- Traffic routed through dual-router architecture with configurable impairment
+- Latency: 0ms, 10ms, 60ms, 130ms, 300ms RTT (switched via routing)
+- Loss: 0-100% (injected via nftables DROP rules)
+- Starlink pattern, burst loss, and complex patterns supported
+
+**Purpose**: Validate SRT's ARQ-based loss recovery under realistic network conditions.
+
+#### Metrics Collection (Both Modes)
+
+Regardless of test mode, **all processes use Unix Domain Sockets (UDS)** for Prometheus metrics:
+
+```bash
+# Clean network mode
+./server -addr 127.0.0.10:6000 -promuds /tmp/srt_server.sock
+
+# Network impairment mode
+ip netns exec ns_srv ./server -addr 10.0.1.1:6000 -promuds /tmp/srt_server.sock
+
+# Query metrics (same command in both modes)
+curl --unix-socket /tmp/srt_server.sock http://localhost/metrics
+```
+
+**Rationale**: Using UDS consistently in both modes:
+- Simplifies the test orchestrator (one collection method)
+- Works across namespace boundaries (filesystem is shared)
+- Eliminates TCP port binding issues
+
+#### TestConfig Mode Field
+
+```go
+type TestMode string
+
+const (
+    TestModeClean   TestMode = "clean"   // Default namespace, loopback
+    TestModeNetwork TestMode = "network" // Isolated namespaces with impairment
+)
+
+type TestConfig struct {
+    // ... existing fields ...
+
+    // Test mode determines network setup
+    Mode TestMode // "clean" (default) or "network"
+
+    // Network impairment settings (only used when Mode == "network")
+    Impairment NetworkImpairment
+}
+```
+
+#### Test Phases by Mode
+
+| Phase | Clean Network | Network Impairment |
+|-------|---------------|---------------------|
+| **Setup** | (no-op) | Create namespaces, configure routes/netem |
+| **Start Processes** | Direct execution | `ip netns exec <ns> ./binary` |
+| **Metrics Collection** | UDS: `/tmp/srt_*.sock` | UDS: `/tmp/srt_*.sock` |
+| **Apply Impairment** | (no-op) | Adjust routes/nftables dynamically |
+| **Teardown** | (no-op) | Delete namespaces |
 
 ---
 
@@ -137,15 +272,25 @@ Each GoSRT component:
 - Exposes Prometheus metrics on a dedicated port
 - Supports graceful shutdown via SIGINT
 
-### 1.2 Test Configuration System
+### 1.3 Test Configuration System
 
 The `TestConfig` structure enables testing different configuration combinations:
 
 ```go
+type TestMode string
+
+const (
+    TestModeClean   TestMode = "clean"   // Default namespace, loopback (default)
+    TestModeNetwork TestMode = "network" // Isolated namespaces with impairment
+)
+
 type TestConfig struct {
     // Test identification
     Name        string
     Description string
+
+    // Test mode (clean network vs network impairment)
+    Mode TestMode // "clean" (default) or "network"
 
     // Network configuration
     ServerNetwork          NetworkConfig
@@ -165,9 +310,12 @@ type TestConfig struct {
     // Shared SRT configuration
     SharedSRT *SRTConfig
 
-    // Metrics collection
+    // Metrics collection (always via UDS)
     MetricsEnabled  bool
     CollectInterval time.Duration
+
+    // Network impairment (only used when Mode == TestModeNetwork)
+    Impairment NetworkImpairment
 
     // Expected results
     ExpectedErrors     []string
@@ -226,7 +374,367 @@ type ComponentConfig struct {
 }
 ```
 
-### 1.3 Current Test Configurations
+### 1.4 Test Configuration Generation
+
+Rather than manually defining each test configuration, the framework uses **programmatic generation**
+from configuration dimensions. This ensures complete coverage and simplifies adding new options.
+
+#### Configuration Dimensions
+
+Each dimension defines a set of values that can be combined:
+
+```go
+// TestDimensions defines all configurable aspects
+type TestDimensions struct {
+    // Test mode (required - determines namespace setup)
+    Modes []TestMode
+
+    // Bandwidth levels
+    Bitrates []BitrateOption
+
+    // Buffer/latency configurations
+    BufferConfigs []BufferConfig
+
+    // Packet reordering algorithms
+    ReorderAlgorithms []ReorderOption
+
+    // io_uring configurations
+    IoUringConfigs []IoUringConfig
+
+    // Network impairment patterns (only for Mode=network)
+    ImpairmentPatterns []ImpairmentOption
+
+    // Encryption (future)
+    EncryptionModes []EncryptionOption
+}
+```
+
+#### Dimension Definitions
+
+```go
+// ========== Test Mode ==========
+type TestMode string
+const (
+    ModeClean   TestMode = "clean"   // Default namespace, loopback
+    ModeNetwork TestMode = "network" // Isolated namespaces, impairment
+)
+var TestModes = []TestMode{ModeClean, ModeNetwork}
+
+// ========== Bitrate ==========
+type BitrateOption struct {
+    Name     string // e.g., "1Mbps", "10Mbps"
+    Bitrate  int64  // bits per second
+    Category DurationCategory
+}
+var Bitrates = []BitrateOption{
+    {"1Mbps", 1_000_000, CategoryQuick},
+    {"2Mbps", 2_000_000, CategoryQuick},
+    {"5Mbps", 5_000_000, CategoryStandard},
+    {"10Mbps", 10_000_000, CategoryStandard},
+    {"50Mbps", 50_000_000, CategoryExtended},
+}
+
+// ========== Buffer Configuration ==========
+type BufferConfig struct {
+    Name       string
+    Latency    time.Duration // -latency flag
+    RecvBuf    uint32        // -rcvbuf
+    SendBuf    uint32        // -sndbuf
+    FC         uint32        // -fc
+    Category   DurationCategory
+}
+var BufferConfigs = []BufferConfig{
+    {"Default", 0, 0, 0, 0, CategoryQuick},                           // Use defaults
+    {"SmallBuf", 120*time.Millisecond, 0, 0, 0, CategoryQuick},       // Low latency
+    {"MediumBuf", 500*time.Millisecond, 0, 0, 0, CategoryStandard},   // Moderate
+    {"LargeBuf", 3*time.Second, 2097152, 2097152, 25600, CategoryStandard}, // Large buffers
+    {"ExtraLargeBuf", 5*time.Second, 4194304, 4194304, 51200, CategoryExtended}, // Stress test
+}
+
+// ExtraLargeBuf (5s) RATIONALE:
+// - NOT a recommended production configuration
+// - Designed to stress-test ACK/NAK handling under heavy packet loss
+// - With 5s of buffering at 10Mbps = ~6MB of data in flight
+// - At 5% loss, this means ~300KB of data needing retransmission tracking
+// - Exercises: NAK list management, ACK coalescing, memory pressure, timing edge cases
+// - Useful for profiling and optimizing the congestion control code paths
+
+// ========== Packet Reordering ==========
+type ReorderOption struct {
+    Name      string
+    Algorithm string // "list" or "btree"
+    Degree    int    // btree degree (0 = default)
+    Category  DurationCategory
+}
+var ReorderAlgorithms = []ReorderOption{
+    {"List", "list", 0, CategoryQuick},
+    {"BTree", "btree", 32, CategoryQuick},
+    {"BTree64", "btree", 64, CategoryStandard},
+}
+
+// ========== io_uring Configuration ==========
+type IoUringConfig struct {
+    Name          string
+    SendEnabled   bool
+    RecvEnabled   bool
+    OutputEnabled bool // client-side output writer
+    Category      DurationCategory
+}
+var IoUringConfigs = []IoUringConfig{
+    {"NoIoUring", false, false, false, CategoryQuick},
+    {"IoUringSend", true, false, false, CategoryStandard},
+    {"IoUringRecv", false, true, false, CategoryStandard},
+    {"IoUringBoth", true, true, false, CategoryStandard},
+    {"IoUringOutput", false, false, true, CategoryStandard},
+    {"IoUringFull", true, true, true, CategoryExtended},
+}
+
+// ========== Network Impairment (Mode=network only) ==========
+type ImpairmentOption struct {
+    Name     string
+    Pattern  string // matches ImpairmentPatterns keys
+    Category DurationCategory
+}
+var ImpairmentPatterns = []ImpairmentOption{
+    {"Clean", "clean", CategoryQuick},
+    {"Loss1pct", "lossy-1pct", CategoryStandard},
+    {"Loss5pct", "lossy-5pct", CategoryStandard},
+    {"LatencyTier2", "latency-tier2", CategoryStandard},
+    {"LatencyTier3", "latency-tier3", CategoryStandard},
+    {"LatencyGeo", "latency-geo", CategoryExtended},
+    {"Starlink", "starlink", CategoryExtended},
+    {"StarlinkWithLoss", "starlink-with-loss", CategoryLongDuration},
+}
+```
+
+#### Duration Categories
+
+Each configuration option is tagged with a duration category:
+
+```go
+type DurationCategory int
+
+const (
+    CategoryQuick        DurationCategory = iota // 10-30s, CI smoke tests
+    CategoryStandard                             // 1-5 min, full validation
+    CategoryExtended                             // 30-60 min, stress testing
+    CategoryLongDuration                         // 12-24 hours, stability
+)
+
+// Test duration per category
+var CategoryDurations = map[DurationCategory]time.Duration{
+    CategoryQuick:        15 * time.Second,
+    CategoryStandard:     2 * time.Minute,
+    CategoryExtended:     30 * time.Minute,
+    CategoryLongDuration: 12 * time.Hour,
+}
+
+// Connection wait per category (higher for larger buffers/latency)
+var CategoryConnectionWait = map[DurationCategory]time.Duration{
+    CategoryQuick:        2 * time.Second,
+    CategoryStandard:     5 * time.Second,
+    CategoryExtended:     10 * time.Second,
+    CategoryLongDuration: 30 * time.Second,
+}
+```
+
+#### Generation Rules
+
+Not all combinations are valid or useful. The generator applies rules:
+
+```go
+type GenerationRules struct {
+    // Skip invalid combinations
+    SkipRules []SkipRule
+
+    // Reduce combinatorial explosion for certain dimensions
+    // e.g., only test impairment patterns with default buffers
+    ConstraintRules []ConstraintRule
+}
+
+var DefaultRules = GenerationRules{
+    SkipRules: []SkipRule{
+        // Network impairment only valid for Mode=network
+        {Condition: "Mode == clean && Impairment != clean"},
+
+        // io_uring output only makes sense for client (handled internally)
+
+        // Long duration tests only with default settings
+        {Condition: "Category == LongDuration && !IsDefaultConfig()"},
+    },
+
+    ConstraintRules: []ConstraintRule{
+        // For high bitrates, only test with optimized settings
+        {When: "Bitrate >= 50Mbps", Require: "IoUring.SendEnabled || IoUring.RecvEnabled"},
+
+        // For network mode, limit io_uring variations (focus on buffers + impairment)
+        // Buffer sizes are CRITICAL for loss recovery - test all buffer configs
+        {When: "Mode == network", Limit: "IoUringConfigs", To: []string{"NoIoUring", "IoUringBoth"}},
+
+        // For network mode, limit reorder algorithm variations
+        {When: "Mode == network", Limit: "ReorderAlgorithms", To: []string{"List", "BTree"}},
+    },
+}
+
+// RATIONALE for network mode buffer testing:
+// - SmallBuf (120ms): Tests SRT behavior with minimal buffering - more susceptible to loss
+// - MediumBuf (500ms): Balanced configuration - common for live streaming
+// - LargeBuf (3s): Tests SRT's deep buffering - should recover from most impairments
+// - ExtraLargeBuf (5s): Stress test - pushes ACK/NAK handling to extremes
+//
+// Each buffer size combined with each impairment pattern validates:
+// - Whether the buffer is sufficient for the RTT + jitter
+// - How loss recovery behaves under different buffer constraints
+// - Edge cases where buffers overflow or underflow
+// - ACK/NAK list management under heavy retransmission load (ExtraLargeBuf)
+```
+
+#### Test Name Generation
+
+Names are auto-generated from the combination:
+
+```go
+func GenerateTestName(mode TestMode, bitrate BitrateOption,
+                       buffer BufferConfig, reorder ReorderOption,
+                       iouring IoUringConfig, impairment ImpairmentOption) string {
+    parts := []string{}
+
+    // Mode prefix (only for network mode)
+    if mode == ModeNetwork {
+        parts = append(parts, "Net")
+    }
+
+    // Non-default options
+    if buffer.Name != "Default" {
+        parts = append(parts, buffer.Name)
+    }
+    if reorder.Algorithm != "list" {
+        parts = append(parts, reorder.Name)
+    }
+    if iouring.SendEnabled || iouring.RecvEnabled || iouring.OutputEnabled {
+        parts = append(parts, iouring.Name)
+    }
+    if mode == ModeNetwork && impairment.Pattern != "clean" {
+        parts = append(parts, impairment.Name)
+    }
+
+    // Always include bitrate
+    parts = append(parts, bitrate.Name)
+
+    // Default fallback
+    if len(parts) == 1 {
+        parts = []string{"Default", bitrate.Name}
+    }
+
+    return strings.Join(parts, "-")
+}
+
+// Examples:
+// - Default-2Mbps           (clean, default config, 2Mbps)
+// - BTree-10Mbps            (clean, btree reordering, 10Mbps)
+// - IoUringFull-LargeBuf-10Mbps
+// - Net-Loss5pct-2Mbps      (network mode, 5% loss)
+// - Net-Starlink-5Mbps      (network mode, starlink pattern)
+```
+
+#### Generator Function
+
+```go
+func GenerateTestConfigs(category DurationCategory, rules GenerationRules) []TestConfig {
+    var configs []TestConfig
+
+    for _, mode := range TestModes {
+        for _, bitrate := range Bitrates {
+            for _, buffer := range BufferConfigs {
+                for _, reorder := range ReorderAlgorithms {
+                    for _, iouring := range IoUringConfigs {
+                        for _, impairment := range ImpairmentPatterns {
+                            // Determine effective category (max of all dimensions)
+                            effectiveCategory := maxCategory(
+                                bitrate.Category, buffer.Category,
+                                reorder.Category, iouring.Category,
+                                impairment.Category,
+                            )
+
+                            // Skip if not in requested category
+                            if effectiveCategory != category {
+                                continue
+                            }
+
+                            // Apply skip rules
+                            if shouldSkip(mode, bitrate, buffer, reorder, iouring, impairment, rules) {
+                                continue
+                            }
+
+                            // Apply constraint rules
+                            if !meetsConstraints(mode, bitrate, buffer, reorder, iouring, impairment, rules) {
+                                continue
+                            }
+
+                            configs = append(configs, buildTestConfig(
+                                mode, bitrate, buffer, reorder, iouring, impairment,
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return configs
+}
+```
+
+#### Running by Category
+
+```bash
+# Run quick tests only (CI smoke tests, ~5 minutes total)
+make test-integration-quick
+
+# Run standard tests (full validation, ~30 minutes)
+make test-integration-standard
+
+# Run extended tests (stress testing, ~2 hours)
+make test-integration-extended
+
+# Run all clean network tests (no namespaces needed)
+make test-integration-clean
+
+# Run all network impairment tests (requires root)
+sudo make test-integration-network
+```
+
+#### Estimated Test Counts
+
+| Category | Clean Mode | Network Mode | Total |
+|----------|------------|--------------|-------|
+| Quick | ~15 | ~10 | ~25 |
+| Standard | ~40 | ~80 | ~120 |
+| Extended | ~20 | ~40 | ~60 |
+| Long-Duration | ~5 | ~10 | ~15 |
+
+**Network mode has more tests** because buffer configurations are fully tested with each
+impairment pattern. This is intentional: buffer sizing is critical for SRT loss recovery.
+
+Example network mode combinations for a single impairment pattern (e.g., `Loss5pct`):
+- `Net-SmallBuf-Loss5pct-2Mbps` - 120ms buffer, may struggle with 5% loss
+- `Net-MediumBuf-Loss5pct-2Mbps` - 500ms buffer, moderate recovery margin
+- `Net-LargeBuf-Loss5pct-2Mbps` - 3s buffer, should handle 5% loss easily
+
+**Note**: Actual counts depend on constraint rules. The generator can output a manifest:
+
+```bash
+# List all tests without running
+make test-integration-list
+# Output: 130 total tests (20 quick, 65 standard, 35 extended, 10 long-duration)
+```
+
+---
+
+### 1.5 Current Test Configurations (Legacy)
+
+The following manually-defined tests exist for backward compatibility. New tests should use
+the generation framework above.
 
 | Category | Test Name | Description |
 |----------|-----------|-------------|
@@ -248,7 +756,7 @@ type ComponentConfig struct {
 | | FullIoUring-10Mbps | Full io_uring at 10 Mb/s |
 | **High Performance** | HighPerf-10Mbps | Maximum performance config |
 
-### 1.4 Test Phases
+### 1.7 Test Phases
 
 Each integration test follows three phases:
 
@@ -298,7 +806,7 @@ Each integration test follows three phases:
 4. Collect Final Metrics Snapshot
 ```
 
-### 1.5 Metrics Collection Infrastructure
+### 1.8 Metrics Collection Infrastructure
 
 The framework collects Prometheus metrics from all components:
 
@@ -331,6 +839,18 @@ type MetricsCollector struct {
 ---
 
 ## Part 2: Metrics Analysis Design
+
+**Detailed Design Document**: [metrics_analysis_design.md](metrics_analysis_design.md)
+
+The metrics analysis framework validates SRT behavior by examining Prometheus metrics collected
+during test runs. It includes error detection, positive signal validation, and statistical
+validation for network impairment tests.
+
+**Key Components**:
+- **Error Analysis**: Verify error counters are zero (or within expected bounds)
+- **Positive Signals**: Confirm packets sent/received, throughput achieved, ACK/NAK exchanged
+- **Statistical Validation**: For network tests, verify loss rates match configured impairment (±50% tolerance)
+- **Time Series**: Analyze metrics across multiple collection points
 
 ### 2.1 Error Metrics Categories
 
@@ -499,33 +1019,35 @@ type ProcessResult struct {
 
 ### 3.1 Packet Loss Injection
 
-**Status**: 🔲 Design In Progress
+**Status**: ✅ Design Complete
 
 **Detailed Design**: [packet_loss_injection_design.md](packet_loss_injection_design.md)
 
 SRT's core value proposition is ARQ-based loss recovery. To properly test this, we need to introduce controlled packet loss.
 
-#### Requirements Summary
+#### Architecture Summary
 
-| Category | Requirements |
-|----------|--------------|
-| **Packet Loss** | Uniform loss (0.1-10%), burst loss, correlated loss |
-| **Latency** | Fixed delay, jitter, asymmetric latency |
-| **Outages** | Complete outage, periodic outage, Starlink pattern |
+The packet loss injection design uses **Linux network namespaces** to isolate the publisher,
+server, and subscriber processes. A **dual-router architecture** (`ns_router_a` ↔ `ns_router_b`)
+with multiple parallel veth pairs enables:
 
-#### Starlink Pattern
+- **Latency control**: Five fixed-latency links (0ms, 10ms, 60ms, 130ms, 300ms RTT); latency
+  switching via routing table updates (no queue flush)
+- **Loss injection**: `nftables` DROP rules for instant packet loss without affecting netem queues
+- **Queue sizing**: 50,000 packet netem queue limit to prevent tail-drop at high latency
 
-LEO satellite networks experience reconvergence events at seconds 12, 27, 42, 57 of each minute, causing **100% packet loss** for 50-70ms (complete outage, not partial loss).
+#### Metrics Collection
 
-#### Implementation Options Under Evaluation
+Since processes run in isolated network namespaces, TCP-based Prometheus endpoints are
+unreachable from the test orchestrator. **Unix Domain Sockets (UDS)** solve this:
 
-| Option | Description | Assessment |
-|--------|-------------|------------|
-| **Namespaces + Netem** | Linux kernel network isolation with tc/netem | Likely best: low effort, high precision |
-| **Custom UDP Proxy** | Go-based packet manipulation | High effort, cross-platform |
-| **Existing Tools** | Toxiproxy, Comcast, etc. | Limited UDP support |
+```bash
+# Start server with UDS metrics
+ip netns exec ns_srv ./server -promuds /tmp/srt_server.sock
 
-**Reference**: `documentation/amt.sh` - Linux kernel network namespace example
+# Query from host via shared filesystem
+curl --unix-socket /tmp/srt_server.sock http://localhost/metrics
+```
 
 #### Key Metrics to Validate
 
@@ -893,19 +1415,35 @@ make test-integration REPORT=html > report.html
 - [x] Graceful shutdown verification
 - [x] Process lifecycle management
 
-### Phase 2: Metrics Analysis 🔲
+### Phase 2: Metrics Analysis ✅ Phase 1 Implemented
 
-- [ ] Implement error counter analysis
-- [ ] Add per-test validators
-- [ ] Generate structured test reports
-- [ ] Add threshold-based validation
+**Design Document**: [metrics_analysis_design.md](metrics_analysis_design.md)
+**Implementation Tracking**: [integration_testing_metrics_analysis_implementation.md](integration_testing_metrics_analysis_implementation.md)
 
-### Phase 3: Packet Loss Testing 🔲
+- [x] Design error counter analysis
+- [x] Design positive signal validation
+- [x] Design statistical validation for network impairment tests
+- [x] Design time series data model
+- [x] Implement error counter analysis (`AnalyzeErrors()`)
+- [x] Implement positive signal validators (`ValidatePositiveSignals()`)
+- [x] Generate console output (`PrintAnalysisResult()`)
+- [x] Integrate with test framework (`runTestWithMetrics()` + `AnalyzeTestResults()`)
+- [ ] Implement statistical validation (loss rate tolerance) - Phase 2
+- [ ] Generate structured test reports (JSON) - Phase 2
+- [ ] Add configurable thresholds per test - Phase 2
 
-- [ ] Design loss injection approach
-- [ ] Implement loss injection
-- [ ] Add loss recovery test configurations
-- [ ] Validate ARQ mechanism
+### Phase 3: Packet Loss Testing ✅ Design Complete
+
+**Design Document**: [packet_loss_injection_design.md](packet_loss_injection_design.md)
+
+- [x] Design namespace-based network isolation
+- [x] Design dual-router architecture with netem
+- [x] Design nftables-based loss injection
+- [x] Design impairment patterns (Starlink, burst loss)
+- [ ] Implement namespace setup scripts
+- [ ] Implement Go network controller
+- [ ] Add network impairment test configurations
+- [ ] Validate ARQ mechanism under loss
 
 ### Phase 4: Video Testing 🔲
 
@@ -979,4 +1517,5 @@ contrib/integration_testing/
 | 2024-12-06 | Added 17 test configurations | - |
 | 2024-12-06 | Documented metrics analysis design | - |
 | 2024-12-06 | Noted packet loss and video testing requirements | - |
+| 2024-12-07 | Implemented Phase 1 metrics analysis (error + signal validation) | - |
 

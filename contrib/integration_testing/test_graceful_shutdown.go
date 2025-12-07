@@ -143,6 +143,28 @@ func testGracefulShutdownSIGINTWithConfig(config TestConfig) {
 
 // runTestWithConfig runs the graceful shutdown test with the given configuration
 func runTestWithConfig(config TestConfig) error {
+	testPassed, testMetrics, startTime, endTime := runTestWithMetrics(config)
+	if !testPassed {
+		return fmt.Errorf("test execution failed")
+	}
+
+	// Perform metrics analysis if metrics were collected
+	if testMetrics != nil && config.MetricsEnabled {
+		analysisResult := AnalyzeTestResults(testMetrics, &config, startTime, endTime)
+		PrintAnalysisResult(analysisResult)
+
+		if !analysisResult.Passed {
+			return fmt.Errorf("metrics analysis failed: %s", analysisResult.Summary)
+		}
+	}
+
+	return nil
+}
+
+// runTestWithMetrics runs the test and returns metrics for analysis
+func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, startTime, endTime time.Time) {
+	startTime = time.Now()
+
 	// Get network configuration
 	serverNet, clientGenNet, clientNet := config.GetEffectiveNetworkConfig()
 
@@ -163,7 +185,8 @@ func runTestWithConfig(config TestConfig) error {
 
 	// Check if binaries exist
 	if err := ensureBinaries(baseDir, serverBin, clientGenBin, clientBin); err != nil {
-		return fmt.Errorf("building binaries: %w", err)
+		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", err)
+		return false, nil, startTime, time.Now()
 	}
 
 	// Create context for test orchestration
@@ -188,7 +211,8 @@ func runTestWithConfig(config TestConfig) error {
 	serverCmd.Stdout = os.Stdout
 	serverCmd.Stderr = os.Stderr
 	if err := serverCmd.Start(); err != nil {
-		return fmt.Errorf("starting server: %w", err)
+		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
+		return false, nil, startTime, time.Now()
 	}
 	defer func() {
 		if serverCmd.Process != nil {
@@ -205,7 +229,8 @@ func runTestWithConfig(config TestConfig) error {
 	clientGenCmd.Stdout = os.Stdout
 	clientGenCmd.Stderr = os.Stderr
 	if err := clientGenCmd.Start(); err != nil {
-		return fmt.Errorf("starting client-generator: %w", err)
+		fmt.Fprintf(os.Stderr, "Error starting client-generator: %v\n", err)
+		return false, nil, startTime, time.Now()
 	}
 	defer func() {
 		if clientGenCmd.Process != nil {
@@ -222,7 +247,8 @@ func runTestWithConfig(config TestConfig) error {
 	clientCmd.Stdout = os.Stdout
 	clientCmd.Stderr = os.Stderr
 	if err := clientCmd.Start(); err != nil {
-		return fmt.Errorf("starting client: %w", err)
+		fmt.Fprintf(os.Stderr, "Error starting client: %v\n", err)
+		return false, nil, startTime, time.Now()
 	}
 	defer func() {
 		if clientCmd.Process != nil {
@@ -236,7 +262,8 @@ func runTestWithConfig(config TestConfig) error {
 
 	// Verify processes are running
 	if serverCmd.Process == nil || clientGenCmd.Process == nil || clientCmd.Process == nil {
-		return fmt.Errorf("one or more processes failed to start")
+		fmt.Fprintf(os.Stderr, "Error: one or more processes failed to start\n")
+		return false, nil, startTime, time.Now()
 	}
 
 	// Initialize metrics collection if enabled
@@ -285,7 +312,8 @@ func runTestWithConfig(config TestConfig) error {
 	// Step 1: Send SIGINT to Client (subscriber)
 	fmt.Println("Sending SIGINT to client (subscriber)...")
 	if err := clientCmd.Process.Signal(os.Interrupt); err != nil {
-		return fmt.Errorf("sending SIGINT to client: %w", err)
+		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client: %v\n", err)
+		return false, testMetrics, startTime, time.Now()
 	}
 
 	clientDone := make(chan struct{})
@@ -299,11 +327,13 @@ func runTestWithConfig(config TestConfig) error {
 	case <-clientDone:
 		fmt.Println("✓ Client exited gracefully")
 	case <-time.After(8 * time.Second):
-		return fmt.Errorf("client did not exit within 8 seconds")
+		fmt.Fprintf(os.Stderr, "Error: client did not exit within 8 seconds\n")
+		return false, testMetrics, startTime, time.Now()
 	}
 
 	if clientCmd.ProcessState != nil && !clientCmd.ProcessState.Success() {
-		return fmt.Errorf("client exited with non-zero code")
+		fmt.Fprintf(os.Stderr, "Error: client exited with non-zero code\n")
+		return false, testMetrics, startTime, time.Now()
 	}
 
 	time.Sleep(500 * time.Millisecond)
@@ -311,7 +341,8 @@ func runTestWithConfig(config TestConfig) error {
 	// Step 2: Send SIGINT to Client-Generator (publisher)
 	fmt.Println("Sending SIGINT to client-generator (publisher)...")
 	if err := clientGenCmd.Process.Signal(os.Interrupt); err != nil {
-		return fmt.Errorf("sending SIGINT to client-generator: %w", err)
+		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client-generator: %v\n", err)
+		return false, testMetrics, startTime, time.Now()
 	}
 
 	clientGenDone := make(chan struct{})
@@ -325,11 +356,13 @@ func runTestWithConfig(config TestConfig) error {
 	case <-clientGenDone:
 		fmt.Println("✓ Client-generator exited gracefully")
 	case <-time.After(8 * time.Second):
-		return fmt.Errorf("client-generator did not exit within 8 seconds")
+		fmt.Fprintf(os.Stderr, "Error: client-generator did not exit within 8 seconds\n")
+		return false, testMetrics, startTime, time.Now()
 	}
 
 	if clientGenCmd.ProcessState != nil && !clientGenCmd.ProcessState.Success() {
-		return fmt.Errorf("client-generator exited with non-zero code")
+		fmt.Fprintf(os.Stderr, "Error: client-generator exited with non-zero code\n")
+		return false, testMetrics, startTime, time.Now()
 	}
 
 	time.Sleep(500 * time.Millisecond)
@@ -337,7 +370,8 @@ func runTestWithConfig(config TestConfig) error {
 	// Step 3: Send SIGINT to Server (last)
 	fmt.Println("Sending SIGINT to server...")
 	if err := serverCmd.Process.Signal(os.Interrupt); err != nil {
-		return fmt.Errorf("sending SIGINT to server: %w", err)
+		fmt.Fprintf(os.Stderr, "Error sending SIGINT to server: %v\n", err)
+		return false, testMetrics, startTime, time.Now()
 	}
 
 	serverDone := make(chan struct{})
@@ -356,23 +390,16 @@ func runTestWithConfig(config TestConfig) error {
 	case <-serverDone:
 		fmt.Println("✓ Server shutdown completed")
 	case <-time.After(shutdownDelay + 2*time.Second):
-		return fmt.Errorf("server did not shutdown within %v", shutdownDelay+2*time.Second)
+		fmt.Fprintf(os.Stderr, "Error: server did not shutdown within %v\n", shutdownDelay+2*time.Second)
+		return false, testMetrics, startTime, time.Now()
 	}
 
 	if serverCmd.ProcessState != nil && !serverCmd.ProcessState.Success() {
-		return fmt.Errorf("server exited with non-zero code")
+		fmt.Fprintf(os.Stderr, "Error: server exited with non-zero code\n")
+		return false, testMetrics, startTime, time.Now()
 	}
 
-	// Verify metrics if enabled
-	if config.MetricsEnabled && testMetrics != nil {
-		testMetrics.PrintSummary()
-
-		if err := testMetrics.VerifyNoErrors(); err != nil {
-			fmt.Printf("Warning: %v\n", err)
-			// Don't fail on metrics errors for now - just warn
-		}
-	}
-
+	// Print basic verification
 	fmt.Println()
 	fmt.Println("Verification:")
 	fmt.Println("  ✓ Client received SIGINT and exited gracefully")
@@ -381,7 +408,8 @@ func runTestWithConfig(config TestConfig) error {
 	fmt.Println("  ✓ All processes exited with code 0")
 	fmt.Println("  ✓ All processes exited within expected timeframes")
 
-	return nil
+	endTime = time.Now()
+	return true, testMetrics, startTime, endTime
 }
 
 // getBaseDir returns the base directory of the gosrt project

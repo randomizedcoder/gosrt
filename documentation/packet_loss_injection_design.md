@@ -1306,14 +1306,14 @@ ip netns exec "${NS_ROUTER_B}" tc qdisc show
 1. Setup Phase
    ├── Create namespaces (setup_network.sh)
    ├── Start netem controller
-   ├── Start server in ns_srv
-   ├── Start client-generator in ns_pub
-   └── Start client in ns_sub
+   ├── Start server in ns_srv with -promuds /tmp/srt_server.sock
+   ├── Start client-generator in ns_pub with -promuds /tmp/srt_clientgen.sock
+   └── Start client in ns_sub with -promuds /tmp/srt_client.sock
 
 2. Test Phase (per configuration)
    ├── Apply impairment pattern (e.g., "starlink")
    ├── Run for test duration
-   ├── Collect metrics periodically
+   ├── Collect metrics via UDS (curl --unix-socket)
    └── Verify SRT recovery metrics
 
 3. Teardown Phase
@@ -1322,6 +1322,59 @@ ip netns exec "${NS_ROUTER_B}" tc qdisc show
    ├── Cleanup namespaces
    └── Generate report
 ```
+
+### Metrics Collection via Unix Domain Sockets
+
+Since each GoSRT process runs in an isolated network namespace, TCP-based Prometheus
+endpoints are not accessible from the host or integration test orchestrator. **Unix
+Domain Sockets (UDS)** solve this problem because socket files are accessible via
+the shared filesystem regardless of network namespace isolation.
+
+#### Starting Processes with UDS Metrics
+
+```bash
+# Server in ns_srv namespace
+ip netns exec ns_srv ./server -addr 10.0.1.1:6000 \
+    -promuds /tmp/srt_metrics_server.sock
+
+# Client-generator in ns_pub namespace
+ip netns exec ns_pub ./client-generator -to srt://10.0.1.1:6000/stream \
+    -promuds /tmp/srt_metrics_clientgen.sock
+
+# Client in ns_sub namespace
+ip netns exec ns_sub ./client -from srt://10.0.1.1:6000?streamid=subscribe:/stream \
+    -promuds /tmp/srt_metrics_client.sock
+```
+
+#### Collecting Metrics from Host
+
+```bash
+# Query server metrics (from host or orchestrator)
+curl --unix-socket /tmp/srt_metrics_server.sock http://localhost/metrics
+
+# Query client-generator metrics
+curl --unix-socket /tmp/srt_metrics_clientgen.sock http://localhost/metrics
+
+# Query client metrics
+curl --unix-socket /tmp/srt_metrics_client.sock http://localhost/metrics
+
+# Filter for SRT-specific counters
+curl -s --unix-socket /tmp/srt_metrics_server.sock http://localhost/metrics | grep gosrt_
+```
+
+#### Integration with Go Test Orchestrator
+
+```go
+// Use common.MetricsClient to fetch metrics via UDS
+client := common.NewMetricsClient()
+
+// Fetch from each component via socket path
+serverMetrics, _ := client.FetchUDS("/tmp/srt_metrics_server.sock")
+clientGenMetrics, _ := client.FetchUDS("/tmp/srt_metrics_clientgen.sock")
+clientMetrics, _ := client.FetchUDS("/tmp/srt_metrics_client.sock")
+```
+
+**See**: `prometheus_uds_design.md` for full UDS implementation details.
 
 ### File Structure
 
@@ -1521,4 +1574,5 @@ var LossTestConfigs = []TestConfig{
 | 2024-12-06 | Latency switching via routing (no queue flush) | - |
 | 2024-12-06 | Loss injection via nftables DROP (no queue impact) | - |
 | 2024-12-06 | Updated shell script to be shellcheck-compliant with readable variable names | - |
+| 2024-12-06 | Added metrics collection via Unix Domain Sockets (UDS) for namespace isolation | - |
 
