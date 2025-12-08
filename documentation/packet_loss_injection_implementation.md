@@ -65,7 +65,7 @@ Go wrapper for controlling network impairment from the test framework.
 - Predefined loss patterns (Starlink, high-loss burst)
 - Process spawning helpers for running binaries in namespaces
 
-### Phase 3: Test Framework Integration 🔲 PENDING
+### Phase 3: Test Framework Integration ✅ COMPLETE
 
 Integrate network impairment with the existing test framework.
 
@@ -73,10 +73,22 @@ Integrate network impairment with the existing test framework.
 |------|--------|------|-------|
 | Add Mode field to TestConfig | ✅ Complete | `config.go` | `TestModeClean` / `TestModeNetwork` |
 | Add Impairment field | ✅ Complete | `config.go` | `NetworkImpairment` struct |
-| Network mode test runner | 🔲 Pending | | Setup namespace before test |
+| Network mode test runner | ✅ Complete | `test_network_mode.go` | `runNetworkModeTest()` |
 | UDS metrics collection | ✅ Complete | `metrics_collector.go` | Already supports UDS |
-| Process spawning in namespace | 🔲 Pending | | `ip netns exec` for processes |
-| Cleanup on test failure | 🔲 Pending | | Ensure namespaces are removed |
+| Process spawning in namespace | ✅ Complete | `test_network_mode.go` | `startProcessInNamespace()` |
+| Cleanup on test failure | ✅ Complete | `test_network_mode.go` | `defer nc.Cleanup()` |
+| Test mode dispatch | ✅ Complete | `test_graceful_shutdown.go` | Checks `config.Mode` |
+| Latency profile support | ✅ Complete | `test_network_mode.go` | `getLatencyProfileIndex()` |
+| Pattern support | ✅ Complete | `test_network_mode.go` | `getImpairmentPattern()` |
+| CLI flag builders | ✅ Complete | `test_network_mode.go` | Uses namespace IPs |
+
+**Key Features**:
+- Automatic root privilege check
+- Network namespace setup with defer cleanup
+- UDS-based metrics collection (accessible from host)
+- Impairment applied after connections established
+- Graceful shutdown with SIGINT sequence
+- Pattern cleanup before test end
 
 ### Phase 4: Network Impairment Test Configurations 🔲 PENDING
 
@@ -119,6 +131,8 @@ contrib/integration_testing/
 │   ├── starlink_pattern.sh    # ✅ Starlink reconvergence pattern
 │   └── status.sh              # ✅ Human-friendly network status display
 ├── network_controller.go      # ✅ Go wrapper for network control
+├── test_network_mode.go       # ✅ Network mode test runner
+├── test_graceful_shutdown.go  # ✅ Updated with mode dispatch
 ├── config.go                  # ✅ TestMode and NetworkImpairment types
 ├── analysis.go                # ✅ Statistical validation
 └── test_configs.go            # 🔲 Network impairment test configs
@@ -301,4 +315,5 @@ fmt.Println(status)
 | 2024-12-08 | Phase 1 complete: All shell scripts created | - |
 | 2024-12-08 | Updated design: null routes instead of nftables | - |
 | 2024-12-08 | Phase 2 complete: NetworkController Go wrapper | - |
+| 2024-12-08 | Phase 3 complete: Test framework integration | - |
 

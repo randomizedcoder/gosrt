@@ -143,7 +143,19 @@ func testGracefulShutdownSIGINTWithConfig(config TestConfig) {
 
 // runTestWithConfig runs the graceful shutdown test with the given configuration
 func runTestWithConfig(config TestConfig) error {
-	testPassed, testMetrics, startTime, endTime := runTestWithMetrics(config)
+	var testPassed bool
+	var testMetrics *TestMetrics
+	var startTime, endTime time.Time
+
+	// Dispatch based on test mode
+	if config.Mode == TestModeNetwork {
+		// Run in network namespace mode (requires root)
+		testPassed, testMetrics, startTime, endTime = runNetworkModeTest(config)
+	} else {
+		// Run in clean network mode (default - uses loopback)
+		testPassed, testMetrics, startTime, endTime = runTestWithMetrics(config)
+	}
+
 	if !testPassed {
 		return fmt.Errorf("test execution failed")
 	}
