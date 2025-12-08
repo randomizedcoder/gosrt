@@ -6,6 +6,34 @@ import (
 	"time"
 )
 
+// TestMode indicates whether a test runs on clean network or with impairment
+type TestMode string
+
+const (
+	// TestModeClean runs on default namespace with loopback - no network impairment
+	TestModeClean TestMode = "clean"
+
+	// TestModeNetwork runs in isolated namespaces with network impairment
+	TestModeNetwork TestMode = "network"
+)
+
+// NetworkImpairment defines network impairment parameters for network mode tests
+type NetworkImpairment struct {
+	// Loss configuration
+	LossRate    float64 // Packet loss rate (0.0-1.0, e.g., 0.02 = 2%)
+	BurstLength int     // Burst loss length (0 = random loss, >0 = burst model)
+
+	// Latency configuration
+	LatencyMs       int // Base RTT latency in milliseconds (netem delay = RTT/2)
+	LatencyJitterMs int // Latency jitter in milliseconds
+
+	// Pattern-based impairment (overrides above if set)
+	Pattern string // "clean", "moderate", "heavy", "starlink", "geo-satellite"
+
+	// Latency profile (predefined latency settings)
+	LatencyProfile string // "local", "regional", "continental", "geo-satellite", "tier3-high"
+}
+
 // MetricsEndpoint represents a metrics endpoint configuration
 type MetricsEndpoint struct {
 	HTTPAddr string // TCP HTTP address (e.g., "127.0.0.10:5101") - empty if not used
@@ -229,6 +257,10 @@ type TestConfig struct {
 	// Test identification
 	Name        string // Human-readable name (e.g., "SmallBuffers-1Mbps")
 	Description string // Detailed description of what this test validates
+
+	// Test mode (clean network vs network impairment)
+	Mode       TestMode          // TestModeClean (default) or TestModeNetwork
+	Impairment NetworkImpairment // Network impairment settings (only used if Mode == TestModeNetwork)
 
 	// Network configuration (IP addresses and ports for each component)
 	ServerNetwork          NetworkConfig // Server network config (default: 127.0.0.10:6000)

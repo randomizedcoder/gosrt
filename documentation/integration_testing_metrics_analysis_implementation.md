@@ -50,18 +50,23 @@ See [Integration Testing Design - Core Principles](integration_testing_design.md
 | Analysis result aggregation | ✅ Complete | `analysis.go` | `AnalyzeTestMetrics()` - combines all analysis |
 | Console output format | ✅ Complete | `analysis.go` | `PrintAnalysisResult()` - formatted console output |
 | Test framework integration | ✅ Complete | `test_graceful_shutdown.go` | `runTestWithMetrics()` + `AnalyzeTestResults()` |
-| JSON output format | 🔲 Pending | - | For CI/CD integration |
+| JSON output format | ✅ Complete | `analysis.go` | `ToJSON()`, `WriteJSON()`, `PrintJSON()` |
 
-### Phase 2: Statistical Validation
+### Phase 2: Statistical Validation ✅ COMPLETE
 
 | Task | Status | File | Notes |
 |------|--------|------|-------|
-| Statistical expectations | 🔲 Pending | - | For network impairment tests |
-| Tolerance-based validation | 🔲 Pending | - | ±50% tolerance for netem |
-| Loss rate validation | 🔲 Pending | - | |
-| Retransmission rate validation | 🔲 Pending | - | |
-| NAK behavior validation | 🔲 Pending | - | |
-| Recovery rate validation | 🔲 Pending | - | |
+| TestMode and NetworkImpairment types | ✅ Complete | `config.go` | `TestModeClean`, `TestModeNetwork`, `NetworkImpairment` |
+| Statistical expectations | ✅ Complete | `analysis.go` | `StatisticalExpectation`, `computeStatisticalExpectations()` |
+| Tolerance-based validation | ✅ Complete | `analysis.go` | `isWithinTolerance()` with ±50% default |
+| Loss rate validation | ✅ Complete | `analysis.go` | `ValidateStatistical()` - loss rate check |
+| Retransmission rate validation | ✅ Complete | `analysis.go` | Min/max retrans rate checks |
+| NAK behavior validation | ✅ Complete | `analysis.go` | NAKs per lost packet check |
+| Recovery rate validation | ✅ Complete | `analysis.go` | Min recovery rate check |
+| Console output for statistical | ✅ Complete | `analysis.go` | Added to `PrintAnalysisResult()` |
+
+**Note**: Statistical validation is only performed for `TestModeNetwork` tests with `LossRate > 0`.
+For clean network tests, it passes immediately (not applicable).
 
 ### Phase 3: Go Runtime Stability Analysis ✅ COMPLETE
 
