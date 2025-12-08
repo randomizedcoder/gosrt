@@ -57,11 +57,46 @@ func main() {
 
 	case "list-configs":
 		// List all configurations
-		fmt.Println("Available test configurations:")
+		fmt.Println("Available test configurations (clean network):")
 		fmt.Println()
 		for _, c := range TestConfigs {
 			fmt.Printf("  %-35s %s\n", c.Name, c.Description)
 		}
+
+	case "list-network-configs":
+		// List network impairment configurations
+		fmt.Println("Available network impairment configurations (require root):")
+		fmt.Println()
+		for _, c := range NetworkTestConfigs {
+			fmt.Printf("  %-45s %s\n", c.Name, c.Description)
+		}
+
+	case "network-test":
+		// Run a specific network impairment test
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Error: config name required\n")
+			fmt.Fprintf(os.Stderr, "Usage: sudo %s network-test <config-name>\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for _, c := range NetworkTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-45s %s\n", c.Name, c.Description)
+			}
+			os.Exit(1)
+		}
+		configName := os.Args[2]
+		config := GetNetworkTestConfigByName(configName)
+		if config == nil {
+			fmt.Fprintf(os.Stderr, "Error: unknown network configuration: %s\n", configName)
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for _, c := range NetworkTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-45s %s\n", c.Name, c.Description)
+			}
+			os.Exit(1)
+		}
+		testNetworkModeWithConfig(*config)
+
+	case "network-test-all":
+		// Run all network impairment tests
+		testNetworkModeAllConfigs()
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown test: %s\n", testName)
@@ -72,11 +107,15 @@ func main() {
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, "Usage: %s <test-name> [options]\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "\nAvailable tests:\n")
+	fmt.Fprintf(os.Stderr, "\nClean Network Tests (no root required):\n")
 	fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint              Run graceful shutdown test with default config\n")
 	fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint-all          Run graceful shutdown test with all configurations\n")
 	fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint-config NAME  Run graceful shutdown test with specific config\n")
-	fmt.Fprintf(os.Stderr, "  list-configs                          List all available configurations\n")
+	fmt.Fprintf(os.Stderr, "  list-configs                          List all clean network configurations\n")
+	fmt.Fprintf(os.Stderr, "\nNetwork Impairment Tests (require root):\n")
+	fmt.Fprintf(os.Stderr, "  network-test NAME                     Run network impairment test with specific config\n")
+	fmt.Fprintf(os.Stderr, "  network-test-all                      Run all network impairment tests\n")
+	fmt.Fprintf(os.Stderr, "  list-network-configs                  List all network impairment configurations\n")
 }
 
 // testGracefulShutdownSIGINTAllConfigs runs the graceful shutdown test with all configurations
@@ -139,6 +178,89 @@ func testGracefulShutdownSIGINTWithConfig(config TestConfig) {
 
 	fmt.Println()
 	fmt.Printf("=== Test 1.1 (%s): PASSED ===\n", config.Name)
+}
+
+// testNetworkModeWithConfig runs a network impairment test with a specific configuration
+func testNetworkModeWithConfig(config TestConfig) {
+	fmt.Printf("=== Network Impairment Test: %s ===\n", config.Name)
+	fmt.Println()
+	fmt.Printf("Description: %s\n", config.Description)
+	fmt.Printf("Mode: %s\n", config.Mode)
+	fmt.Printf("Bitrate: %d bps (%.2f Mb/s)\n", config.Bitrate, float64(config.Bitrate)/1_000_000)
+	if config.Impairment.LossRate > 0 {
+		fmt.Printf("Loss Rate: %.1f%%\n", config.Impairment.LossRate*100)
+	}
+	if config.Impairment.LatencyProfile != "" {
+		fmt.Printf("Latency Profile: %s\n", config.Impairment.LatencyProfile)
+	}
+	if config.Impairment.Pattern != "" {
+		fmt.Printf("Impairment Pattern: %s\n", config.Impairment.Pattern)
+	}
+	fmt.Println()
+
+	if err := runTestWithConfig(config); err != nil {
+		fmt.Fprintf(os.Stderr, "Test FAILED: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	fmt.Printf("=== Network Test (%s): PASSED ===\n", config.Name)
+}
+
+// testNetworkModeAllConfigs runs all network impairment tests
+func testNetworkModeAllConfigs() {
+	fmt.Println("=== Network Impairment Tests (All Configurations) ===")
+	fmt.Println()
+	fmt.Printf("Total configurations to test: %d\n", len(NetworkTestConfigs))
+	fmt.Println()
+	fmt.Println("NOTE: These tests require root privileges for network namespace creation.")
+	fmt.Println()
+
+	passed := 0
+	failed := 0
+	var failedConfigs []string
+
+	for i, config := range NetworkTestConfigs {
+		fmt.Printf("\n--- Configuration %d/%d: %s ---\n", i+1, len(NetworkTestConfigs), config.Name)
+		fmt.Printf("Description: %s\n", config.Description)
+		fmt.Printf("Bitrate: %d bps (%.2f Mb/s)\n", config.Bitrate, float64(config.Bitrate)/1_000_000)
+		if config.Impairment.LossRate > 0 {
+			fmt.Printf("Loss Rate: %.1f%%\n", config.Impairment.LossRate*100)
+		}
+		if config.Impairment.LatencyProfile != "" {
+			fmt.Printf("Latency Profile: %s\n", config.Impairment.LatencyProfile)
+		}
+		if config.Impairment.Pattern != "" {
+			fmt.Printf("Impairment Pattern: %s\n", config.Impairment.Pattern)
+		}
+		fmt.Println()
+
+		err := runTestWithConfig(config)
+		if err != nil {
+			fmt.Printf("✗ Configuration %s FAILED: %v\n", config.Name, err)
+			failed++
+			failedConfigs = append(failedConfigs, config.Name)
+		} else {
+			fmt.Printf("✓ Configuration %s PASSED\n", config.Name)
+			passed++
+		}
+
+		// Wait between tests for cleanup
+		if i < len(NetworkTestConfigs)-1 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("=== Results: %d/%d passed, %d failed ===\n", passed, len(NetworkTestConfigs), failed)
+
+	if failed > 0 {
+		fmt.Println("\nFailed configurations:")
+		for _, name := range failedConfigs {
+			fmt.Printf("  - %s\n", name)
+		}
+		os.Exit(1)
+	}
 }
 
 // runTestWithConfig runs the graceful shutdown test with the given configuration

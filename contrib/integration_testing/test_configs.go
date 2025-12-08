@@ -243,11 +243,204 @@ var TestConfigs = []TestConfig{
 	},
 }
 
+// ============================================================================
+// NETWORK IMPAIRMENT TEST CONFIGURATIONS
+// ============================================================================
+// These tests run in network namespace mode with controlled packet loss
+// and latency. They require root privileges and are NOT included in the
+// default TestConfigs slice.
+//
+// Run with: sudo ./integration_testing graceful-shutdown-sigint-config <name>
+
+// NetworkTestConfigs contains test configurations that use network namespaces
+// with controlled impairment (loss, latency, patterns).
+var NetworkTestConfigs = []TestConfig{
+	// ========== Basic Loss Tests (No Latency) ==========
+	{
+		Name:        "Network-Loss2pct-5Mbps",
+		Description: "2% packet loss at 5 Mb/s - basic ARQ validation",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.02, // 2% loss
+			LatencyProfile: "none",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    30 * time.Second, // Longer duration for loss recovery
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &LargeBuffersSRTConfig, // Large buffers for loss recovery
+	},
+	{
+		Name:        "Network-Loss5pct-5Mbps",
+		Description: "5% packet loss at 5 Mb/s - moderate loss recovery",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.05, // 5% loss
+			LatencyProfile: "none",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    30 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &LargeBuffersSRTConfig,
+	},
+	{
+		Name:        "Network-Loss10pct-5Mbps",
+		Description: "10% packet loss at 5 Mb/s - heavy loss recovery",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.10, // 10% loss
+			LatencyProfile: "none",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    30 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &LargeBuffersSRTConfig,
+	},
+
+	// ========== Latency + Loss Tests ==========
+	{
+		Name:        "Network-Regional-Loss2pct-5Mbps",
+		Description: "10ms RTT + 2% loss at 5 Mb/s - regional network with light loss",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.02,
+			LatencyProfile: "regional",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    30 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &LargeBuffersSRTConfig,
+	},
+	{
+		Name:        "Network-Continental-Loss2pct-5Mbps",
+		Description: "60ms RTT + 2% loss at 5 Mb/s - continental network with light loss",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.02,
+			LatencyProfile: "continental",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    30 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &LargeBuffersSRTConfig,
+	},
+	{
+		Name:        "Network-Intercontinental-Loss5pct-5Mbps",
+		Description: "130ms RTT + 5% loss at 5 Mb/s - intercontinental with moderate loss",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "intercontinental",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    45 * time.Second, // Longer for high latency
+		ConnectionWait:  5 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 3 * time.Second,
+		SharedSRT:       &ExtraLargeBuffersSRTConfig, // Need extra large buffers
+	},
+	{
+		Name:        "Network-GeoSatellite-Loss2pct-2Mbps",
+		Description: "300ms RTT + 2% loss at 2 Mb/s - GEO satellite simulation",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.02,
+			LatencyProfile: "geo-satellite",
+		},
+		Bitrate:         2_000_000, // Lower bitrate for high latency
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  10 * time.Second, // Long connection wait for 600ms RTT
+		MetricsEnabled:  true,
+		CollectInterval: 5 * time.Second,
+		SharedSRT:       &ExtraLargeBuffersSRTConfig,
+	},
+
+	// ========== Pattern-Based Impairment Tests ==========
+	{
+		Name:        "Network-Starlink-5Mbps",
+		Description: "Starlink reconvergence pattern (60ms 100% loss at 12,27,42,57s) at 5 Mb/s",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional", // LEO satellite has low latency normally
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second, // Run for 1.5 minutes to see multiple events
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &LargeBuffersSRTConfig,
+	},
+	{
+		Name:        "Network-HighLossBurst-5Mbps",
+		Description: "High loss burst pattern (85% loss for 1s every minute) at 5 Mb/s",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			Pattern:        "high-loss",
+			LatencyProfile: "none",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &LargeBuffersSRTConfig,
+	},
+
+	// ========== Stress Tests ==========
+	{
+		Name:        "Network-Stress-HighLatencyHighLoss",
+		Description: "130ms RTT + 10% loss at 10 Mb/s - extreme stress test",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.10,
+			LatencyProfile: "intercontinental",
+		},
+		Bitrate:         10_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  5 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 3 * time.Second,
+		SharedSRT:       &ExtraLargeBuffersSRTConfig,
+	},
+}
+
+// ExtraLargeBuffersSRTConfig provides 5-second buffers for high-latency scenarios
+var ExtraLargeBuffersSRTConfig = SRTConfig{
+	ConnectionTimeout: 10000 * time.Millisecond, // 10 second connection timeout
+	PeerIdleTimeout:   60000 * time.Millisecond, // 60 second idle timeout
+	RecvLatency:       5000 * time.Millisecond,  // 5 second receive latency
+	PeerLatency:       5000 * time.Millisecond,  // 5 second peer latency
+	FC:                51200,                    // 51200 packets flow control
+	RecvBuf:           4 * 1024 * 1024,          // 4 MB receive buffer
+	SendBuf:           4 * 1024 * 1024,          // 4 MB send buffer
+	TLPktDrop:         true,
+}
+
 // GetTestConfigByName finds a test configuration by name
 func GetTestConfigByName(name string) *TestConfig {
 	for i := range TestConfigs {
 		if TestConfigs[i].Name == name {
 			return &TestConfigs[i]
+		}
+	}
+	return nil
+}
+
+// GetNetworkTestConfigByName finds a network test configuration by name
+func GetNetworkTestConfigByName(name string) *TestConfig {
+	for i := range NetworkTestConfigs {
+		if NetworkTestConfigs[i].Name == name {
+			return &NetworkTestConfigs[i]
 		}
 	}
 	return nil

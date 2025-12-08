@@ -90,18 +90,41 @@ Integrate network impairment with the existing test framework.
 - Graceful shutdown with SIGINT sequence
 - Pattern cleanup before test end
 
-### Phase 4: Network Impairment Test Configurations 🔲 PENDING
+### Phase 4: Network Impairment Test Configurations ✅ COMPLETE
 
 Test configurations that use network impairment.
 
 | Task | Status | File | Notes |
 |------|--------|------|-------|
-| 2% loss test | 🔲 Pending | `test_configs.go` | Basic loss recovery |
-| 5% loss test | 🔲 Pending | | Moderate loss |
-| 10% loss test | 🔲 Pending | | Heavy loss |
-| Latency + loss tests | 🔲 Pending | | Combined impairment |
-| Starlink pattern test | 🔲 Pending | | Burst loss recovery |
-| High-loss burst test | 🔲 Pending | | 85% loss for 1 second |
+| 2% loss test | ✅ Complete | `test_configs.go` | `Network-Loss2pct-5Mbps` |
+| 5% loss test | ✅ Complete | | `Network-Loss5pct-5Mbps` |
+| 10% loss test | ✅ Complete | | `Network-Loss10pct-5Mbps` |
+| Regional + 2% loss | ✅ Complete | | `Network-Regional-Loss2pct-5Mbps` (10ms RTT) |
+| Continental + 2% loss | ✅ Complete | | `Network-Continental-Loss2pct-5Mbps` (60ms RTT) |
+| Intercontinental + 5% loss | ✅ Complete | | `Network-Intercontinental-Loss5pct-5Mbps` (130ms RTT) |
+| GEO Satellite + 2% loss | ✅ Complete | | `Network-GeoSatellite-Loss2pct-2Mbps` (300ms RTT) |
+| Starlink pattern test | ✅ Complete | | `Network-Starlink-5Mbps` |
+| High-loss burst test | ✅ Complete | | `Network-HighLossBurst-5Mbps` |
+| Stress test | ✅ Complete | | `Network-Stress-HighLatencyHighLoss` |
+| ExtraLargeBuffers config | ✅ Complete | | 5s latency, 4MB buffers |
+| GetNetworkTestConfigByName | ✅ Complete | | Config lookup function |
+| CLI: network-test | ✅ Complete | `test_graceful_shutdown.go` | Run single network test |
+| CLI: network-test-all | ✅ Complete | | Run all network tests |
+| CLI: list-network-configs | ✅ Complete | | List network configs |
+
+**Network Test Configurations (10 total)**:
+```
+Network-Loss2pct-5Mbps               # Basic 2% loss
+Network-Loss5pct-5Mbps               # Moderate 5% loss
+Network-Loss10pct-5Mbps              # Heavy 10% loss
+Network-Regional-Loss2pct-5Mbps      # 10ms RTT + 2% loss
+Network-Continental-Loss2pct-5Mbps   # 60ms RTT + 2% loss
+Network-Intercontinental-Loss5pct    # 130ms RTT + 5% loss
+Network-GeoSatellite-Loss2pct-2Mbps  # 300ms RTT + 2% loss
+Network-Starlink-5Mbps               # Starlink reconvergence pattern
+Network-HighLossBurst-5Mbps          # 85% loss burst pattern
+Network-Stress-HighLatencyHighLoss   # 130ms RTT + 10% loss @ 10Mbps
+```
 
 ### Phase 5: Statistical Validation 🔲 PENDING
 
@@ -316,4 +339,5 @@ fmt.Println(status)
 | 2024-12-08 | Updated design: null routes instead of nftables | - |
 | 2024-12-08 | Phase 2 complete: NetworkController Go wrapper | - |
 | 2024-12-08 | Phase 3 complete: Test framework integration | - |
+| 2024-12-08 | Phase 4 complete: 10 network impairment test configs | - |
 
