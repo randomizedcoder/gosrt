@@ -1477,17 +1477,24 @@ make test-integration REPORT=html > report.html
 - [x] Add `montanaflynn/stats` dependency for linear regression
 - [x] Implement Go runtime stability analysis (`runtime_analysis.go`)
 - [x] Auto-analyze memory, goroutines, GC, CPU for tests ≥30 min
-- [ ] Implement statistical validation (loss rate tolerance) - needs network impairment tests
-- [ ] Generate structured test reports (JSON)
+- [x] Implement statistical validation (`ValidateStatistical()`)
+- [x] Generate structured test reports (JSON) - `ToJSON()`, `WriteJSON()`, `PrintJSON()`
+- [x] Add fail-safe principle (default to FAILED, only pass on explicit confirmation)
 - [ ] Add configurable thresholds per test
 
-### Phase 3: Packet Loss Testing ✅ Design Complete
+### Phase 3: Packet Loss Testing ✅ Design Complete, 🔨 Implementation In Progress
 
 **Design Document**: [packet_loss_injection_design.md](packet_loss_injection_design.md)
+**Implementation Tracker**: [packet_loss_injection_implementation.md](packet_loss_injection_implementation.md)
+
+**Loss Injection Approach**:
+- **100% loss events** (Starlink, outages): Null/blackhole routes (`ip route add blackhole`)
+- **Probabilistic loss** (2%, 5%, etc.): Netem `loss` parameter on inter-router links
+- **No nftables dependency**: Uses only iproute2 and tc (simpler, fewer dependencies)
 
 - [x] Design namespace-based network isolation
 - [x] Design dual-router architecture with netem
-- [x] Design nftables-based loss injection
+- [x] Design loss injection via null routes + netem (replaced nftables)
 - [x] Design impairment patterns (Starlink, burst loss)
 - [ ] Implement namespace setup scripts
 - [ ] Implement Go network controller
@@ -1550,6 +1557,9 @@ contrib/integration_testing/
 | Document | Description |
 |----------|-------------|
 | `packet_loss_injection_design.md` | Packet loss injection design (detailed) |
+| `packet_loss_injection_implementation.md` | Packet loss injection implementation progress |
+| `metrics_analysis_design.md` | Metrics analysis design |
+| `integration_testing_metrics_analysis_implementation.md` | Metrics analysis implementation progress |
 | `test_1.1_detailed_design.md` | Original graceful shutdown test design |
 | `context_and_cancellation_new_design.md` | Context cancellation patterns |
 | `metrics_and_statistics_design.md` | Metrics infrastructure design |
@@ -1567,6 +1577,9 @@ contrib/integration_testing/
 | 2024-12-06 | Documented metrics analysis design | - |
 | 2024-12-06 | Noted packet loss and video testing requirements | - |
 | 2024-12-07 | Implemented Phase 1 metrics analysis (error + signal validation) | - |
+| 2024-12-08 | Implemented statistical validation and JSON output | - |
+| 2024-12-08 | Added fail-safe principle (tests default to FAILED) | - |
+| 2024-12-08 | Updated Phase 3: replaced nftables with null routes + netem loss | - |
 | 2024-12-07 | Added montanaflynn/stats for linear regression | - |
 | 2024-12-07 | Implemented Go runtime stability analysis (Phase 3) | - |
 

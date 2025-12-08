@@ -6,6 +6,7 @@ This document describes the design for controlled packet loss injection in the G
 
 **Related Documents**:
 - [Integration Testing Design](integration_testing_design.md) - Parent integration testing framework
+- [Packet Loss Injection Implementation](packet_loss_injection_implementation.md) - Implementation progress tracker
 - [amt.sh](amt.sh) - Linux kernel network namespace example (reference for implementation)
 
 ---
@@ -116,7 +117,7 @@ Timeline (one minute):
 | **Reproducibility** | Deterministic patterns for debugging (seed-based randomness) |
 | **Observability** | Log/metric injection events for correlation with SRT metrics |
 | **Ease of Use** | Simple configuration via CLI or test config files |
-| **Cross-Platform** | Linux required (netem, nftables), macOS nice-to-have |
+| **Cross-Platform** | Linux required (netem, iproute2), macOS nice-to-have |
 | **No Tail-Drop** | Netem queue configured with 50k packet limit to prevent drops |
 
 ### 3. Integration Requirements
@@ -469,7 +470,8 @@ real network behavior during Starlink reconvergence events.
 **Solution: Dual Router with Fixed Latency Links**:
 - Two router namespaces connected by **multiple parallel veth pairs**, each with fixed latency
 - Switch between latency profiles by changing **routing**, not netem rules (no queue flush)
-- Use **nftables** for loss injection (Starlink events) - packets are dropped, not queued
+- Use **null/blackhole routes** for 100% loss injection (Starlink events) - instant, no dependencies
+- Use **netem loss parameter** for probabilistic loss (2%, 5%, etc.) - already on inter-router links
 
 #### Architecture Diagram
 
@@ -510,7 +512,8 @@ real network behavior during Starlink reconvergence events.
 │  │   │                                                                                  │     │      │
 │  │   └─────────────────────────────────────────────────────────────────────────────────┘     │      │
 │  │                                                                                            │      │
-│  │   nftables: Drop rules for Starlink/loss events (no queue impact)                        │      │
+│  │   Blackhole routes: 100% drop for Starlink/outage events (instant effect)               │      │
+│  │   Netem loss: Probabilistic loss (2%, 5%, etc.) on inter-router links                   │      │
 │  │   Routing: Switch between links to change latency profile                                │      │
 │  │                                                                                            │      │
 │  └───────────────────────────────────────────────────────────────────────────────────────────┘      │
@@ -557,9 +560,9 @@ real network behavior during Starlink reconvergence events.
 │  │                              Go Controller (netem-controller)                             │       │
 │  │                                                                                           │       │
 │  │  • Latency switching: Change routing to use different inter-router link                  │       │
-│  │  • Loss injection: nftables DROP rules (no queue flush, instant effect)                 │       │
-│  │  • Starlink pattern: 100% drop at seconds 12, 27, 42, 57 for 50-70ms                    │       │
-│  │  • High-loss pattern: nftables probability-based drop (85%)                              │       │
+│  │  • 100% loss (Starlink/outage): Blackhole routes (instant effect)                        │       │
+│  │  • Probabilistic loss: Netem loss parameter on inter-router links                        │       │
+│  │  • Starlink pattern: Blackhole route at seconds 12, 27, 42, 57 for 50-70ms              │       │
 │  │                                                                                           │       │
 │  └──────────────────────────────────────────────────────────────────────────────────────────┘       │
 │                                                                                                      │
@@ -605,19 +608,28 @@ ip netns exec ns_router_b ip route replace 10.1.1.0/24 via 10.100.3.1
 ip netns exec ns_router_b ip route replace 10.1.2.0/24 via 10.100.3.1
 ```
 
-#### Loss Injection via nftables (No Queue Impact)
+#### Loss Injection via Null Routes and Netem
 
-Starlink events and loss injection use nftables DROP rules, which don't affect the netem queue:
+**100% Loss Events** (Starlink, complete outage) use blackhole routes - instant and simple:
 
 ```bash
-# Starlink event: 100% drop for 60ms
-ip netns exec ns_router_a nft add rule inet srt forward drop
+# Starlink event: 100% drop for 60ms using blackhole route
+# Add blackhole route to drop all traffic to the server subnet
+ip netns exec ns_router_a ip route add blackhole 10.2.1.0/24
 sleep 0.06
-ip netns exec ns_router_a nft flush chain inet srt forward
+# Remove blackhole route to restore traffic
+ip netns exec ns_router_a ip route del blackhole 10.2.1.0/24
+```
 
-# Probability-based loss (5%)
-ip netns exec ns_router_a nft add rule inet srt forward \
-    numgen random mod 100 \< 5 drop
+**Probabilistic Loss** (2%, 5%, etc.) uses netem's loss parameter on inter-router links:
+
+```bash
+# Add 5% loss to the inter-router link (combined with existing latency)
+# IMPORTANT: Always include "limit 50000" to prevent netem tail drops
+ip netns exec ns_router_a tc qdisc change dev link2_a root netem delay 30ms loss 5% limit 50000
+
+# Remove probabilistic loss (restore delay-only, keep large queue)
+ip netns exec ns_router_a tc qdisc change dev link2_a root netem delay 30ms limit 50000
 ```
 
 #### Advantages of Dual Router Architecture
@@ -627,8 +639,9 @@ ip netns exec ns_router_a nft add rule inet srt forward \
 | **No queue flush** | Latency changes via routing, not netem reconfiguration |
 | **Realistic transitions** | Packets in-flight continue through their path |
 | **Fixed latency links** | Set once at startup, never modified |
-| **Clean loss injection** | nftables DROP doesn't affect latency queue |
-| **Instant loss events** | Starlink reconvergence is immediate (no queue drain) |
+| **Simple loss injection** | Blackhole routes for 100% loss, netem for probabilistic loss |
+| **No nftables dependency** | Uses only iproute2 and tc (already required for namespaces) |
+| **Instant loss events** | Blackhole route change is immediate (kernel routing table) |
 | **Independent paths** | Can test different latencies simultaneously if needed |
 | **50k queue preserved** | Latency queues maintain their contents during transitions |
 
@@ -849,11 +862,9 @@ main() {
     # Set initial routing to use link0 (no latency)
     set_latency_profile 0
 
-    # Setup nftables for loss injection on Router A
-    log_info "Setting up nftables for loss injection..."
-    ns_exec "${NS_ROUTER_A}" nft add table inet srt
-    ns_exec "${NS_ROUTER_A}" nft add chain inet srt forward \
-        '{ type filter hook forward priority 0; policy accept; }'
+    # No nftables setup needed - we use:
+    # - Blackhole routes for 100% loss (Starlink events)
+    # - Netem loss parameter for probabilistic loss
 
     # Save state for external tools
     cat > "${STATE_FILE}" << EOF
@@ -910,7 +921,8 @@ fi
 
 ```go
 // netem_controller.go - Dynamic network impairment controller
-// Uses nftables for loss injection (instant, no queue flush)
+// Uses blackhole routes for 100% loss (Starlink events)
+// Uses netem loss parameter for probabilistic loss
 // Uses routing changes for latency switching (no queue flush)
 
 package netemcontroller
@@ -923,7 +935,7 @@ import (
     "time"
 )
 
-// NetworkController manages network impairment via nftables and routing
+// NetworkController manages network impairment via blackhole routes, netem, and routing
 type NetworkController struct {
     testID       string        // Test run ID for namespace names
     nsRouterA    string        // Client-side router namespace
@@ -1052,7 +1064,9 @@ func (c *NetworkController) SetLatencyProfile(profile LatencyProfile) error {
     return nil
 }
 
-// SetLoss applies a static loss rate via nftables (instant, no queue impact)
+// SetLoss applies a loss rate:
+// - 100% loss uses blackhole routes (instant, for Starlink events)
+// - Probabilistic loss uses netem loss parameter on inter-router links
 func (c *NetworkController) SetLoss(percent int) error {
     c.mu.Lock()
     defer c.mu.Unlock()
@@ -1063,7 +1077,8 @@ func (c *NetworkController) SetLoss(percent int) error {
 func (c *NetworkController) ClearLoss() error {
     c.mu.Lock()
     defer c.mu.Unlock()
-    return c.clearNftLoss()
+    c.clearBlackhole()
+    return c.clearNetemLoss()
 }
 
 // StartPattern starts a dynamic loss pattern
@@ -1079,29 +1094,59 @@ func (c *NetworkController) Stop() {
     c.ClearLoss()
 }
 
-// applyNftLoss uses nftables to drop packets (no queue flush)
-func (c *NetworkController) applyNftLoss(percent int) error {
-    // Clear existing rules first
-    _ = c.clearNftLoss()
+// applyLoss applies loss using the appropriate method:
+// - 100% loss: blackhole route (instant)
+// - Probabilistic loss: netem loss parameter
+func (c *NetworkController) applyLoss(percent int) error {
+    // Clear any existing loss configuration
+    c.clearBlackhole()
+    _ = c.clearNetemLoss()
 
     if percent == 0 {
         return nil
     }
 
     if percent == 100 {
-        // Total drop - simple rule
-        return c.nsExec(c.nsRouterA, "nft", "add", "rule", "inet", "srt", "forward", "drop")
+        // Total drop using blackhole route - instant effect
+        // Add blackhole routes for both server and subscriber subnets
+        if err := c.nsExec(c.nsRouterA, "ip", "route", "add", "blackhole", c.serverSubnet); err != nil {
+            return err
+        }
+        return c.nsExec(c.nsRouterA, "ip", "route", "add", "blackhole", c.subscriberSubnet)
     }
 
-    // Probability-based drop using numgen
-    // numgen random mod 100 < percent => drop
-    return c.nsExec(c.nsRouterA, "nft", "add", "rule", "inet", "srt", "forward",
-        "numgen", "random", "mod", "100", "<", fmt.Sprintf("%d", percent), "drop")
+    // Probabilistic loss using netem on current latency link
+    // Modify the existing netem qdisc to add loss parameter
+    // IMPORTANT: Always include "limit 50000" to prevent netem tail drops
+    currentLink := fmt.Sprintf("link%d_a", c.currentLatency)
+    delay := c.getDelayForLatency(c.currentLatency)
+    return c.nsExec(c.nsRouterA, "tc", "qdisc", "change", "dev", currentLink,
+        "root", "netem", "delay", delay, "loss", fmt.Sprintf("%d%%", percent), "limit", "50000")
 }
 
-// clearNftLoss removes all nftables loss rules
-func (c *NetworkController) clearNftLoss() error {
-    return c.nsExec(c.nsRouterA, "nft", "flush", "chain", "inet", "srt", "forward")
+// clearBlackhole removes blackhole routes
+func (c *NetworkController) clearBlackhole() {
+    // Ignore errors - routes may not exist
+    _ = c.nsExec(c.nsRouterA, "ip", "route", "del", "blackhole", c.serverSubnet)
+    _ = c.nsExec(c.nsRouterA, "ip", "route", "del", "blackhole", c.subscriberSubnet)
+}
+
+// clearNetemLoss removes loss parameter from netem (restores delay-only, keeps large queue)
+func (c *NetworkController) clearNetemLoss() error {
+    currentLink := fmt.Sprintf("link%d_a", c.currentLatency)
+    delay := c.getDelayForLatency(c.currentLatency)
+    // Keep limit 50000 to prevent tail drops
+    return c.nsExec(c.nsRouterA, "tc", "qdisc", "change", "dev", currentLink,
+        "root", "netem", "delay", delay, "limit", "50000")
+}
+
+// getDelayForLatency returns the netem delay string for a latency profile
+func (c *NetworkController) getDelayForLatency(profile int) string {
+    delays := []string{"0ms", "5ms", "30ms", "65ms", "150ms"}
+    if profile >= 0 && profile < len(delays) {
+        return delays[profile]
+    }
+    return "0ms"
 }
 
 // nsExec runs a command in a network namespace
@@ -1138,9 +1183,9 @@ func (c *NetworkController) runPattern(pattern LossPattern) {
             case <-time.After(time.Until(eventTime)):
             }
 
-            // Apply loss via nftables (instant effect)
+            // Apply loss (blackhole for 100%, netem for probabilistic)
             c.mu.Lock()
-            if err := c.applyNftLoss(event.LossPercent); err != nil {
+            if err := c.applyLoss(event.LossPercent); err != nil {
                 fmt.Printf("Error applying loss: %v\n", err)
             }
             c.mu.Unlock()
@@ -1175,8 +1220,9 @@ func (c *NetworkController) runPattern(pattern LossPattern) {
 
 With the dual-router architecture:
 - **Latency** is controlled via **routing** (switching between fixed-latency links)
-- **Loss** is controlled via **nftables** (instant drop, no queue impact)
-- **Netem** is only applied once at setup to inter-router links (never changed)
+- **100% Loss** (Starlink, outages) is controlled via **blackhole routes** (instant effect)
+- **Probabilistic Loss** is controlled via **netem loss parameter** on current latency link
+- **Netem delay** is applied once at setup to inter-router links (fixed latency values)
 
 #### Latency Switching via Routing
 
@@ -1223,45 +1269,54 @@ ip netns exec "${NS_ROUTER_A}" ip route
 ip netns exec "${NS_ROUTER_B}" ip route
 ```
 
-#### Loss Injection via nftables
+#### Loss Injection via Null Routes and Netem
 
 ```bash
 # ============================================================================
-# Loss is injected via nftables DROP rules - instant effect, no queue impact
-# The nftables table "inet srt" is created during setup
+# Loss is injected using two mechanisms:
+# - Blackhole routes: 100% loss (Starlink events, complete outages) - instant
+# - Netem loss parameter: Probabilistic loss (2%, 5%, etc.)
+# No nftables dependency - uses only iproute2 and tc
 # ============================================================================
 
 NS_ROUTER_A="ns_router_a_$$"
+SUBNET_SERVER="10.2.1.0/24"
+SUBNET_SUBSCRIBER="10.1.2.0/24"
 
-# === Starlink Event: 100% drop for 60ms ===
-ip netns exec "${NS_ROUTER_A}" nft add rule inet srt forward drop
+# === Starlink Event: 100% drop for 60ms using blackhole routes ===
+# Add blackhole routes - instant effect, kernel routing table update
+ip netns exec "${NS_ROUTER_A}" ip route add blackhole "${SUBNET_SERVER}"
+ip netns exec "${NS_ROUTER_A}" ip route add blackhole "${SUBNET_SUBSCRIBER}"
 sleep 0.06
-ip netns exec "${NS_ROUTER_A}" nft flush chain inet srt forward
+# Remove blackhole routes - restore normal routing
+ip netns exec "${NS_ROUTER_A}" ip route del blackhole "${SUBNET_SERVER}"
+ip netns exec "${NS_ROUTER_A}" ip route del blackhole "${SUBNET_SUBSCRIBER}"
 
-# === High Loss Event: 85% drop for 1 second ===
-ip netns exec "${NS_ROUTER_A}" nft add rule inet srt forward \
-    numgen random mod 100 \< 85 drop
+# === Probabilistic Loss using netem ===
+# Add loss parameter to existing netem qdisc on current latency link
+# IMPORTANT: Always include "limit 50000" to prevent netem tail drops
+# Example: link2 has 30ms delay, add 5% loss
+ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms loss 5% limit 50000
+
+# High loss event: 85% drop for 1 second
+ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms loss 85% limit 50000
 sleep 1
-ip netns exec "${NS_ROUTER_A}" nft flush chain inet srt forward
+# Remove loss (restore delay-only, keep large queue)
+ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms limit 50000
 
-# === Static probability-based loss ===
-# 2% loss
-ip netns exec "${NS_ROUTER_A}" nft add rule inet srt forward \
-    numgen random mod 100 \< 2 drop
+# === Static probability-based loss examples ===
+# 2% loss on tier2 link (30ms delay)
+ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms loss 2% limit 50000
 
-# 5% loss
-ip netns exec "${NS_ROUTER_A}" nft add rule inet srt forward \
-    numgen random mod 100 \< 5 drop
+# 5% loss on tier3 link (65ms delay)
+ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link3_a root netem delay 65ms loss 5% limit 50000
 
-# === Directional loss (only affect traffic to server) ===
-ip netns exec "${NS_ROUTER_A}" nft add rule inet srt forward \
-    ip daddr "${SUBNET_SERVER}.0/24" numgen random mod 100 \< 5 drop
+# === Clear all loss (restore delay-only, keep large queue) ===
+ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms limit 50000
 
-# === Clear all loss rules ===
-ip netns exec "${NS_ROUTER_A}" nft flush chain inet srt forward
-
-# === View current rules ===
-ip netns exec "${NS_ROUTER_A}" nft list ruleset
+# === View current configuration ===
+ip netns exec "${NS_ROUTER_A}" ip route show
+ip netns exec "${NS_ROUTER_A}" tc qdisc show
 ```
 
 #### Netem Setup (Applied Once at Startup)
@@ -1575,4 +1630,6 @@ var LossTestConfigs = []TestConfig{
 | 2024-12-06 | Loss injection via nftables DROP (no queue impact) | - |
 | 2024-12-06 | Updated shell script to be shellcheck-compliant with readable variable names | - |
 | 2024-12-06 | Added metrics collection via Unix Domain Sockets (UDS) for namespace isolation | - |
+| 2024-12-08 | Replaced nftables with null/blackhole routes for 100% loss events | - |
+| 2024-12-08 | Use netem loss parameter for probabilistic loss (simpler, no nftables dependency) | - |
 
