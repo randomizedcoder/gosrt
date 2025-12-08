@@ -36,19 +36,34 @@ Shell scripts for creating and managing the network namespace topology.
 - Probabilistic loss uses netem loss parameter
 - Latency switching via routing (no queue flush)
 
-### Phase 2: Go Network Controller 🔲 PENDING
+### Phase 2: Go Network Controller ✅ COMPLETE
 
 Go wrapper for controlling network impairment from the test framework.
 
 | Task | Status | File | Notes |
 |------|--------|------|-------|
-| NetworkController struct | 🔲 Pending | `network_controller.go` | Manages namespaces and impairment |
-| Setup/Cleanup methods | 🔲 Pending | | Call shell scripts or use netlink |
-| SetLatency method | 🔲 Pending | | Switch latency profile |
-| SetLoss method | 🔲 Pending | | Set loss percentage |
-| StartPattern method | 🔲 Pending | | Start Starlink/burst patterns |
-| StopPattern method | 🔲 Pending | | Stop patterns |
-| Namespace command runner | 🔲 Pending | | `ip netns exec` wrapper |
+| NetworkController struct | ✅ Complete | `network_controller.go` | TestID, ScriptDir, namespace names, IPs |
+| NewNetworkController | ✅ Complete | | Config-based constructor, auto-finds scripts |
+| Setup method | ✅ Complete | | Calls setup.sh, sets isSetup flag |
+| Cleanup method | ✅ Complete | | Stops patterns, calls cleanup.sh |
+| SetLatencyProfile method | ✅ Complete | | Profiles 0-4, calls set_latency.sh |
+| SetLoss method | ✅ Complete | | 0-100%, calls set_loss.sh |
+| LossPattern type | ✅ Complete | | Events with offset, duration, percent |
+| PatternStarlink | ✅ Complete | | Predefined Starlink reconvergence pattern |
+| PatternHighLossBurst | ✅ Complete | | Predefined 85% loss burst pattern |
+| StartPattern method | ✅ Complete | | Runs pattern in background goroutine |
+| StopPattern method | ✅ Complete | | Cancels pattern, clears loss |
+| RunInNamespace | ✅ Complete | | Executes command, returns output |
+| StartProcessInNamespace | ✅ Complete | | Returns exec.Cmd for caller to manage |
+| GetNamespace/GetIP | ✅ Complete | | Component name to namespace/IP lookup |
+| Status method | ✅ Complete | | Calls status.sh, returns output |
+
+**Key Features**:
+- Thread-safe with mutex protection
+- Context-aware for cancellation
+- Automatic script directory detection
+- Predefined loss patterns (Starlink, high-loss burst)
+- Process spawning helpers for running binaries in namespaces
 
 ### Phase 3: Test Framework Integration 🔲 PENDING
 
@@ -103,7 +118,7 @@ contrib/integration_testing/
 │   ├── set_loss.sh            # ✅ Set loss percentage (0-100)
 │   ├── starlink_pattern.sh    # ✅ Starlink reconvergence pattern
 │   └── status.sh              # ✅ Human-friendly network status display
-├── network_controller.go      # 🔲 Go wrapper for network control
+├── network_controller.go      # ✅ Go wrapper for network control
 ├── config.go                  # ✅ TestMode and NetworkImpairment types
 ├── analysis.go                # ✅ Statistical validation
 └── test_configs.go            # 🔲 Network impairment test configs
@@ -222,31 +237,49 @@ sudo ./starlink_pattern.sh stop
 sudo ./cleanup.sh
 ```
 
-### From Go Test Framework (Future)
+### From Go Test Framework
 
 ```go
-// Create network controller
-ctrl := NewNetworkController(testID)
-defer ctrl.Cleanup()
+ctx := context.Background()
 
-// Setup network
-if err := ctrl.Setup(); err != nil {
+// Create network controller
+ctrl, err := NewNetworkController(NetworkControllerConfig{
+    TestID: "mytest",
+    // ScriptDir auto-detected if empty
+})
+if err != nil {
     return err
 }
 
-// Configure impairment
-ctrl.SetLatencyProfile(2)  // 60ms RTT
-ctrl.SetLoss(5)            // 5% loss
+// Setup network (requires root)
+if err := ctrl.Setup(ctx); err != nil {
+    return err
+}
+defer ctrl.Cleanup(ctx)
 
-// Start processes in namespaces
-ctrl.RunInNamespace("server", serverCmd)
-ctrl.RunInNamespace("publisher", publisherCmd)
-ctrl.RunInNamespace("subscriber", subscriberCmd)
+// Configure impairment
+ctrl.SetLatencyProfile(ctx, 2)  // 60ms RTT
+ctrl.SetLoss(ctx, 5)            // 5% loss
+
+// Get namespace and IP for server
+serverNS, _ := ctrl.GetNamespace("server")
+serverIP, _ := ctrl.GetIP("server")
+
+// Start server in namespace
+serverCmd, _ := ctrl.StartProcessInNamespace(ctx, serverNS,
+    "./server", "-addr", serverIP+":6000", "-promuds", "/tmp/server.sock")
+serverCmd.Start()
+defer serverCmd.Process.Kill()
+
+// Start Starlink pattern
+ctrl.StartPattern(ctx, PatternStarlink)
+defer ctrl.StopPattern(ctx)
 
 // Run test...
 
-// Collect metrics via UDS
-serverMetrics := ctrl.CollectMetrics("server", "/tmp/server.sock")
+// Get network status
+status, _ := ctrl.Status(ctx)
+fmt.Println(status)
 ```
 
 ---
@@ -267,4 +300,5 @@ serverMetrics := ctrl.CollectMetrics("server", "/tmp/server.sock")
 | 2024-12-08 | Initial implementation document | - |
 | 2024-12-08 | Phase 1 complete: All shell scripts created | - |
 | 2024-12-08 | Updated design: null routes instead of nftables | - |
+| 2024-12-08 | Phase 2 complete: NetworkController Go wrapper | - |
 
