@@ -101,7 +101,9 @@ run_in_namespace() {
 # Usage: namespace_exists <namespace_name>
 namespace_exists() {
     local namespace_name="$1"
-    ip netns list | grep -q "^${namespace_name}$" 2>/dev/null
+    # Note: ip netns list may output "name (id: N)" on some systems
+    # so we match the namespace name at the start of the line
+    ip netns list 2>/dev/null | grep -q "^${namespace_name}\( \|$\)"
 }
 
 # Create a namespace if it doesn't exist
@@ -473,9 +475,16 @@ print_network_status() {
     echo "=== SRT Test Network Status (ID: ${TEST_ID}) ==="
     echo ""
     echo "Namespaces:"
-    ip netns list | grep "_${TEST_ID}$" | while read -r ns; do
-        echo "  - ${ns}"
-    done
+    # Use || true to prevent pipefail from causing script exit when grep has no matches
+    local ns_list
+    ns_list=$(ip netns list 2>/dev/null | grep "_${TEST_ID}$" || true)
+    if [[ -n "${ns_list}" ]]; then
+        echo "${ns_list}" | while read -r ns; do
+            echo "  - ${ns}"
+        done
+    else
+        echo "  (none found)"
+    fi
     echo ""
     echo "Current latency profile: ${CURRENT_LATENCY_PROFILE}"
     echo ""

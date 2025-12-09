@@ -10,23 +10,29 @@ import (
 	srt "github.com/datarhei/gosrt"
 )
 
-// ThroughputGetter is a function that returns current bytes, packets, success count, and loss count
+// ThroughputGetter is a function that returns current bytes, packets, success count, loss count, and retransmits
 // This allows the display to work with any counter source (metrics.ConnectionMetrics, etc.)
-// Returns: (bytes, pkts, successPkts, lostPkts)
+// Returns: (bytes, pkts, successPkts, lostPkts, retransPkts)
 //   - bytes: total bytes transferred (for MB display)
 //   - pkts: packets for rate calculation (for pkt/s display)
 //   - successPkts: total successful packets (for success rate)
 //   - lostPkts: total unrecoverable packet losses (for success rate)
-type ThroughputGetter func() (bytes uint64, pkts uint64, successPkts uint64, lostPkts uint64)
+//   - retransPkts: total retransmissions (ARQ recovery activity)
+type ThroughputGetter func() (bytes uint64, pkts uint64, successPkts uint64, lostPkts uint64, retransPkts uint64)
 
 // RunThroughputDisplay runs a throughput display loop that periodically prints stats
-// The getter function is called to retrieve current byte/packet/success/loss totals
+// The getter function is called to retrieve current byte/packet/success/loss/retrans totals
 // The loop exits when ctx is cancelled
 //
-// Output format (fixed-width columns, supports up to 99.999 Mb/s):
+// Output format (fixed-width columns):
 //
-//	HH:MM:SS.xx | 9999.99 kpkt/s | 999.99 pkt/s | 9999.99 MB | 99.999 Mb/s | 9999 ok / 0 loss ~= 100.000% success
+//	[label] HH:MM:SS.xx | 999.9 pkt/s | 99.99 MB | 9.999 Mb/s | 9999k ok / 999 loss / 999 retx ~= 100.0%
 func RunThroughputDisplay(ctx context.Context, period time.Duration, getter ThroughputGetter) {
+	RunThroughputDisplayWithLabel(ctx, period, "", getter)
+}
+
+// RunThroughputDisplayWithLabel runs a throughput display loop with a component label
+func RunThroughputDisplayWithLabel(ctx context.Context, period time.Duration, label string, getter ThroughputGetter) {
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 
@@ -38,7 +44,7 @@ func RunThroughputDisplay(ctx context.Context, period time.Duration, getter Thro
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			currentBytes, currentPkts, successPkts, lostPkts := getter()
+			currentBytes, currentPkts, _, lostPkts, retransPkts := getter()
 
 			diff := now.Sub(last)
 			if diff.Seconds() <= 0 {
@@ -48,28 +54,34 @@ func RunThroughputDisplay(ctx context.Context, period time.Duration, getter Thro
 			mbps := float64(currentBytes-prevBytes) * 8 / (1000 * 1000 * diff.Seconds())
 			pps := float64(currentPkts-prevPkts) / diff.Seconds()
 
-			// Calculate success percentage
-			total := successPkts + lostPkts
+			// Calculate success percentage: packets received / (packets received + unrecoverable losses)
+			// Note: retransmits are recovered losses, so they count as success
+			total := currentPkts + lostPkts
 			var successPct float64 = 100.0
 			if total > 0 {
-				successPct = float64(successPkts) / float64(total) * 100.0
+				successPct = float64(currentPkts) / float64(total) * 100.0
 			}
 
 			// Format time with 2 decimal places: HH:MM:SS.xx
 			timeStr := now.Format("15:04:05.00")
 
-			// Fixed-width columns for alignment (supports up to 99.999 Mb/s)
-			// Format: time | kpkt/s | pkt/s | MB | Mb/s | success(k) / loss ~= % success
-			// Success: 10 chars in thousands (up to 9999999.99k = ~10 billion packets)
-			// Loss: 6 chars raw count (up to 999999 lost packets)
-			fmt.Fprintf(os.Stderr, "\r%s | %8.2f kpkt/s | %7.2f pkt/s | %8.2f MB | %6.3f Mb/s | %10.2fk ok / %6d loss ~= %.3f%% success",
+			// Simplified format: [label] time | rate | total MB | Mb/s | packets ok / loss / retx ~= %
+			// Use currentPkts for "ok" since it's the actual received packet count
+			labelStr := ""
+			if label != "" {
+				labelStr = fmt.Sprintf("[%s] ", label)
+			}
+			// Use newline instead of carriage return so both [PUB] and [SUB] lines are visible
+			// when running multiple applications simultaneously
+			fmt.Fprintf(os.Stderr, "%s%s | %7.1f pkt/s | %7.2f MB | %6.3f Mb/s | %6.1fk ok / %5d loss / %5d retx ~= %5.1f%%\n",
+				labelStr,
 				timeStr,
-				float64(currentPkts)/1000,
 				pps,
 				float64(currentBytes)/(1024*1024),
 				mbps,
-				float64(successPkts)/1000,
+				float64(currentPkts)/1000,
 				lostPkts,
+				retransPkts,
 				successPct)
 
 			prevBytes, prevPkts = currentBytes, currentPkts
@@ -90,19 +102,19 @@ type ConnectionStatistics struct {
 	RemoteAddr                  string   `json:"remote_addr"`
 	PeerIdleTimeoutRemainingSec *float64 `json:"peer_idle_timeout_remaining_seconds,omitempty"`
 	Accumulated                 struct {
-		PktSent           uint64   `json:"pkt_sent_data"`
-		PktRecv           uint64   `json:"pkt_recv_data"`
-		PktSentACK        uint64   `json:"pkt_sent_ack"`
-		PktRecvACK        uint64   `json:"pkt_recv_ack"`
-		PktSentACKACK     *uint64  `json:"pkt_sent_ackack,omitempty"`
-		PktRecvACKACK     *uint64  `json:"pkt_recv_ackack,omitempty"`
-		PktSentNAK        uint64   `json:"pkt_sent_nak"`
-		PktRecvNAK        uint64   `json:"pkt_recv_nak"`
-		PktRetrans        uint64   `json:"pkt_retrans_total"`
-		PktRetransFromNAK *uint64  `json:"pkt_retrans_from_nak,omitempty"`
-		PktRetransPercent *float64 `json:"pkt_retrans_percent,omitempty"`
-		PktRecvLoss       uint64   `json:"pkt_recv_loss"`
-		PktRecvLossRate   float64  `json:"pkt_recv_loss_rate"`
+		PktSent            uint64   `json:"pkt_sent_data"`
+		PktRecv            uint64   `json:"pkt_recv_data"`
+		PktSentACK         uint64   `json:"pkt_sent_ack"`
+		PktRecvACK         uint64   `json:"pkt_recv_ack"`
+		PktSentACKACK      *uint64  `json:"pkt_sent_ackack,omitempty"`
+		PktRecvACKACK      *uint64  `json:"pkt_recv_ackack,omitempty"`
+		PktSentNAK         uint64   `json:"pkt_sent_nak"`
+		PktRecvNAK         uint64   `json:"pkt_recv_nak"`
+		PktRetrans         uint64   `json:"pkt_retrans_total"`
+		PktRetransFromNAK  *uint64  `json:"pkt_retrans_from_nak,omitempty"`
+		PktRetransPercent  *float64 `json:"pkt_retrans_percent,omitempty"`
+		PktRecvLoss        uint64   `json:"pkt_recv_loss"`
+		PktRecvRetransRate float64  `json:"pkt_recv_retrans_rate"` // Retransmission rate (NOT loss rate)
 	} `json:"accumulated"`
 	Instantaneous struct {
 		MbpsSentRate              float64  `json:"mbps_sent_rate"`
@@ -177,7 +189,7 @@ func PrintConnectionStatistics(connections []srt.Conn, interval string, labeler 
 		connStat.Accumulated.PktRecvNAK = stats.Accumulated.PktRecvNAK
 		connStat.Accumulated.PktRetrans = stats.Accumulated.PktRetrans
 		connStat.Accumulated.PktRecvLoss = stats.Accumulated.PktRecvLoss
-		connStat.Accumulated.PktRecvLossRate = stats.Instantaneous.PktRecvLossRate
+		connStat.Accumulated.PktRecvRetransRate = stats.Instantaneous.PktRecvRetransRate
 
 		// Get extended statistics (not part of standard SRT stats) in a single call
 		extStats := conn.GetExtendedStatistics()

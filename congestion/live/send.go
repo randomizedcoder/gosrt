@@ -54,7 +54,7 @@ type sender struct {
 		estimatedInputBW float64 // bytes/s
 		estimatedSentBW  float64 // bytes/s
 
-		pktLossRate float64
+		pktRetransRate float64 // Retransmission rate (NOT loss rate)
 	}
 
 	deliver func(p packet.Packet)
@@ -104,7 +104,7 @@ func (s *sender) Stats() congestion.SendStats {
 	}
 	mbpsInputBW := s.rate.estimatedInputBW * 8 / 1024 / 1024
 	mbpsSentBW := s.rate.estimatedSentBW * 8 / 1024 / 1024
-	pktLossRate := s.rate.pktLossRate
+	pktRetransRate := s.rate.pktRetransRate
 	s.lock.RUnlock()
 
 	// Metrics are always available (initialized in connection.go before NewSender)
@@ -116,7 +116,7 @@ func (s *sender) Stats() congestion.SendStats {
 	m.CongestionSendMsBuf.Store(msBuf)
 	m.CongestionSendMbpsInputBandwidth.Store(uint64(mbpsInputBW * 1000))
 	m.CongestionSendMbpsSentBandwidth.Store(uint64(mbpsSentBW * 1000))
-	m.CongestionSendPktLossRate.Store(uint64(pktLossRate * 100))
+	m.CongestionSendPktRetransRate.Store(uint64(pktRetransRate * 100))
 
 	// Build return struct from atomic counters (lock-free reads)
 	// PktLoss = packets reported as lost via NAK (incremented in nakLocked when NAK received)
@@ -141,7 +141,7 @@ func (s *sender) Stats() congestion.SendStats {
 		BytePayload:                 bytePayload,
 		MbpsEstimatedInputBandwidth: mbpsInputBW,
 		MbpsEstimatedSentBandwidth:  mbpsSentBW,
-		PktLossRate:                 pktLossRate,
+		PktRetransRate:              pktRetransRate,
 	}
 }
 
@@ -317,9 +317,9 @@ func (s *sender) tickUpdateRateStats(now uint64) {
 		s.rate.estimatedInputBW = float64(s.rate.bytes) / (float64(tdiff) / 1000 / 1000)
 		s.rate.estimatedSentBW = float64(s.rate.bytesSent) / (float64(tdiff) / 1000 / 1000)
 		if s.rate.bytesSent != 0 {
-			s.rate.pktLossRate = float64(s.rate.bytesRetrans) / float64(s.rate.bytesSent) * 100
+			s.rate.pktRetransRate = float64(s.rate.bytesRetrans) / float64(s.rate.bytesSent) * 100
 		} else {
-			s.rate.pktLossRate = 0
+			s.rate.pktRetransRate = 0
 		}
 
 		s.rate.bytes = 0
@@ -438,6 +438,13 @@ func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
 				retransCount++
 			}
 		}
+	}
+
+	// Track NAK requests we couldn't fulfill (packets already dropped from buffer)
+	// This happens when the receiver requests retransmission of packets that
+	// exceeded our drop threshold and were discarded
+	if retransCount < totalLossCount {
+		m.CongestionSendNAKNotFound.Add(totalLossCount - retransCount)
 	}
 
 	return retransCount

@@ -7,13 +7,15 @@ all: build
 test:
 	go test -race -coverprofile=/dev/null -covermode=atomic -v ./...
 
-## test-flags: Run flags tests (Go unit tests)
-test-flags:
-	CGO_ENABLED=0 go test -v ./contrib/common/
-
-## test-flags-integration: Run flags integration tests (bash script)
-test-flags-integration: client server
+## test-flags: Run flags integration tests (bash script)
+## Tests that CLI flags are correctly parsed and applied to config
+test-flags: client server
 	@./contrib/common/test_flags.sh
+
+## audit-metrics: Verify all metrics are defined, used, and exported to Prometheus
+## Uses AST analysis to find discrepancies between metrics.go, usage, and handler.go
+audit-metrics:
+	@go run tools/metrics-audit/main.go
 
 ## test-integration: Run integration tests (context cancellation, graceful shutdown, etc.)
 test-integration: client server client-generator
@@ -30,6 +32,40 @@ test-integration-config: client server client-generator
 ## test-integration-list: List available integration test configurations
 test-integration-list:
 	@cd contrib/integration_testing && go run . list-configs
+
+## test-network-list: List available network impairment test configurations
+test-network-list:
+	@cd contrib/integration_testing && go run . list-network-configs
+
+## test-network: Run network impairment test (root, CONFIG=Network-Loss2pct-5Mbps)
+test-network: client server client-generator
+	@echo "NOTE: Network impairment tests require root privileges for network namespace creation"
+	@cd contrib/integration_testing && go run . network-test $(CONFIG)
+
+## test-network-all: Run all network impairment tests (requires root)
+test-network-all: client server client-generator
+	@echo "NOTE: Network impairment tests require root privileges for network namespace creation"
+	@cd contrib/integration_testing && go run . network-test-all
+
+## test-network-quick: Run quick network tests (2% and 5% loss only, requires root)
+test-network-quick: client server client-generator
+	@echo "NOTE: Network impairment tests require root privileges"
+	@cd contrib/integration_testing && go run . network-test Network-Loss2pct-5Mbps
+	@cd contrib/integration_testing && go run . network-test Network-Loss5pct-5Mbps
+
+## network-setup: Set up network namespaces for manual testing (requires root)
+network-setup:
+	@echo "Setting up network namespaces..."
+	@cd contrib/integration_testing/network && sudo ./setup.sh
+
+## network-cleanup: Clean up network namespaces (requires root)
+network-cleanup:
+	@echo "Cleaning up network namespaces..."
+	@cd contrib/integration_testing/network && sudo ./cleanup.sh
+
+## network-status: Show current network namespace status
+network-status:
+	@cd contrib/integration_testing/network && sudo ./status.sh
 
 test-congestion-live:
 	go test -v ./congestion/live
@@ -146,6 +182,8 @@ nixshell:
 
 # Testing targets
 .PHONY: test test-flags test-flags-integration test-integration test-integration-all test-integration-config test-integration-list test-congestion-live test-packet-pool test-packet fuzz coverage
+# Network impairment testing targets (require root)
+.PHONY: test-network-list test-network test-network-all test-network-quick network-setup network-cleanup network-status
 # Benchmark targets
 .PHONY: bench-packet bench-packet-all bench-packet-pool bench-circular
 # Code quality targets

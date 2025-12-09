@@ -88,7 +88,7 @@ type SendStats struct {
 	MbpsEstimatedInputBandwidth float64
 	MbpsEstimatedSentBandwidth  float64
 
-	PktLossRate float64
+	PktRetransRate float64 // Retransmission rate: bytesRetrans / bytesSent * 100 (NOT loss rate)
 }
 
 // ReceiveStats are collected statistics from a reciever
@@ -121,5 +121,5 @@ type ReceiveStats struct {
 	MbpsEstimatedRecvBandwidth float64
 	MbpsEstimatedLinkCapacity  float64
 
-	PktLossRate float64
+	PktRetransRate float64 // Retransmission rate: bytesRetrans / bytesRecv * 100 (NOT loss rate)
 }

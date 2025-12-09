@@ -69,18 +69,27 @@ func NewNetworkController(cfg NetworkControllerConfig) (*NetworkController, erro
 
 	scriptDir := cfg.ScriptDir
 	if scriptDir == "" {
-		// Try to find the script directory relative to the executable
-		execPath, err := os.Executable()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get executable path: %w", err)
-		}
-		// Assume scripts are in a 'network' subdirectory next to the executable
-		scriptDir = filepath.Join(filepath.Dir(execPath), "network")
+		// Try multiple locations to find the network scripts directory
+		candidates := []string{}
 
-		// If that doesn't exist, try relative to current working directory
-		if _, err := os.Stat(scriptDir); os.IsNotExist(err) {
-			cwd, _ := os.Getwd()
-			scriptDir = filepath.Join(cwd, "contrib", "integration_testing", "network")
+		// 1. Try relative to the executable
+		if execPath, err := os.Executable(); err == nil {
+			candidates = append(candidates, filepath.Join(filepath.Dir(execPath), "network"))
+		}
+
+		// 2. Try 'network' subdirectory of current working directory
+		if cwd, err := os.Getwd(); err == nil {
+			candidates = append(candidates, filepath.Join(cwd, "network"))
+			// 3. Try full path from project root
+			candidates = append(candidates, filepath.Join(cwd, "contrib", "integration_testing", "network"))
+		}
+
+		// Find the first candidate that exists
+		for _, candidate := range candidates {
+			if _, err := os.Stat(candidate); err == nil {
+				scriptDir = candidate
+				break
+			}
 		}
 	}
 
@@ -502,4 +511,3 @@ func (nc *NetworkController) runScriptWithOutput(ctx context.Context, script str
 
 	return cmd.CombinedOutput()
 }
-

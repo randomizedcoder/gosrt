@@ -340,6 +340,7 @@ var NetworkTestConfigs = []TestConfig{
 		Impairment: NetworkImpairment{
 			LossRate:       0.05,
 			LatencyProfile: "intercontinental",
+			Thresholds:     ptrTo(HighLatencyThresholds()),
 		},
 		Bitrate:         5_000_000,
 		TestDuration:    45 * time.Second, // Longer for high latency
@@ -355,6 +356,7 @@ var NetworkTestConfigs = []TestConfig{
 		Impairment: NetworkImpairment{
 			LossRate:       0.02,
 			LatencyProfile: "geo-satellite",
+			Thresholds:     ptrTo(HighLatencyThresholds()),
 		},
 		Bitrate:         2_000_000, // Lower bitrate for high latency
 		TestDuration:    60 * time.Second,
@@ -372,6 +374,7 @@ var NetworkTestConfigs = []TestConfig{
 		Impairment: NetworkImpairment{
 			Pattern:        "starlink",
 			LatencyProfile: "regional", // LEO satellite has low latency normally
+			Thresholds:     ptrTo(BurstLossThresholds()),
 		},
 		Bitrate:         5_000_000,
 		TestDuration:    90 * time.Second, // Run for 1.5 minutes to see multiple events
@@ -387,6 +390,7 @@ var NetworkTestConfigs = []TestConfig{
 		Impairment: NetworkImpairment{
 			Pattern:        "high-loss",
 			LatencyProfile: "none",
+			Thresholds:     ptrTo(BurstLossThresholds()),
 		},
 		Bitrate:         5_000_000,
 		TestDuration:    90 * time.Second,
@@ -404,6 +408,7 @@ var NetworkTestConfigs = []TestConfig{
 		Impairment: NetworkImpairment{
 			LossRate:       0.10,
 			LatencyProfile: "intercontinental",
+			Thresholds:     ptrTo(StressTestThresholds()),
 		},
 		Bitrate:         10_000_000,
 		TestDuration:    60 * time.Second,
@@ -412,6 +417,11 @@ var NetworkTestConfigs = []TestConfig{
 		CollectInterval: 3 * time.Second,
 		SharedSRT:       &ExtraLargeBuffersSRTConfig,
 	},
+}
+
+// ptrTo returns a pointer to the given StatisticalThresholds value
+func ptrTo(t StatisticalThresholds) *StatisticalThresholds {
+	return &t
 }
 
 // ExtraLargeBuffersSRTConfig provides 5-second buffers for high-latency scenarios

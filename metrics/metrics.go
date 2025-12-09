@@ -26,64 +26,64 @@ type ConnectionMetrics struct {
 	PktRecvDataDropped atomic.Uint64
 	PktRecvDataError   atomic.Uint64
 	PktSentDataSuccess atomic.Uint64
-	PktSentDataDropped atomic.Uint64
-	PktSentDataError   atomic.Uint64
+	// PktSentDataDropped atomic.Uint64 // Not implemented - send drops tracked via CongestionSendPktDrop
+	PktSentDataError atomic.Uint64
 
 	// Control packet counters - ACK
 	PktRecvACKSuccess atomic.Uint64
-	PktRecvACKDropped atomic.Uint64
-	PktRecvACKError   atomic.Uint64
+	// PktRecvACKDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktRecvACKError   atomic.Uint64 // Not implemented - control packets currently never error
 	PktSentACKSuccess atomic.Uint64
-	PktSentACKDropped atomic.Uint64
-	PktSentACKError   atomic.Uint64
+	// PktSentACKDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktSentACKError   atomic.Uint64 // Not implemented - control packets currently never error
 
 	// Control packet counters - ACKACK
 	PktRecvACKACKSuccess atomic.Uint64
-	PktRecvACKACKDropped atomic.Uint64
-	PktRecvACKACKError   atomic.Uint64
+	// PktRecvACKACKDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktRecvACKACKError   atomic.Uint64 // Not implemented - control packets currently never error
 	PktSentACKACKSuccess atomic.Uint64
-	PktSentACKACKDropped atomic.Uint64
-	PktSentACKACKError   atomic.Uint64
+	// PktSentACKACKDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktSentACKACKError   atomic.Uint64 // Not implemented - control packets currently never error
 
 	// Control packet counters - NAK
 	PktRecvNAKSuccess atomic.Uint64
-	PktRecvNAKDropped atomic.Uint64
-	PktRecvNAKError   atomic.Uint64
+	// PktRecvNAKDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktRecvNAKError   atomic.Uint64 // Not implemented - control packets currently never error
 	PktSentNAKSuccess atomic.Uint64
-	PktSentNAKDropped atomic.Uint64
-	PktSentNAKError   atomic.Uint64
+	// PktSentNAKDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktSentNAKError   atomic.Uint64 // Not implemented - control packets currently never error
 
 	// Control packet counters - KM
 	PktRecvKMSuccess atomic.Uint64
-	PktRecvKMDropped atomic.Uint64
-	PktRecvKMError   atomic.Uint64
+	// PktRecvKMDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktRecvKMError   atomic.Uint64 // Not implemented - control packets currently never error
 	PktSentKMSuccess atomic.Uint64
-	PktSentKMDropped atomic.Uint64
-	PktSentKMError   atomic.Uint64
+	// PktSentKMDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktSentKMError   atomic.Uint64 // Not implemented - control packets currently never error
 
 	// Control packet counters - Keepalive
 	PktRecvKeepaliveSuccess atomic.Uint64
-	PktRecvKeepaliveDropped atomic.Uint64
-	PktRecvKeepaliveError   atomic.Uint64
+	// PktRecvKeepaliveDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktRecvKeepaliveError   atomic.Uint64 // Not implemented - control packets currently never error
 	PktSentKeepaliveSuccess atomic.Uint64
-	PktSentKeepaliveDropped atomic.Uint64
-	PktSentKeepaliveError   atomic.Uint64
+	// PktSentKeepaliveDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktSentKeepaliveError   atomic.Uint64 // Not implemented - control packets currently never error
 
 	// Control packet counters - Shutdown
 	PktRecvShutdownSuccess atomic.Uint64
-	PktRecvShutdownDropped atomic.Uint64
-	PktRecvShutdownError   atomic.Uint64
+	// PktRecvShutdownDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktRecvShutdownError   atomic.Uint64 // Not implemented - control packets currently never error
 	PktSentShutdownSuccess atomic.Uint64
-	PktSentShutdownDropped atomic.Uint64
-	PktSentShutdownError   atomic.Uint64
+	// PktSentShutdownDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktSentShutdownError   atomic.Uint64 // Not implemented - control packets currently never error
 
 	// Control packet counters - Handshake
 	PktRecvHandshakeSuccess atomic.Uint64
-	PktRecvHandshakeDropped atomic.Uint64
-	PktRecvHandshakeError   atomic.Uint64
+	// PktRecvHandshakeDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktRecvHandshakeError   atomic.Uint64 // Not implemented - control packets currently never error
 	PktSentHandshakeSuccess atomic.Uint64
-	PktSentHandshakeDropped atomic.Uint64
-	PktSentHandshakeError   atomic.Uint64
+	// PktSentHandshakeDropped atomic.Uint64 // Not implemented - control packets currently never dropped
+	// PktSentHandshakeError   atomic.Uint64 // Not implemented - control packets currently never error
 
 	// Path-specific counters
 	PktRecvIoUring   atomic.Uint64
@@ -127,7 +127,7 @@ type ConnectionMetrics struct {
 	ByteRecvDataSuccess atomic.Uint64
 	ByteRecvDataDropped atomic.Uint64
 	ByteSentDataSuccess atomic.Uint64
-	ByteSentDataDropped atomic.Uint64
+	// ByteSentDataDropped atomic.Uint64 // Not implemented - send drops tracked via error counters
 
 	// Special counters (from connStats migration)
 	PktRecvUndecrypt  atomic.Uint64
@@ -156,7 +156,7 @@ type ConnectionMetrics struct {
 	CongestionRecvBytePayload      atomic.Uint64
 	CongestionRecvMbpsBandwidth    atomic.Uint64 // Mbps * 1000
 	CongestionRecvMbpsLinkCapacity atomic.Uint64 // Mbps * 1000
-	CongestionRecvPktLossRate      atomic.Uint64 // Percentage * 100
+	CongestionRecvPktRetransRate atomic.Uint64 // Retransmission rate: bytesRetrans/bytesRecv * 100 (NOT loss rate)
 
 	// Congestion control - Sender statistics
 	CongestionSendPkt                atomic.Uint64
@@ -178,14 +178,14 @@ type ConnectionMetrics struct {
 	CongestionSendBytePayload        atomic.Uint64
 	CongestionSendMbpsInputBandwidth atomic.Uint64 // Mbps * 1000
 	CongestionSendMbpsSentBandwidth  atomic.Uint64 // Mbps * 1000
-	CongestionSendPktLossRate        atomic.Uint64 // Percentage * 100
+	CongestionSendPktRetransRate atomic.Uint64 // Retransmission rate: bytesRetrans/bytesSent * 100 (NOT loss rate)
 
 	// Additional error/drop counters for congestion control
 	CongestionRecvPktNil               atomic.Uint64 // Nil packets received
 	CongestionRecvPktStoreInsertFailed atomic.Uint64 // Packet store insertion failures
-	CongestionRecvDeliveryFailed       atomic.Uint64 // Delivery callback failures
-	CongestionSendDeliveryFailed       atomic.Uint64 // Delivery callback failures
-	CongestionSendNAKNotFound          atomic.Uint64 // NAK requests for packets not in lossList
+	// CongestionRecvDeliveryFailed       atomic.Uint64 // Not implemented - delivery callbacks don't fail
+	// CongestionSendDeliveryFailed       atomic.Uint64 // Not implemented - delivery callbacks don't fail
+	CongestionSendNAKNotFound atomic.Uint64 // NAK requests for packets not in lossList
 
 	// Granular drop counters - Congestion control (DATA packets only)
 	CongestionRecvDataDropTooOld            atomic.Uint64 // Belated, past play time

@@ -289,11 +289,38 @@ The implementation is divided into phases:
 
 ---
 
+## Phase 8.1: Congestion Control Statistics Export to Prometheus
+
+**Status**: ✅ Complete
+
+**Tasks**:
+- [x] Export `CongestionSendPkt` and `CongestionRecvPkt` (packets sent/received)
+- [x] Export `CongestionSendPktUnique` and `CongestionRecvPktUnique` (unique packets)
+- [x] Export `CongestionRecvPktLoss` and `CongestionSendPktLoss` (packets lost)
+- [x] Export `CongestionSendPktRetrans` and `CongestionRecvPktRetrans` (retransmissions)
+- [x] Export `CongestionSendByte` and `CongestionRecvByte` (bytes sent/received)
+
+**Files Modified**:
+- [x] `metrics/handler.go` - Added 10 new writeCounterValue calls for congestion control metrics
+
+**New Prometheus Metrics**:
+| Metric Name | Labels | Description |
+|-------------|--------|-------------|
+| `gosrt_connection_congestion_packets_total` | direction=send/recv | Total packets via congestion control |
+| `gosrt_connection_congestion_packets_unique_total` | direction=send/recv | Unique packets (excludes retrans/dups) |
+| `gosrt_connection_congestion_packets_lost_total` | direction=send/recv | Packets lost (sequence gaps) |
+| `gosrt_connection_congestion_retransmissions_total` | direction=send/recv | Retransmitted packets |
+| `gosrt_connection_congestion_bytes_total` | direction=send/recv | Bytes sent/received |
+
+**Implementation Tracking**: See [defect1_prometheus_metrics_implementation.md](./defect1_prometheus_metrics_implementation.md)
+
+---
+
 ## Overall Progress
 
 **Total Estimated Effort**: 28-39 hours
 
-**Completed**: Phase 1 (100%), Phase 2 (100%), Phase 3 (100%), Phase 4 (100%), Phase 5 (100%), Phase 6 (100%), Phase 7 (100%)
+**Completed**: Phase 1 (100%), Phase 2 (100%), Phase 3 (100%), Phase 4 (100%), Phase 5 (100%), Phase 6 (100%), Phase 7 (100%), Phase 8.1 (100%)
 **In Progress**: None
 **Remaining**: Phase 8 (Testing and Validation)
 

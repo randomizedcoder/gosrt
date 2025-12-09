@@ -440,10 +440,43 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 		testMetrics.CollectAllMetrics("pre-shutdown")
 	}
 
-	// Shutdown order: Client → Client-Generator → Server
+	// Shutdown order: Client-Generator → (drain) → Client → Server
+	// This allows us to verify pipeline balance after draining
 	fmt.Println("\nInitiating shutdown sequence...")
 
-	// Step 1: Send SIGINT to Client (subscriber)
+	// Step 1: Send SIGINT to Client-Generator (publisher) - stop new data
+	fmt.Println("Sending SIGINT to client-generator (publisher)...")
+	if err := clientGenCmd.Process.Signal(os.Interrupt); err != nil {
+		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client-generator: %v\n", err)
+		return false, testMetrics, startTime, time.Now()
+	}
+
+	clientGenDone := make(chan struct{})
+	go func() {
+		clientGenCmd.Wait()
+		close(clientGenDone)
+	}()
+
+	// Client-generator has internal 5-second timeouts for waitgroups, allow 8 seconds total
+	select {
+	case <-clientGenDone:
+		fmt.Println("✓ Client-generator exited gracefully")
+	case <-time.After(8 * time.Second):
+		fmt.Fprintf(os.Stderr, "Error: client-generator did not exit within 8 seconds\n")
+		return false, testMetrics, startTime, time.Now()
+	}
+
+	if clientGenCmd.ProcessState != nil && !clientGenCmd.ProcessState.Success() {
+		fmt.Fprintf(os.Stderr, "Error: client-generator exited with non-zero code\n")
+		return false, testMetrics, startTime, time.Now()
+	}
+
+	// Step 2: Brief wait before stopping client
+	// Note: Pipeline balance verification uses pre-shutdown metrics (collected above)
+	// since stopping client-generator causes subscriber connections to close
+	time.Sleep(500 * time.Millisecond)
+
+	// Step 3: Send SIGINT to Client (subscriber)
 	fmt.Println("Sending SIGINT to client (subscriber)...")
 	if err := clientCmd.Process.Signal(os.Interrupt); err != nil {
 		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client: %v\n", err)
@@ -472,36 +505,7 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 2: Send SIGINT to Client-Generator (publisher)
-	fmt.Println("Sending SIGINT to client-generator (publisher)...")
-	if err := clientGenCmd.Process.Signal(os.Interrupt); err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client-generator: %v\n", err)
-		return false, testMetrics, startTime, time.Now()
-	}
-
-	clientGenDone := make(chan struct{})
-	go func() {
-		clientGenCmd.Wait()
-		close(clientGenDone)
-	}()
-
-	// Client-generator has internal 5-second timeouts for waitgroups, allow 8 seconds total
-	select {
-	case <-clientGenDone:
-		fmt.Println("✓ Client-generator exited gracefully")
-	case <-time.After(8 * time.Second):
-		fmt.Fprintf(os.Stderr, "Error: client-generator did not exit within 8 seconds\n")
-		return false, testMetrics, startTime, time.Now()
-	}
-
-	if clientGenCmd.ProcessState != nil && !clientGenCmd.ProcessState.Success() {
-		fmt.Fprintf(os.Stderr, "Error: client-generator exited with non-zero code\n")
-		return false, testMetrics, startTime, time.Now()
-	}
-
-	time.Sleep(500 * time.Millisecond)
-
-	// Step 3: Send SIGINT to Server (last)
+	// Step 4: Send SIGINT to Server (last)
 	fmt.Println("Sending SIGINT to server...")
 	if err := serverCmd.Process.Signal(os.Interrupt); err != nil {
 		fmt.Fprintf(os.Stderr, "Error sending SIGINT to server: %v\n", err)
@@ -536,8 +540,8 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 	// Print basic verification
 	fmt.Println()
 	fmt.Println("Verification:")
-	fmt.Println("  ✓ Client received SIGINT and exited gracefully")
 	fmt.Println("  ✓ Client-generator received SIGINT and exited gracefully")
+	fmt.Println("  ✓ Client received SIGINT and exited gracefully")
 	fmt.Println("  ✓ Server received SIGINT and shutdown gracefully")
 	fmt.Println("  ✓ All processes exited with code 0")
 	fmt.Println("  ✓ All processes exited within expected timeframes")

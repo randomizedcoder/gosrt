@@ -36,43 +36,139 @@ func MetricsHandler() http.Handler {
 			socketIdStr := fmt.Sprintf("0x%08x", socketId)
 
 			// Single success counter (for peer idle timeout)
-			writeCounterValue(b, "gosrt_connection_packets_received_total",
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
 				metrics.PktRecvSuccess.Load(),
 				"socket_id", socketIdStr, "type", "all", "status", "success")
 
 			// Edge case counters (should be 0, but track for debugging)
-			writeCounterValue(b, "gosrt_connection_packets_received_total",
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
 				metrics.PktRecvNil.Load(),
 				"socket_id", socketIdStr, "type", "nil", "status", "error")
 
-			writeCounterValue(b, "gosrt_connection_packets_received_total",
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
 				metrics.PktRecvControlUnknown.Load(),
 				"socket_id", socketIdStr, "type", "control_unknown", "status", "error")
 
-			writeCounterValue(b, "gosrt_connection_packets_received_total",
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
 				metrics.PktRecvSubTypeUnknown.Load(),
 				"socket_id", socketIdStr, "type", "subtype_unknown", "status", "error")
 
 			// Crypto operation error counters
-			writeCounterValue(b, "gosrt_connection_crypto_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_crypto_error_total",
 				metrics.CryptoErrorEncrypt.Load(),
 				"socket_id", socketIdStr, "operation", "encrypt")
-			writeCounterValue(b, "gosrt_connection_crypto_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_crypto_error_total",
 				metrics.CryptoErrorGenerateSEK.Load(),
 				"socket_id", socketIdStr, "operation", "generate_sek")
-			writeCounterValue(b, "gosrt_connection_crypto_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_crypto_error_total",
 				metrics.CryptoErrorMarshalKM.Load(),
 				"socket_id", socketIdStr, "operation", "marshal_km")
 
-			// Packet counters - ACK
-			writeCounterValue(b, "gosrt_connection_packets_received_total",
-				metrics.PktRecvACKSuccess.Load(),
-				"socket_id", socketIdStr, "type", "ack", "path", "iouring")
-			writeCounterValue(b, "gosrt_connection_packets_dropped_total",
-				metrics.PktRecvACKDropped.Load(),
-				"socket_id", socketIdStr, "type", "ack", "reason", "parse_error")
+			// ========== Control Packet Counters ==========
+			// These metrics track all SRT control packet types for comprehensive visibility
+			// Note: Dropped/Error counters for control packets are not implemented as they currently never fail
 
-			// ... (similar for all metrics - will be expanded as we add more)
+			// ACK packets - received/sent (success only)
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvACKSuccess.Load(),
+				"socket_id", socketIdStr, "type", "ack", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentACKSuccess.Load(),
+				"socket_id", socketIdStr, "type", "ack", "status", "success")
+
+			// ACKACK packets - received/sent (success only)
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvACKACKSuccess.Load(),
+				"socket_id", socketIdStr, "type", "ackack", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentACKACKSuccess.Load(),
+				"socket_id", socketIdStr, "type", "ackack", "status", "success")
+
+			// NAK packets - received/sent (CRITICAL for ARQ validation, success only)
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvNAKSuccess.Load(),
+				"socket_id", socketIdStr, "type", "nak", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentNAKSuccess.Load(),
+				"socket_id", socketIdStr, "type", "nak", "status", "success")
+
+			// DATA packets - received
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvDataSuccess.Load(),
+				"socket_id", socketIdStr, "type", "data", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvDataDropped.Load(),
+				"socket_id", socketIdStr, "type", "data", "status", "dropped")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvDataError.Load(),
+				"socket_id", socketIdStr, "type", "data", "status", "error")
+
+			// DATA packets - sent
+			// Note: PktSentDataDropped not implemented - send drops tracked via CongestionSendPktDrop
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentDataSuccess.Load(),
+				"socket_id", socketIdStr, "type", "data", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentDataError.Load(),
+				"socket_id", socketIdStr, "type", "data", "status", "error")
+
+			// Keepalive packets - received
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvKeepaliveSuccess.Load(),
+				"socket_id", socketIdStr, "type", "keepalive", "status", "success")
+
+			// Keepalive packets - sent
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentKeepaliveSuccess.Load(),
+				"socket_id", socketIdStr, "type", "keepalive", "status", "success")
+
+			// Shutdown packets - received
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvShutdownSuccess.Load(),
+				"socket_id", socketIdStr, "type", "shutdown", "status", "success")
+
+			// Shutdown packets - sent
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentShutdownSuccess.Load(),
+				"socket_id", socketIdStr, "type", "shutdown", "status", "success")
+
+			// Handshake packets - received
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvHandshakeSuccess.Load(),
+				"socket_id", socketIdStr, "type", "handshake", "status", "success")
+
+			// Handshake packets - sent
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentHandshakeSuccess.Load(),
+				"socket_id", socketIdStr, "type", "handshake", "status", "success")
+
+			// KM (Key Material) packets - received
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvKMSuccess.Load(),
+				"socket_id", socketIdStr, "type", "km", "status", "success")
+
+			// KM (Key Material) packets - sent
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentKMSuccess.Load(),
+				"socket_id", socketIdStr, "type", "km", "status", "success")
+
+			// ========== Retransmission Counters ==========
+			// Direct retransmission counter from NAK handling
+			writeCounterIfNonZero(b, "gosrt_connection_retransmissions_from_nak_total",
+				metrics.PktRetransFromNAK.Load(),
+				"socket_id", socketIdStr)
+
+			// ========== Byte Counters ==========
+			writeCounterIfNonZero(b, "gosrt_connection_bytes_received_total",
+				metrics.ByteRecvDataSuccess.Load(),
+				"socket_id", socketIdStr, "type", "data", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_bytes_received_total",
+				metrics.ByteRecvDataDropped.Load(),
+				"socket_id", socketIdStr, "type", "data", "status", "dropped")
+			writeCounterIfNonZero(b, "gosrt_connection_bytes_sent_total",
+				metrics.ByteSentDataSuccess.Load(),
+				"socket_id", socketIdStr, "type", "data", "status", "success")
+			// ByteSentDataDropped not implemented - send drops tracked via CongestionSendByteDrop
 
 			// Lock timing (average and max) - handlePacketMutex
 			if metrics.HandlePacketLockTiming != nil {
@@ -86,7 +182,7 @@ func MetricsHandler() http.Handler {
 				writeGauge(b, "gosrt_connection_lock_wait_seconds_max",
 					waitMax, "socket_id", socketIdStr, "lock", "handle_packet")
 
-				writeCounterValue(b, "gosrt_connection_lock_acquisitions_total",
+				writeCounterIfNonZero(b, "gosrt_connection_lock_acquisitions_total",
 					metrics.HandlePacketLockTiming.GetTotalAcquisitions(),
 					"socket_id", socketIdStr, "lock", "handle_packet")
 			}
@@ -103,7 +199,7 @@ func MetricsHandler() http.Handler {
 				writeGauge(b, "gosrt_connection_lock_wait_seconds_max",
 					waitMax, "socket_id", socketIdStr, "lock", "receiver")
 
-				writeCounterValue(b, "gosrt_connection_lock_acquisitions_total",
+				writeCounterIfNonZero(b, "gosrt_connection_lock_acquisitions_total",
 					metrics.ReceiverLockTiming.GetTotalAcquisitions(),
 					"socket_id", socketIdStr, "lock", "receiver")
 			}
@@ -120,89 +216,331 @@ func MetricsHandler() http.Handler {
 				writeGauge(b, "gosrt_connection_lock_wait_seconds_max",
 					waitMax, "socket_id", socketIdStr, "lock", "sender")
 
-				writeCounterValue(b, "gosrt_connection_lock_acquisitions_total",
+				writeCounterIfNonZero(b, "gosrt_connection_lock_acquisitions_total",
 					metrics.SenderLockTiming.GetTotalAcquisitions(),
 					"socket_id", socketIdStr, "lock", "sender")
 			}
 
 			// Granular drop counters - Congestion control receiver (DATA packets)
-			writeCounterValue(b, "gosrt_connection_congestion_recv_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_recv_data_drop_total",
 				metrics.CongestionRecvDataDropTooOld.Load(),
 				"socket_id", socketIdStr, "reason", "too_old")
-			writeCounterValue(b, "gosrt_connection_congestion_recv_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_recv_data_drop_total",
 				metrics.CongestionRecvDataDropAlreadyAcked.Load(),
 				"socket_id", socketIdStr, "reason", "already_acked")
-			writeCounterValue(b, "gosrt_connection_congestion_recv_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_recv_data_drop_total",
 				metrics.CongestionRecvDataDropDuplicate.Load(),
 				"socket_id", socketIdStr, "reason", "duplicate")
-			writeCounterValue(b, "gosrt_connection_congestion_recv_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_recv_data_drop_total",
 				metrics.CongestionRecvDataDropStoreInsertFailed.Load(),
 				"socket_id", socketIdStr, "reason", "store_insert_failed")
 
 			// Granular drop counters - Congestion control sender (DATA packets)
-			writeCounterValue(b, "gosrt_connection_congestion_send_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_send_data_drop_total",
 				metrics.CongestionSendDataDropTooOld.Load(),
 				"socket_id", socketIdStr, "reason", "too_old")
 
 			// Granular error counters - Connection-level send (DATA packets)
-			writeCounterValue(b, "gosrt_connection_send_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_data_drop_total",
 				metrics.PktSentDataErrorMarshal.Load(),
 				"socket_id", socketIdStr, "reason", "marshal")
-			writeCounterValue(b, "gosrt_connection_send_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_data_drop_total",
 				metrics.PktSentDataRingFull.Load(),
 				"socket_id", socketIdStr, "reason", "ring_full")
-			writeCounterValue(b, "gosrt_connection_send_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_data_drop_total",
 				metrics.PktSentDataErrorSubmit.Load(),
 				"socket_id", socketIdStr, "reason", "submit")
-			writeCounterValue(b, "gosrt_connection_send_data_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_data_drop_total",
 				metrics.PktSentDataErrorIoUring.Load(),
 				"socket_id", socketIdStr, "reason", "iouring")
 
 			// Granular error counters - Connection-level send (Control packets)
-			writeCounterValue(b, "gosrt_connection_send_control_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_control_drop_total",
 				metrics.PktSentControlErrorMarshal.Load(),
 				"socket_id", socketIdStr, "reason", "marshal")
-			writeCounterValue(b, "gosrt_connection_send_control_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_control_drop_total",
 				metrics.PktSentControlRingFull.Load(),
 				"socket_id", socketIdStr, "reason", "ring_full")
-			writeCounterValue(b, "gosrt_connection_send_control_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_control_drop_total",
 				metrics.PktSentControlErrorSubmit.Load(),
 				"socket_id", socketIdStr, "reason", "submit")
-			writeCounterValue(b, "gosrt_connection_send_control_drop_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_control_drop_total",
 				metrics.PktSentControlErrorIoUring.Load(),
 				"socket_id", socketIdStr, "reason", "iouring")
 
 			// Granular error counters - Connection-level receive (DATA packets)
-			writeCounterValue(b, "gosrt_connection_recv_data_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_recv_data_error_total",
 				metrics.PktRecvDataErrorParse.Load(),
 				"socket_id", socketIdStr, "type", "parse")
-			writeCounterValue(b, "gosrt_connection_recv_data_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_recv_data_error_total",
 				metrics.PktRecvDataErrorIoUring.Load(),
 				"socket_id", socketIdStr, "type", "iouring")
-			writeCounterValue(b, "gosrt_connection_recv_data_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_recv_data_error_total",
 				metrics.PktRecvDataErrorEmpty.Load(),
 				"socket_id", socketIdStr, "type", "empty")
-			writeCounterValue(b, "gosrt_connection_recv_data_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_recv_data_error_total",
 				metrics.PktRecvDataErrorRoute.Load(),
 				"socket_id", socketIdStr, "type", "route")
 
 			// Granular error counters - Connection-level receive (Control packets)
-			writeCounterValue(b, "gosrt_connection_recv_control_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_recv_control_error_total",
 				metrics.PktRecvControlErrorParse.Load(),
 				"socket_id", socketIdStr, "type", "parse")
-			writeCounterValue(b, "gosrt_connection_recv_control_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_recv_control_error_total",
 				metrics.PktRecvControlErrorIoUring.Load(),
 				"socket_id", socketIdStr, "type", "iouring")
-			writeCounterValue(b, "gosrt_connection_recv_control_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_recv_control_error_total",
 				metrics.PktRecvControlErrorEmpty.Load(),
 				"socket_id", socketIdStr, "type", "empty")
-			writeCounterValue(b, "gosrt_connection_recv_control_error_total",
+			writeCounterIfNonZero(b, "gosrt_connection_recv_control_error_total",
 				metrics.PktRecvControlErrorRoute.Load(),
 				"socket_id", socketIdStr, "type", "route")
 
 			// Path-specific counters - io_uring submissions (for detecting lost completions)
-			writeCounterValue(b, "gosrt_connection_send_submitted_total",
+			writeCounterIfNonZero(b, "gosrt_connection_send_submitted_total",
 				metrics.PktSentSubmitted.Load(),
+				"socket_id", socketIdStr)
+
+			// ========== Congestion Control Statistics ==========
+			// These metrics are critical for loss rate calculation and ARQ analysis
+
+			// Packets sent/received by congestion control (for cross-endpoint loss calculation)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_total",
+				metrics.CongestionSendPkt.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_total",
+				metrics.CongestionRecvPkt.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+
+			// Unique packets (excludes retransmissions on send, duplicates on recv)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_unique_total",
+				metrics.CongestionSendPktUnique.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_unique_total",
+				metrics.CongestionRecvPktUnique.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+
+			// Packets lost (detected via sequence number gaps by receiver)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_lost_total",
+				metrics.CongestionRecvPktLoss.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_lost_total",
+				metrics.CongestionSendPktLoss.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+
+			// Retransmissions (packets retransmitted by sender, retransmits received by receiver)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_retransmissions_total",
+				metrics.CongestionSendPktRetrans.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_retransmissions_total",
+				metrics.CongestionRecvPktRetrans.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+
+			// Bytes sent/received (for throughput calculation)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_total",
+				metrics.CongestionSendByte.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_total",
+				metrics.CongestionRecvByte.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+
+			// ========== io_uring and Low-Level Path Counters ==========
+			// These track packets through specific I/O paths (useful for debugging)
+			writeCounterIfNonZero(b, "gosrt_connection_io_path_total",
+				metrics.PktRecvIoUring.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "path", "iouring")
+			writeCounterIfNonZero(b, "gosrt_connection_io_path_total",
+				metrics.PktSentIoUring.Load(),
+				"socket_id", socketIdStr, "direction", "send", "path", "iouring")
+			writeCounterIfNonZero(b, "gosrt_connection_io_path_total",
+				metrics.PktRecvReadFrom.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "path", "readfrom")
+			writeCounterIfNonZero(b, "gosrt_connection_io_path_total",
+				metrics.PktSentWriteTo.Load(),
+				"socket_id", socketIdStr, "direction", "send", "path", "writeto")
+
+			// ========== Detailed Error Counters ==========
+			// Defensive counters for error conditions (usually zero, but critical when non-zero)
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktRecvErrorParse.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "error", "parse")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktRecvErrorRoute.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "error", "route")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktRecvErrorEmpty.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "error", "empty")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktRecvErrorUnknown.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "error", "unknown")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktRecvErrorIoUring.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "error", "iouring")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktSentErrorMarshal.Load(),
+				"socket_id", socketIdStr, "direction", "send", "error", "marshal")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktSentErrorSubmit.Load(),
+				"socket_id", socketIdStr, "direction", "send", "error", "submit")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktSentErrorUnknown.Load(),
+				"socket_id", socketIdStr, "direction", "send", "error", "unknown")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktSentErrorIoUring.Load(),
+				"socket_id", socketIdStr, "direction", "send", "error", "iouring")
+			writeCounterIfNonZero(b, "gosrt_connection_error_detail_total",
+				metrics.PktSentRingFull.Load(),
+				"socket_id", socketIdStr, "direction", "send", "error", "ring_full")
+
+			// ========== Connection-Level Edge Case Counters ==========
+			// Counters for unusual situations (defensive coding)
+			writeCounterIfNonZero(b, "gosrt_connection_edge_case_total",
+				metrics.PktRecvInvalid.Load(),
+				"socket_id", socketIdStr, "type", "invalid")
+			writeCounterIfNonZero(b, "gosrt_connection_edge_case_total",
+				metrics.PktRecvNilConnection.Load(),
+				"socket_id", socketIdStr, "type", "nil_connection")
+			writeCounterIfNonZero(b, "gosrt_connection_edge_case_total",
+				metrics.PktRecvWrongPeer.Load(),
+				"socket_id", socketIdStr, "type", "wrong_peer")
+			writeCounterIfNonZero(b, "gosrt_connection_edge_case_total",
+				metrics.PktRecvBacklogFull.Load(),
+				"socket_id", socketIdStr, "type", "backlog_full")
+			writeCounterIfNonZero(b, "gosrt_connection_edge_case_total",
+				metrics.PktRecvQueueFull.Load(),
+				"socket_id", socketIdStr, "type", "queue_full")
+			writeCounterIfNonZero(b, "gosrt_connection_edge_case_total",
+				metrics.PktRecvUnknownSocketId.Load(),
+				"socket_id", socketIdStr, "type", "unknown_socket")
+
+			// ========== Decryption Counters ==========
+			writeCounterIfNonZero(b, "gosrt_connection_decrypt_failed_total",
+				metrics.PktRecvUndecrypt.Load(),
+				"socket_id", socketIdStr, "unit", "packets")
+			writeCounterIfNonZero(b, "gosrt_connection_decrypt_failed_bytes_total",
+				metrics.ByteRecvUndecrypt.Load(),
+				"socket_id", socketIdStr)
+
+			// ========== Congestion Control Buffer Gauges ==========
+			// These are point-in-time values, not cumulative counters
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_buffer_ms",
+				float64(metrics.CongestionRecvMsBuf.Load()),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_buffer_ms",
+				float64(metrics.CongestionSendMsBuf.Load()),
+				"socket_id", socketIdStr, "direction", "send")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_buffer_packets",
+				float64(metrics.CongestionRecvPktBuf.Load()),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_buffer_packets",
+				float64(metrics.CongestionSendPktBuf.Load()),
+				"socket_id", socketIdStr, "direction", "send")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_buffer_bytes",
+				float64(metrics.CongestionRecvByteBuf.Load()),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_buffer_bytes",
+				float64(metrics.CongestionSendByteBuf.Load()),
+				"socket_id", socketIdStr, "direction", "send")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_flight_size_packets",
+				float64(metrics.CongestionSendPktFlightSize.Load()),
+				"socket_id", socketIdStr)
+
+			// ========== Congestion Control Timing Gauges ==========
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_send_period_us",
+				float64(metrics.CongestionSendUsPktSndPeriod.Load()),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_send_duration_us_total",
+				metrics.CongestionSendUsSndDuration.Load(),
+				"socket_id", socketIdStr)
+
+			// ========== Congestion Control Bandwidth Gauges ==========
+			// Values are stored as kbps (mbps * 1000) for precision without floating point
+			writeGaugeIfNonZero(b, "gosrt_connection_link_capacity_kbps",
+				float64(metrics.MbpsLinkCapacity.Load()),
+				"socket_id", socketIdStr)
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_bandwidth_kbps",
+				float64(metrics.CongestionRecvMbpsBandwidth.Load()),
+				"socket_id", socketIdStr, "direction", "recv", "type", "bandwidth")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_bandwidth_kbps",
+				float64(metrics.CongestionRecvMbpsLinkCapacity.Load()),
+				"socket_id", socketIdStr, "direction", "recv", "type", "link_capacity")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_bandwidth_kbps",
+				float64(metrics.CongestionSendMbpsSentBandwidth.Load()),
+				"socket_id", socketIdStr, "direction", "send", "type", "sent")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_bandwidth_kbps",
+				float64(metrics.CongestionSendMbpsInputBandwidth.Load()),
+				"socket_id", socketIdStr, "direction", "send", "type", "input")
+
+			// ========== Congestion Control Byte-Level Detail ==========
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_unique_total",
+				metrics.CongestionRecvByteUnique.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_unique_total",
+				metrics.CongestionSendByteUnique.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_lost_total",
+				metrics.CongestionRecvByteLoss.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_lost_total",
+				metrics.CongestionSendByteLoss.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_retrans_total",
+				metrics.CongestionRecvByteRetrans.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_retrans_total",
+				metrics.CongestionSendByteRetrans.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_belated_total",
+				metrics.CongestionRecvByteBelated.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_drop_total",
+				metrics.CongestionRecvByteDrop.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_drop_total",
+				metrics.CongestionSendByteDrop.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_payload_total",
+				metrics.CongestionRecvBytePayload.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_payload_total",
+				metrics.CongestionSendBytePayload.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+
+			// ========== Congestion Control Drop/Belated Counters ==========
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_belated_total",
+				metrics.CongestionRecvPktBelated.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_drop_total",
+				metrics.CongestionRecvPktDrop.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_packets_drop_total",
+				metrics.CongestionSendPktDrop.Load(),
+				"socket_id", socketIdStr, "direction", "send")
+
+			// ========== Congestion Control Internal Counters ==========
+			// Defensive counters for edge cases in congestion control
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
+				metrics.CongestionRecvPktNil.Load(),
+				"socket_id", socketIdStr, "type", "recv_pkt_nil")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
+				metrics.CongestionRecvPktStoreInsertFailed.Load(),
+				"socket_id", socketIdStr, "type", "store_insert_failed")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
+				metrics.CongestionSendNAKNotFound.Load(),
+				"socket_id", socketIdStr, "type", "nak_not_found")
+
+			// ========== Congestion Control Rate Gauges ==========
+			// Stored as percentage * 100 for precision (e.g., 5.5% = 550)
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_retrans_rate_permille",
+				float64(metrics.CongestionRecvPktRetransRate.Load()),
+				"socket_id", socketIdStr, "direction", "recv")
+			writeGaugeIfNonZero(b, "gosrt_connection_congestion_retrans_rate_permille",
+				float64(metrics.CongestionSendPktRetransRate.Load()),
+				"socket_id", socketIdStr, "direction", "send")
+
+			// ========== Header Size (Configuration) ==========
+			writeGaugeIfNonZero(b, "gosrt_connection_header_size_bytes",
+				float64(metrics.HeaderSize.Load()),
 				"socket_id", socketIdStr)
 		}
 

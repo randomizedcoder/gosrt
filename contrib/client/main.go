@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,7 +25,7 @@ import (
 )
 
 const (
-	STATS_PERIOD = 200 * time.Millisecond
+	STATS_PERIOD = 1 * time.Second // Throughput display update interval
 	CHANNEL_SIZE = 2048
 )
 
@@ -137,6 +138,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Store connection socket ID for metrics lookup (if SRT connection)
+	var connSocketId atomic.Uint32
+	if srtconn, ok := r.(srt.Conn); ok {
+		connSocketId.Store(srtconn.SocketId())
+	}
+
 	w, err := openWriter(*to, logger, ctx, &wg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
@@ -196,21 +203,30 @@ func main() {
 	// ============================================================
 	// Create Client Metrics (lock-free atomic counters)
 	// ============================================================
+	// Application-level metrics for basic byte/packet counting
 	clientMetrics := &metrics.ConnectionMetrics{}
-	// Register with socket ID 0 for client (unique identifier)
-	metrics.RegisterConnection(0, clientMetrics)
-	defer metrics.UnregisterConnection(0)
 
 	// Start throughput stats display loop (uses shared common function)
-	// Shows receive stats: bytes, packets, success count, and loss count
+	// Shows receive stats: bytes, packets, success count, loss count, and retransmits
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		common.RunThroughputDisplay(ctx, STATS_PERIOD, func() (uint64, uint64, uint64, uint64) {
+		common.RunThroughputDisplayWithLabel(ctx, STATS_PERIOD, "SUB", func() (uint64, uint64, uint64, uint64, uint64) {
+			// Get loss and retransmit counts from the actual connection's metrics (if available)
+			var loss, retrans uint64
+			if socketId := connSocketId.Load(); socketId != 0 {
+				// Query the actual connection metrics
+				conns, _ := metrics.GetConnections()
+				if connMetrics, ok := conns[socketId]; ok && connMetrics != nil {
+					loss = connMetrics.CongestionRecvPktLoss.Load()
+					retrans = connMetrics.CongestionRecvPktRetrans.Load()
+				}
+			}
 			return clientMetrics.ByteRecvDataSuccess.Load(),
 				clientMetrics.PktRecvDataSuccess.Load(),
-				clientMetrics.PktRecvSuccess.Load(),
-				clientMetrics.CongestionRecvPktLoss.Load()
+				clientMetrics.PktRecvDataSuccess.Load(), // Use data packets for success count
+				loss,
+				retrans
 		})
 	}()
 

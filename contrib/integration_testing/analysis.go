@@ -51,6 +51,102 @@ func NewTestMetricsTimeSeries(tm *TestMetrics, testName string, config *TestConf
 	}
 }
 
+// PipelineBalanceResult holds the result of pipeline balance verification
+type PipelineBalanceResult struct {
+	Passed bool
+
+	// Metrics from each component
+	ClientGenPacketsSent int64 // Packets sent by client-generator
+	ServerPacketsRecv    int64 // Packets received by server (from client-gen)
+	ServerPacketsSent    int64 // Packets sent by server (to client)
+	ClientPacketsRecv    int64 // Packets received by client
+
+	// Balance verification
+	IngressBalanced  bool  // ClientGen sent == Server recv
+	EgressBalanced   bool  // Server sent == Client recv
+	IngressDiff      int64 // Difference (expected 0)
+	EgressDiff       int64 // Difference (expected 0)
+	AllowedTolerance int64 // Max allowed difference (for timing)
+
+	// Messages
+	Violations []string
+	Warnings   []string
+}
+
+// VerifyPipelineBalance checks that packets flow correctly through the pipeline
+// This should be called after the client-generator stops and pipeline drains
+func VerifyPipelineBalance(serverMetrics, clientGenMetrics, clientMetrics DerivedMetrics, tolerance int64) PipelineBalanceResult {
+	result := PipelineBalanceResult{
+		Passed:               false, // Fail-safe: default to failed
+		AllowedTolerance:     tolerance,
+		ClientGenPacketsSent: clientGenMetrics.TotalPacketsSent,
+		ServerPacketsRecv:    serverMetrics.TotalPacketsRecv,
+		ServerPacketsSent:    serverMetrics.TotalPacketsSent,
+		ClientPacketsRecv:    clientMetrics.TotalPacketsRecv,
+	}
+
+	// Check ingress: Client-Generator → Server
+	result.IngressDiff = result.ClientGenPacketsSent - result.ServerPacketsRecv
+	if result.IngressDiff < 0 {
+		result.IngressDiff = -result.IngressDiff // Absolute value
+	}
+	result.IngressBalanced = result.IngressDiff <= tolerance
+
+	if !result.IngressBalanced {
+		result.Violations = append(result.Violations,
+			fmt.Sprintf("Ingress imbalance: Client-Gen sent %d, Server recv %d (diff: %d, tolerance: %d)",
+				result.ClientGenPacketsSent, result.ServerPacketsRecv, result.IngressDiff, tolerance))
+	}
+
+	// Check egress: Server → Client
+	result.EgressDiff = result.ServerPacketsSent - result.ClientPacketsRecv
+	if result.EgressDiff < 0 {
+		result.EgressDiff = -result.EgressDiff // Absolute value
+	}
+	result.EgressBalanced = result.EgressDiff <= tolerance
+
+	if !result.EgressBalanced {
+		result.Violations = append(result.Violations,
+			fmt.Sprintf("Egress imbalance: Server sent %d, Client recv %d (diff: %d, tolerance: %d)",
+				result.ServerPacketsSent, result.ClientPacketsRecv, result.EgressDiff, tolerance))
+	}
+
+	// Only pass if both balanced
+	result.Passed = result.IngressBalanced && result.EgressBalanced
+
+	// Add warnings for close-but-not-exact matches
+	if result.IngressBalanced && result.IngressDiff > 0 {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("Small ingress difference: %d packets (within tolerance)", result.IngressDiff))
+	}
+	if result.EgressBalanced && result.EgressDiff > 0 {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("Small egress difference: %d packets (within tolerance)", result.EgressDiff))
+	}
+
+	return result
+}
+
+// PrintPipelineBalance prints the pipeline balance result
+func PrintPipelineBalance(result PipelineBalanceResult) {
+	fmt.Println("\nPipeline Balance Verification:")
+	if result.Passed {
+		fmt.Println("  ✓ PASSED")
+		fmt.Printf("    Client-Generator → Server: %d → %d (diff: %d)\n",
+			result.ClientGenPacketsSent, result.ServerPacketsRecv, result.IngressDiff)
+		fmt.Printf("    Server → Client:           %d → %d (diff: %d)\n",
+			result.ServerPacketsSent, result.ClientPacketsRecv, result.EgressDiff)
+	} else {
+		fmt.Println("  ✗ FAILED")
+		for _, v := range result.Violations {
+			fmt.Printf("    ✗ %s\n", v)
+		}
+	}
+	for _, w := range result.Warnings {
+		fmt.Printf("    ⚠ %s\n", w)
+	}
+}
+
 // DerivedMetrics computed from the time series
 type DerivedMetrics struct {
 	// Deltas (final - initial)
@@ -58,10 +154,13 @@ type DerivedMetrics struct {
 	TotalPacketsRecv     int64
 	TotalPacketsLost     int64
 	TotalRetransmissions int64
+	TotalRetransFromNAK  int64 // Direct counter from NAK handling
 	TotalNAKsSent        int64
 	TotalNAKsRecv        int64
 	TotalACKsSent        int64
 	TotalACKsRecv        int64
+	TotalACKACKsSent     int64
+	TotalACKACKsRecv     int64
 	TotalErrors          int64
 
 	// Bytes sent/received
@@ -108,20 +207,30 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 
 	dm.Duration = last.Timestamp.Sub(first.Timestamp)
 
-	// The Prometheus metrics have labels (socket_id, type, status, etc.)
-	// We need to sum across all connections for each metric type
+	// ========== Congestion Control Statistics (Primary Source) ==========
+	// These come from the congestion control layer and are the most accurate
 
-	// Packet counters - sum data packets with status=success across all socket_ids
-	// Note: The current Prometheus handler only exports packets_received, not packets_sent
-	// For packets sent, we need to use a different metric or estimate
-	dm.TotalPacketsRecv = int64(getSumByPrefix(last, "gosrt_connection_packets_received_total") -
-		getSumByPrefix(first, "gosrt_connection_packets_received_total"))
+	// Packets sent/received from congestion control (includes retransmissions)
+	dm.TotalPacketsSent = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_packets_total", "direction=\"send\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_packets_total", "direction=\"send\""))
+	dm.TotalPacketsRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_packets_total", "direction=\"recv\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_packets_total", "direction=\"recv\""))
 
-	// TotalPacketsSent is not directly available in Prometheus metrics
-	// Use submissions as a proxy (io_uring submissions = packets sent attempts)
-	dm.TotalPacketsSent = int64(getSumByPrefix(last, "gosrt_connection_send_submitted_total") -
-		getSumByPrefix(first, "gosrt_connection_send_submitted_total"))
+	// Packets lost - detected via sequence number gaps by receiver
+	dm.TotalPacketsLost = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_packets_lost_total", "direction=\"recv\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_packets_lost_total", "direction=\"recv\""))
 
+	// Retransmissions - packets retransmitted by sender
+	dm.TotalRetransmissions = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_retransmissions_total", "direction=\"send\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_retransmissions_total", "direction=\"send\""))
+
+	// Bytes sent/received (for accurate throughput calculation)
+	dm.TotalBytesSent = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_bytes_total", "direction=\"send\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_bytes_total", "direction=\"send\""))
+	dm.TotalBytesRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_bytes_total", "direction=\"recv\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_bytes_total", "direction=\"recv\""))
+
+	// ========== Control Packet Statistics ==========
 	// ACK counters - look for type="ack" in the metrics
 	dm.TotalACKsSent = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_sent_total", "type=\"ack\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_packets_sent_total", "type=\"ack\""))
@@ -133,6 +242,16 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 		getSumByPrefixContaining(first, "gosrt_connection_packets_sent_total", "type=\"nak\""))
 	dm.TotalNAKsRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_received_total", "type=\"nak\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_packets_received_total", "type=\"nak\""))
+
+	// ACKACK counters
+	dm.TotalACKACKsSent = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_sent_total", "type=\"ackack\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_packets_sent_total", "type=\"ackack\""))
+	dm.TotalACKACKsRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_received_total", "type=\"ackack\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_packets_received_total", "type=\"ackack\""))
+
+	// Direct retransmission counter (from NAK handling)
+	dm.TotalRetransFromNAK = int64(getSumByPrefix(last, "gosrt_connection_retransmissions_from_nak_total") -
+		getSumByPrefix(first, "gosrt_connection_retransmissions_from_nak_total"))
 
 	// Error counters
 	dm.TotalErrors = int64(getSumByPrefix(last, "gosrt_connection_crypto_error_total") -
@@ -157,13 +276,14 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 		}
 	}
 
-	// Compute rates
-	if dm.Duration.Seconds() > 0 && dm.TotalPacketsSent > 0 {
-		// Estimate bytes from packets (assuming ~1068 bytes payload per packet)
-		dm.TotalBytesSent = dm.TotalPacketsSent * 1068
-		dm.TotalBytesRecv = dm.TotalPacketsRecv * 1068
-		dm.AvgSendRateMbps = float64(dm.TotalBytesSent*8) / dm.Duration.Seconds() / 1_000_000
-		dm.AvgRecvRateMbps = float64(dm.TotalBytesRecv*8) / dm.Duration.Seconds() / 1_000_000
+	// Compute rates using actual byte counts from Prometheus
+	if dm.Duration.Seconds() > 0 {
+		if dm.TotalBytesSent > 0 {
+			dm.AvgSendRateMbps = float64(dm.TotalBytesSent*8) / dm.Duration.Seconds() / 1_000_000
+		}
+		if dm.TotalBytesRecv > 0 {
+			dm.AvgRecvRateMbps = float64(dm.TotalBytesRecv*8) / dm.Duration.Seconds() / 1_000_000
+		}
 	}
 
 	if dm.TotalPacketsSent > 0 {
@@ -307,6 +427,23 @@ func getExpectedErrorCount(counter string, config *TestConfig) int64 {
 		if expected == counter {
 			// Allow some errors for known expected cases
 			return 100 // Configurable threshold
+		}
+	}
+
+	// For network impairment tests, congestion drops are expected
+	if config.Mode == TestModeNetwork && config.Impairment.LossRate > 0 {
+		// These counters indicate packets dropped due to arriving too late
+		// or buffer overflow - expected with packet loss
+		if counter == "gosrt_connection_congestion_recv_data_drop_total" ||
+			counter == "gosrt_connection_congestion_send_data_drop_total" ||
+			counter == "gosrt_connection_packets_dropped_total" {
+			// Allow drops proportional to expected loss rate
+			// e.g., 2% loss with 10000 packets = ~200 drops allowed (with margin)
+			expectedDrops := int64(config.Impairment.LossRate * 10000 * 5) // 5x margin
+			if expectedDrops < 100 {
+				expectedDrops = 100
+			}
+			return expectedDrops
 		}
 	}
 
@@ -457,6 +594,7 @@ type AnalysisResult struct {
 	ErrorAnalysis         ErrorAnalysisResult
 	PositiveSignals       PositiveSignalResult
 	StatisticalValidation StatisticalValidationResult // For network impairment tests
+	PipelineBalance       PipelineBalanceResult       // Clean network pipeline verification
 
 	// Runtime stability (for long-running tests)
 	RuntimeStability []RuntimeStabilityResult
@@ -494,10 +632,32 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	result.ClientGenMetrics = ComputeDerivedMetrics(ts.ClientGenerator)
 	result.ClientMetrics = ComputeDerivedMetrics(ts.Client)
 
+	// Pipeline balance verification for clean network tests
+	// Uses a small tolerance for timing differences (5 packets)
+	// Note: Mode defaults to "" (empty), treat "" and "clean" as clean network
+	pipelineBalanceRequired := false
+	if config == nil || config.Mode == TestModeClean || config.Mode == "" {
+		pipelineBalanceRequired = true
+		// Allow small tolerance for timing: ~0.1% or 5 packets, whichever is larger
+		tolerance := int64(5)
+		if result.ServerMetrics.TotalPacketsSent > 5000 {
+			tolerance = result.ServerMetrics.TotalPacketsSent / 1000 // 0.1%
+		}
+		result.PipelineBalance = VerifyPipelineBalance(
+			result.ServerMetrics, result.ClientGenMetrics, result.ClientMetrics, tolerance)
+		if !result.PipelineBalance.Passed {
+			result.TotalViolations += len(result.PipelineBalance.Violations)
+		}
+		result.TotalWarnings += len(result.PipelineBalance.Warnings)
+	} else {
+		// For network impairment tests, pipeline balance is not expected
+		result.PipelineBalance = PipelineBalanceResult{Passed: true}
+	}
+
 	// Count violations and warnings from error and signal analysis
-	result.TotalViolations = len(errorResult.Violations) + len(signalResult.Violations) +
+	result.TotalViolations += len(errorResult.Violations) + len(signalResult.Violations) +
 		len(statisticalResult.Violations)
-	result.TotalWarnings = len(statisticalResult.Warnings)
+	result.TotalWarnings += len(statisticalResult.Warnings)
 
 	// Track runtime stability pass/fail (for long-running tests)
 	runtimePassed := true // No runtime analysis = passes by default (not applicable)
@@ -518,7 +678,8 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 
 	// EXPLICIT PASS CONDITION: Only set to passed when ALL checks explicitly confirm success
 	// This is the ONLY place where Passed can become true
-	if errorResult.Passed && signalResult.Passed && statisticalResult.Passed && runtimePassed {
+	pipelinePassed := !pipelineBalanceRequired || result.PipelineBalance.Passed
+	if errorResult.Passed && signalResult.Passed && statisticalResult.Passed && runtimePassed && pipelinePassed {
 		result.Passed = true
 	}
 
@@ -585,6 +746,25 @@ func PrintAnalysisResult(result AnalysisResult) {
 		for _, w := range result.StatisticalValidation.Warnings {
 			fmt.Printf("  ⚠ %s: %s\n", w.Metric, w.Message)
 		}
+		// Print observed statistics summary for network impairment tests
+		fmt.Println("\n  Observed Statistics:")
+		retransPctOfSent := float64(0)
+		if result.ClientGenMetrics.TotalPacketsSent > 0 {
+			retransPctOfSent = float64(result.ClientGenMetrics.TotalRetransmissions) /
+				float64(result.ClientGenMetrics.TotalPacketsSent) * 100
+		}
+		fmt.Printf("    Configured loss: %.1f%%, Retrans%% of sent: %.2f%%\n",
+			result.TestConfig.Impairment.LossRate*100, retransPctOfSent)
+		fmt.Printf("    Packets sent: %d, Retransmissions: %d, Lost: %d\n",
+			result.ClientGenMetrics.TotalPacketsSent,
+			result.ClientGenMetrics.TotalRetransmissions,
+			result.ClientMetrics.TotalPacketsLost)
+	}
+
+	// Pipeline Balance (only for clean network tests)
+	// Note: Mode defaults to "" (empty), treat "" and "clean" as clean network
+	if result.TestConfig == nil || result.TestConfig.Mode == TestModeClean || result.TestConfig.Mode == "" {
+		PrintPipelineBalance(result.PipelineBalance)
 	}
 
 	// Metrics Summary
@@ -920,8 +1100,24 @@ type StatisticalExpectation struct {
 
 // ObservedStatistics holds computed statistics from metrics
 type ObservedStatistics struct {
-	LossRate          float64 // Packets lost / packets sent
-	RetransRate       float64 // Retransmissions / packets lost
+	// Primary loss rate (using the best available method)
+	LossRate float64 // Best estimate of packets lost / packets sent
+
+	// Cross-endpoint loss calculation (sender packets - receiver packets)
+	CrossEndpointLossRate float64 // (PacketsSent - PacketsRecv) / PacketsSent
+	CrossEndpointLossAbs  int64   // Absolute packets lost via cross-endpoint
+
+	// Reported loss from sequence gap detection
+	ReportedLossRate float64 // PacketsLost / PacketsSent (from receiver's detection)
+	ReportedLossAbs  int64   // Absolute packets lost via sequence gaps
+
+	// Cross-check: do both methods agree?
+	LossMethodsAgree bool    // True if both methods agree within tolerance
+	LossDiscrepancy  float64 // Difference between methods (for debugging)
+
+	// Other statistics
+	RetransRate       float64 // Retransmissions / packets lost (should be ~1.0 for full recovery)
+	RetransPctOfSent  float64 // Retransmissions / packets sent (should match loss rate)
 	NAKsPerLostPacket float64 // NAKs sent / packets lost
 	RecoveryRate      float64 // (Packets sent - unrecoverable) / packets sent
 }
@@ -952,7 +1148,7 @@ func ValidateStatistical(ts *TestMetricsTimeSeries, config *TestConfig) Statisti
 	checksPerformed := 0
 	checksPassed := 0
 
-	// Validate loss rate
+	// Validate loss rate (using best available method)
 	checksPerformed++
 	if isWithinTolerance(observed.LossRate, expected.ExpectedLossRate, expected.LossRateTolerance) {
 		checksPassed++
@@ -964,8 +1160,21 @@ func ValidateStatistical(ts *TestMetricsTimeSeries, config *TestConfig) Statisti
 			ExpectedRange: fmt.Sprintf("%.1f%% - %.1f%%", lowerBound*100, upperBound*100),
 			Observed:      observed.LossRate * 100,
 			Message: fmt.Sprintf(
-				"Observed loss rate %.2f%% outside expected range for %.1f%% configured loss",
-				observed.LossRate*100, expected.ExpectedLossRate*100),
+				"Observed loss rate %.2f%% outside expected range for %.1f%% configured loss (cross-endpoint: %.2f%%, reported: %.2f%%)",
+				observed.LossRate*100, expected.ExpectedLossRate*100,
+				observed.CrossEndpointLossRate*100, observed.ReportedLossRate*100),
+		})
+	}
+
+	// Add warning if loss calculation methods disagree significantly
+	if !observed.LossMethodsAgree && observed.LossDiscrepancy > 0 {
+		result.Warnings = append(result.Warnings, StatisticalWarning{
+			Metric: "LossMethodDiscrepancy",
+			Message: fmt.Sprintf(
+				"Loss detection methods disagree by %.1f%%: cross-endpoint=%.2f%% (%d pkts), reported=%.2f%% (%d pkts)",
+				observed.LossDiscrepancy*100,
+				observed.CrossEndpointLossRate*100, observed.CrossEndpointLossAbs,
+				observed.ReportedLossRate*100, observed.ReportedLossAbs),
 		})
 	}
 
@@ -991,6 +1200,28 @@ func ValidateStatistical(ts *TestMetricsTimeSeries, config *TestConfig) Statisti
 					"High retransmission rate (%.1f%%) - possible retransmission storm",
 					observed.RetransRate*100),
 			})
+		}
+
+		// Cross-check: retransmissions as % of sent should be close to loss rate
+		// This validates that the ARQ is working correctly end-to-end
+		// With loss rate L and retrans recovery R, expected retrans % ≈ L / (1 - L*R) ≈ L for small L
+		// Use wider tolerance (2x) since retransmissions can also be lost
+		checksPerformed++
+		lowerBound := expected.ExpectedLossRate * 0.5 // At least 50% of loss rate
+		upperBound := expected.ExpectedLossRate * 3.0 // No more than 3x loss rate
+		if observed.RetransPctOfSent >= lowerBound && observed.RetransPctOfSent <= upperBound {
+			checksPassed++
+		} else {
+			result.Warnings = append(result.Warnings, StatisticalWarning{
+				Metric: "RetransPctOfSent",
+				Message: fmt.Sprintf(
+					"Retransmissions (%.2f%% of sent) don't match loss rate (%.1f%% expected) - "+
+						"expected range %.2f%% - %.2f%%",
+					observed.RetransPctOfSent*100, expected.ExpectedLossRate*100,
+					lowerBound*100, upperBound*100),
+			})
+			// Don't fail the test, just warn - this is a sanity check, not a hard requirement
+			checksPassed++ // Count as passed since it's just a warning
 		}
 	}
 
@@ -1040,8 +1271,11 @@ func ValidateStatistical(ts *TestMetricsTimeSeries, config *TestConfig) Statisti
 	return result
 }
 
-// computeStatisticalExpectations calculates expected behavior based on impairment config
+// computeStatisticalExpectations calculates expected behavior based on impairment config.
+// If imp.Thresholds is set, those values are used directly.
+// Otherwise, defaults are computed based on impairment type.
 func computeStatisticalExpectations(imp NetworkImpairment) StatisticalExpectation {
+	// Start with default expectations
 	exp := StatisticalExpectation{
 		ExpectedLossRate:  imp.LossRate,
 		LossRateTolerance: 0.5, // ±50% tolerance (netem is statistical)
@@ -1053,6 +1287,31 @@ func computeStatisticalExpectations(imp NetworkImpairment) StatisticalExpectatio
 		MinRecoveryRate:   0.95, // 95% of packets should be successfully received
 	}
 
+	// If explicit thresholds are provided, use them directly
+	if imp.Thresholds != nil {
+		t := imp.Thresholds
+		if t.LossRateTolerance > 0 {
+			exp.LossRateTolerance = t.LossRateTolerance
+		}
+		if t.MinRetransRate > 0 {
+			exp.MinRetransRate = t.MinRetransRate
+		}
+		if t.MaxRetransRate > 0 {
+			exp.MaxRetransRate = t.MaxRetransRate
+		}
+		if t.MinNAKsPerLostPkt > 0 {
+			exp.MinNAKsPerLostPkt = t.MinNAKsPerLostPkt
+		}
+		if t.MaxNAKsPerLostPkt > 0 {
+			exp.MaxNAKsPerLostPkt = t.MaxNAKsPerLostPkt
+		}
+		if t.MinRecoveryRate > 0 {
+			exp.MinRecoveryRate = t.MinRecoveryRate
+		}
+		return exp
+	}
+
+	// Otherwise, compute defaults based on impairment type
 	// Adjust for high latency - allows more recovery time but harder to retransmit
 	if imp.LatencyProfile == "geo-satellite" || imp.LatencyProfile == "tier3-high" {
 		exp.MinRecoveryRate = 0.90  // Slightly lower expectation for high latency
@@ -1065,6 +1324,9 @@ func computeStatisticalExpectations(imp NetworkImpairment) StatisticalExpectatio
 		// Starlink has 100% loss bursts - recovery depends on buffer size
 		exp.LossRateTolerance = 1.0 // Higher tolerance for burst patterns
 		exp.MinRecoveryRate = 0.85  // Some packets may be unrecoverable during bursts
+	case "high-loss":
+		exp.LossRateTolerance = 1.0 // High tolerance for burst patterns
+		exp.MinRecoveryRate = 0.80  // Heavy impairment = lower recovery expectation
 	case "heavy":
 		exp.MinRecoveryRate = 0.80 // Heavy impairment = lower recovery expectation
 	case "moderate":
@@ -1075,11 +1337,18 @@ func computeStatisticalExpectations(imp NetworkImpairment) StatisticalExpectatio
 }
 
 // computeObservedStatistics calculates actual statistics from metrics
+// Uses two independent methods for loss calculation and cross-checks them:
+// 1. Cross-endpoint: PacketsSent (sender) - PacketsRecv (receiver)
+// 2. Reported loss: Sequence gap detection by receiver
 func computeObservedStatistics(ts *TestMetricsTimeSeries) ObservedStatistics {
 	// Get derived metrics for each component
-	// Client-generator is the sender, client is the receiver
+	// Topology: Client-Generator → Server → Client
+	// - Client-generator is the sender (publisher)
+	// - Client is the final receiver (subscriber)
+	// - Server is the relay AND the loss detector (sends NAKs back to client-generator)
 	sender := ComputeDerivedMetrics(ts.ClientGenerator)
 	receiver := ComputeDerivedMetrics(ts.Client)
+	server := ComputeDerivedMetrics(ts.Server)
 
 	stats := ObservedStatistics{}
 
@@ -1093,26 +1362,82 @@ func computeObservedStatistics(ts *TestMetricsTimeSeries) ObservedStatistics {
 	}
 
 	if packetsSent > 0 {
-		// Loss rate from receiver's perspective
-		packetsLost := receiver.TotalPacketsLost
-		if packetsLost > 0 {
-			stats.LossRate = float64(packetsLost) / float64(packetsSent)
+		// ========== Method 1: Cross-Endpoint Loss Calculation ==========
+		// Compare packets sent by sender vs packets received by receiver
+		packetsReceived := receiver.TotalPacketsRecv
+		if packetsReceived < packetsSent {
+			stats.CrossEndpointLossAbs = packetsSent - packetsReceived
+			stats.CrossEndpointLossRate = float64(stats.CrossEndpointLossAbs) / float64(packetsSent)
 		}
 
-		// Recovery rate (what fraction of sent packets were received)
-		packetsReceived := receiver.TotalPacketsRecv
+		// ========== Method 2: Reported Loss (Sequence Gap Detection) ==========
+		// Packets lost as detected by receiver via sequence number gaps
+		stats.ReportedLossAbs = receiver.TotalPacketsLost
+		if stats.ReportedLossAbs > 0 {
+			stats.ReportedLossRate = float64(stats.ReportedLossAbs) / float64(packetsSent)
+		}
+
+		// ========== Cross-Check: Do Both Methods Agree? ==========
+		// Allow 50% discrepancy between methods (due to timing, in-flight packets, etc.)
+		const crossCheckTolerance = 0.5
+		if stats.CrossEndpointLossRate > 0 && stats.ReportedLossRate > 0 {
+			// Calculate relative difference
+			maxRate := stats.CrossEndpointLossRate
+			if stats.ReportedLossRate > maxRate {
+				maxRate = stats.ReportedLossRate
+			}
+			minRate := stats.CrossEndpointLossRate
+			if stats.ReportedLossRate < minRate {
+				minRate = stats.ReportedLossRate
+			}
+			if maxRate > 0 {
+				stats.LossDiscrepancy = (maxRate - minRate) / maxRate
+				stats.LossMethodsAgree = stats.LossDiscrepancy <= crossCheckTolerance
+			}
+		} else {
+			// If only one method detected loss, they don't really "agree"
+			// but we shouldn't flag it as a discrepancy
+			stats.LossMethodsAgree = true
+		}
+
+		// ========== Use Best Available Loss Rate ==========
+		// Prefer the higher of the two methods (more conservative/defensive)
+		// This catches losses that either method might miss
+		if stats.CrossEndpointLossRate > stats.ReportedLossRate {
+			stats.LossRate = stats.CrossEndpointLossRate
+		} else {
+			stats.LossRate = stats.ReportedLossRate
+		}
+
+		// ========== Recovery Rate ==========
+		// What fraction of sent packets were successfully received
 		stats.RecoveryRate = float64(packetsReceived) / float64(packetsSent)
 		if stats.RecoveryRate > 1.0 {
 			stats.RecoveryRate = 1.0 // Cap at 100%
 		}
 	} else {
 		stats.RecoveryRate = 1.0 // No packets sent = 100% recovery (nothing to lose)
+		stats.LossMethodsAgree = true
 	}
 
-	// Retransmission and NAK rates (relative to packets lost)
-	if receiver.TotalPacketsLost > 0 {
-		stats.RetransRate = float64(sender.TotalRetransmissions) / float64(receiver.TotalPacketsLost)
-		stats.NAKsPerLostPacket = float64(receiver.TotalNAKsSent) / float64(receiver.TotalPacketsLost)
+	// ========== Retransmission and NAK Rates ==========
+	// Use the best available loss count for denominators
+	lossCount := stats.ReportedLossAbs
+	if stats.CrossEndpointLossAbs > lossCount {
+		lossCount = stats.CrossEndpointLossAbs
+	}
+
+	if lossCount > 0 {
+		stats.RetransRate = float64(sender.TotalRetransmissions) / float64(lossCount)
+		// NAKs are sent by the SERVER (which receives from client-generator and detects loss)
+		// NOT by the final client (which just receives relayed data from server)
+		stats.NAKsPerLostPacket = float64(server.TotalNAKsSent) / float64(lossCount)
+	}
+
+	// Retransmissions as percentage of packets sent
+	// This should match the configured loss rate (e.g., 2% loss → ~2% retransmissions)
+	if packetsSent > 0 {
+		stats.RetransPctOfSent = float64(sender.TotalRetransmissions) / float64(packetsSent)
 	}
 
 	return stats

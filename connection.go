@@ -1018,8 +1018,10 @@ func (c *srtConn) handleACK(p packet.Packet) {
 func (c *srtConn) handleNAK(p packet.Packet) {
 	c.log("control:recv:NAK:dump", func() string { return p.Dump() })
 
-	// Note: NAK metrics are tracked via packet classifier in recv path
-	// No need to increment here - metrics already tracked
+	// Increment NAK received counter (control packets don't go through packet classifier)
+	if c.metrics != nil {
+		c.metrics.PktRecvNAKSuccess.Add(1)
+	}
 
 	cif := &packet.CIFNAK{}
 
@@ -1498,8 +1500,10 @@ func (c *srtConn) sendNAK(list []circular.Number) {
 	c.log("control:send:NAK:dump", func() string { return p.Dump() })
 	c.log("control:send:NAK:cif", func() string { return cif.String() })
 
-	// Note: NAK metrics are tracked via packet classifier in send path
-	// No need to increment here - metrics already tracked
+	// Increment NAK sent counter (control packets don't go through packet classifier)
+	if c.metrics != nil {
+		c.metrics.PktSentNAKSuccess.Add(1)
+	}
 
 	c.pop(p)
 }
@@ -1917,15 +1921,15 @@ func (c *srtConn) printCloseStatistics() {
 		"connection_duration":                 time.Since(c.start).String(),
 		"peer_idle_timeout_remaining_seconds": remainingSeconds,
 		"accumulated": map[string]interface{}{
-			"pkt_sent_data":      stats.Accumulated.PktSent,
-			"pkt_recv_data":      stats.Accumulated.PktRecv,
-			"pkt_sent_ack":       stats.Accumulated.PktSentACK,
-			"pkt_recv_ack":       stats.Accumulated.PktRecvACK,
-			"pkt_sent_nak":       stats.Accumulated.PktSentNAK,
-			"pkt_recv_nak":       stats.Accumulated.PktRecvNAK,
-			"pkt_retrans_total":  stats.Accumulated.PktRetrans,
-			"pkt_recv_loss":      stats.Accumulated.PktRecvLoss,
-			"pkt_recv_loss_rate": stats.Instantaneous.PktRecvLossRate,
+			"pkt_sent_data":         stats.Accumulated.PktSent,
+			"pkt_recv_data":         stats.Accumulated.PktRecv,
+			"pkt_sent_ack":          stats.Accumulated.PktSentACK,
+			"pkt_recv_ack":          stats.Accumulated.PktRecvACK,
+			"pkt_sent_nak":          stats.Accumulated.PktSentNAK,
+			"pkt_recv_nak":          stats.Accumulated.PktRecvNAK,
+			"pkt_retrans_total":     stats.Accumulated.PktRetrans,
+			"pkt_recv_loss":         stats.Accumulated.PktRecvLoss,
+			"pkt_recv_retrans_rate": stats.Instantaneous.PktRecvRetransRate,
 		},
 		"instantaneous": map[string]interface{}{
 			"mbps_sent_rate": stats.Instantaneous.MbpsSentRate,
@@ -2080,8 +2084,8 @@ func (c *srtConn) Stats(s *Statistics) {
 		MsRecvTsbPdDelay:      c.tsbpdDelay / 1000,
 		PktReorderTolerance:   uint64(c.config.LossMaxTTL),
 		PktRecvAvgBelatedTime: 0,
-		PktSendLossRate:       send.PktLossRate,
-		PktRecvLossRate:       recv.PktLossRate,
+		PktSendRetransRate:    send.PktRetransRate,
+		PktRecvRetransRate:    recv.PktRetransRate,
 	}
 
 	// If we're only sending, the receiver congestion control value for the link capacity is zero,

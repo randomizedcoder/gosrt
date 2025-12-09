@@ -61,7 +61,7 @@ type receiver struct {
 		packetsPerSecond float64
 		bytesPerSecond   float64
 
-		pktLossRate float64
+		pktRetransRate float64 // Retransmission rate (NOT loss rate)
 	}
 
 	sendACK func(seq circular.Number, light bool)
@@ -126,7 +126,7 @@ func (r *receiver) Stats() congestion.ReceiveStats {
 	bytePayload := uint64(r.avgPayloadSize)
 	mbpsBandwidth := r.rate.bytesPerSecond * 8 / 1024 / 1024
 	mbpsLinkCapacity := r.avgLinkCapacity * packet.MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
-	pktLossRate := r.rate.pktLossRate
+	pktRetransRate := r.rate.pktRetransRate
 	r.lock.RUnlock()
 
 	// Metrics are always available (initialized in connection.go before NewReceiver)
@@ -136,7 +136,7 @@ func (r *receiver) Stats() congestion.ReceiveStats {
 	m.CongestionRecvBytePayload.Store(bytePayload)
 	m.CongestionRecvMbpsBandwidth.Store(uint64(mbpsBandwidth * 1000))
 	m.CongestionRecvMbpsLinkCapacity.Store(uint64(mbpsLinkCapacity * 1000))
-	m.CongestionRecvPktLossRate.Store(uint64(pktLossRate * 100))
+	m.CongestionRecvPktRetransRate.Store(uint64(pktRetransRate * 100))
 
 	// Build return struct from atomic counters (lock-free reads)
 	return congestion.ReceiveStats{
@@ -161,7 +161,7 @@ func (r *receiver) Stats() congestion.ReceiveStats {
 		BytePayload:                bytePayload,
 		MbpsEstimatedRecvBandwidth: mbpsBandwidth,
 		MbpsEstimatedLinkCapacity:  mbpsLinkCapacity,
-		PktLossRate:                pktLossRate,
+		PktRetransRate:             pktRetransRate,
 	}
 }
 
@@ -548,7 +548,7 @@ func (r *receiver) updateRateStats(now uint64) {
 		r.rate.packetsPerSecond = float64(r.rate.packets) / (float64(tdiff) / 1000 / 1000)
 		r.rate.bytesPerSecond = float64(r.rate.bytes) / (float64(tdiff) / 1000 / 1000)
 		if r.rate.bytes != 0 {
-			r.rate.pktLossRate = float64(r.rate.bytesRetrans) / float64(r.rate.bytes) * 100
+			r.rate.pktRetransRate = float64(r.rate.bytesRetrans) / float64(r.rate.bytes) * 100
 		} else {
 			r.rate.bytes = 0
 		}

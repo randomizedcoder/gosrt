@@ -126,18 +126,38 @@ Network-HighLossBurst-5Mbps          # 85% loss burst pattern
 Network-Stress-HighLatencyHighLoss   # 130ms RTT + 10% loss @ 10Mbps
 ```
 
-### Phase 5: Statistical Validation 🔲 PENDING
+### Phase 5: Statistical Validation ✅ COMPLETE
 
-Validate that observed metrics match expected impairment.
+Configurable tolerances for network impairment validation.
 
 | Task | Status | File | Notes |
 |------|--------|------|-------|
-| Statistical validation function | ✅ Complete | `analysis.go` | `ValidateStatistical()` |
-| Loss rate tolerance | ✅ Complete | | ±50% tolerance |
-| Retransmission validation | ✅ Complete | | Min/max retrans rate |
-| NAK validation | ✅ Complete | | NAKs per lost packet |
-| Recovery rate validation | ✅ Complete | | Min recovery rate |
-| Integration with test runner | 🔲 Pending | | Call for network mode tests |
+| `StatisticalThresholds` struct | ✅ Complete | `config.go` | Configurable per-test tolerances |
+| `DefaultThresholds()` | ✅ Complete | | ±50% loss, 95% recovery |
+| `HighLatencyThresholds()` | ✅ Complete | | ±60% loss, 90% recovery |
+| `BurstLossThresholds()` | ✅ Complete | | ±100% loss, 85% recovery |
+| `StressTestThresholds()` | ✅ Complete | | ±80% loss, 80% recovery |
+| Threshold integration in analysis | ✅ Complete | `analysis.go` | Use config thresholds if set |
+| Apply thresholds to network configs | ✅ Complete | `test_configs.go` | High-lat, burst, stress tests |
+
+**Configurable Thresholds**:
+```go
+type StatisticalThresholds struct {
+    LossRateTolerance float64 // ±X% of expected loss rate
+    MinRetransRate    float64 // Minimum retransmission ratio
+    MaxRetransRate    float64 // Maximum retransmission ratio
+    MinNAKsPerLostPkt float64 // Minimum NAKs per lost packet
+    MaxNAKsPerLostPkt float64 // Maximum NAKs per lost packet
+    MinRecoveryRate   float64 // Minimum packet recovery rate
+}
+```
+
+**Preset Thresholds Applied**:
+- `Network-Intercontinental-*`: `HighLatencyThresholds()` (90% recovery)
+- `Network-GeoSatellite-*`: `HighLatencyThresholds()` (90% recovery)
+- `Network-Starlink-*`: `BurstLossThresholds()` (85% recovery)
+- `Network-HighLossBurst-*`: `BurstLossThresholds()` (85% recovery)
+- `Network-Stress-*`: `StressTestThresholds()` (80% recovery)
 
 ---
 
@@ -340,4 +360,5 @@ fmt.Println(status)
 | 2024-12-08 | Phase 2 complete: NetworkController Go wrapper | - |
 | 2024-12-08 | Phase 3 complete: Test framework integration | - |
 | 2024-12-08 | Phase 4 complete: 10 network impairment test configs | - |
+| 2024-12-08 | Phase 5 complete: Configurable statistical thresholds | - |
 

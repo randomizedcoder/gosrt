@@ -1,7 +1,7 @@
 package metrics
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +18,16 @@ var metricsBuilderPool = sync.Pool{
 	},
 }
 
-// writeCounterValue writes a Prometheus counter metric
+// scratchPool provides reusable byte slices for number formatting
+var scratchPool = sync.Pool{
+	New: func() interface{} {
+		// Pre-allocate enough for any formatted number
+		buf := make([]byte, 0, 32)
+		return &buf
+	},
+}
+
+// writeCounterValue writes a Prometheus counter metric with minimal allocations
 // Note: b is *strings.Builder from pool, will be reset after use
 func writeCounterValue(b *strings.Builder, name string, value uint64, labels ...string) {
 	b.WriteString(name)
@@ -28,14 +37,38 @@ func writeCounterValue(b *strings.Builder, name string, value uint64, labels ...
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			fmt.Fprintf(b, "%s=\"%s\"", labels[i], labels[i+1])
+			// Write label=value without fmt.Fprintf
+			b.WriteString(labels[i])
+			b.WriteString(`="`)
+			b.WriteString(labels[i+1])
+			b.WriteByte('"')
 		}
 		b.WriteByte('}')
 	}
-	fmt.Fprintf(b, " %d\n", value)
+	b.WriteByte(' ')
+
+	// Use scratch buffer from pool for number formatting
+	scratchPtr := scratchPool.Get().(*[]byte)
+	scratch := (*scratchPtr)[:0]
+	scratch = strconv.AppendUint(scratch, value, 10)
+	b.Write(scratch)
+	*scratchPtr = scratch
+	scratchPool.Put(scratchPtr)
+
+	b.WriteByte('\n')
 }
 
-// writeGauge writes a Prometheus gauge metric
+// writeCounterIfNonZero writes a Prometheus counter only if value > 0
+// This reduces Prometheus storage for defensive/rare error counters that are usually zero.
+// Use this for counters that track rare events, errors, or edge cases.
+func writeCounterIfNonZero(b *strings.Builder, name string, value uint64, labels ...string) {
+	if value == 0 {
+		return // Skip zero values to reduce Prometheus storage
+	}
+	writeCounterValue(b, name, value, labels...)
+}
+
+// writeGauge writes a Prometheus gauge metric with minimal allocations
 // Note: b is *strings.Builder from pool, will be reset after use
 func writeGauge(b *strings.Builder, name string, value float64, labels ...string) {
 	b.WriteString(name)
@@ -45,11 +78,34 @@ func writeGauge(b *strings.Builder, name string, value float64, labels ...string
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			fmt.Fprintf(b, "%s=\"%s\"", labels[i], labels[i+1])
+			// Write label=value without fmt.Fprintf
+			b.WriteString(labels[i])
+			b.WriteString(`="`)
+			b.WriteString(labels[i+1])
+			b.WriteByte('"')
 		}
 		b.WriteByte('}')
 	}
-	fmt.Fprintf(b, " %.9f\n", value)
+	b.WriteByte(' ')
+
+	// Use scratch buffer from pool for number formatting
+	scratchPtr := scratchPool.Get().(*[]byte)
+	scratch := (*scratchPtr)[:0]
+	scratch = strconv.AppendFloat(scratch, value, 'f', 9, 64)
+	b.Write(scratch)
+	*scratchPtr = scratch
+	scratchPool.Put(scratchPtr)
+
+	b.WriteByte('\n')
+}
+
+// writeGaugeIfNonZero writes a Prometheus gauge only if value != 0
+// Use this for gauges that track rare/optional measurements.
+func writeGaugeIfNonZero(b *strings.Builder, name string, value float64, labels ...string) {
+	if value == 0.0 {
+		return // Skip zero values to reduce Prometheus storage
+	}
+	writeGauge(b, name, value, labels...)
 }
 
 // WithLockTiming executes a function while measuring lock hold and wait times for a regular Mutex
@@ -228,7 +284,7 @@ func IncrementSendErrorDrop(m *ConnectionMetrics, p packet.Packet, reason DropRe
 }
 
 // IncrementRecvErrorDrop increments granular error counters for receive path
-// For DATA packets, also increments aggregate (if applicable)
+// For DATA packets, also increments the aggregate PktRecvDataError counter
 // Note: For receive path, we may not have a packet object when errors occur
 // Metrics are guaranteed to be non-nil (initialized in connection.go before NewReceiver)
 func IncrementRecvErrorDrop(m *ConnectionMetrics, p packet.Packet, reason DropReason, isData bool) {
@@ -237,24 +293,28 @@ func IncrementRecvErrorDrop(m *ConnectionMetrics, p packet.Packet, reason DropRe
 	case DropReasonParse:
 		if isData {
 			m.PktRecvDataErrorParse.Add(1)
+			m.PktRecvDataError.Add(1) // Aggregate
 		} else {
 			m.PktRecvControlErrorParse.Add(1)
 		}
 	case DropReasonIoUring:
 		if isData {
 			m.PktRecvDataErrorIoUring.Add(1)
+			m.PktRecvDataError.Add(1) // Aggregate
 		} else {
 			m.PktRecvControlErrorIoUring.Add(1)
 		}
 	case DropReasonEmpty:
 		if isData {
 			m.PktRecvDataErrorEmpty.Add(1)
+			m.PktRecvDataError.Add(1) // Aggregate
 		} else {
 			m.PktRecvControlErrorEmpty.Add(1)
 		}
 	case DropReasonRoute:
 		if isData {
 			m.PktRecvDataErrorRoute.Add(1)
+			m.PktRecvDataError.Add(1) // Aggregate
 		} else {
 			m.PktRecvControlErrorRoute.Add(1)
 		}

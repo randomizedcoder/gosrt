@@ -32,6 +32,85 @@ type NetworkImpairment struct {
 
 	// Latency profile (predefined latency settings)
 	LatencyProfile string // "local", "regional", "continental", "geo-satellite", "tier3-high"
+
+	// Validation thresholds (nil = use defaults based on impairment type)
+	Thresholds *StatisticalThresholds
+}
+
+// StatisticalThresholds defines configurable tolerances for statistical validation.
+// All values are optional - zero values use defaults.
+type StatisticalThresholds struct {
+	// Loss rate tolerance as a fraction (0.5 = plus/minus 50% of expected loss rate)
+	// Default: 0.5 for probabilistic loss, 1.0 for pattern-based
+	LossRateTolerance float64
+
+	// Minimum retransmission rate (fraction of lost packets that trigger retrans)
+	// Default: 0.8 (80%)
+	MinRetransRate float64
+
+	// Maximum retransmission rate (no more than Nx retransmissions per lost packet)
+	// Default: 3.0
+	MaxRetransRate float64
+
+	// Minimum NAKs per lost packet (lower bound for NAK activity)
+	// Default: 0.5
+	MinNAKsPerLostPkt float64
+
+	// Maximum NAKs per lost packet (upper bound to detect NAK storms)
+	// Default: 5.0
+	MaxNAKsPerLostPkt float64
+
+	// Minimum recovery rate (fraction of packets successfully received)
+	// Default: 0.95 (95%)
+	MinRecoveryRate float64
+}
+
+// DefaultThresholds returns the default thresholds for probabilistic loss
+func DefaultThresholds() StatisticalThresholds {
+	return StatisticalThresholds{
+		LossRateTolerance: 0.5,  // plus/minus 50% tolerance
+		MinRetransRate:    0.8,  // 80% of lost packets retransmitted
+		MaxRetransRate:    3.0,  // No more than 3x retransmissions per loss
+		MinNAKsPerLostPkt: 0.5,  // At least 0.5 NAKs per lost packet
+		MaxNAKsPerLostPkt: 5.0,  // No more than 5 NAKs per lost packet
+		MinRecoveryRate:   0.95, // 95% recovery rate
+	}
+}
+
+// HighLatencyThresholds returns relaxed thresholds for high-latency scenarios
+func HighLatencyThresholds() StatisticalThresholds {
+	return StatisticalThresholds{
+		LossRateTolerance: 0.6,  // plus/minus 60% tolerance
+		MinRetransRate:    0.7,  // Lower retrans expectation
+		MaxRetransRate:    4.0,  // Allow more retransmissions
+		MinNAKsPerLostPkt: 0.3,  // Lower NAK expectation
+		MaxNAKsPerLostPkt: 8.0,  // Higher NAK tolerance
+		MinRecoveryRate:   0.90, // 90% recovery rate
+	}
+}
+
+// BurstLossThresholds returns relaxed thresholds for burst loss patterns
+func BurstLossThresholds() StatisticalThresholds {
+	return StatisticalThresholds{
+		LossRateTolerance: 1.0,  // plus/minus 100% tolerance (bursts are unpredictable)
+		MinRetransRate:    0.5,  // Lower retrans expectation
+		MaxRetransRate:    5.0,  // Allow more retransmissions
+		MinNAKsPerLostPkt: 0.3,  // Lower NAK expectation
+		MaxNAKsPerLostPkt: 10.0, // Higher NAK tolerance
+		MinRecoveryRate:   0.85, // 85% recovery rate
+	}
+}
+
+// StressTestThresholds returns very relaxed thresholds for stress testing
+func StressTestThresholds() StatisticalThresholds {
+	return StatisticalThresholds{
+		LossRateTolerance: 0.8,  // plus/minus 80% tolerance
+		MinRetransRate:    0.5,  // Lower retrans expectation
+		MaxRetransRate:    5.0,  // Allow many retransmissions
+		MinNAKsPerLostPkt: 0.2,  // Lower NAK expectation
+		MaxNAKsPerLostPkt: 15.0, // Much higher NAK tolerance
+		MinRecoveryRate:   0.80, // 80% recovery rate
+	}
 }
 
 // MetricsEndpoint represents a metrics endpoint configuration

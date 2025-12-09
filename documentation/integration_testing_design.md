@@ -1461,7 +1461,7 @@ make test-integration REPORT=html > report.html
 - [x] Graceful shutdown verification
 - [x] Process lifecycle management
 
-### Phase 2: Metrics Analysis ✅ Phases 1 & 3 Implemented
+### Phase 2: Metrics Analysis ✅ Complete
 
 **Design Document**: [metrics_analysis_design.md](metrics_analysis_design.md)
 **Implementation Tracking**: [integration_testing_metrics_analysis_implementation.md](integration_testing_metrics_analysis_implementation.md)
@@ -1480,9 +1480,27 @@ make test-integration REPORT=html > report.html
 - [x] Implement statistical validation (`ValidateStatistical()`)
 - [x] Generate structured test reports (JSON) - `ToJSON()`, `WriteJSON()`, `PrintJSON()`
 - [x] Add fail-safe principle (default to FAILED, only pass on explicit confirmation)
-- [ ] Add configurable thresholds per test
+- [x] Add configurable thresholds per test (`StatisticalThresholds` struct)
 
-### Phase 3: Packet Loss Testing ✅ Design Complete, 🔨 Implementation In Progress
+**Configurable Statistical Thresholds**:
+```go
+type StatisticalThresholds struct {
+    LossRateTolerance float64 // ±X% of expected loss rate
+    MinRetransRate    float64 // Minimum retransmission ratio
+    MaxRetransRate    float64 // Maximum retransmission ratio
+    MinNAKsPerLostPkt float64 // Minimum NAKs per lost packet
+    MaxNAKsPerLostPkt float64 // Maximum NAKs per lost packet
+    MinRecoveryRate   float64 // Minimum packet recovery rate
+}
+```
+
+Preset threshold functions:
+- `DefaultThresholds()` - ±50% loss tolerance, 95% recovery
+- `HighLatencyThresholds()` - ±60% tolerance, 90% recovery (GEO satellite, intercontinental)
+- `BurstLossThresholds()` - ±100% tolerance, 85% recovery (Starlink, high-loss patterns)
+- `StressTestThresholds()` - ±80% tolerance, 80% recovery (extreme stress testing)
+
+### Phase 3: Packet Loss Testing ✅ Implementation Complete
 
 **Design Document**: [packet_loss_injection_design.md](packet_loss_injection_design.md)
 **Implementation Tracker**: [packet_loss_injection_implementation.md](packet_loss_injection_implementation.md)
@@ -1496,10 +1514,43 @@ make test-integration REPORT=html > report.html
 - [x] Design dual-router architecture with netem
 - [x] Design loss injection via null routes + netem (replaced nftables)
 - [x] Design impairment patterns (Starlink, burst loss)
-- [ ] Implement namespace setup scripts
-- [ ] Implement Go network controller
-- [ ] Add network impairment test configurations
-- [ ] Validate ARQ mechanism under loss
+- [x] Implement namespace setup scripts (7 scripts, all pass shellcheck)
+- [x] Implement Go network controller (`network_controller.go`)
+- [x] Implement network mode test runner (`test_network_mode.go`)
+- [x] Add network impairment test configurations (10 configs)
+- [ ] Validate ARQ mechanism under loss (requires running tests with root)
+
+**Shell Scripts** (`contrib/integration_testing/network/`):
+| Script | Purpose |
+|--------|---------|
+| `lib.sh` | Shared functions, 50k netem queue limit |
+| `setup.sh` | Create 5 namespaces + inter-router links |
+| `cleanup.sh` | Remove all namespaces |
+| `set_latency.sh` | Switch latency profile (0-4: 0-300ms RTT) |
+| `set_loss.sh` | Set loss (0-100%, blackhole or netem) |
+| `starlink_pattern.sh` | LEO satellite reconvergence pattern |
+| `status.sh` | Human-friendly network display |
+
+**Go Components**:
+| Component | Purpose |
+|-----------|---------|
+| `NetworkController` | Thread-safe, context-aware wrapper for scripts |
+| `runNetworkModeTest()` | Process spawning in namespaces with cleanup |
+| `PatternStarlink` | 60ms 100% loss at seconds 12, 27, 42, 57 |
+| `PatternHighLossBurst` | 85% loss for 1s every minute |
+
+**Test Configurations** (10 network tests in `NetworkTestConfigs`):
+- Loss only: 2%, 5%, 10% at 5 Mb/s
+- Latency + loss: Regional (10ms), Continental (60ms), Intercontinental (130ms), GEO (300ms)
+- Patterns: Starlink reconvergence, High-loss burst
+- Stress: 130ms RTT + 10% loss at 10 Mb/s
+
+**CLI Commands**:
+```bash
+./integration_testing list-network-configs        # List all network configs
+sudo ./integration_testing network-test <name>    # Run single network test
+sudo ./integration_testing network-test-all       # Run all network tests
+```
 
 ### Phase 4: Video Testing 🔲
 
@@ -1580,6 +1631,7 @@ contrib/integration_testing/
 | 2024-12-08 | Implemented statistical validation and JSON output | - |
 | 2024-12-08 | Added fail-safe principle (tests default to FAILED) | - |
 | 2024-12-08 | Updated Phase 3: replaced nftables with null routes + netem loss | - |
+| 2024-12-08 | Phase 3 implementation complete: scripts, controller, 10 test configs | - |
 | 2024-12-07 | Added montanaflynn/stats for linear regression | - |
 | 2024-12-07 | Implemented Go runtime stability analysis (Phase 3) | - |
 
