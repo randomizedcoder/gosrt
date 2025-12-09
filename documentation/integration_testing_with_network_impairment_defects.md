@@ -310,100 +310,199 @@ Two different retransmission counters exist:
 **Priority**: Medium
 **Discovered**: 2024-12-08
 **Test**: `Network-Loss5pct-5Mbps`
+**Last Updated**: 2024-12-09
 
-### Symptoms
+### Latest Test Results (After Metrics Audit)
 
-When running the 5% packet loss test:
+After completing the AST-based metrics audit (all 118 metrics now aligned), the test output shows:
+
 ```bash
 sudo make test-network CONFIG=Network-Loss5pct-5Mbps
 ```
 
-The test fails with:
+**Throughput Display (Now Working!):**
+```
+[PUB] 09:19:18.29 |   305.0 pkt/s |   19.61 MB |  4.997 Mb/s |   10.0k ok /     0 loss /   959 retx ~= 100.0%
+[SUB] 09:19:18.79 |   610.0 pkt/s |   16.33 MB |  4.997 Mb/s |   16.7k ok /     0 loss /     0 retx ~= 100.0%
+```
+
+✅ **Improvement**: Retransmissions now visible in throughput display!
+
+**JSON Stats (Connection Closed Events):**
+
+| Component | Metric | Value |
+|-----------|--------|-------|
+| Client-generator | `pkt_sent_data` | 21,426 |
+| Client-generator | `pkt_recv_nak` | 1,810 |
+| Client-generator | `pkt_retrans_from_nak` | 980 |
+| Client-generator | `pkt_retrans_percent` | 4.57% |
+| Server (receiver) | `pkt_recv_data` | 20,509 |
+| Server (receiver) | `pkt_recv_loss` | 1,702 |
+| Server (receiver) | `pkt_recv_retrans` | 932 |
+| Server (receiver) | `pkt_sent_nak` | 905 |
+| Server (receiver) | `pkt_recv_drop` | 63 |
+| Client (subscriber) | `pkt_recv_data` | 18,614 |
+
+**Analysis Output:**
 ```
 Statistical Validation: ✗ FAILED
-  ✗ RecoveryRate: expected >= 95.0%, got 94.36
+  ✗ RecoveryRate: expected >= 95.0%, got 94.92
     Poor loss recovery - too many unrecoverable packets
+  Observed Statistics:
+    Configured loss: 5.0%, Retrans% of sent: 5.08%
+    Packets sent: 19290, Retransmissions: 980, Lost: 0  ← STILL SHOWING "Lost: 0"!
 ```
 
-### Observed Data
+### Issues Identified
 
-| Metric | Value |
-|--------|-------|
-| Configured loss | 5% |
-| Observed loss rate | 8.86% (higher than configured) |
-| Packets sent | 21,591 |
-| Packets lost (detected) | 1,918 |
-| Retransmissions | 1,095 |
-| Unrecovered drops | 68 |
-| Recovery rate | 94.36% |
+#### Issue 3.1: Analysis Reports "Lost: 0" Despite JSON Showing Loss
 
-### Deeper Analysis: Why 8.86% When Only 5% Configured?
-
-**Network Topology:**
-```
-Publisher (10.1.1.2) ──┐
-                       ├── ROUTER_CLIENT ══════ ROUTER_SERVER ─── Server (10.2.1.2)
-Subscriber (10.1.2.2) ─┘        ↑                     ↑
-                              link_a               link_b
-                           (5% LOSS)            (NO LOSS)
-```
-
-**Loss is applied only on ROUTER_CLIENT → ROUTER_SERVER direction.**
-
-**Expected vs Observed:**
-| Metric | Expected (5% one-way) | Observed |
-|--------|----------------------|----------|
-| Loss events | ~1,080 | 1,918 |
-| Loss rate | ~5.26% | 8.86% |
-
-**The Math:**
-- Original packets: 21,591 - 1,095 retrans = 20,496
-- Expected losses (5%): 20,496 × 0.05 = 1,025
-- Expected retrans losses (5% of 1,095): 55
-- Total expected: ~1,080
-
-**Actual: 1,918** ← Almost **2× expected**!
+The JSON clearly shows `pkt_recv_loss: 1702`, but the analysis reports "Lost: 0".
 
 **Possible Causes:**
-1. **Loss counter includes reordering events?** - If packets arrive out of order, they might be counted as "lost" then "recovered"
-2. **Double-counting in sequence gap detection?**
-3. **netem internal behavior with bursty patterns?**
+1. `ComputeDerivedMetrics()` is not correctly reading `CongestionRecvPktLoss` from Prometheus
+2. The Prometheus metric key doesn't match what analysis expects
+3. The loss counter is being read from the wrong component (client vs server)
 
-**Observations:**
-1. The recovery rate (94.36%) is marginal - only 68 packets truly unrecoverable
-2. SRT ARQ IS working - 1,095 successful retransmissions
-3. The high "loss" count might be a counting/detection issue, not actual network loss
+#### Issue 3.2: Discrepancy Between "Packets sent" Values
 
-### Possible Fixes
+| Source | Packets Sent |
+|--------|--------------|
+| JSON `pkt_sent_data` | 21,426 |
+| Analysis output | 19,290 |
+| JSON `PktSentUnique` | 18,614 |
 
-**Option A: Adjust threshold for 5% loss tests**
+The analysis may be using a different counter or component.
 
-For higher loss scenarios, the 95% recovery rate may be too strict. Consider:
-- 5% loss: 93% minimum recovery rate
-- 10% loss: 90% minimum recovery rate
+#### Issue 3.3: Recovery Rate Threshold Still Marginal
 
-**Option B: Increase SRT buffers for high-loss scenarios**
+- **Current threshold**: 95%
+- **Observed**: 94.92%
+- **Margin**: Only 0.08% below threshold
 
-The test config uses `latency=3000ms`. For 5% loss, we might need:
+With 63 unrecovered packets out of ~1700 lost:
+- Actual recovery: (1702 - 63) / 1702 = **96.3%**
+
+The analysis calculation may differ from this simple formula.
+
+### What's Working ✅
+
+1. **Throughput display now shows retransmissions**: `959 retx` visible
+2. **NAK mechanism is working**: 905 NAKs sent, 980 retransmissions
+3. **Retransmission percentage accurate**: 4.57% ≈ 5% configured loss
+4. **All 118 metrics are now aligned** (AST audit passed)
+
+### What's NOT Working ❌
+
+1. **"Lost: 0"** in analysis - metric not being read correctly
+2. **Recovery rate threshold** - marginal failure (94.92% vs 95.0%)
+3. **Packet count discrepancy** - different values in JSON vs analysis
+
+### Root Cause Hypothesis
+
+The `CongestionRecvPktLoss` counter is exported to Prometheus as:
+```
+gosrt_connection_congestion_packets_lost_total{direction="recv"}
+```
+
+But `ComputeDerivedMetrics()` may be looking for a different metric name, or looking at the wrong component (client instead of server's receiver side).
+
+### Proposed Investigation
+
+1. **Debug metric extraction**: Add logging to see what Prometheus values `analysis.go` is actually reading
+2. **Verify metric key**: Confirm `getSumByPrefix()` matches the actual Prometheus output
+3. **Check component selection**: Ensure we're reading from the SERVER's metrics for loss counts (not client-generator or client)
+
+### Previous Analysis (2024-12-08)
+
+| Metric | Value (Previous) | Value (Latest) |
+|--------|-----------------|----------------|
+| Configured loss | 5% | 5% |
+| Observed loss | 8.86% | Unknown (shows 0) |
+| Packets sent | 21,591 | 21,426 |
+| Retransmissions | 1,095 | 980 |
+| Recovery rate | 94.36% | 94.92% |
+
+### Possible Fixes (Unchanged)
+
+**Option A: Fix "Lost: 0" metric reading issue** (PRIORITY)
+- Debug and fix `ComputeDerivedMetrics()` to correctly read `CongestionRecvPktLoss`
+
+**Option B: Adjust threshold for 5% loss tests**
+- 5% loss: 93% minimum recovery rate instead of 95%
+
+**Option C: Increase SRT buffers for high-loss scenarios**
 - Larger flow control window
 - Longer retransmission timeout
-- Deeper receiver buffer
 
-**Option C: Adjust test duration**
+---
 
-A 30-second test may not be long enough to average out burst loss effects. Consider longer tests for statistical stability.
+## Defect 4: Analysis Reports "Lost: 0" Despite Actual Loss
+
+**Status**: 🔴 Open
+**Priority**: High
+**Discovered**: 2024-12-09
+**Related**: Defect 3
+
+### Symptoms
+
+The analysis output reports "Lost: 0" even though JSON stats clearly show loss:
+
+**Analysis Output:**
+```
+Observed Statistics:
+    Configured loss: 5.0%, Retrans% of sent: 5.08%
+    Packets sent: 19290, Retransmissions: 980, Lost: 0  ← WRONG!
+```
+
+**JSON Stats (same test):**
+```json
+{
+  "pkt_recv_loss": 1702  ← ACTUAL LOSS
+}
+```
+
+### Evidence
+
+From the 5% loss test run (2024-12-09):
+
+| Metric Source | Counter | Value |
+|---------------|---------|-------|
+| JSON `pkt_recv_loss` | Server detecting sequence gaps | 1,702 |
+| Prometheus `gosrt_connection_congestion_packets_lost_total` | Should match | Unknown |
+| Analysis `DerivedMetrics.TotalPacketsLost` | Should be 1,702 | **0** |
+
+### Root Cause Analysis
+
+The `analysis.go` file computes derived metrics in `ComputeDerivedMetrics()`. Let's trace the flow:
+
+1. **Prometheus exports** `gosrt_connection_congestion_packets_lost_total{direction="recv"}`
+2. **`ComputeDerivedMetrics()`** should read this with `getSumByPrefix()` or similar
+3. **Problem**: Either the metric key doesn't match, or it's reading from wrong component
+
+**Key Question**: Are we reading loss from `ts.Server` or from `ts.Client`?
+
+The data flow is:
+```
+Client-Generator → SERVER (detects loss) → Client
+       ↓                    ↓                ↓
+  Sends packets      Records loss       Receives data
+```
+
+Loss detection happens on the SERVER (receiver side of client-generator connection). But the analysis might be reading from the Client component.
+
+### Investigation Steps
+
+1. Add debug logging to `ComputeDerivedMetrics()` to show raw Prometheus values
+2. Verify `getSumByPrefix()` regex matches `gosrt_connection_congestion_packets_lost_total`
+3. Confirm we're reading from `ts.Server` not `ts.Client` for loss counts
+4. Check if zero-value filtering is hiding the metric
 
 ### Impact
 
-- **2% loss tests**: PASSING ✅
-- **5% loss tests**: FAILING (marginal) ❌
-- **Higher loss tests**: Unknown
-
-### Next Steps
-
-1. Run the test multiple times to see if 94.36% is consistent or varies
-2. Review threshold settings in `test_configs.go` for high-loss scenarios
-3. Consider whether this is a threshold issue or an actual SRT performance concern
+- Statistical validation cannot work correctly without loss counts
+- "Recovery rate" calculation is affected
+- Cross-endpoint loss validation is affected
 
 ---
 
@@ -443,9 +542,53 @@ Some tests may need longer durations to accumulate enough samples for statistica
 
 ---
 
+## Summary: Current State (2024-12-09)
+
+### What's Fixed ✅
+
+| Item | Status | Notes |
+|------|--------|-------|
+| **Prometheus metric exports** | ✅ Complete | All 118 metrics aligned (AST audit passed) |
+| **Throughput display retransmissions** | ✅ Working | `[PUB]` shows `959 retx` |
+| **NAK counter increments** | ✅ Fixed | `PktSentNAKSuccess`/`PktRecvNAKSuccess` now incremented |
+| **CongestionSendNAKNotFound** | ✅ Fixed | Now tracks unretransmittable NAK requests |
+| **PktRecvDataError aggregate** | ✅ Fixed | Now incremented with granular counters |
+
+### What's Still Broken ❌
+
+| Defect | Priority | Issue |
+|--------|----------|-------|
+| **Defect 3** | Medium | 5% loss test fails at 94.92% (threshold 95%) |
+| **Defect 4** | High | Analysis reports "Lost: 0" despite actual 1,702 losses |
+
+### Observations from Latest Test
+
+The SRT ARQ mechanism is **working correctly**:
+- 905 NAKs sent by server
+- 980 retransmissions triggered
+- 63 unrecoverable packets (3.7% of lost packets)
+- ~96.3% actual recovery rate
+
+The issues are in the **analysis/validation layer**, not SRT itself:
+1. `TotalPacketsLost` not being populated from Prometheus
+2. Threshold may be too aggressive for 5% loss scenarios
+
+### Next Steps
+
+1. **Debug Defect 4**: Add logging to `ComputeDerivedMetrics()` to trace why "Lost: 0"
+2. **Verify metric keys**: Confirm Prometheus output matches what analysis expects
+3. **Consider relaxing threshold**: 93% for 5% loss instead of 95%
+4. **Run 2% loss test**: Verify it still passes to confirm regression didn't occur
+
+---
+
 ## Change Log
 
 | Date | Change | Author |
 |------|--------|--------|
 | 2024-12-08 | Initial document, Defect 1 documented | - |
+| 2024-12-08 | Added Defect 2, 3 and implementation phases | - |
+| 2024-12-09 | Updated after AST metrics audit (118 metrics aligned) | - |
+| 2024-12-09 | Added Defect 4: "Lost: 0" analysis bug | - |
+| 2024-12-09 | Updated Defect 3 with latest test results | - |
 
