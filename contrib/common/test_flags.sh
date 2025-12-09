@@ -176,9 +176,18 @@ run_test "HandshakeTimeout and ShutdownDelay together" "-handshaketimeout 1.5s -
 # Test 27: LocalAddr flag
 run_test "LocalAddr flag" "-localaddr 127.0.0.20" '"LocalAddr" *: *"127.0.0.20"' "$CLIENT_BIN"
 
-# Test 28: All flag types combined (excluding drifttracer=false due to known limitation)
+# Test 28: KeepaliveThreshold flag (default 0.75)
+run_test "KeepaliveThreshold flag (0.5)" "-keepalivethreshold 0.5" '"KeepaliveThreshold" *: *0\.5' "$CLIENT_BIN"
+
+# Test 29: KeepaliveThreshold flag (disable with 0)
+run_test "KeepaliveThreshold flag (0 - disabled)" "-keepalivethreshold 0" '"KeepaliveThreshold" *: *0' "$CLIENT_BIN"
+
+# Test 30: KeepaliveThreshold flag (server)
+run_test "KeepaliveThreshold flag (server)" "-keepalivethreshold 0.8" '"KeepaliveThreshold" *: *0\.8' "$SERVER_BIN"
+
+# Test 31: All flag types combined (excluding drifttracer=false due to known limitation)
 # Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
-run_test "All flag types" "-statisticsinterval 10s -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
+run_test "All flag types" "-statisticsinterval 10s -keepalivethreshold 0.6 -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"KeepaliveThreshold" *: *0\.6.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 
 echo ""
 echo "================================"

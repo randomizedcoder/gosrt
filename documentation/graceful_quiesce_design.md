@@ -501,13 +501,40 @@ This enables **Pipeline Balance Verification** for clean network tests:
 
 ### 0. SRT Core: Proactive Keepalive (Prerequisite)
 
+**File**: `config.go`
+
+| Change | Description |
+|--------|-------------|
+| Add `KeepaliveThreshold float64` | Threshold as fraction of PeerIdleTimeout (default 0.75) |
+
 **File**: `connection.go`
 
 | Change | Description |
 |--------|-------------|
 | Add `sendProactiveKeepalive()` | New method to send keepalive packet |
-| Modify `watchPeerIdleTimeout()` | Add keepalive ticker at 75% of PeerIdleTimeout |
-| Add keepalive tracking | Track last keepalive time to avoid flooding |
+| Add `getKeepaliveInterval()` | Calculate interval from threshold |
+| Modify `watchPeerIdleTimeout()` | Add keepalive ticker based on threshold |
+
+**File**: `contrib/common/flags.go`
+
+| Change | Description |
+|--------|-------------|
+| Add `KeepaliveThreshold` flag | `-keepalivethreshold` (float, default 0.75) |
+| Update `ApplyFlagsToConfig()` | Apply threshold to config |
+
+**Flag Behavior**:
+```
+-keepalivethreshold 0.75   # Default: send keepalive at 75% of PeerIdleTimeout
+-keepalivethreshold 0.5    # More aggressive: 50% of timeout
+-keepalivethreshold 0      # Disable proactive keepalives
+-keepalivethreshold -1     # Also disables (for clarity)
+```
+
+**File**: `contrib/common/test_flags.sh`
+
+| Change | Description |
+|--------|-------------|
+| Add keepalivethreshold test | Verify flag is parsed and applied correctly |
 
 This ensures connections stay alive during quiesce period, even with short `PeerIdleTimeout`.
 
@@ -1236,43 +1263,67 @@ func (c *srtConn) sendProactiveKeepalive() {
 }
 ```
 
-**Automatic Threshold (Opt-Out)**
+**Threshold-Based Configuration (Opt-Out)**
 
-Derive keepalive interval automatically at 75% of PeerIdleTimeout:
+Use a threshold as a fraction of PeerIdleTimeout:
 
 ```go
 // In config.go - add to Config struct:
 type Config struct {
     // ...existing fields...
 
-    // KeepaliveInterval is the interval for sending proactive keepalive packets.
-    // Default: 75% of PeerIdleTimeout (auto-calculated if zero)
-    // Set to a negative value to disable proactive keepalives.
-    KeepaliveInterval time.Duration
+    // KeepaliveThreshold is the fraction of PeerIdleTimeout at which to send
+    // proactive keepalive packets. Default: 0.75 (75%).
+    // Set to 0 or negative to disable proactive keepalives.
+    // Valid range: 0.0 to 1.0 (0 = disabled, 1.0 = at timeout which is too late)
+    KeepaliveThreshold float64
 }
 
 // In DefaultConfig:
 var DefaultConfig = Config{
     // ...existing...
-    KeepaliveInterval: 0, // 0 = auto-calculate from PeerIdleTimeout
+    KeepaliveThreshold: 0.75, // Send keepalive at 75% of PeerIdleTimeout
+}
+```
+
+```go
+// In contrib/common/flags.go - add flag:
+var KeepaliveThreshold = flag.Float64("keepalivethreshold", 0.75,
+    "Fraction of peer idle timeout at which to send proactive keepalives (0 to disable)")
+
+// In ApplyFlagsToConfig():
+if FlagSet["keepalivethreshold"] {
+    config.KeepaliveThreshold = *KeepaliveThreshold
 }
 ```
 
 ```go
 // In connection.go - calculate effective interval:
 func (c *srtConn) getKeepaliveInterval() time.Duration {
-    if c.config.KeepaliveInterval < 0 {
-        return 0 // Disabled explicitly
+    if c.config.KeepaliveThreshold <= 0 {
+        return 0 // Disabled
     }
-    if c.config.KeepaliveInterval > 0 {
-        return c.config.KeepaliveInterval // User-specified
+    if c.config.KeepaliveThreshold >= 1.0 {
+        return 0 // Invalid - would fire at or after timeout
     }
-    // Auto-calculate: 75% of PeerIdleTimeout
-    return c.config.PeerIdleTimeout * 3 / 4
+    // Calculate: threshold * PeerIdleTimeout
+    return time.Duration(float64(c.config.PeerIdleTimeout) * c.config.KeepaliveThreshold)
 }
 ```
 
-This is **opt-out** - proactive keepalives are enabled by default, making GoSRT more reliable out of the box. Users can disable with `-keepalive -1` if needed.
+**CLI Usage**:
+```bash
+# Default (75% threshold)
+./server -addr :6000
+
+# Custom threshold (50%)
+./server -addr :6000 -keepalivethreshold 0.5
+
+# Disable proactive keepalives
+./server -addr :6000 -keepalivethreshold 0
+```
+
+This is **opt-out** - proactive keepalives are enabled by default at 75%, making GoSRT more reliable out of the box.
 
 ### Recommended Approach
 

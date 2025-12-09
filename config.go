@@ -131,6 +131,13 @@ type Config struct {
 	// SRTO_PEERIDLETIMEO
 	PeerIdleTimeout time.Duration
 
+	// KeepaliveThreshold is the fraction of PeerIdleTimeout at which to send
+	// proactive keepalive packets. This keeps connections alive during idle periods.
+	// Default: 0.75 (75% of PeerIdleTimeout).
+	// Set to 0 or negative to disable proactive keepalives.
+	// Valid range: 0.0 to 1.0 (0 = disabled, values >= 1.0 are treated as disabled)
+	KeepaliveThreshold float64
+
 	// Minimum receiver latency to be requested by sender.
 	// SRTO_PEERLATENCY
 	PeerLatency time.Duration
@@ -281,6 +288,7 @@ var defaultConfig Config = Config{
 	PayloadSize:               MAX_PAYLOAD_SIZE,
 	PBKeylen:                  16,
 	PeerIdleTimeout:           2 * time.Second,
+	KeepaliveThreshold:        0.75, // Send keepalive at 75% of PeerIdleTimeout
 	PeerLatency:               120 * time.Millisecond,
 	ReceiverBufferSize:        0,
 	ReceiverLatency:           120 * time.Millisecond,

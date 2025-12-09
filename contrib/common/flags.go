@@ -32,8 +32,9 @@ var (
 	InputBW            = flag.Int64("inputbw", 0, "Input bandwidth in bytes")
 	MinInputBW         = flag.Int64("mininputbw", 0, "Minimum input bandwidth in bytes")
 	OheadBW            = flag.Int64("oheadbw", 0, "Limit bandwidth overhead in percents")
-	PeerIdleTimeo      = flag.Int("peeridletimeo", 0, "Peer idle timeout in milliseconds")
-	SndDropDelay       = flag.Int("snddropdelay", 0, "Sender's delay before dropping packets in milliseconds")
+	PeerIdleTimeo       = flag.Int("peeridletimeo", 0, "Peer idle timeout in milliseconds")
+	KeepaliveThreshold  = flag.Float64("keepalivethreshold", 0.75, "Fraction of peer idle timeout at which to send proactive keepalives (0 to disable, default 0.75)")
+	SndDropDelay        = flag.Int("snddropdelay", 0, "Sender's delay before dropping packets in milliseconds")
 	IPTOS              = flag.Int("iptos", 0, "IP socket type of service")
 	IPTTL              = flag.Int("ipttl", 0, "IP socket 'time to live' option")
 	IPv6Only           = flag.Int("ipv6only", -1, "Allow only IPv6 (-1 for default)")
@@ -174,6 +175,9 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["peeridletimeo"] {
 		config.PeerIdleTimeout = time.Duration(*PeerIdleTimeo) * time.Millisecond
+	}
+	if FlagSet["keepalivethreshold"] {
+		config.KeepaliveThreshold = *KeepaliveThreshold
 	}
 	if FlagSet["snddropdelay"] {
 		config.SendDropDelay = time.Duration(*SndDropDelay) * time.Millisecond

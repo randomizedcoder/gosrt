@@ -964,6 +964,36 @@ func (c *srtConn) handleKeepAlive(p packet.Packet) {
 	c.pop(p)
 }
 
+// sendProactiveKeepalive sends a keepalive packet to keep the connection alive.
+// This is used when no data has been received for a while to prevent idle timeout.
+func (c *srtConn) sendProactiveKeepalive() {
+	p := packet.NewPacket(c.remoteAddr)
+	p.Header().IsControlPacket = true
+	p.Header().ControlType = packet.CTRLTYPE_KEEPALIVE
+	p.Header().TypeSpecific = 0
+	p.Header().Timestamp = c.getTimestampForPacket()
+	p.Header().DestinationSocketId = c.peerSocketId
+
+	c.log("control:send:keepalive:proactive", func() string {
+		return "sending proactive keepalive to maintain connection"
+	})
+
+	// Note: Keepalive metrics are tracked via packet classifier in send path
+	// No need to increment here - metrics already tracked
+
+	c.pop(p)
+}
+
+// getKeepaliveInterval calculates the keepalive interval based on config.
+// Returns 0 if proactive keepalives are disabled.
+func (c *srtConn) getKeepaliveInterval() time.Duration {
+	threshold := c.config.KeepaliveThreshold
+	if threshold <= 0 || threshold >= 1.0 {
+		return 0 // Disabled or invalid
+	}
+	return time.Duration(float64(c.config.PeerIdleTimeout) * threshold)
+}
+
 // handleShutdown closes the connection
 func (c *srtConn) handleShutdown(p packet.Packet) {
 	c.log("control:recv:shutdown:dump", func() string { return p.Dump() })
@@ -1735,6 +1765,17 @@ func (c *srtConn) watchPeerIdleTimeout() {
 	ticker := time.NewTicker(tickerInterval)
 	defer ticker.Stop()
 
+	// Proactive keepalive ticker (if enabled)
+	// Sends keepalive when connection is idle to prevent timeout
+	keepaliveInterval := c.getKeepaliveInterval()
+	var keepaliveTicker *time.Ticker
+	var keepaliveChan <-chan time.Time
+	if keepaliveInterval > 0 {
+		keepaliveTicker = time.NewTicker(keepaliveInterval)
+		keepaliveChan = keepaliveTicker.C
+		defer keepaliveTicker.Stop()
+	}
+
 	for {
 		select {
 		case <-c.peerIdleTimeout.C:
@@ -1756,6 +1797,15 @@ func (c *srtConn) watchPeerIdleTimeout() {
 		case <-ticker.C:
 			// Periodic check (1/2 timeout for <=6s, 1/4 timeout for >6s)
 			// Will check counter and reset if needed after select
+
+		case <-keepaliveChan:
+			// Proactive keepalive: send if no recent activity to prevent timeout
+			currentCount := c.getTotalReceivedPackets()
+			if currentCount == initialCount {
+				// No packets received since last check - send keepalive
+				c.sendProactiveKeepalive()
+			}
+			// Note: We don't update initialCount here - that happens in the common logic below
 
 		case <-c.ctx.Done():
 			// Connection closing
