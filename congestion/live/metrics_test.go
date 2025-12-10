@@ -173,17 +173,16 @@ func TestReceiverLossCounter(t *testing.T) {
 	}
 
 	// Verify NAK was generated for missing packets 5, 6
-	require.Len(t, nakList, 2, "Should have NAK'd 2 packets (5 and 6)")
+	// The NAK list is [5, 6] which is a range NAK entry requesting 2 packets.
+	require.Len(t, nakList, 2, "NAK list should have 2 entries (start=5, end=6)")
 	require.Equal(t, uint32(5), nakList[0].Val())
 	require.Equal(t, uint32(6), nakList[1].Val())
 
-	// Verify loss counter
-	// Note: The loss counter uses Distance(newPkt, maxSeen) which is 7-4=3, not 2.
-	// This is because Distance counts the "gap" including the step to the new packet.
-	// The NAK correctly reports 2 missing packets (5, 6), but the loss metric
-	// counts 3 due to the Distance calculation.
-	require.Equal(t, uint64(3), testMetrics.CongestionRecvPktLoss.Load(),
-		"CongestionRecvPktLoss should be 3 (Distance from 4 to 7)")
+	// Verify loss counter matches actual missing packets (5 and 6 = 2 packets)
+	// Previously, this was incorrectly calculated as Distance(7, 4) = 3.
+	// Now it correctly uses the NAK list to count: Distance(6, 5) + 1 = 2 packets.
+	require.Equal(t, uint64(2), testMetrics.CongestionRecvPktLoss.Load(),
+		"CongestionRecvPktLoss should be 2 (packets 5 and 6 missing)")
 
 	// Verify NAK detail counters (RFC SRT Appendix A)
 	// Counters track PACKETS requested, not entries:
@@ -191,19 +190,19 @@ func TestReceiverLossCounter(t *testing.T) {
 	//
 	// Trace:
 	//   After receiving 0-4, maxSeenSequenceNumber = 4
-	//   Receive 7: gap detected (5,6 missing = 3 packets), NAK sent, maxSeenSequenceNumber = 7
+	//   Receive 7: gap detected (5,6 missing = 2 packets), NAK sent [5,6], maxSeenSequenceNumber = 7
 	//   Receive 8: in order (7+1), no NAK, maxSeenSequenceNumber = 8
 	//   Receive 9: in order (8+1), no NAK, maxSeenSequenceNumber = 9
 	//
-	// One range NAK for 3 packets (gap 5-6, Distance=3)
-	require.Equal(t, uint64(3), testMetrics.CongestionRecvNAKRange.Load(),
-		"CongestionRecvNAKRange should be 3 (packets requested via range NAK)")
+	// One range NAK entry for 2 packets (start=5, end=6, Distance=1, count=2)
+	require.Equal(t, uint64(2), testMetrics.CongestionRecvNAKRange.Load(),
+		"CongestionRecvNAKRange should be 2 (packets requested via range NAK)")
 	require.Equal(t, uint64(0), testMetrics.CongestionRecvNAKSingle.Load(),
 		"CongestionRecvNAKSingle should be 0 (no single NAK entries)")
 
 	// Verify invariant: NAKSingle + NAKRange = NAKPktsTotal
-	require.Equal(t, uint64(3), testMetrics.CongestionRecvNAKPktsTotal.Load(),
-		"CongestionRecvNAKPktsTotal should be 3")
+	require.Equal(t, uint64(2), testMetrics.CongestionRecvNAKPktsTotal.Load(),
+		"CongestionRecvNAKPktsTotal should be 2")
 	require.Equal(t,
 		testMetrics.CongestionRecvNAKSingle.Load()+testMetrics.CongestionRecvNAKRange.Load(),
 		testMetrics.CongestionRecvNAKPktsTotal.Load(),

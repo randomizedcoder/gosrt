@@ -293,23 +293,21 @@ func (r *receiver) pushLocked(pkt packet.Packet) {
 		return
 	} else {
 		// Too far ahead, there are some missing sequence numbers, immediate NAK report.
-		// RFC SRT Appendix A, Figure 22: This is always a range NAK (start != end) because
-		// the gap between maxSeenSequenceNumber and current packet is > 1.
 		// TODO: Implement SRTO_LOSSMAXTTL to delay NAK for reordered packets.
-		r.sendNAK([]circular.Number{
+		nakList := []circular.Number{
 			r.maxSeenSequenceNumber.Inc(),
 			pkt.Header().PacketSequenceNumber.Dec(),
-		})
+		}
+		r.sendNAK(nakList)
 
-		gapSize := uint64(pkt.Header().PacketSequenceNumber.Distance(r.maxSeenSequenceNumber))
-		m.CongestionRecvPktLoss.Add(gapSize)
-		m.CongestionRecvByteLoss.Add(gapSize * uint64(r.avgPayloadSize))
+		// Count packets requested by this NAK using shared helper.
+		// This ensures 100% consistency with how the sender counts received NAKs.
+		// Note: The helper correctly handles both single (start==end) and range entries.
+		missingPkts := metrics.CountNAKEntries(m, nakList, metrics.NAKCounterSend)
 
-		// NAK detail counters: count PACKETS requested, not entries
-		// Immediate NAK is always a range (gapSize > 1), so add gapSize to Range counter
-		// This allows: NAKSingle + NAKRange = NAKPktsTotal = expected retransmissions
-		m.CongestionRecvNAKRange.Add(gapSize)
-		m.CongestionRecvNAKPktsTotal.Add(gapSize)
+		// Update loss counters with the correct packet count
+		m.CongestionRecvPktLoss.Add(missingPkts)
+		m.CongestionRecvByteLoss.Add(missingPkts * uint64(r.avgPayloadSize))
 
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
 	}
@@ -490,28 +488,12 @@ func (r *receiver) Tick(now uint64) {
 	}
 
 	if list := r.periodicNAK(now); len(list) != 0 {
-		// RFC SRT Appendix A: Count NAK entries by type before sending.
-		// - Figure 21: Single (start == end) - 4 bytes on wire
-		// - Figure 22: Range (start != end) - 8 bytes on wire
-		// Count PACKETS requested, not entries, so:
-		//   NAKSingle + NAKRange = NAKPktsTotal = expected retransmissions
-		m := r.metrics
-		if m != nil {
-			for i := 0; i < len(list); i += 2 {
-				start := list[i]
-				end := list[i+1]
-				if start.Equals(end) {
-					// Single packet NAK entry: 1 packet
-					m.CongestionRecvNAKSingle.Add(1)
-					m.CongestionRecvNAKPktsTotal.Add(1)
-				} else {
-					// Range NAK entry: multiple packets
-					rangeSize := uint64(end.Distance(start)) + 1
-					m.CongestionRecvNAKRange.Add(rangeSize)
-					m.CongestionRecvNAKPktsTotal.Add(rangeSize)
-				}
-			}
-		}
+		// Count NAK entries using shared helper before sending.
+		// This ensures 100% consistency with how the sender counts received NAKs.
+		// RFC SRT Appendix A:
+		//   - Figure 21: Single (start == end) - 4 bytes on wire
+		//   - Figure 22: Range (start != end) - 8 bytes on wire
+		metrics.CountNAKEntries(r.metrics, list, metrics.NAKCounterSend)
 		r.sendNAK(list)
 	}
 

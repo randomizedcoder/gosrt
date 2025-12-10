@@ -1248,32 +1248,78 @@ MaxRetransRate: 4.0  // retrans <= 400% of loss (allows 2x amplification + margi
 
 ## Defect 8: NAK Packet Imbalance and High Unfulfilled Rate
 
-**Status**: 🔴 Under Investigation
+**Status**: 🟢 Fixed
 **Priority**: High
 **Discovered**: 2024-12-10
+**Fixed**: 2024-12-10
 **Tracking Document**: [defect8_nak_imbalance_investigation.md](defect8_nak_imbalance_investigation.md)
 
 ### Summary
 
-Running `Network-Loss2pct-5Mbps` with `--verbose` reveals:
-1. **2x NAK packet imbalance** - CG receives 2x the NAKs that Server sends
-2. **~50% unfulfilled NAK requests** - Half of NAK-requested packets not retransmitted
-3. **Low duplicate count** - Expected more duplicates if over-NAKing
+Running `Network-Loss2pct-5Mbps` with `--verbose` revealed a 2x NAK packet imbalance. Root cause was three separate bugs:
 
-### Hypotheses
+1. **Bug 1 (Receive Path)**: Double-counting NAKs - `handleNAK()` incremented counter AND `IncrementRecvMetrics()` also incremented
+2. **Bug 2 (Send Path, io_uring)**: Control packets decommissioned before metrics call, causing `nil` packet and no metric increment
+3. **Bug 3 (Send Path, Listener)**: Wrong lookup key - used `DestinationSocketId` (peer's ID) instead of local socket ID
 
-| Hypothesis | Issue | Likelihood |
-|------------|-------|------------|
-| A: Counting Bug | Different counting semantics for NAK packets vs entries | High |
-| B: Processing Bottleneck | Go channels too slow | Medium |
-| C: Buffer Exhaustion | Packets evicted before retransmission | Medium |
-| D: Race Condition | Concurrent NAK handling issues | Medium |
+### Fixes Applied
 
-### Next Step
+- `connection.go`: Removed duplicate increment in `handleNAK()`
+- `connection_linux.go`: Added `IncrementSendControlMetric()` helper for io_uring path
+- `listen.go`: Introduced `sendWithMetrics()` to avoid lookup
+- `conn_request.go`: Updated `onSend` callback to pass metrics directly
+- Added `ListenerMetrics` for detecting map lookup failures
+- Added comprehensive unit tests in `metrics/packet_classifier_test.go` and `connection_metrics_test.go`
 
-Run Experiment 1: Test with io_uring and btree enabled to determine if performance matters.
+### Verification
 
-See [full investigation document](defect8_nak_imbalance_investigation.md) for details.
+NAK balance now shows "✓ NAK pkts balanced" in verbose output. New `gosrt_listener_send_conn_lookup_not_found_total` counter catches any future lookup failures.
+
+---
+
+## Defect 9: Client with io_uring Output Does Not Exit Gracefully
+
+**Status**: 🟢 Fixed
+**Priority**: High
+**Discovered**: 2024-12-10
+**Fixed**: 2024-12-10
+**Tracking Document**: [defect9_client_shutdown.md](defect9_client_shutdown.md)
+
+### Summary
+
+Client process hung indefinitely after SIGINT when `-iouringoutput` was enabled. Root cause: multiple io_uring completion handlers using blocking `WaitCQE()` calls and incorrect cleanup ordering.
+
+### Fixes Applied
+
+All io_uring handlers changed from blocking `WaitCQE()` to polling `PeekCQE()` with 10ms sleep:
+- `contrib/common/writer_iouring_linux.go`
+- `connection_linux.go`
+- `dial_linux.go`
+- `listen_linux.go`
+
+Added `ioUringPollInterval` constant (10ms) with documentation explaining trade-offs.
+
+### Verification
+
+`make test-shutdown` passes for all components (server, client-generator, client with/without io_uring).
+
+---
+
+## Defect 10: High Loss Rate Despite Large SRT Buffers
+
+**Status**: 🔴 Under Investigation
+**Priority**: High
+**Discovered**: 2024-12-10
+**Tracking Document**: [defect10_high_loss_rate.md](defect10_high_loss_rate.md)
+
+### Summary
+
+With only 2% netem loss and 3-second SRT buffers, the test shows unexpectedly poor recovery:
+- **Gap rate 10.7%** (5.4x higher than expected 2%)
+- **Recovery rate 68.9%** (expected 95%+)
+- **NAK delivery rate ~60%** - NAKs being lost by network
+
+SRT should easily recover 2% loss with 3-second buffers. See dedicated document for full investigation.
 
 ---
 

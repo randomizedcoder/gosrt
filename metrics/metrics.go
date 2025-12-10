@@ -356,3 +356,13 @@ func (ltm *LockTimingMetrics) SnapshotWaitTimes() [LockTimingSamples]int64 {
 	}
 	return out
 }
+
+// NewConnectionMetrics creates a new ConnectionMetrics with LockTiming initialized.
+// All atomic counters are zero-initialized automatically.
+func NewConnectionMetrics() *ConnectionMetrics {
+	return &ConnectionMetrics{
+		HandlePacketLockTiming: &LockTimingMetrics{},
+		ReceiverLockTiming:     &LockTimingMetrics{},
+		SenderLockTiming:       &LockTimingMetrics{},
+	}
+}
