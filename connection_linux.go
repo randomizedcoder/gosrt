@@ -17,6 +17,20 @@ import (
 	"github.com/randomizedcoder/giouring"
 )
 
+// ioUringPollInterval is the interval between io_uring completion queue polls
+// when no completions are immediately available (EAGAIN).
+//
+// Trade-offs:
+//   - Lower values (1ms): Faster shutdown detection, but ~1000 wakeups/sec when idle
+//   - Higher values (100ms): Lower CPU usage when idle, but slower shutdown response
+//
+// 10ms provides a good balance: ~100 wakeups/sec when idle, and shutdown
+// response time that feels instant to users (<10ms added latency).
+//
+// Note: This only affects idle polling. During active data flow, completions
+// are immediately available and PeekCQE() returns without sleeping.
+const ioUringPollInterval = 10 * time.Millisecond
+
 // initializeIoUring initializes the io_uring send ring for the connection
 func (c *srtConn) initializeIoUring(config srtConnConfig) {
 	if !c.config.IoUringEnabled {
@@ -84,6 +98,15 @@ func (c *srtConn) cleanupIoUring() {
 		c.sendCompCancel()
 	}
 
+	// IMPORTANT: Close the ring FIRST to wake up blocked WaitCQE()
+	// WaitCQE() will return EBADF when the ring is closed, allowing
+	// the completion handler to exit cleanly. If we wait before closing,
+	// the handler stays blocked in WaitCQE() and we timeout.
+	ring, ok := c.sendRing.(*giouring.Ring)
+	if ok {
+		ring.QueueExit()
+	}
+
 	// Wait for completion handler to finish (with timeout)
 	done := make(chan struct{})
 	go func() {
@@ -94,21 +117,17 @@ func (c *srtConn) cleanupIoUring() {
 	select {
 	case <-done:
 		// Completion handler finished
-	case <-time.After(5 * time.Second):
-		// Timeout - log warning but continue
+	case <-time.After(2 * time.Second):
+		// Timeout - log warning but continue (reduced from 5s since QueueExit should wake it)
 		c.log("connection:io_uring:cleanup", func() string {
 			return "timeout waiting for completion handler"
 		})
 	}
 
-	// Drain any remaining completions
-	c.drainCompletions()
-
-	// Close the ring
-	ring, ok := c.sendRing.(*giouring.Ring)
-	if ok {
-		ring.QueueExit()
-	}
+	// Note: drainCompletions() is NOT called here because the ring is already closed.
+	// The completion handler processes all pending CQEs until it receives EBADF from
+	// WaitCQE(), so there's nothing left to drain. Calling PeekCQE() after QueueExit()
+	// would cause a segfault.
 
 	// Clean up completion map and return all buffers to pool
 	c.sendCompLock.Lock()
@@ -314,7 +333,9 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	// Errors in completion handler will be tracked separately
 }
 
-// sendCompletionHandler processes io_uring send completions using direct CQE polling
+// sendCompletionHandler processes io_uring send completions using polling (not blocking WaitCQE).
+// This allows the handler to check ctx.Done() regularly and exit promptly when
+// the context is cancelled, without waiting for QueueExit() to be called.
 func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 	defer c.sendCompWg.Done()
 
@@ -327,39 +348,42 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 		// Check for context cancellation first
 		select {
 		case <-ctx.Done():
-			// Connection closing - drain any remaining completions
-			c.drainCompletions()
+			// Connection closing - exit immediately
+			// Note: Do NOT call drainCompletions() here - the ring may already be closed
+			// by QueueExit() in cleanupIoUring(), which would cause a SIGSEGV.
 			return
 		default:
 		}
 
-		// WaitCQE blocks until a completion is available
-		// Note: giouring's WaitCQE doesn't support timeouts, so we handle
-		// context cancellation by checking before each WaitCQE call
-		cqe, err := ring.WaitCQE()
+		// Use non-blocking PeekCQE instead of blocking WaitCQE
+		// This allows us to check ctx.Done() regularly and exit promptly
+		cqe, err := ring.PeekCQE()
 		if err != nil {
-			// Check if context was cancelled while waiting
-			select {
-			case <-ctx.Done():
-				c.drainCompletions()
-				return
-			default:
-			}
-
-			// Handle different error conditions
+			// EBADF means ring was closed via QueueExit()
 			if err == syscall.EBADF {
-				// Ring closed - connection is shutting down
-				return
+				return // Ring closed - normal shutdown
 			}
 
-			// EINTR is normal (interrupted by signal), EAGAIN shouldn't occur with WaitCQE
-			// but handle gracefully if it does
-			if err != syscall.EAGAIN && err != syscall.EINTR {
-				c.log("connection:send:completion:error", func() string {
-					return fmt.Sprintf("error waiting for completion: %v", err)
-				})
+			// EAGAIN means no completions available - sleep and retry
+			if err == syscall.EAGAIN {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(ioUringPollInterval):
+					continue
+				}
 			}
-			continue // Retry WaitCQE
+
+			// EINTR is normal (interrupted by signal) - retry immediately
+			if err == syscall.EINTR {
+				continue
+			}
+
+			// Other errors - log and continue
+			c.log("connection:send:completion:error", func() string {
+				return fmt.Sprintf("error peeking completion: %v", err)
+			})
+			continue
 		}
 
 		// Get request ID from completion user data
@@ -444,6 +468,12 @@ func (c *srtConn) drainCompletions() {
 			// Try to get completion (non-blocking)
 			cqe, err := ring.PeekCQE()
 			if err != nil {
+				// EBADF means ring was closed via QueueExit() - exit immediately
+				// This is the normal case when drainCompletions is called during shutdown
+				if err == syscall.EBADF {
+					return
+				}
+
 				if err == syscall.EAGAIN {
 					// No completions available - check if map is empty
 					c.sendCompLock.RLock()

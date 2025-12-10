@@ -36,10 +36,26 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 	"unsafe" // Required for io_uring buffer address passing - see comments above
 
 	"github.com/randomizedcoder/giouring"
 )
+
+// ioUringPollInterval is the interval between io_uring completion queue polls
+// when no completions are immediately available (EAGAIN).
+//
+// Trade-offs:
+//   - Lower values (1ms): Faster shutdown detection, but ~1000 wakeups/sec when idle
+//   - Higher values (100ms): Lower CPU usage when idle, but slower shutdown response
+//
+// 10ms provides a good balance: ~100 wakeups/sec when idle, and shutdown
+// response time that feels instant to users (<10ms added latency).
+//
+// Note: This only affects idle polling. During active data flow, completions
+// are immediately available and PeekCQE() returns without sleeping.
+const ioUringPollInterval = 10 * time.Millisecond
 
 // IoUringWriter provides async writes using Linux io_uring.
 //
@@ -180,16 +196,54 @@ func (w *IoUringWriter) Write(p []byte) (int, error) {
 
 // completionHandler processes io_uring completions in a dedicated goroutine.
 // It returns buffers to the pool when writes complete.
+//
+// IMPORTANT: This handler uses polling with PeekCQE() instead of blocking WaitCQE().
+// This allows the handler to check the closed flag regularly and exit promptly
+// when Close() is called. WaitCQE() would block forever if there are no pending
+// completions, preventing graceful shutdown.
+//
+// Error handling:
+// - EBADF: Ring closed via QueueExit() - clean shutdown
+// - EAGAIN: No completions available - sleep and retry
 func (w *IoUringWriter) completionHandler() {
 	defer w.wg.Done()
 
 	for {
-		cqe, err := w.ring.WaitCQE()
+		// Check closed flag first
+		if w.closed.Load() {
+			return // Normal shutdown
+		}
+
+		// Use non-blocking PeekCQE instead of blocking WaitCQE
+		// This allows us to check the closed flag regularly
+		cqe, err := w.ring.PeekCQE()
 		if err != nil {
-			if w.closed.Load() {
-				return // Normal shutdown
+			// EBADF means the ring was closed via QueueExit()
+			if err == syscall.EBADF {
+				return // Ring closed - normal shutdown
 			}
-			continue // Retry on transient errors
+
+			// EAGAIN means no completions available - sleep and retry
+			if err == syscall.EAGAIN {
+				// Check closed flag before sleeping
+				if w.closed.Load() {
+					return // Normal shutdown
+				}
+				// Short sleep to avoid busy-spinning (see ioUringPollInterval comment)
+				time.Sleep(ioUringPollInterval)
+				continue
+			}
+
+			// EINTR is normal (interrupted by signal) - retry immediately
+			if err == syscall.EINTR {
+				continue
+			}
+
+			// For other errors, check closed flag and continue
+			if w.closed.Load() {
+				return
+			}
+			continue
 		}
 
 		reqID := cqe.UserData
@@ -231,4 +285,3 @@ func IoUringOutputAvailable() bool {
 
 // Ensure IoUringWriter implements io.WriteCloser
 var _ io.WriteCloser = (*IoUringWriter)(nil)
-

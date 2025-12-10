@@ -376,14 +376,17 @@ func main() {
 	// ============================================================
 	// Wait for Completion or Context Cancellation
 	// ============================================================
+	var shutdownStart time.Time
 	select {
 	case err := <-doneChan:
+		shutdownStart = time.Now()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		} else {
 			fmt.Fprint(os.Stderr, "\n")
 		}
 	case <-ctx.Done():
+		shutdownStart = time.Now()
 		// Context cancelled - graceful shutdown
 		fmt.Fprintf(os.Stderr, "\nShutdown signal received\n")
 	}
@@ -411,9 +414,11 @@ func main() {
 
 	select {
 	case <-done:
-		fmt.Fprintf(os.Stderr, "Graceful shutdown complete\n")
+		elapsedMs := time.Since(shutdownStart).Milliseconds()
+		fmt.Fprintf(os.Stderr, "Graceful shutdown complete after %dms\n", elapsedMs)
 	case <-time.After(config.ShutdownDelay):
-		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s\n", config.ShutdownDelay)
+		elapsedMs := time.Since(shutdownStart).Milliseconds()
+		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
 	}
 }
 

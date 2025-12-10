@@ -1867,49 +1867,10 @@ func (c *srtConn) close() {
 			})
 		}
 
-		// Clean up io_uring resources if enabled
-		if c.sendRing != nil {
-			c.log("connection:close", func() string { return "stopping io_uring completion handler" })
-
-			// Stop completion handler
-			if c.sendCompCancel != nil {
-				c.sendCompCancel()
-			}
-
-			// Wait for completion handler to finish (with timeout)
-			done = make(chan struct{})
-			go func() {
-				c.sendCompWg.Wait()
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				// Completion handler finished
-			case <-time.After(5 * time.Second):
-				c.log("connection:close:warning", func() string {
-					return "timeout waiting for send completion handler"
-				})
-			}
-
-			// Drain any remaining completions
-			c.drainCompletions()
-
-			// Close io_uring ring
-			// Ring cleanup handled by cleanupIoUring()
-			c.sendRing = nil
-
-			// Clean up any remaining completion info
-			c.sendCompLock.Lock()
-			for _, compInfo := range c.sendCompletions {
-				compInfo.buffer.Reset()
-				c.sendBufferPool.Put(compInfo.buffer)
-			}
-			c.sendCompletions = nil
-			c.sendCompLock.Unlock()
-
-			c.log("connection:close", func() string { return "io_uring ring closed" })
-		}
+		// Clean up io_uring resources if enabled (Linux-specific)
+		// cleanupIoUring() handles: cancellation, QueueExit (to wake blocked WaitCQE),
+		// waiting for completion handler, draining completions, buffer cleanup
+		c.cleanupIoUring()
 
 		c.log("connection:close", func() string { return "flushing congestion" })
 

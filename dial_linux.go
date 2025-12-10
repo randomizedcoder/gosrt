@@ -16,6 +16,8 @@ import (
 	"github.com/randomizedcoder/giouring"
 )
 
+// Note: ioUringPollInterval is defined in connection_linux.go
+
 // initializeIoUringRecv initializes the io_uring receive ring for the dialer
 func (dl *dialer) initializeIoUringRecv() error {
 	if !dl.config.IoUringRecvEnabled {
@@ -79,6 +81,15 @@ func (dl *dialer) cleanupIoUringRecv() {
 	// Note: Completion handler will exit when dl.ctx is cancelled (via client context cancellation)
 	// No need to call recvCompCancel() - it was a no-op anyway since we use dl.ctx directly
 
+	// IMPORTANT: Close the ring FIRST to wake up blocked WaitCQE()
+	// WaitCQE() will return EBADF when the ring is closed, allowing
+	// the completion handler to exit cleanly. If we wait before closing,
+	// the handler stays blocked in WaitCQE() and we timeout.
+	ring, ok := dl.recvRing.(*giouring.Ring)
+	if ok {
+		ring.QueueExit()
+	}
+
 	// Wait for completion handler to finish (with timeout)
 	done := make(chan struct{})
 	go func() {
@@ -89,14 +100,8 @@ func (dl *dialer) cleanupIoUringRecv() {
 	select {
 	case <-done:
 		// Completion handler finished
-	case <-time.After(5 * time.Second):
-		// Timeout - continue anyway (dialer doesn't have log method)
-	}
-
-	// Close the ring
-	ring, ok := dl.recvRing.(*giouring.Ring)
-	if ok {
-		ring.QueueExit()
+	case <-time.After(2 * time.Second):
+		// Timeout - continue anyway (reduced from 5s since QueueExit should wake it)
 	}
 
 	// Clean up completion map and return all buffers to pool
@@ -338,67 +343,54 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 	ring.CQESeen(cqe)
 }
 
-// getRecvCompletion gets a single completion (non-blocking peek, then blocking wait if needed)
+// getRecvCompletion gets a single completion using polling (no blocking WaitCQE).
+// This allows the handler to check ctx.Done() regularly and exit promptly when
+// the context is cancelled, without waiting for QueueExit() to be called.
 func (dl *dialer) getRecvCompletion(ctx context.Context, ring *giouring.Ring) (*giouring.CompletionQueueEvent, *recvCompletionInfo) {
-	// Try non-blocking peek first
-	cqe, err := ring.PeekCQE()
-	if err == nil {
-		compInfo := dl.lookupAndRemoveRecvCompletion(cqe, ring)
-		if compInfo == nil {
-			return nil, nil
-		}
-		return cqe, compInfo
-	}
-
-	// PeekCQE returned an error
-	if err != syscall.EAGAIN {
+	// Use polling with PeekCQE instead of blocking WaitCQE
+	// This allows us to check ctx.Done() regularly and exit promptly
+	for {
+		// Check context first
 		select {
 		case <-ctx.Done():
 			return nil, nil
 		default:
 		}
 
+		// Try non-blocking peek
+		cqe, err := ring.PeekCQE()
+		if err == nil {
+			compInfo := dl.lookupAndRemoveRecvCompletion(cqe, ring)
+			if compInfo == nil {
+				return nil, nil
+			}
+			return cqe, compInfo
+		}
+
+		// EBADF means ring was closed via QueueExit()
 		if err == syscall.EBADF {
 			return nil, nil
 		}
 
-		if err != syscall.EINTR {
-			// Skip logging (no log method)
-		}
-		return nil, nil
-	}
-
-	// EAGAIN - wait for completion
-	select {
-	case <-ctx.Done():
-		return nil, nil
-	default:
-	}
-
-	cqe, err = ring.WaitCQE()
-	if err != nil {
-		select {
-		case <-ctx.Done():
-			return nil, nil
-		default:
+		// EAGAIN means no completions available - sleep and retry
+		if err == syscall.EAGAIN {
+			// Short sleep to avoid busy-spinning, but still responsive to ctx cancellation
+			select {
+			case <-ctx.Done():
+				return nil, nil
+			case <-time.After(ioUringPollInterval):
+				continue
+			}
 		}
 
-		if err == syscall.EBADF {
-			return nil, nil
+		// EINTR is normal (interrupted by signal) - retry immediately
+		if err == syscall.EINTR {
+			continue
 		}
 
-		if err != syscall.EAGAIN && err != syscall.EINTR {
-			// Skip logging
-		}
+		// Other errors - return nil to let caller handle
 		return nil, nil
 	}
-
-	compInfo := dl.lookupAndRemoveRecvCompletion(cqe, ring)
-	if compInfo == nil {
-		return nil, nil
-	}
-
-	return cqe, compInfo
 }
 
 // submitRecvRequestBatch submits multiple receive requests in a batch
@@ -504,7 +496,8 @@ func (dl *dialer) recvCompletionHandler(ctx context.Context) {
 			if pendingResubmits > 0 {
 				dl.submitRecvRequestBatch(pendingResubmits)
 			}
-			dl.drainRecvCompletions()
+			// Skip drainRecvCompletions - it takes too long (5s timeout) and
+			// the ring will be closed by cleanupIoUringRecv() anyway.
 			return
 		default:
 		}

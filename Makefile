@@ -53,6 +53,10 @@ test-network-quick: client server client-generator
 	@cd contrib/integration_testing && go run . network-test Network-Loss2pct-5Mbps
 	@cd contrib/integration_testing && go run . network-test Network-Loss5pct-5Mbps
 
+## test-shutdown: Quick test for graceful shutdown of each component (no root needed)
+test-shutdown: client server client-generator
+	@cd contrib/integration_testing && ./test_shutdown.sh $(TEST)
+
 ## network-setup: Set up network namespaces for manual testing (requires root)
 network-setup:
 	@echo "Setting up network namespaces..."

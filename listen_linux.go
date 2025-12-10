@@ -19,6 +19,8 @@ import (
 	"github.com/randomizedcoder/giouring"
 )
 
+// Note: ioUringPollInterval is defined in connection_linux.go
+
 // recvCompletionInfo stores minimal information needed for completion handling
 // Key insight: We only need the buffer (to return to pool after deserialization)
 // and rsa (to extract source address). The msg and iovec are only used during
@@ -167,6 +169,15 @@ func (ln *listener) cleanupIoUringRecv() {
 	// Note: Completion handler will exit when ln.ctx is cancelled (via server context cancellation)
 	// No need to call recvCompCancel() - it was a no-op anyway since we use ln.ctx directly
 
+	// IMPORTANT: Close the ring FIRST to wake up blocked WaitCQE()
+	// WaitCQE() will return EBADF when the ring is closed, allowing
+	// the completion handler to exit cleanly. If we wait before closing,
+	// the handler stays blocked in WaitCQE() and we timeout.
+	ring, ok := ln.recvRing.(*giouring.Ring)
+	if ok {
+		ring.QueueExit()
+	}
+
 	// Wait for completion handler to finish (with timeout)
 	done := make(chan struct{})
 	go func() {
@@ -177,20 +188,14 @@ func (ln *listener) cleanupIoUringRecv() {
 	select {
 	case <-done:
 		// Completion handler finished
-	case <-time.After(5 * time.Second):
-		// Timeout - log warning but continue
+	case <-time.After(2 * time.Second):
+		// Timeout - log warning but continue (reduced from 5s since QueueExit should wake it)
 		// Use safe logging (won't panic if logger is closed)
 		if ln.config.Logger != nil {
 			ln.config.Logger.Print("listen:io_uring:recv:cleanup", 0, 2, func() string {
 				return "timeout waiting for completion handler"
 			})
 		}
-	}
-
-	// Close the ring
-	ring, ok := ln.recvRing.(*giouring.Ring)
-	if ok {
-		ring.QueueExit()
 	}
 
 	// Clean up completion map and return all buffers to pool
@@ -527,79 +532,58 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	// Always resubmit to maintain constant pending count (handled by caller)
 }
 
-// getRecvCompletion gets a single completion (non-blocking peek, then blocking wait if needed)
-// Returns immediately with the completion for low-latency processing
+// getRecvCompletion gets a single completion using polling (no blocking WaitCQE).
+// This allows the handler to check ctx.Done() regularly and exit promptly when
+// the context is cancelled, without waiting for QueueExit() to be called.
 func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) (*giouring.CompletionQueueEvent, *recvCompletionInfo) {
-	// Try non-blocking peek first
-	cqe, err := ring.PeekCQE()
-	if err == nil {
-		// Success - we have a completion, look it up and return
-		compInfo := ln.lookupAndRemoveRecvCompletion(cqe, ring)
-		if compInfo == nil {
-			return nil, nil // Unknown request ID, skip
-		}
-		return cqe, compInfo
-	}
-
-	// PeekCQE returned an error - handle based on error type
-	if err != syscall.EAGAIN {
-		// Error other than EAGAIN - handle and return early
+	// Use polling with PeekCQE instead of blocking WaitCQE
+	// This allows us to check ctx.Done() regularly and exit promptly
+	for {
+		// Check context first
 		select {
 		case <-ctx.Done():
 			return nil, nil
 		default:
 		}
 
-		if err == syscall.EBADF {
-			// Ring closed - listener is shutting down
-			return nil, nil
+		// Try non-blocking peek
+		cqe, err := ring.PeekCQE()
+		if err == nil {
+			// Success - we have a completion, look it up and return
+			compInfo := ln.lookupAndRemoveRecvCompletion(cqe, ring)
+			if compInfo == nil {
+				return nil, nil // Unknown request ID, skip
+			}
+			return cqe, compInfo
 		}
 
-		// EINTR is normal (interrupted by signal)
-		if err != syscall.EINTR {
-			ln.log("listen:recv:completion:error", func() string {
-				return fmt.Sprintf("error peeking completion: %v", err)
-			})
-		}
-		return nil, nil
-	}
-
-	// EAGAIN - no completions available, wait for one (blocking)
-	// Check context before blocking call
-	select {
-	case <-ctx.Done():
-		return nil, nil
-	default:
-	}
-
-	cqe, err = ring.WaitCQE()
-	if err != nil {
-		// Check if context was cancelled while waiting
-		select {
-		case <-ctx.Done():
-			return nil, nil
-		default:
-		}
-
+		// EBADF means ring was closed via QueueExit()
 		if err == syscall.EBADF {
 			return nil, nil
 		}
 
-		if err != syscall.EAGAIN && err != syscall.EINTR {
-			ln.log("listen:recv:completion:error", func() string {
-				return fmt.Sprintf("error waiting for completion: %v", err)
-			})
+		// EAGAIN means no completions available - sleep and retry
+		if err == syscall.EAGAIN {
+			// Short sleep to avoid busy-spinning, but still responsive to ctx cancellation
+			select {
+			case <-ctx.Done():
+				return nil, nil
+			case <-time.After(ioUringPollInterval):
+				continue
+			}
 		}
+
+		// EINTR is normal (interrupted by signal) - retry immediately
+		if err == syscall.EINTR {
+			continue
+		}
+
+		// Other errors - log and return nil
+		ln.log("listen:recv:completion:error", func() string {
+			return fmt.Sprintf("error peeking completion: %v", err)
+		})
 		return nil, nil
 	}
-
-	// Successfully got completion from WaitCQE - look it up and return
-	compInfo := ln.lookupAndRemoveRecvCompletion(cqe, ring)
-	if compInfo == nil {
-		return nil, nil // Unknown request ID, skip
-	}
-
-	return cqe, compInfo
 }
 
 // submitRecvRequestBatch submits multiple receive requests in a batch
@@ -723,11 +707,13 @@ func (ln *listener) recvCompletionHandler(ctx context.Context) {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
-			// Flush any pending resubmits before draining
+			// Flush any pending resubmits
 			if pendingResubmits > 0 {
 				ln.submitRecvRequestBatch(pendingResubmits)
 			}
-			ln.drainRecvCompletions()
+			// Skip drainRecvCompletions - it takes too long (5s timeout) and
+			// the ring will be closed by cleanupIoUringRecv() anyway.
+			// ln.drainRecvCompletions()
 			return
 		default:
 		}
