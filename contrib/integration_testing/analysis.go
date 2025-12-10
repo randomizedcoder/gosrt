@@ -439,6 +439,29 @@ var AnalysisErrorCounterPrefixes = []string{
 	// Congestion control drops
 	"gosrt_connection_congestion_recv_data_drop_total",
 	"gosrt_connection_congestion_send_data_drop_total",
+
+	// Listener-level map lookup failures (programming errors - should be 0)
+	// Note: These indicate bugs like Defect 8 Bug 3 (wrong lookup key)
+	"gosrt_handshake_lookup_not_found_total",
+
+	// Send path lookup failure - specifically detects Bug 3
+	// Should always be 0 with the closure-based fix
+	"gosrt_send_conn_lookup_not_found_total",
+}
+
+// ListenerWarningCounterPrefixes are counters that may indicate issues but
+// can be non-zero during normal operation (e.g., during shutdown)
+var ListenerWarningCounterPrefixes = []string{
+	// Receive path lookup failures - can happen during shutdown
+	"gosrt_recv_conn_lookup_not_found_total",
+}
+
+// ListenerInfoCounterPrefixes are informational counters (not errors)
+var ListenerInfoCounterPrefixes = []string{
+	// Duplicate handshakes (expected in some scenarios)
+	"gosrt_handshake_duplicate_total",
+	// Socket ID collisions (rare, but expected)
+	"gosrt_socketid_collision_total",
 }
 
 // Drop counters (may be expected in some tests)

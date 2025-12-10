@@ -333,6 +333,34 @@ var NetworkTestConfigs = []TestConfig{
 			IoUringOutput: true, // io_uring for client output
 		},
 	},
+	{
+		Name:        "Network-Loss2pct-1Mbps-NoIoUring",
+		Description: "2% loss WITHOUT io_uring - verify fix works for traditional path",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.02, // 2% loss
+			LatencyProfile: "none",
+		},
+		Bitrate:         1_000_000,
+		TestDuration:    30 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT: &SRTConfig{
+			ConnectionTimeout:      3000 * time.Millisecond,
+			PeerIdleTimeout:        30000 * time.Millisecond,
+			Latency:                3000 * time.Millisecond,
+			RecvLatency:            3000 * time.Millisecond,
+			PeerLatency:            3000 * time.Millisecond,
+			IoUringEnabled:         false,  // NO io_uring - use traditional WriteTo
+			IoUringRecvEnabled:     false,  // NO io_uring - use traditional ReadFrom
+			PacketReorderAlgorithm: "list", // list for baseline comparison
+			TLPktDrop:              true,
+		},
+		Client: ComponentConfig{
+			IoUringOutput: false, // NO io_uring for client output
+		},
+	},
 
 	// ========== High Performance Loss Tests (io_uring + btree) ==========
 	// These tests use maximum performance paths to investigate NAK handling issues

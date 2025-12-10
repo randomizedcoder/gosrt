@@ -480,7 +480,8 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 				return fmt.Sprintf("unknown destination socket ID: %d", socketId)
 			})
 		}
-		// Note: Can't track metrics here - connection doesn't exist
+		// Track at listener level since we can't associate with a connection
+		metrics.GetListenerMetrics().RecvConnLookupNotFoundIoUring.Add(1)
 		ring.CQESeen(cqe)
 		p.Decommission()
 		return // Always resubmit to maintain constant pending count
@@ -489,7 +490,8 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	conn := val.(*srtConn)
 	if conn == nil {
 		// Connection is nil - drop packet
-		// Note: Can't track metrics here - connection is nil
+		// Track at listener level since connection is nil
+		metrics.GetListenerMetrics().RecvConnLookupNotFoundIoUring.Add(1)
 		ring.CQESeen(cqe)
 		p.Decommission()
 		return // Always resubmit to maintain constant pending count

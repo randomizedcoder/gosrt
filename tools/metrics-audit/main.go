@@ -1,7 +1,8 @@
 // metrics-audit is a static analysis tool that verifies alignment between:
 // 1. Metrics defined in ConnectionMetrics struct (metrics/metrics.go)
-// 2. Metrics actually incremented via .Add()/.Store() calls
-// 3. Metrics exported to Prometheus via .Load() calls (metrics/handler.go)
+// 2. Metrics defined in ListenerMetrics struct (metrics/listener_metrics.go)
+// 3. Metrics actually incremented via .Add()/.Store() calls
+// 4. Metrics exported to Prometheus via .Load() calls (metrics/handler.go)
 //
 // Usage:
 //
@@ -46,11 +47,32 @@ func main() {
 	fmt.Println("=== GoSRT Metrics Audit ===")
 	fmt.Printf("Project root: %s\n\n", root)
 
-	// Phase 1: Parse metrics.go for struct fields
-	fmt.Println("Phase 1: Parsing metrics/metrics.go for struct fields...")
-	metricsInStruct, commentedOut := parseMetricsStruct(filepath.Join(root, "metrics/metrics.go"))
+	// Phase 1a: Parse metrics.go for ConnectionMetrics struct fields
+	fmt.Println("Phase 1a: Parsing metrics/metrics.go for ConnectionMetrics fields...")
+	metricsInStruct, commentedOut := parseMetricsStruct(filepath.Join(root, "metrics/metrics.go"), "ConnectionMetrics")
 	fmt.Printf("  Found %d atomic fields in ConnectionMetrics\n", len(metricsInStruct))
 	fmt.Printf("  Found %d commented-out fields\n\n", len(commentedOut))
+
+	// Phase 1b: Parse listener_metrics.go for ListenerMetrics struct fields
+	fmt.Println("Phase 1b: Parsing metrics/listener_metrics.go for ListenerMetrics fields...")
+	listenerMetricsFile := filepath.Join(root, "metrics/listener_metrics.go")
+	listenerMetricsInStruct := make(map[string]bool)
+	listenerCommentedOut := make(map[string]bool)
+	if _, err := os.Stat(listenerMetricsFile); err == nil {
+		listenerMetricsInStruct, listenerCommentedOut = parseMetricsStruct(listenerMetricsFile, "ListenerMetrics")
+		fmt.Printf("  Found %d atomic fields in ListenerMetrics\n", len(listenerMetricsInStruct))
+		fmt.Printf("  Found %d commented-out fields\n\n", len(listenerCommentedOut))
+	} else {
+		fmt.Println("  (metrics/listener_metrics.go not found - skipping)")
+	}
+
+	// Merge listener metrics into main tracking maps
+	for name := range listenerMetricsInStruct {
+		metricsInStruct[name] = true
+	}
+	for name := range listenerCommentedOut {
+		commentedOut[name] = true
+	}
 
 	// Phase 2: Scan codebase for .Add()/.Store() calls
 	fmt.Println("Phase 2: Scanning codebase for .Add()/.Store() calls...")
@@ -128,14 +150,41 @@ func main() {
 	}
 	fmt.Println()
 
+	// Find metrics with multiple increments (potential double-counting)
+	var multipleIncrements []string
+	for name, locs := range metricsInUse {
+		if len(locs) > 1 {
+			multipleIncrements = append(multipleIncrements, name)
+		}
+	}
+	sort.Strings(multipleIncrements)
+
+	fmt.Printf("⚠️  Multiple increment locations (review for double-counting): %d fields\n", len(multipleIncrements))
+	if len(multipleIncrements) > 0 {
+		for _, name := range multipleIncrements {
+			locs := metricsInUse[name]
+			fmt.Printf("   - %s (%d locations):\n", name, len(locs))
+			for _, loc := range locs {
+				fmt.Printf("       %s:%d (.%s)\n", loc.File, loc.Line, loc.Method)
+			}
+		}
+	}
+	fmt.Println()
+
 	// Summary
 	fmt.Println("=== Summary ===")
-	if len(missingExports) == 0 {
+	if len(missingExports) == 0 && len(neverUsed) == 0 {
 		fmt.Println("✅ AUDIT PASSED: All used metrics are exported to Prometheus")
+		if len(multipleIncrements) > 0 {
+			fmt.Printf("⚠️  WARNING: %d metrics have multiple increment locations - review for potential double-counting\n", len(multipleIncrements))
+		}
 		os.Exit(0)
-	} else {
+	} else if len(missingExports) > 0 {
 		fmt.Printf("❌ AUDIT FAILED: %d metrics need to be added to Prometheus handler\n", len(missingExports))
 		os.Exit(1)
+	} else {
+		fmt.Printf("⚠️  AUDIT WARNING: %d metrics defined but never used\n", len(neverUsed))
+		os.Exit(0)
 	}
 }
 
@@ -158,9 +207,10 @@ func findProjectRoot() string {
 	return ""
 }
 
-// parseMetricsStruct extracts all atomic fields from ConnectionMetrics
+// parseMetricsStruct extracts all atomic fields from a metrics struct
+// structName: name of the struct to parse (e.g., "ConnectionMetrics", "ListenerMetrics")
 // Returns: (active fields, commented-out fields)
-func parseMetricsStruct(path string) (map[string]bool, map[string]bool) {
+func parseMetricsStruct(path string, structName string) (map[string]bool, map[string]bool) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 	if err != nil {
@@ -198,7 +248,7 @@ func parseMetricsStruct(path string) (map[string]bool, map[string]bool) {
 	// Now find active fields in the struct
 	ast.Inspect(f, func(n ast.Node) bool {
 		ts, ok := n.(*ast.TypeSpec)
-		if !ok || ts.Name.Name != "ConnectionMetrics" {
+		if !ok || ts.Name.Name != structName {
 			return true
 		}
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/datarhei/gosrt/crypto"
+	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
 	"github.com/datarhei/gosrt/rand"
 )
@@ -299,6 +300,8 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 
 		// We received a duplicate request: reject silently
 		if exists {
+			// Informational: duplicate handshake request (not an error, but tracked)
+			metrics.GetListenerMetrics().HandshakeDuplicateRequest.Add(1)
 			return nil
 		}
 
@@ -381,6 +384,8 @@ func (req *connRequest) Reject(reason RejectionReason) {
 	defer req.ln.lock.Unlock()
 
 	if _, hasReq := req.ln.connReqs[req.peerSocketId]; !hasReq {
+		// Programming error: Reject() called on non-existent request
+		metrics.GetListenerMetrics().HandshakeRejectNotFound.Add(1)
 		return
 	}
 
@@ -415,6 +420,8 @@ func (req *connRequest) generateSocketId() (uint32, error) {
 		if _, found := req.ln.conns.Load(socketId); !found {
 			return socketId, nil
 		}
+		// Informational: socket ID collision (expected in rare cases, tracked)
+		metrics.GetListenerMetrics().SocketIdCollision.Add(1)
 	}
 
 	return 0, fmt.Errorf("could not generate unused socketid")
@@ -430,6 +437,8 @@ func (req *connRequest) Accept() (Conn, error) {
 	defer req.ln.lock.Unlock()
 
 	if _, hasReq := req.ln.connReqs[req.peerSocketId]; !hasReq {
+		// Programming error: Accept() called on non-existent request
+		metrics.GetListenerMetrics().HandshakeAcceptNotFound.Add(1)
 		return nil, fmt.Errorf("connection already accepted")
 	}
 
@@ -480,13 +489,20 @@ func (req *connRequest) Accept() (Conn, error) {
 		initialPacketSequenceNumber: req.handshake.InitialPacketSequenceNumber,
 		crypto:                      req.crypto,
 		keyBaseEncryption:           packet.EvenKeyEncrypted,
-		onSend:                      req.ln.send, // Fallback if io_uring disabled
+		onSend:                      nil, // Will be set below after connection is created
 		onShutdown:                  req.ln.handleShutdown,
 		logger:                      req.config.Logger,
 		socketFd:                    socketFd,
 		parentCtx:                   req.ln.ctx,
 		parentWg:                    &req.ln.connWg,
 	})
+
+	// Set onSend with a closure that captures conn.metrics for proper metrics tracking.
+	// This is the fallback path used when io_uring is disabled.
+	// (io_uring path sets onSend to c.send in connection_linux.go)
+	conn.onSend = func(p packet.Packet) {
+		req.ln.sendWithMetrics(p, conn.metrics)
+	}
 
 	req.ln.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })
 

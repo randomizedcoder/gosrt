@@ -23,6 +23,9 @@ func MetricsHandler() http.Handler {
 		// Write Go runtime metrics first (standard metrics, compatible with prometheus/client_golang)
 		writeRuntimeMetrics(b)
 
+		// Write listener-level metrics (not per-connection)
+		writeListenerMetrics(b)
+
 		// Write application-specific metrics
 		connections, socketIds := GetConnections()
 
@@ -571,4 +574,42 @@ func MetricsHandler() http.Handler {
 
 		w.Write([]byte(b.String()))
 	})
+}
+
+// writeListenerMetrics writes listener-level metrics (not per-connection).
+// These track events that happen before a connection is established or
+// after a connection is closed.
+func writeListenerMetrics(b *strings.Builder) {
+	lm := GetListenerMetrics()
+
+	// ========== Receive Path Lookup Failures ==========
+	// These can happen normally during shutdown, but high counts during
+	// operation may indicate bugs or attacks
+	writeCounterIfNonZero(b, "gosrt_recv_conn_lookup_not_found_total",
+		lm.RecvConnLookupNotFound.Load(),
+		"path", "standard")
+	writeCounterIfNonZero(b, "gosrt_recv_conn_lookup_not_found_total",
+		lm.RecvConnLookupNotFoundIoUring.Load(),
+		"path", "iouring")
+
+	// ========== Handshake Path Lookup Failures ==========
+	// These indicate programming errors - should never happen in correct code
+	writeCounterIfNonZero(b, "gosrt_handshake_lookup_not_found_total",
+		lm.HandshakeRejectNotFound.Load(),
+		"operation", "reject")
+	writeCounterIfNonZero(b, "gosrt_handshake_lookup_not_found_total",
+		lm.HandshakeAcceptNotFound.Load(),
+		"operation", "accept")
+
+	// ========== Informational Counters ==========
+	// Expected behavior, not errors, but useful for debugging
+	writeCounterIfNonZero(b, "gosrt_handshake_duplicate_total",
+		lm.HandshakeDuplicateRequest.Load())
+	writeCounterIfNonZero(b, "gosrt_socketid_collision_total",
+		lm.SocketIdCollision.Load())
+
+	// ========== Send Path Lookup Failures (Bug 3 Detection) ==========
+	// This should always be 0 - indicates the Bug 3 map lookup issue
+	writeCounterIfNonZero(b, "gosrt_send_conn_lookup_not_found_total",
+		lm.SendConnLookupNotFound.Load())
 }

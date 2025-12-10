@@ -1,9 +1,10 @@
 # Defect 8: NAK Packet Imbalance and High Unfulfilled Rate
 
-**Status**: 🟢 Fixed (Pending Verification)
+**Status**: ✅ Verified Fixed
 **Priority**: High
 **Discovered**: 2024-12-10
 **Fixed**: 2024-12-10
+**Verified**: 2024-12-10
 **Related To**: [Defect 7](integration_testing_with_network_impairment_defects.md) (Range NAKs causing retransmission amplification)
 
 ---
@@ -505,6 +506,156 @@ if isControlPacket {
 - `connection.go`: Removed duplicate increment in `handleNAK`, updated comments
 - `connection_linux.go`: Capture controlType before decommission, use new helper
 - `metrics/packet_classifier.go`: Added `IncrementSendControlMetric` helper function
+- `listen.go`: Fixed connection lookup bug in send path (see Bug 3 below)
+- `conn_request.go`: Use closure with direct metrics reference instead of broken lookup
+
+### Bug 3: Listener Send Path - Wrong Lookup Key
+
+**Discovery**: Found during non-io_uring verification testing on 2024-12-10.
+
+#### SRT Socket ID Model
+
+Per the SRT RFC, each end of an SRT connection has its **own unique socket ID**.
+These are NOT shared - each peer generates its own ID independently during handshake.
+
+```
+   Client (Caller)                    Server (Listener)
+   ================                   ==================
+   socketId = 0xAABBCCDD              socketId = 0x11223344
+   peerSocketId = 0x11223344          peerSocketId = 0xAABBCCDD
+```
+
+**Handshake Socket ID Exchange:**
+
+1. **Client sends Induction request:**
+   - Client generates its own socket ID (e.g., 0xAABBCCDD)
+   - Sends `cif.SRTSocketId = 0xAABBCCDD` to server
+
+2. **Server receives and stores peer ID:**
+   - `peerSocketId = cif.SRTSocketId` (0xAABBCCDD)
+   - Server generates its OWN socket ID via `generateSocketId()` (e.g., 0x11223344)
+   - Stores in `req.socketId`
+
+3. **Server sends Conclusion response:**
+   - Sends `req.handshake.SRTSocketId = req.socketId` (0x11223344)
+   - Client receives this as server's socket ID
+
+4. **Connection established:**
+   - Client stores: `socketId=0xAABBCCDD`, `peerSocketId=0x11223344`
+   - Server stores: `socketId=0x11223344`, `peerSocketId=0xAABBCCDD`
+
+**Key insight**: The socket IDs are DIFFERENT on each end. Each end identifies
+itself with its own ID, and stores the peer's ID separately.
+
+**SRT Control Packet Header** (RFC Section 3.2):
+```
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                     Destination Socket ID                     |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+The `Destination Socket ID` field contains the **recipient's** socket ID - the ID
+that the receiving end uses to identify itself. There is no "Source Socket ID"
+field in the packet header.
+
+#### How Socket IDs Are Used
+
+**When SENDING a packet:**
+- We set `DestinationSocketId = peerSocketId` (the remote end's ID)
+- This tells the remote end "this packet is for your connection 0x11223344"
+
+**When RECEIVING a packet:**
+- The packet's `DestinationSocketId` contains **OUR** socket ID
+- This is how we know which of our connections should receive this packet
+
+#### How ln.conns is Keyed
+
+In `conn_request.go:531`:
+```go
+req.ln.conns.Store(req.socketId, conn)  // Keyed by LOCAL socket ID
+```
+
+The listener's connection map is keyed by the **local socket ID** (the server's
+own ID for that connection), NOT the peer's socket ID.
+
+#### The Bug: SEND vs RECEIVE Path
+
+**RECEIVE path (worked correctly):**
+```go
+// In listen.go receive loop:
+val, ok := ln.conns.Load(p.Header().DestinationSocketId)
+```
+- Packet from peer has `DestinationSocketId = our local ID`
+- Lookup by `DestinationSocketId` finds our connection ✓
+
+**SEND path (was broken):**
+```go
+// In listen.go send():
+val, ok := ln.conns.Load(h.DestinationSocketId)  // WRONG!
+```
+- When we SEND, `DestinationSocketId = peer's socket ID`
+- But `ln.conns` is keyed by LOCAL socket ID
+- Lookup by `DestinationSocketId` (peer's ID) always fails ✗
+
+#### Example
+
+```
+Server sends NAK to Client:
+  - Packet header: DestinationSocketId = 0xAABBCCDD (client's ID)
+  - Server's ln.conns: { 0x11223344 → *srtConn }  (keyed by server's ID)
+  - Lookup: ln.conns.Load(0xAABBCCDD) → NOT FOUND!
+  - Result: IncrementSendMetrics never called, NAK not counted
+```
+
+#### Why the Receive Path Works
+
+The receive path works because when the CLIENT sends a packet to the SERVER:
+- Client sets `DestinationSocketId = 0x11223344` (server's ID)
+- Server receives packet, does `ln.conns.Load(0x11223344)` → FOUND!
+
+#### The Fix
+
+Instead of trying to look up the connection by socket ID in the send path,
+we create a closure that directly captures the connection's metrics:
+
+```go
+// conn_request.go - after connection is created:
+conn.onSend = func(p packet.Packet) {
+    req.ln.sendWithMetrics(p, conn.metrics)  // Direct reference, no lookup needed
+}
+```
+
+**Note**: `dial.go` was not affected because the dialer only has one connection
+and stores it directly in `dl.conn` (no map lookup required).
+
+#### Why Existing Tests Didn't Catch This Bug
+
+The existing test `TestConnectionMetricsNAKRetransmit` in `connection_metrics_test.go`:
+```go
+// Line 446-448: Only verifies CLIENT received NAKs
+if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
+    recvNAK := writerMetrics.PktRecvNAKSuccess.Load()
+    require.Greater(t, recvNAK, uint64(0), "Sender should receive NAKs")
+}
+```
+
+The test drops packets on the CLIENT (dialer) side to trigger NAKs from the SERVER.
+But it only checks that the CLIENT received NAKs - it never verifies that the SERVER
+tracked **sending** NAKs. Since the dialer's receive path worked correctly, the bug
+in the listener's send path went undetected.
+
+#### New Tests Added
+
+Added two new tests in `connection_metrics_test.go`:
+
+1. **`TestListenerSendMetricsNAK`**: Verifies the SERVER (listener) correctly tracks
+   `PktSentNAKSuccess` when sending NAKs. This directly tests the bug scenario.
+
+2. **`TestListenerSendMetricsACK`**: Verifies the SERVER (listener) correctly tracks
+   `PktSentACKSuccess` when sending ACKs. Tests the same send path for a different
+   control packet type.
+
+Both tests specifically target the listener's send path that had the wrong lookup key.
 
 ### Unit Tests Added
 
@@ -530,6 +681,101 @@ After the fix, NAK counts should be balanced:
 - Server sends N NAK packets → CG receives ~N NAK packets (minus ~2% network loss)
 - No more 2x ratio on receive side
 - No more 0 on send side (io_uring path now tracked)
+
+---
+
+## Verification Results (2024-12-10)
+
+### Test: `Network-Loss2pct-1Mbps-HighPerf` (io_uring + btree)
+
+**Command**: `sudo make test-network CONFIG=Network-Loss2pct-1Mbps-HighPerf VERBOSE=1`
+
+**Result**: ✅ NAK counting is now balanced
+
+#### Sample Mid-Test Intervals (After Fix)
+
+| Interval | Server NAKs Sent | CG NAKs Recv | Status |
+|----------|------------------|--------------|--------|
+| 1 | 11 | 9 | diff: 2 (network loss expected) |
+| 2 | 7 | 7 | ✓ balanced |
+| 3 | 9 | 9 | ✓ balanced |
+| 4 | 13 | 13 | ✓ balanced |
+| 5 | 11 | 9 | diff: 2 (network loss expected) |
+| 6 | 14 | 14 | ✓ balanced |
+| 7 | 10 | 10 | ✓ balanced |
+| 8 | 6 | 6 | ✓ balanced |
+| 9 | 8 | 8 | ✓ balanced |
+| 10 | 17 | 17 | ✓ balanced |
+| 11 | 13 | 13 | ✓ balanced |
+| 12 | 13 | 12 | diff: 1 (network loss expected) |
+| 13 | 17 | 15 | diff: 2 (network loss expected) |
+| 14 | 12 | 12 | ✓ balanced |
+| 15 | 13 | 13 | ✓ balanced |
+
+**Key Observations**:
+1. **2x ratio is eliminated** - Most intervals show exact balance
+2. **Small differences (1-2) are expected** - These are NAK packets lost to 2% network impairment
+3. **Retransmissions are also balanced** - Most intervals show `Retrans balanced: N sent = N recv`
+
+#### Sample Verbose Output (After Fix)
+
+```
+[Connection1: CG→Server] Delta over 2.0s:
+  Sender (CG):
+    Packets: +257 total (+244 unique, +13 retrans)
+    Control: +13 NAKs recv, +152 ACKs recv
+    NAK detail: +13 singles, +0 ranges, requesting 13 pkts
+  Receiver (Server):
+    Packets: +253 total (+13 retrans, +26 gaps)
+    Control: +13 NAKs sent, +305 ACKs sent
+    NAK detail: +0 singles, +26 ranges, requesting 26 pkts
+  Balance Check:
+    ✓ NAK pkts balanced: 13 sent = 13 recv        <-- FIXED!
+    ✓ Retrans balanced: 13 sent = 13 recv
+```
+
+Compare to **before fix** (2x ratio):
+```
+  Balance Check:
+    ⚠ NAK pkt imbalance: Server sent 28, CG recv 56 (diff: -28)   <-- 2x bug
+```
+
+### Remaining Issues (Separate Defects)
+
+1. **Defect 8a**: Client does not exit gracefully after SIGINT during quiesce phase
+2. **"NAK request gap"**: Expected behavior - Range NAKs over-request due to no `LossMaxTTL` implementation
+
+---
+
+## Final Verification (2024-12-10)
+
+A comprehensive verification was performed:
+
+### 1. Added Error Counter
+Added `SendConnLookupNotFound` counter to detect Bug 3 pattern in future.
+
+### 2. Revert Test
+Temporarily reverted fix to broken lookup code:
+```
+Error Analysis: ✗ FAILED
+  ✗ server: gosrt_send_conn_lookup_not_found_total increased by 15144
+
+NAK imbalance:
+  Connection1: NAKs: sent=0, recv=87
+```
+
+### 3. Fix Applied
+With closure-based fix:
+```
+Error Analysis: ✓ PASSED
+NAK balance:
+  ✓ NAK pkts balanced: 4 sent = 4 recv
+```
+
+### Conclusion
+- **All three bugs (1, 2, 3) are fixed**
+- **Error counters now detect Bug 3 pattern** (15,144 failures caught)
+- **NAK balance is restored** for both io_uring and non-io_uring paths
 
 ---
 
