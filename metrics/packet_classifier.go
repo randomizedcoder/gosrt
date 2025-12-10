@@ -223,6 +223,36 @@ func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 	}
 }
 
+// IncrementSendControlMetric increments the appropriate send counter for a control packet type.
+// This is used by the io_uring path where control packets are decommissioned before
+// IncrementSendMetrics can classify them.
+func IncrementSendControlMetric(m *ConnectionMetrics, controlType packet.CtrlType) {
+	if m == nil {
+		return
+	}
+
+	switch controlType {
+	case packet.CTRLTYPE_ACK:
+		m.PktSentACKSuccess.Add(1)
+	case packet.CTRLTYPE_ACKACK:
+		m.PktSentACKACKSuccess.Add(1)
+	case packet.CTRLTYPE_NAK:
+		m.PktSentNAKSuccess.Add(1)
+	case packet.CTRLTYPE_KEEPALIVE:
+		m.PktSentKeepaliveSuccess.Add(1)
+	case packet.CTRLTYPE_SHUTDOWN:
+		m.PktSentShutdownSuccess.Add(1)
+	case packet.CTRLTYPE_HANDSHAKE:
+		m.PktSentHandshakeSuccess.Add(1)
+	case packet.CTRLTYPE_USER:
+		// USER packets are typically KM - track as handshake for simplicity
+		m.PktSentHandshakeSuccess.Add(1)
+	default:
+		// Unknown control type - count as generic success
+		m.PktSentHandshakeSuccess.Add(1)
+	}
+}
+
 // IncrementSendErrorMetrics increments error metrics for cases where we don't have a packet
 // Exported for use in send paths
 func IncrementSendErrorMetrics(m *ConnectionMetrics, isIoUring bool, errorType DropReason) {

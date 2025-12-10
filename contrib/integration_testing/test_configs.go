@@ -302,6 +302,70 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &LargeBuffersSRTConfig,
 	},
 
+	// ========== High Performance Loss Tests (io_uring + btree) ==========
+	// These tests use maximum performance paths to investigate NAK handling issues
+	{
+		Name:        "Network-Loss2pct-1Mbps-HighPerf",
+		Description: "2% loss with io_uring + btree - Defect 8 investigation",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.02, // 2% loss (same as baseline)
+			LatencyProfile: "none",
+		},
+		Bitrate:         1_000_000,
+		TestDuration:    30 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT: &SRTConfig{
+			ConnectionTimeout:      3000 * time.Millisecond,
+			PeerIdleTimeout:        30000 * time.Millisecond,
+			Latency:                3000 * time.Millisecond,
+			RecvLatency:            3000 * time.Millisecond,
+			PeerLatency:            3000 * time.Millisecond,
+			IoUringEnabled:         true,    // io_uring for SRT send
+			IoUringRecvEnabled:     true,    // io_uring for SRT recv
+			PacketReorderAlgorithm: "btree", // btree for faster packet lookup
+			BTreeDegree:            32,
+			TLPktDrop:              true,
+		},
+		Client: ComponentConfig{
+			IoUringOutput: true, // io_uring for client output
+		},
+	},
+
+	// ========== High Performance Loss Tests (io_uring + btree) ==========
+	// These tests use maximum performance paths to investigate NAK handling issues
+	{
+		Name:        "Network-Loss2pct-5Mbps-HighPerf",
+		Description: "2% loss with io_uring + btree - Defect 8 investigation",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.02, // 2% loss (same as baseline)
+			LatencyProfile: "none",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    30 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT: &SRTConfig{
+			ConnectionTimeout:      3000 * time.Millisecond,
+			PeerIdleTimeout:        30000 * time.Millisecond,
+			Latency:                3000 * time.Millisecond,
+			RecvLatency:            3000 * time.Millisecond,
+			PeerLatency:            3000 * time.Millisecond,
+			IoUringEnabled:         true,    // io_uring for SRT send
+			IoUringRecvEnabled:     true,    // io_uring for SRT recv
+			PacketReorderAlgorithm: "btree", // btree for faster packet lookup
+			BTreeDegree:            32,
+			TLPktDrop:              true,
+		},
+		Client: ComponentConfig{
+			IoUringOutput: true, // io_uring for client output
+		},
+	},
+
 	// ========== Latency + Loss Tests ==========
 	{
 		Name:        "Network-Regional-Loss2pct-5Mbps",

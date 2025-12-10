@@ -1048,10 +1048,9 @@ func (c *srtConn) handleACK(p packet.Packet) {
 func (c *srtConn) handleNAK(p packet.Packet) {
 	c.log("control:recv:NAK:dump", func() string { return p.Dump() })
 
-	// Increment NAK received counter (control packets don't go through packet classifier)
-	if c.metrics != nil {
-		c.metrics.PktRecvNAKSuccess.Add(1)
-	}
+	// Note: NAK recv metrics are tracked via packet classifier in IncrementRecvMetrics
+	// The packet classifier is called by listen.go/dial.go when packets are received.
+	// No need to increment here - already tracked in packet_classifier.go
 
 	cif := &packet.CIFNAK{}
 
@@ -1530,10 +1529,9 @@ func (c *srtConn) sendNAK(list []circular.Number) {
 	c.log("control:send:NAK:dump", func() string { return p.Dump() })
 	c.log("control:send:NAK:cif", func() string { return cif.String() })
 
-	// Increment NAK sent counter (control packets don't go through packet classifier)
-	if c.metrics != nil {
-		c.metrics.PktSentNAKSuccess.Add(1)
-	}
+	// Note: NAK send metrics are tracked in the send path:
+	// - io_uring path: connection_linux.go captures controlType before decommission
+	// - non-io_uring path: listen.go/dial.go calls IncrementSendMetrics with valid packet
 
 	c.pop(p)
 }

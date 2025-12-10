@@ -182,12 +182,18 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 		collectTicker := time.NewTicker(config.CollectInterval)
 		testTimer := time.NewTimer(config.TestDuration)
 
+		snapshotCount := 1 // We already collected "startup" as index 0
 	collectLoop:
 		for {
 			select {
 			case <-collectTicker.C:
 				fmt.Println("\nCollecting mid-test metrics...")
 				testMetrics.CollectAllMetrics("mid-test")
+				snapshotCount++
+				// Print verbose delta if enabled
+				if config.VerboseMetrics && snapshotCount >= 2 {
+					testMetrics.PrintVerboseMetricsDelta(snapshotCount-2, snapshotCount-1)
+				}
 			case <-testTimer.C:
 				collectTicker.Stop()
 				break collectLoop
@@ -197,11 +203,46 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 		time.Sleep(config.TestDuration)
 	}
 
-	// Collect pre-shutdown metrics
+	// =================================================================
+	// QUIESCE PHASE: Pause data flow and wait for metrics to stabilize
+	// =================================================================
+	fmt.Println("\n--- Quiesce Phase ---")
+
+	// Step 1: Send SIGUSR1 to client-generator to pause data generation
+	fmt.Println("Sending SIGUSR1 to client-generator (pause data)...")
+	if err := signalProcess(clientGenCmd, syscall.SIGUSR1); err != nil {
+		fmt.Fprintf(os.Stderr, "Error sending SIGUSR1 to client-generator: %v\n", err)
+		// Non-fatal: continue with shutdown even if pause fails
+	}
+
+	// Step 2: Wait for metrics to stabilize (ACKs, NAKs stop incrementing)
 	if testMetrics != nil {
-		fmt.Println("\nCollecting pre-shutdown metrics...")
+		fmt.Println("Waiting for metrics to stabilize...")
+		stabCtx, stabCancel := context.WithTimeout(ctx, 10*time.Second)
+		result := testMetrics.WaitForStabilization(stabCtx)
+		stabCancel()
+
+		if result.Stable {
+			fmt.Printf("✓ Metrics stabilized in %v (%d iterations)\n", result.Elapsed.Round(time.Millisecond), result.Iterations)
+		} else {
+			fmt.Printf("⚠ Stabilization timeout after %v: %v\n", result.Elapsed.Round(time.Millisecond), result.Error)
+			// Non-fatal: continue with metrics collection
+		}
+	} else {
+		// No metrics - just wait a brief period for any in-flight packets
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Step 3: Collect pre-shutdown metrics (now accurate after stabilization)
+	if testMetrics != nil {
+		fmt.Println("Collecting pre-shutdown metrics...")
 		testMetrics.CollectAllMetrics("pre-shutdown")
 	}
+
+	// =================================================================
+	// SHUTDOWN PHASE: Gracefully stop all processes
+	// =================================================================
+	fmt.Println("\n--- Shutdown Phase ---")
 
 	// Stop any impairment pattern before shutdown
 	if config.Impairment.Pattern != "" && config.Impairment.Pattern != "clean" {

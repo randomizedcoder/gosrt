@@ -529,6 +529,31 @@ func MetricsHandler() http.Handler {
 				metrics.CongestionSendNAKNotFound.Load(),
 				"socket_id", socketIdStr, "type", "nak_not_found")
 
+			// ========== NAK Detail Counters (RFC SRT Appendix A) ==========
+			// Receiver-side: NAKs generated and sent
+			// Figure 21: Single packet entries (4 bytes on wire)
+			// Figure 22: Range entries (8 bytes on wire)
+			writeCounterIfNonZero(b, "gosrt_connection_nak_entries_total",
+				metrics.CongestionRecvNAKSingle.Load(),
+				"socket_id", socketIdStr, "direction", "sent", "type", "single")
+			writeCounterIfNonZero(b, "gosrt_connection_nak_entries_total",
+				metrics.CongestionRecvNAKRange.Load(),
+				"socket_id", socketIdStr, "direction", "sent", "type", "range")
+			writeCounterIfNonZero(b, "gosrt_connection_nak_packets_requested_total",
+				metrics.CongestionRecvNAKPktsTotal.Load(),
+				"socket_id", socketIdStr, "direction", "sent")
+
+			// Sender-side: NAKs received
+			writeCounterIfNonZero(b, "gosrt_connection_nak_entries_total",
+				metrics.CongestionSendNAKSingleRecv.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "type", "single")
+			writeCounterIfNonZero(b, "gosrt_connection_nak_entries_total",
+				metrics.CongestionSendNAKRangeRecv.Load(),
+				"socket_id", socketIdStr, "direction", "recv", "type", "range")
+			writeCounterIfNonZero(b, "gosrt_connection_nak_packets_requested_total",
+				metrics.CongestionSendNAKPktsRecv.Load(),
+				"socket_id", socketIdStr, "direction", "recv")
+
 			// ========== Congestion Control Rate Gauges ==========
 			// Stored as percentage * 100 for precision (e.g., 5.5% = 550)
 			writeGaugeIfNonZero(b, "gosrt_connection_congestion_retrans_rate_permille",

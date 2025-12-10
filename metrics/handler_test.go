@@ -376,6 +376,43 @@ func TestPrometheusCongestionMetrics(t *testing.T) {
 	require.Contains(t, output, `gosrt_connection_congestion_retransmissions_total{socket_id="0xcccccccc",direction="send"} 200`)
 }
 
+// TestPrometheusNAKDetailMetrics verifies NAK detail counters are exported
+// with the correct metric names and labels (RFC SRT Appendix A)
+func TestPrometheusNAKDetailMetrics(t *testing.T) {
+	socketId := uint32(0xdddddddd)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m)
+	defer UnregisterConnection(socketId)
+
+	// Set NAK detail values (receiver side - sends NAKs)
+	m.CongestionRecvNAKSingle.Store(5)
+	m.CongestionRecvNAKRange.Store(10)
+	m.CongestionRecvNAKPktsTotal.Store(50)
+
+	// Set NAK detail values (sender side - receives NAKs)
+	m.CongestionSendNAKSingleRecv.Store(4)
+	m.CongestionSendNAKRangeRecv.Store(8)
+	m.CongestionSendNAKPktsRecv.Store(40)
+
+	output := getPrometheusOutput(t)
+
+	// Verify receiver-side NAK detail metrics (direction="sent" because receiver SENDS NAKs)
+	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",direction="sent",type="single"} 5`,
+		"NAK single entries (sent by receiver)")
+	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",direction="sent",type="range"} 10`,
+		"NAK range entries (sent by receiver)")
+	require.Contains(t, output, `gosrt_connection_nak_packets_requested_total{socket_id="0xdddddddd",direction="sent"} 50`,
+		"NAK packets requested (sent by receiver)")
+
+	// Verify sender-side NAK detail metrics (direction="recv" because sender RECEIVES NAKs)
+	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",direction="recv",type="single"} 4`,
+		"NAK single entries (received by sender)")
+	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",direction="recv",type="range"} 8`,
+		"NAK range entries (received by sender)")
+	require.Contains(t, output, `gosrt_connection_nak_packets_requested_total{socket_id="0xdddddddd",direction="recv"} 40`,
+		"NAK packets requested (received by sender)")
+}
+
 // Helper function to get Prometheus output as string
 func getPrometheusOutput(t *testing.T) string {
 	t.Helper()

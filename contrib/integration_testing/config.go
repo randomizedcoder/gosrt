@@ -363,6 +363,7 @@ type TestConfig struct {
 	// Metrics collection settings
 	MetricsEnabled  bool          // Whether to collect metrics during the test
 	CollectInterval time.Duration // How often to collect metrics
+	VerboseMetrics  bool          // Print detailed per-connection metrics deltas during test
 
 	// Expected results (for validation)
 	ExpectedErrors     []string // List of expected error counters (e.g., "gosrt_pkt_drop_total")

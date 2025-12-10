@@ -37,10 +37,10 @@ test-integration-list:
 test-network-list:
 	@cd contrib/integration_testing && go run . list-network-configs
 
-## test-network: Run network impairment test (root, CONFIG=Network-Loss2pct-5Mbps)
+## test-network: Run network impairment test (root, CONFIG=Network-Loss2pct-5Mbps, VERBOSE=1 for detailed metrics)
 test-network: client server client-generator
 	@echo "NOTE: Network impairment tests require root privileges for network namespace creation"
-	@cd contrib/integration_testing && go run . network-test $(CONFIG)
+	@cd contrib/integration_testing && go run . network-test $(CONFIG) $(if $(VERBOSE),--verbose,)
 
 ## test-network-all: Run all network impairment tests (requires root)
 test-network-all: client server client-generator
@@ -159,6 +159,22 @@ server-profile:
 
 server-all: server server-debug
 
+## clean: Remove all built binaries (forces rebuild on next test)
+clean:
+	@echo "Removing built binaries..."
+	rm -f contrib/server/server contrib/server/server-debug
+	rm -f contrib/client/client contrib/client/client-debug
+	rm -f contrib/client-generator/client-generator contrib/client-generator/client-generator-debug
+	@echo "Clean complete. Run 'make client server client-generator' to rebuild."
+
+## clean-all: Remove all built binaries and generated files
+clean-all: clean
+	rm -f cover.out cover.html
+	rm -f cpu.pprof mem.pprof
+
+## rebuild: Clean and rebuild all binaries
+rebuild: clean client server client-generator
+
 ## coverage: Generate code coverage analysis
 coverage:
 	go test -race -coverprofile=cover.out -timeout 60s -v ./...
@@ -192,6 +208,8 @@ nixshell:
 .PHONY: update tidy vendor
 # Build targets
 .PHONY: client client-debug client-generator client-generator-debug server server-debug
+# Clean targets
+.PHONY: clean clean-all rebuild
 # Other targets
 .PHONY: commit docker logtopics help
 

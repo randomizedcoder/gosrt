@@ -25,8 +25,16 @@ import (
 //   - udsPath: Unix socket path - empty string means no UDS listener
 //
 // If both httpAddr and udsPath are empty, this function does nothing (no listeners opened).
+//
+// Endpoints:
+//   - /metrics - Full Prometheus metrics export
+//   - /stabilize - Minimal 6-metric output for stabilization detection
 func StartMetricsServers(ctx context.Context, wg *sync.WaitGroup, httpAddr, udsPath string) error {
-	handler := metrics.MetricsHandler()
+	// Create mux with both endpoints
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.MetricsHandler())
+	mux.Handle("/stabilize", metrics.StabilizationHandler())
+	handler := mux
 
 	// Start TCP HTTP endpoint if configured
 	if httpAddr != "" {
@@ -124,5 +132,3 @@ func startUDSMetricsServer(ctx context.Context, wg *sync.WaitGroup, socketPath s
 
 	return nil
 }
-
-

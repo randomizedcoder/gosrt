@@ -9,6 +9,63 @@ This document describes the design for controlled packet loss injection in the G
 - [Packet Loss Injection Implementation](packet_loss_injection_implementation.md) - Implementation progress tracker
 - [amt.sh](amt.sh) - Linux kernel network namespace example (reference for implementation)
 
+### Key Design Principle: Bidirectional Impairment
+
+**All network impairments (loss, latency) are applied BIDIRECTIONALLY** - on both Router A
+and Router B. This creates realistic network conditions where each SRT connection experiences
+impairment on both its DATA path and its control (ACK/NAK) path.
+
+#### Two Independent SRT Connections
+
+The test topology creates **two separate, independent SRT connections**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SRT Connection 1 (Publisher ↔ Server)                 │
+│                                                                              │
+│  Publisher ←═══════════(bidirectional 5% loss)═══════════→ Server           │
+│                                                                              │
+│  • DATA packets:  Publisher → (5% loss) → Server                            │
+│  • ACK/NAK:       Server → (5% loss) → Publisher                            │
+│  • SRT ARQ repair operates between Publisher and Server                      │
+│  • Loss on ACK/NAK path affects repair efficiency                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ↓ (data successfully repaired and buffered at server)
+                              │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SRT Connection 2 (Server ↔ Subscriber)                │
+│                                                                              │
+│  Server ←═══════════(bidirectional 5% loss)═══════════→ Subscriber          │
+│                                                                              │
+│  • DATA packets:  Server → (5% loss) → Subscriber                           │
+│  • ACK/NAK:       Subscriber → (5% loss) → Server                           │
+│  • SRT ARQ repair operates INDEPENDENTLY between Server and Subscriber      │
+│  • This connection starts with "clean" data from the server's buffer        │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Characteristics:**
+
+| Aspect | Description |
+|--------|-------------|
+| **Independence** | Connection 2's losses are independent of Connection 1's losses |
+| **Bidirectional per connection** | Each connection has loss on BOTH data AND control paths |
+| **Not compounding** | If Connection 1 repairs successfully, Connection 2 starts fresh |
+| **ACK/NAK loss matters** | 5% loss on control packets affects repair efficiency |
+| **Realistic** | Real networks have impairment in both directions |
+
+**Why bidirectional matters for SRT:**
+- DATA packets lost → triggers NAK from receiver
+- NAK packets lost → sender doesn't know to retransmit → more gaps
+- ACK packets lost → sender's congestion control affected
+- Retransmitted DATA packets → also subject to 5% loss (cascading)
+
+**With 5% bidirectional loss on EACH connection**, expect:
+- **Connection 1**: Server detects ~5% gaps, some NAKs lost, Publisher retransmits ~5-6%
+- **Connection 2**: Client detects ~5% gaps, some NAKs lost, Server retransmits ~5-6%
+- **Each connection operates independently** - successful repair on one doesn't affect the other
+
 ---
 
 ## Requirements
@@ -608,42 +665,63 @@ ip netns exec ns_router_b ip route replace 10.1.1.0/24 via 10.100.3.1
 ip netns exec ns_router_b ip route replace 10.1.2.0/24 via 10.100.3.1
 ```
 
-#### Loss Injection via Null Routes and Netem
+#### Loss Injection via Null Routes and Netem - BIDIRECTIONAL
 
-**100% Loss Events** (Starlink, complete outage) use blackhole routes - instant and simple:
+**CRITICAL: All loss is applied BIDIRECTIONALLY** on both Router A and Router B. This
+ensures that both SRT connections (Publisher→Server and Server→Subscriber) experience
+the same network impairment, which is realistic for real-world network conditions.
+
+**100% Loss Events** (Starlink, complete outage) use blackhole routes on BOTH routers:
 
 ```bash
-# Starlink event: 100% drop for 60ms using blackhole route
-# Add blackhole route to drop all traffic to the server subnet
+# Starlink event: 100% drop for 60ms using blackhole routes (BIDIRECTIONAL)
+# Router A: Block traffic toward server
 ip netns exec ns_router_a ip route add blackhole 10.2.1.0/24
+# Router B: Block traffic toward publisher/subscriber
+ip netns exec ns_router_b ip route add blackhole 10.1.1.0/24
+ip netns exec ns_router_b ip route add blackhole 10.1.2.0/24
 sleep 0.06
-# Remove blackhole route to restore traffic
+# Remove blackhole routes to restore traffic
 ip netns exec ns_router_a ip route del blackhole 10.2.1.0/24
+ip netns exec ns_router_b ip route del blackhole 10.1.1.0/24
+ip netns exec ns_router_b ip route del blackhole 10.1.2.0/24
 ```
 
-**Probabilistic Loss** (2%, 5%, etc.) uses netem's loss parameter on inter-router links:
+**Probabilistic Loss** (2%, 5%, etc.) uses netem's loss parameter on BOTH sides of inter-router links:
 
 ```bash
-# Add 5% loss to the inter-router link (combined with existing latency)
+# Add 5% loss to the inter-router link (BIDIRECTIONAL - combined with existing latency)
 # IMPORTANT: Always include "limit 50000" to prevent netem tail drops
+# Router A side (affects Publisher→Server traffic)
 ip netns exec ns_router_a tc qdisc change dev link2_a root netem delay 30ms loss 5% limit 50000
+# Router B side (affects Server→Publisher/Subscriber traffic)
+ip netns exec ns_router_b tc qdisc change dev link2_b root netem delay 30ms loss 5% limit 50000
 
-# Remove probabilistic loss (restore delay-only, keep large queue)
+# Remove probabilistic loss (restore delay-only, keep large queue) - BIDIRECTIONAL
 ip netns exec ns_router_a tc qdisc change dev link2_a root netem delay 30ms limit 50000
+ip netns exec ns_router_b tc qdisc change dev link2_b root netem delay 30ms limit 50000
 ```
+
+**Why Bidirectional?**
+- **Realistic**: Real networks have loss in both directions
+- **Tests both SRT connections**: Publisher→Server AND Server→Subscriber
+- **Consistent behavior**: Both endpoints experience the same impairment level
+- **Latency already bidirectional**: RTT/2 delay applied on each side (lines 204-207 in lib.sh)
 
 #### Advantages of Dual Router Architecture
 
 | Advantage | Description |
 |-----------|-------------|
+| **Bidirectional impairment** | Loss and latency applied on BOTH routers for realistic simulation |
 | **No queue flush** | Latency changes via routing, not netem reconfiguration |
 | **Realistic transitions** | Packets in-flight continue through their path |
-| **Fixed latency links** | Set once at startup, never modified |
+| **Fixed latency links** | Set once at startup, never modified (RTT/2 on each side) |
 | **Simple loss injection** | Blackhole routes for 100% loss, netem for probabilistic loss |
 | **No nftables dependency** | Uses only iproute2 and tc (already required for namespaces) |
 | **Instant loss events** | Blackhole route change is immediate (kernel routing table) |
 | **Independent paths** | Can test different latencies simultaneously if needed |
 | **50k queue preserved** | Latency queues maintain their contents during transitions |
+| **Both SRT connections affected** | Publisher→Server AND Server→Subscriber experience impairment |
 
 ### Shell Script: Namespace Setup
 
@@ -1269,54 +1347,71 @@ ip netns exec "${NS_ROUTER_A}" ip route
 ip netns exec "${NS_ROUTER_B}" ip route
 ```
 
-#### Loss Injection via Null Routes and Netem
+#### Loss Injection via Null Routes and Netem (BIDIRECTIONAL)
 
 ```bash
 # ============================================================================
-# Loss is injected using two mechanisms:
+# Loss is injected BIDIRECTIONALLY using two mechanisms:
 # - Blackhole routes: 100% loss (Starlink events, complete outages) - instant
 # - Netem loss parameter: Probabilistic loss (2%, 5%, etc.)
 # No nftables dependency - uses only iproute2 and tc
+#
+# BIDIRECTIONAL: Loss is applied on BOTH Router A and Router B so that:
+# - Publisher → Server path experiences loss
+# - Server → Subscriber path experiences loss
+# This is realistic - real networks have loss in both directions.
 # ============================================================================
 
 NS_ROUTER_A="ns_router_a_$$"
+NS_ROUTER_B="ns_router_b_$$"
 SUBNET_SERVER="10.2.1.0/24"
+SUBNET_PUBLISHER="10.1.1.0/24"
 SUBNET_SUBSCRIBER="10.1.2.0/24"
 
-# === Starlink Event: 100% drop for 60ms using blackhole routes ===
-# Add blackhole routes - instant effect, kernel routing table update
+# === Starlink Event: 100% drop for 60ms using blackhole routes (BIDIRECTIONAL) ===
+# Router A: Block outbound traffic toward server
 ip netns exec "${NS_ROUTER_A}" ip route add blackhole "${SUBNET_SERVER}"
-ip netns exec "${NS_ROUTER_A}" ip route add blackhole "${SUBNET_SUBSCRIBER}"
+# Router B: Block outbound traffic toward publisher/subscriber
+ip netns exec "${NS_ROUTER_B}" ip route add blackhole "${SUBNET_PUBLISHER}"
+ip netns exec "${NS_ROUTER_B}" ip route add blackhole "${SUBNET_SUBSCRIBER}"
 sleep 0.06
 # Remove blackhole routes - restore normal routing
 ip netns exec "${NS_ROUTER_A}" ip route del blackhole "${SUBNET_SERVER}"
-ip netns exec "${NS_ROUTER_A}" ip route del blackhole "${SUBNET_SUBSCRIBER}"
+ip netns exec "${NS_ROUTER_B}" ip route del blackhole "${SUBNET_PUBLISHER}"
+ip netns exec "${NS_ROUTER_B}" ip route del blackhole "${SUBNET_SUBSCRIBER}"
 
-# === Probabilistic Loss using netem ===
-# Add loss parameter to existing netem qdisc on current latency link
+# === Probabilistic Loss using netem (BIDIRECTIONAL) ===
+# Add loss parameter to existing netem qdisc on BOTH sides of the link
 # IMPORTANT: Always include "limit 50000" to prevent netem tail drops
 # Example: link2 has 30ms delay, add 5% loss
 ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms loss 5% limit 50000
+ip netns exec "${NS_ROUTER_B}" tc qdisc change dev link2_b root netem delay 30ms loss 5% limit 50000
 
-# High loss event: 85% drop for 1 second
+# High loss event: 85% drop for 1 second (BIDIRECTIONAL)
 ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms loss 85% limit 50000
+ip netns exec "${NS_ROUTER_B}" tc qdisc change dev link2_b root netem delay 30ms loss 85% limit 50000
 sleep 1
 # Remove loss (restore delay-only, keep large queue)
 ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms limit 50000
+ip netns exec "${NS_ROUTER_B}" tc qdisc change dev link2_b root netem delay 30ms limit 50000
 
-# === Static probability-based loss examples ===
-# 2% loss on tier2 link (30ms delay)
+# === Static probability-based loss examples (BIDIRECTIONAL) ===
+# 2% loss on tier2 link (30ms delay) - both directions
 ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms loss 2% limit 50000
+ip netns exec "${NS_ROUTER_B}" tc qdisc change dev link2_b root netem delay 30ms loss 2% limit 50000
 
-# 5% loss on tier3 link (65ms delay)
+# 5% loss on tier3 link (65ms delay) - both directions
 ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link3_a root netem delay 65ms loss 5% limit 50000
+ip netns exec "${NS_ROUTER_B}" tc qdisc change dev link3_b root netem delay 65ms loss 5% limit 50000
 
-# === Clear all loss (restore delay-only, keep large queue) ===
+# === Clear all loss (restore delay-only, keep large queue) - BIDIRECTIONAL ===
 ip netns exec "${NS_ROUTER_A}" tc qdisc change dev link2_a root netem delay 30ms limit 50000
+ip netns exec "${NS_ROUTER_B}" tc qdisc change dev link2_b root netem delay 30ms limit 50000
 
 # === View current configuration ===
 ip netns exec "${NS_ROUTER_A}" ip route show
 ip netns exec "${NS_ROUTER_A}" tc qdisc show
+ip netns exec "${NS_ROUTER_B}" tc qdisc show
 ```
 
 #### Netem Setup (Applied Once at Startup)
@@ -1632,4 +1727,9 @@ var LossTestConfigs = []TestConfig{
 | 2024-12-06 | Added metrics collection via Unix Domain Sockets (UDS) for namespace isolation | - |
 | 2024-12-08 | Replaced nftables with null/blackhole routes for 100% loss events | - |
 | 2024-12-08 | Use netem loss parameter for probabilistic loss (simpler, no nftables dependency) | - |
+| 2024-12-09 | **BIDIRECTIONAL**: Loss now applied on BOTH Router A and Router B | - |
+| 2024-12-09 | Updated lib.sh: set_netem_loss(), clear_netem_loss(), blackhole functions are bidirectional | - |
+| 2024-12-09 | Clarified: Two INDEPENDENT SRT connections, each with bidirectional impairment | - |
+| 2024-12-09 | Each connection has loss on BOTH data AND control (ACK/NAK) paths | - |
+| 2024-12-09 | Connection 2 is independent - starts fresh with data repaired by Connection 1 | - |
 

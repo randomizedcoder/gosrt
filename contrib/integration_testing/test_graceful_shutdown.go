@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -73,9 +74,10 @@ func main() {
 
 	case "network-test":
 		// Run a specific network impairment test
+		// Usage: network-test <config-name> [-v|--verbose]
 		if len(os.Args) < 3 {
 			fmt.Fprintf(os.Stderr, "Error: config name required\n")
-			fmt.Fprintf(os.Stderr, "Usage: sudo %s network-test <config-name>\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "Usage: sudo %s network-test <config-name> [-v|--verbose]\n", os.Args[0])
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
 			for _, c := range NetworkTestConfigs {
 				fmt.Fprintf(os.Stderr, "  %-45s %s\n", c.Name, c.Description)
@@ -91,6 +93,13 @@ func main() {
 				fmt.Fprintf(os.Stderr, "  %-45s %s\n", c.Name, c.Description)
 			}
 			os.Exit(1)
+		}
+		// Check for verbose flag
+		for _, arg := range os.Args[3:] {
+			if arg == "-v" || arg == "--verbose" {
+				config.VerboseMetrics = true
+				fmt.Println("Verbose metrics enabled")
+			}
 		}
 		testNetworkModeWithConfig(*config)
 
@@ -434,17 +443,50 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 		time.Sleep(config.TestDuration)
 	}
 
-	// Collect pre-shutdown metrics
+	// =================================================================
+	// QUIESCE PHASE: Pause data flow and wait for metrics to stabilize
+	// =================================================================
+	fmt.Println("\n--- Quiesce Phase ---")
+
+	// Step 1: Send SIGUSR1 to client-generator to pause data generation
+	fmt.Println("Sending SIGUSR1 to client-generator (pause data)...")
+	if err := clientGenCmd.Process.Signal(syscall.SIGUSR1); err != nil {
+		fmt.Fprintf(os.Stderr, "Error sending SIGUSR1 to client-generator: %v\n", err)
+		// Non-fatal: continue with shutdown even if pause fails
+	}
+
+	// Step 2: Wait for metrics to stabilize (ACKs, NAKs stop incrementing)
 	if config.MetricsEnabled {
-		fmt.Println("\nCollecting pre-shutdown metrics...")
+		fmt.Println("Waiting for metrics to stabilize...")
+		stabCtx, stabCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		result := testMetrics.WaitForStabilization(stabCtx)
+		stabCancel()
+
+		if result.Stable {
+			fmt.Printf("✓ Metrics stabilized in %v (%d iterations)\n", result.Elapsed.Round(time.Millisecond), result.Iterations)
+		} else {
+			fmt.Printf("⚠ Stabilization timeout after %v: %v\n", result.Elapsed.Round(time.Millisecond), result.Error)
+			// Non-fatal: continue with metrics collection
+		}
+	} else {
+		// No metrics - just wait a brief period for any in-flight packets
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Step 3: Collect pre-shutdown metrics (now accurate after stabilization)
+	if config.MetricsEnabled {
+		fmt.Println("Collecting pre-shutdown metrics...")
 		testMetrics.CollectAllMetrics("pre-shutdown")
 	}
 
+	// =================================================================
+	// SHUTDOWN PHASE: Gracefully stop all processes
+	// =================================================================
+	fmt.Println("\n--- Shutdown Phase ---")
 	// Shutdown order: Client-Generator → (drain) → Client → Server
 	// This allows us to verify pipeline balance after draining
-	fmt.Println("\nInitiating shutdown sequence...")
 
-	// Step 1: Send SIGINT to Client-Generator (publisher) - stop new data
+	// Step 4: Send SIGINT to Client-Generator (publisher) - full shutdown
 	fmt.Println("Sending SIGINT to client-generator (publisher)...")
 	if err := clientGenCmd.Process.Signal(os.Interrupt); err != nil {
 		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client-generator: %v\n", err)
@@ -557,7 +599,8 @@ func getBaseDir() string {
 	return filepath.Join(dir, "..", "..")
 }
 
-// ensureBinaries ensures that all required binaries exist, building them if necessary
+// ensureBinaries ensures that all required binaries exist, building them if necessary.
+// Note: If binaries are stale after source changes, run 'make clean' to force rebuild.
 func ensureBinaries(baseDir string, serverBin, clientGenBin, clientBin string) error {
 	binaries := []struct {
 		path string

@@ -184,6 +184,30 @@ func TestReceiverLossCounter(t *testing.T) {
 	// counts 3 due to the Distance calculation.
 	require.Equal(t, uint64(3), testMetrics.CongestionRecvPktLoss.Load(),
 		"CongestionRecvPktLoss should be 3 (Distance from 4 to 7)")
+
+	// Verify NAK detail counters (RFC SRT Appendix A)
+	// Counters track PACKETS requested, not entries:
+	//   NAKSingle + NAKRange = NAKPktsTotal = expected retransmissions
+	//
+	// Trace:
+	//   After receiving 0-4, maxSeenSequenceNumber = 4
+	//   Receive 7: gap detected (5,6 missing = 3 packets), NAK sent, maxSeenSequenceNumber = 7
+	//   Receive 8: in order (7+1), no NAK, maxSeenSequenceNumber = 8
+	//   Receive 9: in order (8+1), no NAK, maxSeenSequenceNumber = 9
+	//
+	// One range NAK for 3 packets (gap 5-6, Distance=3)
+	require.Equal(t, uint64(3), testMetrics.CongestionRecvNAKRange.Load(),
+		"CongestionRecvNAKRange should be 3 (packets requested via range NAK)")
+	require.Equal(t, uint64(0), testMetrics.CongestionRecvNAKSingle.Load(),
+		"CongestionRecvNAKSingle should be 0 (no single NAK entries)")
+
+	// Verify invariant: NAKSingle + NAKRange = NAKPktsTotal
+	require.Equal(t, uint64(3), testMetrics.CongestionRecvNAKPktsTotal.Load(),
+		"CongestionRecvNAKPktsTotal should be 3")
+	require.Equal(t,
+		testMetrics.CongestionRecvNAKSingle.Load()+testMetrics.CongestionRecvNAKRange.Load(),
+		testMetrics.CongestionRecvNAKPktsTotal.Load(),
+		"NAKSingle + NAKRange should equal NAKPktsTotal")
 }
 
 // TestReceiverPacketCounters verifies that received packet counters

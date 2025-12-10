@@ -392,22 +392,37 @@ func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 	return s.nakLocked(sequenceNumbers)
 }
 
+// nakLocked processes a NAK (Negative Acknowledgement) from the receiver.
+// RFC SRT Appendix A defines two NAK encoding formats in the loss list:
+// - Figure 21: Single sequence number (start == end) - 4 bytes on wire
+// - Figure 22: Range of sequence numbers (start != end) - 8 bytes on wire
 func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
 	// Check metrics once at the beginning of the function
 	m := s.metrics
 
 	// First, count all packets reported as lost in the NAK (all reported losses)
-	// This represents packets that the receiver detected as missing
+	// This represents packets that the receiver detected as missing.
+	// Count PACKETS requested by NAK type, not entries.
+	// This allows: NAKSingleRecv + NAKRangeRecv = NAKPktsRecv = expected retransmissions
 	totalLossCount := uint64(0)
 	totalLossBytes := uint64(0)
 	for i := 0; i < len(sequenceNumbers); i += 2 {
 		start := sequenceNumbers[i]
 		end := sequenceNumbers[i+1]
 		lossCount := uint64(end.Distance(start)) + 1
+		if start.Equals(end) {
+			// RFC SRT Appendix A, Figure 21: Single packet NAK entry (1 packet)
+			m.CongestionSendNAKSingleRecv.Add(1)
+		} else {
+			// RFC SRT Appendix A, Figure 22: Range NAK entry (multiple packets)
+			m.CongestionSendNAKRangeRecv.Add(lossCount)
+		}
 		totalLossCount += lossCount
-		// Estimate bytes based on average payload size
 		totalLossBytes += lossCount * uint64(s.avgPayloadSize)
 	}
+
+	// Track total packets requested in received NAKs
+	m.CongestionSendNAKPktsRecv.Add(totalLossCount)
 
 	// Increment loss counters for all reported losses (packets in NAK list)
 	m.CongestionSendPktLoss.Add(totalLossCount)

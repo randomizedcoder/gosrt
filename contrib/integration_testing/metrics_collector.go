@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/datarhei/gosrt/contrib/common"
+	"github.com/datarhei/gosrt/metrics"
 )
 
 // MetricsSnapshot represents a single snapshot of Prometheus metrics
@@ -303,6 +305,285 @@ func (tm *TestMetrics) PrintSummary() {
 					break
 				}
 			}
+		}
+	}
+}
+
+// =============================================================================
+// Stabilization Detection
+// =============================================================================
+
+// CreateStabilizationGetter creates a MetricsGetter for a component's /stabilize endpoint.
+// Returns nil if the endpoint is not configured.
+func CreateStabilizationGetter(endpoint MetricsEndpoint) metrics.MetricsGetter {
+	if !endpoint.IsConfigured() {
+		return nil
+	}
+
+	// Prefer UDS if configured (works across network namespaces)
+	if endpoint.UDSPath != "" {
+		return metrics.NewUDSGetter(endpoint.UDSPath)
+	}
+
+	// Fall back to HTTP
+	url := fmt.Sprintf("http://%s/stabilize", endpoint.HTTPAddr)
+	return metrics.NewHTTPGetter(url)
+}
+
+// GetAllStabilizationGetters returns MetricsGetters for all configured components.
+func (tm *TestMetrics) GetAllStabilizationGetters() []metrics.MetricsGetter {
+	var getters []metrics.MetricsGetter
+
+	if getter := CreateStabilizationGetter(tm.Server.Endpoint); getter != nil {
+		getters = append(getters, getter)
+	}
+	if getter := CreateStabilizationGetter(tm.ClientGenerator.Endpoint); getter != nil {
+		getters = append(getters, getter)
+	}
+	if getter := CreateStabilizationGetter(tm.Client.Endpoint); getter != nil {
+		getters = append(getters, getter)
+	}
+
+	return getters
+}
+
+// WaitForStabilization waits for all components' metrics to stabilize.
+// This should be called after pausing data generation (SIGUSR1 to client-generator)
+// to detect when ACKs, NAKs, and retransmissions have completed.
+func (tm *TestMetrics) WaitForStabilization(ctx context.Context) metrics.StabilizationResult {
+	getters := tm.GetAllStabilizationGetters()
+
+	if len(getters) == 0 {
+		return metrics.StabilizationResult{
+			Stable:  true,
+			Elapsed: 0,
+		}
+	}
+
+	cfg := metrics.DefaultStabilizationConfig()
+	return metrics.WaitForStabilization(ctx, cfg, getters...)
+}
+
+// WaitForStabilizationWithConfig waits for all components' metrics to stabilize
+// with a custom configuration.
+func (tm *TestMetrics) WaitForStabilizationWithConfig(ctx context.Context, cfg metrics.StabilizationConfig) metrics.StabilizationResult {
+	getters := tm.GetAllStabilizationGetters()
+
+	if len(getters) == 0 {
+		return metrics.StabilizationResult{
+			Stable:  true,
+			Elapsed: 0,
+		}
+	}
+
+	return metrics.WaitForStabilization(ctx, cfg, getters...)
+}
+
+// =============================================================================
+// Verbose Metrics Delta - Detailed per-connection analysis
+// =============================================================================
+
+// VerboseMetricsDelta holds detailed delta information for verbose output
+type VerboseMetricsDelta struct {
+	// Connection 1: ClientGenerator → Server
+	Conn1 struct {
+		// Sender (CG) deltas
+		SenderPacketsSent   int64
+		SenderPacketsUnique int64
+		SenderRetransSent   int64
+		SenderNAKsRecv      int64
+		SenderACKsRecv      int64
+
+		// Sender NAK detail (RFC SRT Appendix A)
+		SenderNAKSingleRecv int64 // Single packet NAK entries received
+		SenderNAKRangeRecv  int64 // Range NAK entries received
+		SenderNAKPktsRecv   int64 // Total packets requested in received NAKs
+
+		// Receiver (Server) deltas
+		ReceiverPacketsRecv  int64
+		ReceiverGapsDetected int64
+		ReceiverRetransRecv  int64
+		ReceiverNAKsSent     int64
+		ReceiverACKsSent     int64
+		ReceiverDrops        int64
+		ReceiverDropsTooLate int64
+		ReceiverDropsBufFull int64
+		ReceiverDropsDupes   int64 // Duplicate packets (already in buffer) - KEY METRIC for over-NAKing
+
+		// Receiver NAK detail (RFC SRT Appendix A)
+		ReceiverNAKSingleSent int64 // Single packet NAK entries sent
+		ReceiverNAKRangeSent  int64 // Range NAK entries sent
+		ReceiverNAKPktsSent   int64 // Total packets requested via sent NAKs
+
+		// Balance checks
+		NAKsSentVsRecv      int64 // Server.NAKsSent - CG.NAKsRecv (should be ~0)
+		RetransSentVsRecv   int64 // CG.RetransSent - Server.RetransRecv (should be ~0)
+		NAKPktsReqVsRetrans int64 // NAK packets requested - retransmissions sent
+		DupesVsOverRequest  int64 // Duplicates should ≈ NAKPktsReq - GapsDetected (over-NAK confirmation)
+	}
+}
+
+// PrintVerboseMetricsDelta prints detailed per-connection deltas between two snapshots
+// Focus on Connection 1 (ClientGenerator → Server) to understand the NAK/retransmission flow
+func (tm *TestMetrics) PrintVerboseMetricsDelta(prevIndex, currIndex int) {
+	if len(tm.Server.Snapshots) <= currIndex || len(tm.ClientGenerator.Snapshots) <= currIndex {
+		return
+	}
+
+	cgPrev := tm.ClientGenerator.Snapshots[prevIndex]
+	cgCurr := tm.ClientGenerator.Snapshots[currIndex]
+	serverPrev := tm.Server.Snapshots[prevIndex]
+	serverCurr := tm.Server.Snapshots[currIndex]
+
+	if cgPrev.Error != nil || cgCurr.Error != nil || serverPrev.Error != nil || serverCurr.Error != nil {
+		fmt.Println("  [verbose] Skipped - collection errors")
+		return
+	}
+
+	// Helper to get delta for a metric
+	getDelta := func(curr, prev *MetricsSnapshot, prefix, contains string) int64 {
+		var currSum, prevSum float64
+		for name, val := range curr.Metrics {
+			if strings.HasPrefix(name, prefix) && (contains == "" || strings.Contains(name, contains)) {
+				currSum += val
+			}
+		}
+		for name, val := range prev.Metrics {
+			if strings.HasPrefix(name, prefix) && (contains == "" || strings.Contains(name, contains)) {
+				prevSum += val
+			}
+		}
+		return int64(currSum - prevSum)
+	}
+
+	// Calculate Connection 1 deltas (CG → Server)
+	delta := VerboseMetricsDelta{}
+
+	// CG as SENDER
+	delta.Conn1.SenderPacketsSent = getDelta(cgCurr, cgPrev,
+		"gosrt_connection_congestion_packets_total", "direction=\"send\"")
+	delta.Conn1.SenderPacketsUnique = getDelta(cgCurr, cgPrev,
+		"gosrt_connection_congestion_packets_unique_total", "direction=\"send\"")
+	delta.Conn1.SenderRetransSent = getDelta(cgCurr, cgPrev,
+		"gosrt_connection_congestion_retransmissions_total", "direction=\"send\"")
+	delta.Conn1.SenderNAKsRecv = getDelta(cgCurr, cgPrev,
+		"gosrt_connection_packets_received_total", "type=\"nak\"")
+	delta.Conn1.SenderACKsRecv = getDelta(cgCurr, cgPrev,
+		"gosrt_connection_packets_received_total", "type=\"ack\"")
+
+	// CG NAK detail (RFC SRT Appendix A - received NAKs)
+	delta.Conn1.SenderNAKSingleRecv = getDelta(cgCurr, cgPrev,
+		"gosrt_connection_nak_entries_total", "direction=\"recv\",type=\"single\"")
+	delta.Conn1.SenderNAKRangeRecv = getDelta(cgCurr, cgPrev,
+		"gosrt_connection_nak_entries_total", "direction=\"recv\",type=\"range\"")
+	delta.Conn1.SenderNAKPktsRecv = getDelta(cgCurr, cgPrev,
+		"gosrt_connection_nak_packets_requested_total", "direction=\"recv\"")
+
+	// Server as RECEIVER
+	delta.Conn1.ReceiverPacketsRecv = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_congestion_packets_total", "direction=\"recv\"")
+	delta.Conn1.ReceiverGapsDetected = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_congestion_packets_lost_total", "direction=\"recv\"")
+	delta.Conn1.ReceiverRetransRecv = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_congestion_retransmissions_total", "direction=\"recv\"")
+	delta.Conn1.ReceiverNAKsSent = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_packets_sent_total", "type=\"nak\"")
+	delta.Conn1.ReceiverACKsSent = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_packets_sent_total", "type=\"ack\"")
+	delta.Conn1.ReceiverDrops = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_congestion_recv_data_drop_total", "")
+	delta.Conn1.ReceiverDropsTooLate = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"too_late\"")
+	delta.Conn1.ReceiverDropsBufFull = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"buffer_full\"")
+	delta.Conn1.ReceiverDropsDupes = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"duplicate\"")
+
+	// Server NAK detail (RFC SRT Appendix A - sent NAKs)
+	delta.Conn1.ReceiverNAKSingleSent = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_nak_entries_total", "direction=\"sent\",type=\"single\"")
+	delta.Conn1.ReceiverNAKRangeSent = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_nak_entries_total", "direction=\"sent\",type=\"range\"")
+	delta.Conn1.ReceiverNAKPktsSent = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_nak_packets_requested_total", "direction=\"sent\"")
+
+	// Balance checks
+	delta.Conn1.NAKsSentVsRecv = delta.Conn1.ReceiverNAKsSent - delta.Conn1.SenderNAKsRecv
+	delta.Conn1.RetransSentVsRecv = delta.Conn1.SenderRetransSent - delta.Conn1.ReceiverRetransRecv
+	delta.Conn1.NAKPktsReqVsRetrans = delta.Conn1.ReceiverNAKPktsSent - delta.Conn1.SenderRetransSent
+	// Over-NAK confirmation: duplicates should ≈ (NAK requests - actual gaps)
+	delta.Conn1.DupesVsOverRequest = delta.Conn1.ReceiverDropsDupes - (delta.Conn1.ReceiverNAKPktsSent - delta.Conn1.ReceiverGapsDetected)
+
+	// Print
+	elapsed := cgCurr.Timestamp.Sub(cgPrev.Timestamp)
+
+	fmt.Printf("\n  [Connection1: CG→Server] Delta over %.1fs:\n", elapsed.Seconds())
+	fmt.Printf("    Sender (CG):\n")
+	fmt.Printf("      Packets: +%d total (+%d unique, +%d retrans)\n",
+		delta.Conn1.SenderPacketsSent, delta.Conn1.SenderPacketsUnique, delta.Conn1.SenderRetransSent)
+	fmt.Printf("      Control: +%d NAKs recv, +%d ACKs recv\n",
+		delta.Conn1.SenderNAKsRecv, delta.Conn1.SenderACKsRecv)
+	if delta.Conn1.SenderNAKPktsRecv > 0 {
+		fmt.Printf("      NAK detail: +%d singles, +%d ranges, requesting %d pkts\n",
+			delta.Conn1.SenderNAKSingleRecv, delta.Conn1.SenderNAKRangeRecv, delta.Conn1.SenderNAKPktsRecv)
+	}
+
+	fmt.Printf("    Receiver (Server):\n")
+	fmt.Printf("      Packets: +%d total (+%d retrans, +%d gaps)\n",
+		delta.Conn1.ReceiverPacketsRecv, delta.Conn1.ReceiverRetransRecv, delta.Conn1.ReceiverGapsDetected)
+	fmt.Printf("      Control: +%d NAKs sent, +%d ACKs sent\n",
+		delta.Conn1.ReceiverNAKsSent, delta.Conn1.ReceiverACKsSent)
+	if delta.Conn1.ReceiverNAKPktsSent > 0 {
+		fmt.Printf("      NAK detail: +%d singles, +%d ranges, requesting %d pkts\n",
+			delta.Conn1.ReceiverNAKSingleSent, delta.Conn1.ReceiverNAKRangeSent, delta.Conn1.ReceiverNAKPktsSent)
+	}
+	if delta.Conn1.ReceiverDrops > 0 || delta.Conn1.ReceiverDropsDupes > 0 {
+		fmt.Printf("      ⚠ DROPS: +%d (too_late: %d, buf_full: %d, dupes: %d)\n",
+			delta.Conn1.ReceiverDrops, delta.Conn1.ReceiverDropsTooLate,
+			delta.Conn1.ReceiverDropsBufFull, delta.Conn1.ReceiverDropsDupes)
+	}
+
+	fmt.Printf("    Balance Check:\n")
+	if delta.Conn1.NAKsSentVsRecv != 0 {
+		fmt.Printf("      ⚠ NAK pkt imbalance: Server sent %d, CG recv %d (diff: %d)\n",
+			delta.Conn1.ReceiverNAKsSent, delta.Conn1.SenderNAKsRecv, delta.Conn1.NAKsSentVsRecv)
+	} else {
+		fmt.Printf("      ✓ NAK pkts balanced: %d sent = %d recv\n",
+			delta.Conn1.ReceiverNAKsSent, delta.Conn1.SenderNAKsRecv)
+	}
+	if delta.Conn1.RetransSentVsRecv != 0 {
+		fmt.Printf("      ⚠ Retrans imbalance: CG sent %d, Server recv %d (diff: %d)\n",
+			delta.Conn1.SenderRetransSent, delta.Conn1.ReceiverRetransRecv, delta.Conn1.RetransSentVsRecv)
+	} else {
+		fmt.Printf("      ✓ Retrans balanced: %d sent = %d recv\n",
+			delta.Conn1.SenderRetransSent, delta.Conn1.ReceiverRetransRecv)
+	}
+
+	// NAK request vs retransmission analysis
+	if delta.Conn1.ReceiverNAKPktsSent > 0 {
+		if delta.Conn1.NAKPktsReqVsRetrans > 0 {
+			fmt.Printf("      ⚠ NAK request gap: requested %d pkts, sent %d retrans (unfulfilled: %d)\n",
+				delta.Conn1.ReceiverNAKPktsSent, delta.Conn1.SenderRetransSent, delta.Conn1.NAKPktsReqVsRetrans)
+		} else {
+			fmt.Printf("      ✓ NAK requests fulfilled: %d requested, %d retransmitted\n",
+				delta.Conn1.ReceiverNAKPktsSent, delta.Conn1.SenderRetransSent)
+		}
+	}
+
+	// NAK efficiency
+	if delta.Conn1.ReceiverGapsDetected > 0 {
+		nakPerGap := float64(delta.Conn1.ReceiverNAKsSent) / float64(delta.Conn1.ReceiverGapsDetected)
+		fmt.Printf("    NAK Efficiency: %.2f NAK pkts per gap\n", nakPerGap)
+	}
+
+	// Over-NAKing confirmation via duplicate detection
+	// If duplicates ≈ (NAK requests - gaps), it confirms range NAKs are over-requesting
+	if delta.Conn1.ReceiverDropsDupes > 0 {
+		overNAKPkts := delta.Conn1.ReceiverNAKPktsSent - delta.Conn1.ReceiverGapsDetected
+		if overNAKPkts > 0 {
+			dupeMatchPct := float64(delta.Conn1.ReceiverDropsDupes) / float64(overNAKPkts) * 100
+			fmt.Printf("    Over-NAK Confirmation: %d dupes vs %d over-requested pkts (%.0f%% match)\n",
+				delta.Conn1.ReceiverDropsDupes, overNAKPkts, dupeMatchPct)
 		}
 	}
 }

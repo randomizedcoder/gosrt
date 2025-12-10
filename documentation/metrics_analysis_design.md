@@ -28,9 +28,14 @@ Verify that expected behaviors occurred:
 
 ### 3. Statistical Validation
 For network impairment tests, verify that observed metrics match expected impairment levels:
-- Loss rates within statistical tolerance
-- Retransmission counts proportional to loss
+- Network gap detection proportional to configured netem loss
+- Retransmission counts proportional to detected gaps
 - NAK generation matches missing packet detection
+- **SRT recovery rate** (gaps detected vs packets dropped) should be near 100%
+
+**IMPORTANT**: See [Integration Testing Design - Understanding Loss](integration_testing_design.md#3-understanding-loss-network-vs-srt) for the critical distinction between:
+- **Network-level loss** (netem drops): Detected as sequence gaps, triggers NAK/retransmission
+- **SRT-level loss** (unrecoverable): Packets SRT failed to recover (should be near 0 with good buffers)
 
 ### 4. Regression Detection
 Compare metrics across test runs to detect performance regressions:
@@ -182,7 +187,8 @@ type DerivedMetrics struct {
     // Deltas (final - initial)
     TotalPacketsSent     int64
     TotalPacketsRecv     int64
-    TotalPacketsLost     int64
+    TotalPacketsLost     int64   // Gaps detected (from CongestionRecvPktLoss)
+    TotalPacketsDropped  int64   // Unrecoverable packets (from congestion drops)
     TotalRetransmissions int64
     TotalNAKsSent        int64
     TotalNAKsRecv        int64
@@ -199,6 +205,442 @@ type DerivedMetrics struct {
     // Error breakdown
     ErrorsByType         map[string]int64
 }
+```
+
+---
+
+## Per-Connection Metrics Analysis
+
+A critical insight for accurate analysis: **the GoSRT test architecture has two independent SRT
+connections**, each with their own sender/receiver roles and ARQ state. This section documents
+how to correctly analyze each connection independently.
+
+### Architecture: Two Independent SRT Connections
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                        TWO INDEPENDENT SRT CONNECTIONS                                       │
+├─────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                             │
+│   ┌─────────────────┐                        ┌─────────────────┐                           │
+│   │ ClientGenerator │                        │     Server      │                           │
+│   │   (Publisher)   │                        │   (Relays)      │                           │
+│   │                 │                        │                 │                           │
+│   │ • DATA sender   │═══CONNECTION 1════════>│ • DATA receiver │                           │
+│   │ • ACK receiver  │<───────────────────────│ • ACK sender    │                           │
+│   │ • NAK receiver  │<───────────────────────│ • NAK sender    │                           │
+│   └─────────────────┘                        │                 │                           │
+│                                              │                 │       ┌─────────────────┐ │
+│                                              │ • DATA sender   │═══════│     Client      │ │
+│                                              │ • ACK receiver  │<──────│  (Subscriber)   │ │
+│                                              │ • NAK receiver  │<──────│                 │ │
+│                                              └─────────────────┘       │ • DATA receiver │ │
+│                                                      ║                 │ • ACK sender    │ │
+│                                            CONNECTION 2                │ • NAK sender    │ │
+│                                                      ║                 └─────────────────┘ │
+│                                                      ╚═══════════════════════════>         │
+│                                                                                             │
+├─────────────────────────────────────────────────────────────────────────────────────────────┤
+│ KEY INSIGHT: Packet loss on Connection 1 does NOT directly affect Connection 2            │
+│              Each connection has its own independent ARQ (NAK/retransmit) process          │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Available Prometheus Metrics (Per-Connection Role)
+
+Based on the [metrics audit](#metrics-audit-results), here are the 118 available metrics
+organized by the role each component plays:
+
+#### Sender Role Metrics (send direction)
+
+| Metric Name                                          | Description                      |
+|-----------------------------------------------------|----------------------------------|
+| `gosrt_connection_congestion_packets_total{dir="send"}` | Total packets sent (incl. retrans) |
+| `gosrt_connection_congestion_packets_unique_total{dir="send"}` | Original packets (excl. retrans) |
+| `gosrt_connection_congestion_retransmissions_total{dir="send"}` | Retransmissions sent |
+| `gosrt_connection_congestion_bytes_total{dir="send"}` | Total bytes sent |
+| `gosrt_connection_packets_sent_total{type="data"}` | Data packets sent |
+| `gosrt_connection_packets_received_total{type="nak"}` | NAKs received from peer |
+| `gosrt_connection_packets_received_total{type="ack"}` | ACKs received from peer |
+| `gosrt_connection_congestion_send_data_drop_total` | Send-side drops (congestion) |
+| `gosrt_connection_retransmissions_from_nak_total` | Retransmits triggered by NAK |
+
+#### Receiver Role Metrics (recv direction)
+
+| Metric Name                                          | Description                      |
+|-----------------------------------------------------|----------------------------------|
+| `gosrt_connection_congestion_packets_total{dir="recv"}` | Total packets received |
+| `gosrt_connection_congestion_packets_unique_total{dir="recv"}` | Unique packets (excl. dupes) |
+| `gosrt_connection_congestion_packets_lost_total{dir="recv"}` | Gaps detected (seq number gaps) |
+| `gosrt_connection_congestion_retransmissions_total{dir="recv"}` | Retransmits received |
+| `gosrt_connection_congestion_bytes_total{dir="recv"}` | Total bytes received |
+| `gosrt_connection_packets_received_total{type="data"}` | Data packets received |
+| `gosrt_connection_packets_sent_total{type="nak"}` | NAKs sent to peer |
+| `gosrt_connection_packets_sent_total{type="ack"}` | ACKs sent to peer |
+| `gosrt_connection_congestion_recv_data_drop_total` | Receive-side drops (unrecoverable) |
+| `gosrt_connection_congestion_packets_drop_total{dir="recv"}` | Total dropped packets |
+
+#### Error Metrics (All Components)
+
+| Metric Name                                          | Description                      |
+|-----------------------------------------------------|----------------------------------|
+| `gosrt_connection_crypto_error_total{operation=*}` | Encryption/decryption errors |
+| `gosrt_connection_recv_data_error_total{reason=*}` | Data receive errors |
+| `gosrt_connection_recv_control_error_total{reason=*}` | Control receive errors |
+| `gosrt_connection_send_data_drop_total{reason=*}` | Data send drops |
+| `gosrt_connection_send_control_drop_total{reason=*}` | Control send drops |
+| `gosrt_connection_error_detail_total{error=*}` | Detailed error breakdown |
+| `gosrt_connection_edge_case_total{type=*}` | Edge case counters |
+| `gosrt_connection_decrypt_failed_total` | Decryption failures |
+
+### Per-Connection Metric Mapping
+
+For accurate analysis, we must collect metrics from **both endpoints** of each connection:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CONNECTION 1: ClientGenerator → Server                                                       │
+├─────────────────────────────────────────────────────────────────────────────────────────────┤
+│ FROM COMPONENT         │ PROMETHEUS METRIC                           │ WHAT IT MEASURES    │
+├─────────────────────────┼─────────────────────────────────────────────┼─────────────────────┤
+│ ClientGenerator (sender)│ congestion_packets_total{direction="send"}  │ Packets sent        │
+│ ClientGenerator (sender)│ congestion_retransmissions_total{dir="send"}│ Retransmissions     │
+│ ClientGenerator (sender)│ packets_received_total{type="nak"}          │ NAKs received       │
+│ ClientGenerator (sender)│ retransmissions_from_nak_total              │ NAK-triggered retx  │
+├─────────────────────────┼─────────────────────────────────────────────┼─────────────────────┤
+│ Server (receiver)       │ congestion_packets_total{direction="recv"}  │ Packets received    │
+│ Server (receiver)       │ congestion_packets_lost_total{dir="recv"}   │ Gaps detected       │
+│ Server (receiver)       │ congestion_retransmissions_total{dir="recv"}│ Retransmits recv'd  │
+│ Server (receiver)       │ packets_sent_total{type="nak"}              │ NAKs sent           │
+│ Server (receiver)       │ congestion_recv_data_drop_total             │ SRT drops (final)   │
+└─────────────────────────┴─────────────────────────────────────────────┴─────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CONNECTION 2: Server → Client                                                                │
+├─────────────────────────────────────────────────────────────────────────────────────────────┤
+│ FROM COMPONENT         │ PROMETHEUS METRIC                           │ WHAT IT MEASURES    │
+├─────────────────────────┼─────────────────────────────────────────────┼─────────────────────┤
+│ Server (relay sender)   │ congestion_packets_total{direction="send"}  │ Packets relayed     │
+│ Server (relay sender)   │ congestion_retransmissions_total{dir="send"}│ Retransmissions     │
+│ Server (relay sender)   │ packets_received_total{type="nak"}          │ NAKs from Client    │
+│ Server (relay sender)   │ retransmissions_from_nak_total              │ NAK-triggered retx  │
+├─────────────────────────┼─────────────────────────────────────────────┼─────────────────────┤
+│ Client (receiver)       │ congestion_packets_total{direction="recv"}  │ Packets received    │
+│ Client (receiver)       │ congestion_packets_lost_total{dir="recv"}   │ Gaps detected       │
+│ Client (receiver)       │ congestion_retransmissions_total{dir="recv"}│ Retransmits recv'd  │
+│ Client (receiver)       │ packets_sent_total{type="nak"}              │ NAKs sent           │
+│ Client (receiver)       │ congestion_recv_data_drop_total             │ SRT drops (final)   │
+└─────────────────────────┴─────────────────────────────────────────────┴─────────────────────┘
+```
+
+### Data Structures for Per-Connection Analysis
+
+```go
+// ConnectionAnalysis holds metrics for a single SRT connection endpoint pair
+type ConnectionAnalysis struct {
+    Name string // "publisher-to-server" or "server-to-subscriber"
+
+    // === FROM SENDER SIDE ===
+    PacketsSent       int64   // congestion_packets_total{direction="send"}
+    PacketsSentUnique int64   // congestion_packets_unique_total{direction="send"}
+    RetransSent       int64   // congestion_retransmissions_total{direction="send"}
+    NAKsReceived      int64   // packets_received_total{type="nak"}
+    ACKsReceived      int64   // packets_received_total{type="ack"}
+    SendDrops         int64   // congestion_send_data_drop_total
+
+    // === FROM RECEIVER SIDE ===
+    PacketsRecv       int64   // congestion_packets_total{direction="recv"}
+    PacketsRecvUnique int64   // congestion_packets_unique_total{direction="recv"}
+    GapsDetected      int64   // congestion_packets_lost_total{direction="recv"}
+    RetransRecv       int64   // congestion_retransmissions_total{direction="recv"}
+    NAKsSent          int64   // packets_sent_total{type="nak"}
+    ACKsSent          int64   // packets_sent_total{type="ack"}
+    RecvDrops         int64   // congestion_recv_data_drop_total (SRT unrecoverable)
+
+    // === COMPUTED METRICS ===
+    GapRate           float64 // GapsDetected / PacketsSent
+    RetransPctOfSent  float64 // RetransSent / PacketsSent (should match netem loss)
+    RecoveryRate      float64 // 1 - (RecvDrops / GapsDetected) or 100% if no gaps
+    NAKEfficiency     float64 // NAKsSent / GapsDetected (should be ~1.0)
+    ACKPairBalance    float64 // ACKsSent / ACKsReceived (should be ~1.0)
+}
+
+// computeRates calculates derived rates for a connection
+func (c *ConnectionAnalysis) computeRates() {
+    if c.PacketsSent > 0 {
+        c.GapRate = float64(c.GapsDetected) / float64(c.PacketsSent)
+        c.RetransPctOfSent = float64(c.RetransSent) / float64(c.PacketsSent) * 100.0
+    }
+
+    if c.GapsDetected > 0 {
+        c.RecoveryRate = 1.0 - (float64(c.RecvDrops) / float64(c.GapsDetected))
+        c.NAKEfficiency = float64(c.NAKsSent) / float64(c.GapsDetected)
+    } else {
+        c.RecoveryRate = 1.0 // No gaps = 100% recovery
+        c.NAKEfficiency = 0  // No NAKs needed
+    }
+
+    if c.ACKsSent > 0 && c.ACKsReceived > 0 {
+        c.ACKPairBalance = float64(c.ACKsSent) / float64(c.ACKsReceived)
+    }
+}
+```
+
+### Updated ObservedStatistics
+
+```go
+// ObservedStatistics now includes per-connection breakdown
+type ObservedStatistics struct {
+    // Per-connection analysis
+    Connection1 ConnectionAnalysis // Publisher → Server
+    Connection2 ConnectionAnalysis // Server → Subscriber
+
+    // === COMBINED METRICS (for backward compatibility and summary) ===
+    TotalGaps         int64   // Connection1.GapsDetected + Connection2.GapsDetected
+    TotalRetrans      int64   // Connection1.RetransSent + Connection2.RetransSent
+    TotalSRTDrops     int64   // Connection1.RecvDrops + Connection2.RecvDrops
+
+    // Combined rates
+    OverallGapRate        float64 // Total gaps / total original packets
+    OverallRetransPct     float64 // Total retrans / total sent
+    OverallRecoveryRate   float64 // 1 - (total SRT drops / total gaps)
+}
+
+func computeObservedStatistics(ts *TestMetricsTimeSeries) ObservedStatistics {
+    // Compute derived metrics for each component
+    cg := ComputeDerivedMetrics(ts.ClientGenerator)
+    server := ComputeDerivedMetrics(ts.Server)
+    client := ComputeDerivedMetrics(ts.Client)
+
+    stats := ObservedStatistics{}
+
+    // === CONNECTION 1: ClientGenerator → Server ===
+    stats.Connection1 = ConnectionAnalysis{
+        Name: "publisher-to-server",
+        // From ClientGenerator (sender role)
+        PacketsSent:       cg.TotalPacketsSent,
+        PacketsSentUnique: cg.TotalPacketsSentUnique,
+        RetransSent:       cg.TotalRetransmissions,
+        NAKsReceived:      cg.TotalNAKsRecv,
+        ACKsReceived:      cg.TotalACKsRecv,
+        SendDrops:         cg.TotalSendDrops,
+        // From Server (receiver role for Connection 1)
+        PacketsRecv:       server.TotalPacketsRecv,
+        PacketsRecvUnique: server.TotalPacketsRecvUnique,
+        GapsDetected:      server.TotalGapsDetected,
+        RetransRecv:       server.TotalRetransRecv,
+        NAKsSent:          server.TotalNAKsSent,
+        ACKsSent:          server.TotalACKsSent,
+        RecvDrops:         server.TotalRecvDrops,
+    }
+    stats.Connection1.computeRates()
+
+    // === CONNECTION 2: Server → Client ===
+    // Note: Server acts as BOTH receiver (Conn1) and sender (Conn2)
+    // The server's send metrics reflect data being relayed to Client
+    stats.Connection2 = ConnectionAnalysis{
+        Name: "server-to-subscriber",
+        // From Server (sender role for Connection 2)
+        PacketsSent:       server.TotalPacketsSent,
+        PacketsSentUnique: server.TotalPacketsSentUnique,
+        RetransSent:       server.TotalRetransmissionsSent, // As relay sender
+        NAKsReceived:      server.TotalNAKsRecvFromClient,  // NAKs from Client
+        ACKsReceived:      server.TotalACKsRecvFromClient,
+        SendDrops:         server.TotalSendDropsToClient,
+        // From Client (receiver role)
+        PacketsRecv:       client.TotalPacketsRecv,
+        PacketsRecvUnique: client.TotalPacketsRecvUnique,
+        GapsDetected:      client.TotalGapsDetected,
+        RetransRecv:       client.TotalRetransRecv,
+        NAKsSent:          client.TotalNAKsSent,
+        ACKsSent:          client.TotalACKsSent,
+        RecvDrops:         client.TotalRecvDrops,
+    }
+    stats.Connection2.computeRates()
+
+    // === COMBINED TOTALS ===
+    stats.TotalGaps = stats.Connection1.GapsDetected + stats.Connection2.GapsDetected
+    stats.TotalRetrans = stats.Connection1.RetransSent + stats.Connection2.RetransSent
+    stats.TotalSRTDrops = stats.Connection1.RecvDrops + stats.Connection2.RecvDrops
+
+    // Combined rates
+    totalOriginal := stats.Connection1.PacketsSentUnique
+    if totalOriginal > 0 {
+        stats.OverallGapRate = float64(stats.TotalGaps) / float64(totalOriginal)
+        stats.OverallRetransPct = float64(stats.TotalRetrans) / float64(totalOriginal) * 100.0
+    }
+
+    if stats.TotalGaps > 0 {
+        stats.OverallRecoveryRate = 1.0 - (float64(stats.TotalSRTDrops) / float64(stats.TotalGaps))
+    } else {
+        stats.OverallRecoveryRate = 1.0
+    }
+
+    return stats
+}
+```
+
+### Validation Strategy for Each Connection
+
+For network impairment tests, validate **each connection independently**:
+
+```go
+func ValidateStatisticalPerConnection(
+    ts *TestMetricsTimeSeries,
+    config TestConfig,
+) StatisticalValidationResult {
+    result := StatisticalValidationResult{Passed: true}
+
+    if config.Mode != TestModeNetwork {
+        return result // Skip for clean network tests
+    }
+
+    observed := computeObservedStatistics(ts)
+    expected := computeStatisticalExpectations(config.Impairment)
+
+    // === VALIDATE CONNECTION 1 ===
+    checkConnection(observed.Connection1, expected, config.Impairment.LossRate, &result)
+
+    // === VALIDATE CONNECTION 2 ===
+    checkConnection(observed.Connection2, expected, config.Impairment.LossRate, &result)
+
+    // === VALIDATE COMBINED ===
+    // For bidirectional impairment, gaps accumulate across both connections
+    // Expected combined gap rate ≈ 2 * netem_loss (approximate, not exact)
+    combinedExpectedGapRate := config.Impairment.LossRate * 2 // Bidirectional
+    if !isWithinTolerance(observed.OverallGapRate, combinedExpectedGapRate, 0.5) {
+        result.Warnings = append(result.Warnings, StatisticalWarning{
+            Metric:  "CombinedGapRate",
+            Message: fmt.Sprintf("Combined gap rate %.2f%% differs from expected ~%.2f%%",
+                observed.OverallGapRate*100, combinedExpectedGapRate*100),
+        })
+    }
+
+    return result
+}
+
+func checkConnection(
+    conn ConnectionAnalysis,
+    expected StatisticalExpectation,
+    netemLoss float64,
+    result *StatisticalValidationResult,
+) {
+    // 1. RetransPctOfSent should match netem loss (primary validation)
+    expectedRetransPct := netemLoss * 100.0 // Convert to percentage
+    if !isWithinTolerance(conn.RetransPctOfSent, expectedRetransPct, 0.5) {
+        result.Passed = false
+        result.Violations = append(result.Violations, StatisticalViolation{
+            Metric:        fmt.Sprintf("%s/RetransPctOfSent", conn.Name),
+            ExpectedRange: fmt.Sprintf("%.1f%% ± 50%%", expectedRetransPct),
+            Observed:      conn.RetransPctOfSent,
+            Message: fmt.Sprintf("%s: Retransmission %% (%.2f%%) outside expected range for %.1f%% netem loss",
+                conn.Name, conn.RetransPctOfSent, netemLoss*100),
+        })
+    }
+
+    // 2. Recovery rate should be high (SRT should recover most gaps)
+    if conn.RecoveryRate < expected.MinRecoveryRate {
+        result.Passed = false
+        result.Violations = append(result.Violations, StatisticalViolation{
+            Metric:        fmt.Sprintf("%s/RecoveryRate", conn.Name),
+            ExpectedRange: fmt.Sprintf(">= %.1f%%", expected.MinRecoveryRate*100),
+            Observed:      conn.RecoveryRate,
+            Message: fmt.Sprintf("%s: Poor recovery rate %.1f%% (expected >= %.1f%%)",
+                conn.Name, conn.RecoveryRate*100, expected.MinRecoveryRate*100),
+        })
+    }
+
+    // 3. NAK efficiency (should send ~1 NAK per gap)
+    if conn.GapsDetected > 0 && conn.NAKEfficiency < 0.5 {
+        result.Passed = false
+        result.Violations = append(result.Violations, StatisticalViolation{
+            Metric:        fmt.Sprintf("%s/NAKEfficiency", conn.Name),
+            ExpectedRange: ">= 0.5 NAKs per gap",
+            Observed:      conn.NAKEfficiency,
+            Message: fmt.Sprintf("%s: Too few NAKs (%.2f per gap) - receiver may not be detecting losses",
+                conn.Name, conn.NAKEfficiency),
+        })
+    }
+
+    // 4. NAK storm detection (warning, not failure)
+    if conn.NAKEfficiency > expected.MaxNAKsPerLostPkt {
+        result.Warnings = append(result.Warnings, StatisticalWarning{
+            Metric: fmt.Sprintf("%s/NAKEfficiency", conn.Name),
+            Message: fmt.Sprintf("%s: High NAK rate (%.2f per gap) - possible NAK storm",
+                conn.Name, conn.NAKEfficiency),
+        })
+    }
+}
+```
+
+### Per-Connection Console Output
+
+```
+=== Metrics Analysis: Network-Loss5pct-5Mbps ===
+
+Connection 1 (Publisher → Server):
+  Sender (ClientGenerator):
+    Packets sent: 19380 (unique: 18412)
+    Retransmissions: 968 (5.26% of unique)
+    NAKs received: 955
+    ACKs received: 2750
+  Receiver (Server):
+    Packets received: 19350
+    Gaps detected: 985 (5.35%)
+    Retransmits received: 960
+    NAKs sent: 985
+    SRT drops: 25
+  Recovery: 97.5% ✓
+  Retrans% vs netem: 5.26% (expected ~5.0%) ✓
+
+Connection 2 (Server → Subscriber):
+  Sender (Server relay):
+    Packets sent: 19325
+    Retransmissions: 970 (5.02%)
+    NAKs received: 958
+  Receiver (Client):
+    Packets received: 19290
+    Gaps detected: 965 (4.99%)
+    NAKs sent: 965
+    SRT drops: 35
+  Recovery: 96.4% ✓
+  Retrans% vs netem: 5.02% (expected ~5.0%) ✓
+
+Combined Summary:
+  Total gaps: 1950 (~10% combined for bidirectional 5% loss)
+  Total retransmissions: 1938
+  Total SRT drops: 60
+  End-to-end: sent 18412 unique, delivered 18352 (99.7%)
+
+RESULT: ✓ PASSED
+```
+
+### Metrics Audit Results
+
+The `./tools/metrics-audit` tool confirms all metrics are properly exported:
+
+```
+=== GoSRT Metrics Audit ===
+Phase 1: Parsing metrics/metrics.go for struct fields...
+  Found 118 atomic fields in ConnectionMetrics
+
+Phase 2: Scanning codebase for .Add()/.Store() calls...
+  Found 118 unique fields being incremented
+
+Phase 3: Parsing metrics/handler.go for .Load() calls...
+  Found 118 fields being exported to Prometheus
+
+✅ AUDIT PASSED: All used metrics are exported to Prometheus
+```
+
+**Key Categories of Exported Metrics:**
+- Control packets (ACK, ACKACK, NAK, Keepalive, Shutdown, Handshake, KM): sent/received
+- Data packets: sent/received with success/dropped/error status
+- Congestion control: packets, bytes, loss, retransmissions per direction
+- Error details: parse, route, marshal, encrypt/decrypt errors
+- Edge cases: nil packets, unknown types, belated packets
+- Buffer and bandwidth gauges
+- Lock contention metrics
 
 func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
     if len(ts.Snapshots) < 2 {
@@ -603,6 +1045,168 @@ func isWithinTolerance(observed, expected, tolerance float64) bool {
     lowerBound := expected * (1 - tolerance)
     upperBound := expected * (1 + tolerance)
     return observed >= lowerBound && observed <= upperBound
+}
+```
+
+### 4. NAK Detail Analysis (RFC SRT Appendix A)
+
+The NAK detail counters provide visibility into the NAK/retransmission pipeline,
+enabling precise validation that retransmission rates align with expectations.
+
+#### Key Design Principle: Counters Track PACKETS, Not Entries
+
+**Updated 2024-12-10**: The NAK detail counters track the **number of packets**
+requested, not the number of NAK entries. This enables a crucial invariant:
+
+```
+NAKSingle + NAKRange = NAKPktsTotal = Expected Retransmissions
+```
+
+This design allows direct verification:
+- If `RetransmissionsSent ≈ NAKPktsTotal`, the sender is fulfilling NAK requests
+- If `RetransmissionsSent < NAKPktsTotal`, packets were dropped from sender buffer
+- If `RetransmissionsSent > NAKPktsTotal`, there's a bug in the counting
+
+#### Available Counters
+
+**Receiver-side (generates NAKs)**:
+| Metric | Description |
+|--------|-------------|
+| `gosrt_connection_nak_entries_total{direction="sent",type="single"}` | Packets requested via single NAK entries (1 per entry) |
+| `gosrt_connection_nak_entries_total{direction="sent",type="range"}` | Packets requested via range NAK entries (sum of range sizes) |
+| `gosrt_connection_nak_packets_requested_total{direction="sent"}` | Total = single + range (convenience counter) |
+
+**Sender-side (receives NAKs)**:
+| Metric | Description |
+|--------|-------------|
+| `gosrt_connection_nak_entries_total{direction="recv",type="single"}` | Packets requested via single NAK entries received |
+| `gosrt_connection_nak_entries_total{direction="recv",type="range"}` | Packets requested via range NAK entries received |
+| `gosrt_connection_nak_packets_requested_total{direction="recv"}` | Total packets requested in received NAKs |
+
+#### NAK Detail Validation
+
+```go
+// NAKDetailStatistics holds metrics from NAK detail counters
+// All counters track PACKETS, not entries:
+//   NAKSinglesSent + NAKRangesSent = NAKPktsRequested
+type NAKDetailStatistics struct {
+    // Receiver (NAK sender) side - tracks PACKETS requested
+    NAKSinglesSent   int64 // Packets requested via single NAK entries
+    NAKRangesSent    int64 // Packets requested via range NAK entries
+    NAKPktsRequested int64 // Total = NAKSinglesSent + NAKRangesSent
+
+    // Sender (NAK receiver) side - tracks PACKETS requested
+    NAKSinglesRecv   int64 // Packets requested via single NAK entries received
+    NAKRangesRecv    int64 // Packets requested via range NAK entries received
+    NAKPktsReceived  int64 // Total = NAKSinglesRecv + NAKRangesRecv
+}
+
+// NAKDetailValidationResult contains results of NAK detail analysis
+type NAKDetailValidationResult struct {
+    Passed     bool
+    Violations []string
+    Warnings   []string
+
+    // Key validation metrics
+    NAKDeliveryRate     float64 // NAKPktsReceived / NAKPktsRequested (should be ~1.0)
+    NAKFulfillmentRate  float64 // RetransSent / NAKPktsReceived (should be ~1.0)
+    RangePktRatio       float64 // NAKRangesSent / NAKPktsRequested (proportion from ranges)
+}
+
+func ValidateNAKDetail(stats NAKDetailStatistics, retransSent int64) NAKDetailValidationResult {
+    result := NAKDetailValidationResult{Passed: true}
+
+    // 0. Verify invariant: NAKSingle + NAKRange = NAKPktsTotal
+    expectedTotal := stats.NAKSinglesSent + stats.NAKRangesSent
+    if expectedTotal != stats.NAKPktsRequested {
+        result.Passed = false
+        result.Violations = append(result.Violations,
+            fmt.Sprintf("NAK counter invariant violation: %d + %d ≠ %d",
+                stats.NAKSinglesSent, stats.NAKRangesSent, stats.NAKPktsRequested))
+    }
+
+    // 1. NAK Delivery: Are NAK packets getting through the network?
+    // Compare receiver-sent vs sender-received
+    if stats.NAKPktsRequested > 0 {
+        result.NAKDeliveryRate = float64(stats.NAKPktsReceived) / float64(stats.NAKPktsRequested)
+        if result.NAKDeliveryRate < 0.9 {
+            result.Passed = false
+            result.Violations = append(result.Violations,
+                fmt.Sprintf("NAK delivery rate %.1f%% - NAK packets being lost by network",
+                    result.NAKDeliveryRate*100))
+        }
+    } else {
+        result.NAKDeliveryRate = 1.0 // No NAKs needed
+    }
+
+    // 2. NAK Fulfillment: Are retransmissions being sent for NAK'd packets?
+    // This is the key validation: retransSent should ≈ NAKPktsReceived
+    if stats.NAKPktsReceived > 0 {
+        result.NAKFulfillmentRate = float64(retransSent) / float64(stats.NAKPktsReceived)
+        if result.NAKFulfillmentRate < 0.8 {
+            result.Warnings = append(result.Warnings,
+                fmt.Sprintf("NAK fulfillment rate %.1f%% - sender can't retransmit some packets (buffer exhausted?)",
+                    result.NAKFulfillmentRate*100))
+        }
+        if result.NAKFulfillmentRate > 1.1 {
+            result.Warnings = append(result.Warnings,
+                fmt.Sprintf("NAK fulfillment rate %.1f%% - retransmitting more than requested (possible bug)",
+                    result.NAKFulfillmentRate*100))
+        }
+    } else {
+        result.NAKFulfillmentRate = 1.0 // No NAKs to fulfill
+    }
+
+    // 3. Range packet ratio - what proportion of NAK'd packets came from ranges?
+    // High ratio indicates bursts of loss (immediate NAKs for gaps)
+    // Low ratio indicates individual scattered losses (periodic NAKs)
+    if stats.NAKPktsRequested > 0 {
+        result.RangePktRatio = float64(stats.NAKRangesSent) / float64(stats.NAKPktsRequested)
+    }
+
+    return result
+}
+```
+
+#### Expected NAK Behavior
+
+| Scenario | Singles | Ranges | Avg Pkts/Entry | Interpretation |
+|----------|---------|--------|----------------|----------------|
+| Random 2% loss | High | Low | ~1.0 | Normal - sporadic losses |
+| Random 5% loss | High | Medium | ~1.5 | Some adjacent losses |
+| Burst loss | Low | High | ~10+ | Burst pattern detected |
+| Heavy jitter | Low | High | ~50+ | Over-NAKing due to reordering |
+
+#### Integration with Per-Connection Analysis
+
+For two-hop tests (CG → Server → Client), analyze NAK detail for each connection:
+
+```go
+// Connection 1: CG → Server
+// - CG receives NAKs from Server, should see NAKPktsReceived
+// - Server sends NAKs, should see NAKPktsRequested
+
+// Connection 2: Server → Client
+// - Server receives NAKs from Client, should see NAKPktsReceived
+// - Client sends NAKs, should see NAKPktsRequested
+
+func ValidateConnectionNAKDetail(conn1, conn2 NAKDetailStatistics,
+                                   conn1Retrans, conn2Retrans int64) AnalysisResult {
+    result1 := ValidateNAKDetail(conn1, conn1Retrans)
+    result2 := ValidateNAKDetail(conn2, conn2Retrans)
+
+    // Combine results
+    combined := AnalysisResult{Passed: result1.Passed && result2.Passed}
+
+    // Add per-connection details
+    combined.Details = append(combined.Details,
+        fmt.Sprintf("Connection1 (CG→Server): NAK delivery=%.1f%%, fulfillment=%.1f%%",
+            result1.NAKDeliveryRate*100, result1.NAKFulfillmentRate*100))
+    combined.Details = append(combined.Details,
+        fmt.Sprintf("Connection2 (Server→Client): NAK delivery=%.1f%%, fulfillment=%.1f%%",
+            result2.NAKDeliveryRate*100, result2.NAKFulfillmentRate*100))
+
+    return combined
 }
 ```
 
@@ -1463,4 +2067,7 @@ type TestConfig struct {
 | 2024-12-06 | Initial design document | - |
 | 2024-12-06 | Added Go runtime metrics analysis for long-running tests | - |
 | 2024-12-06 | Use montanaflynn/stats library for statistical functions | - |
+| 2024-12-09 | Added per-connection metrics analysis section with complete Prometheus metric mapping | - |
+| 2024-12-09 | Updated metrics based on audit: all 118 atomic fields now exported to Prometheus | - |
+| 2024-12-09 | Added ConnectionAnalysis struct for independent analysis of each SRT connection | - |
 

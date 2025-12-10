@@ -284,6 +284,13 @@ func main() {
 					continue
 				}
 
+				// Check for EOF - peer closed connection (expected during shutdown)
+				if errors.Is(err, io.EOF) {
+					// Connection closed by peer - exit gracefully (don't report error)
+					doneChan <- nil
+					return
+				}
+
 				// Check if error is due to connection being closed (expected during shutdown)
 				errStr := err.Error()
 				if strings.Contains(errStr, "connection refused") ||

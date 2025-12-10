@@ -53,7 +53,56 @@ result := AnalysisResult{Passed: true}  // Dangerous assumption!
 Every test result must be based on explicit validation of metrics and behavior, not assumptions
 about what "should" happen. If we can't measure it, we can't validate it.
 
-#### 3. Defense in Depth
+#### 3. Understanding Loss: Network vs SRT
+
+**CRITICAL DISTINCTION**: There are two different types of "loss" in these tests:
+
+**Network-Level Loss (netem loss)**:
+- Packets dropped by the network (simulated via `tc netem loss X%`)
+- SRT detects these as **sequence gaps** when packets arrive out of order or are missing
+- SRT's ARQ (Automatic Repeat reQuest) mechanism triggers NAKs to request retransmission
+- With properly sized buffers, SRT should **recover** all network-lost packets
+
+**SRT-Level Loss (unrecoverable loss)**:
+- Packets that SRT's retransmission mechanism **failed to recover**
+- This happens when:
+  - The TSBPD (Time Sender Based Packet Delivery) delay expired before recovery
+  - Too many consecutive retransmissions were needed (congestion)
+  - Network outages exceeded the buffer capacity (e.g., Starlink gaps)
+- This represents **actual data loss** delivered to the application
+
+**Metric Mapping**:
+| Metric | Meaning |
+|--------|---------|
+| `netem loss 5%` | ~5% of packets dropped by network |
+| `CongestionRecvPktLoss` | Sequence gaps DETECTED (≈ netem loss) |
+| `NAKs sent` | Requests for retransmission |
+| `Retransmissions` | Packets re-sent to repair gaps |
+| `PktRecvDrop` | Packets that arrived too late (TSBPD expired) |
+| Final SRT loss | `PktRecvDrop` + undelivered packets |
+
+**Test Expectations**:
+- **Normal conditions (5% netem loss, adequate buffers)**:
+  - `CongestionRecvPktLoss` ≈ 5% of sent packets (gaps detected)
+  - `Retransmissions` ≈ `CongestionRecvPktLoss` (repairs attempted)
+  - `PktRecvDrop` ≈ 0 (all recovered)
+  - SRT loss = 0% (100% recovery)
+
+- **Extreme conditions (high loss, small buffers, long outages)**:
+  - `CongestionRecvPktLoss` > expected (many gaps)
+  - `Retransmissions` > `CongestionRecvPktLoss` (multiple retries needed)
+  - `PktRecvDrop` > 0 (some unrecoverable)
+  - SRT loss > 0% (incomplete recovery)
+
+**Why This Matters**:
+When analyzing test results, we must distinguish between:
+1. "Did SRT detect the network impairment?" → Check `CongestionRecvPktLoss`
+2. "Did SRT repair the damage?" → Check `Retransmissions` and NAK exchange
+3. "Was data actually lost?" → Check `PktRecvDrop` and delivery counts
+
+The goal of most tests is: **network loss should NOT result in SRT loss** (when buffers are sized correctly).
+
+#### 4. Defense in Depth
 
 Multiple layers of validation provide confidence:
 - Process lifecycle (did processes start/stop correctly?)
@@ -195,26 +244,43 @@ any anomalies, errors, or failures are definitively caused by the GoSRT implemen
 │                                                                             │
 │  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌───────────┐ │
 │  │  ns_pub     │     │ ns_router_a │═════│ ns_router_b │     │  ns_srv   │ │
-│  │ Client-Gen  │────▶│  (netem)    │     │  (netem)    │────▶│  Server   │ │
-│  └─────────────┘     │  (nftables) │     └─────────────┘     └───────────┘ │
-│                      └─────────────┘                               ▲       │
-│                            ▲                                       │       │
+│  │ Client-Gen  │◀───▶│  (netem)    │◀═══▶│  (netem)    │◀───▶│  Server   │ │
+│  └─────────────┘     └─────────────┘     └─────────────┘     └───────────┘ │
+│                            ▲                                       ▲       │
 │  ┌─────────────┐           │                                       │       │
-│  │  ns_sub     │───────────┘                                       │       │
-│  │  Client     │───────────────────────────────────────────────────┘       │
+│  │  ns_sub     │◀──────────┘                                       │       │
+│  │  Client     │◀──────────────────────────────────────────────────┘       │
 │  └─────────────┘                                                           │
 │                                                                             │
+│  ◀═══▶ = BIDIRECTIONAL impairment (loss + latency on BOTH directions)      │
 │  ══════ = Multiple parallel links with fixed latency (0/10/60/130/300ms)   │
-│  Latency switching via routing, loss injection via nftables DROP           │
+│  Latency switching via routing, loss via blackhole routes + netem          │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Two Independent SRT Connections with Bidirectional Impairment**:
+
+The test creates two separate, independent SRT connections:
+
+1. **Connection 1: Publisher ↔ Server**
+   - DATA: Publisher → (X% loss) → Server
+   - ACK/NAK: Server → (X% loss) → Publisher
+   - SRT ARQ operates between Publisher and Server
+
+2. **Connection 2: Server ↔ Subscriber** (INDEPENDENT)
+   - DATA: Server → (X% loss) → Subscriber
+   - ACK/NAK: Subscriber → (X% loss) → Server
+   - SRT ARQ operates independently between Server and Subscriber
+   - Starts with "clean" data successfully repaired from Connection 1
 
 **Characteristics**:
 - Each process runs in an isolated network namespace
 - Traffic routed through dual-router architecture with configurable impairment
-- Latency: 0ms, 10ms, 60ms, 130ms, 300ms RTT (switched via routing)
-- Loss: 0-100% (injected via nftables DROP rules)
+- **Bidirectional**: Loss and latency applied on BOTH Router A and Router B
+- Latency: 0ms, 10ms, 60ms, 130ms, 300ms RTT (switched via routing, split as RTT/2 each side)
+- Loss: 0-100% (100% via blackhole routes, 1-99% via netem loss parameter)
 - Starlink pattern, burst loss, and complex patterns supported
+- Each SRT connection has loss on both DATA and ACK/NAK paths
 
 **Purpose**: Validate SRT's ARQ-based loss recovery under realistic network conditions.
 
@@ -896,7 +962,58 @@ validation for network impairment tests.
 - **Error Analysis**: Verify error counters are zero (or within expected bounds)
 - **Positive Signals**: Confirm packets sent/received, throughput achieved, ACK/NAK exchanged
 - **Statistical Validation**: For network tests, verify loss rates match configured impairment (±50% tolerance)
+- **NAK/Retransmit Verification**: Verify retransmissions match NAK requests (see below)
 - **Time Series**: Analyze metrics across multiple collection points
+- **Per-Connection Analysis**: Independent analysis of both SRT connections (Publisher→Server, Server→Subscriber)
+
+### NAK/Retransmit Verification (Updated 2024-12-10)
+
+A critical validation for network impairment tests is verifying that the SRT ARQ mechanism
+is working correctly. The NAK detail counters enable this by tracking **packets requested**
+(not entries), ensuring a verifiable relationship between NAKs and retransmissions.
+
+**Key Invariant**:
+```
+NAKSingle + NAKRange = NAKPktsTotal = Expected Retransmissions
+```
+
+Where:
+- `NAKSingle`: Packets requested via single NAK entries (1 packet per entry)
+- `NAKRange`: Packets requested via range NAK entries (sum of range sizes)
+- `NAKPktsTotal`: Convenience counter = NAKSingle + NAKRange
+
+**Validation Logic**:
+| Check | Formula | Healthy Value |
+|-------|---------|---------------|
+| NAK Delivery | `NAKPktsReceived / NAKPktsRequested` | ≥ 90% |
+| NAK Fulfillment | `RetransSent / NAKPktsReceived` | 80-100% |
+| Counter Invariant | `NAKSingle + NAKRange == NAKPktsTotal` | Always true |
+
+**Example Output**:
+```
+NAK/Retransmit Verification:
+  Publisher→Server:
+    NAK requests sent: 150 pkts (12 via singles, 138 via ranges)
+    NAK requests received by publisher: 145 pkts (97% delivery)
+    Retransmissions sent: 140 pkts (97% fulfillment)
+  ✓ ARQ mechanism working correctly
+```
+
+See [NAK Detail Analysis](metrics_analysis_design.md#4-nak-detail-analysis-rfc-srt-appendix-a)
+for the complete design and validation code.
+
+### Metrics Audit
+
+The `./tools/metrics-audit` tool verifies alignment between metrics defined, incremented, and exported:
+
+```
+=== GoSRT Metrics Audit ===
+✅ Fully Aligned (defined, used, exported): 118 fields
+```
+
+All 118 atomic counters in `ConnectionMetrics` are now properly exported to Prometheus.
+See [Per-Connection Metrics Analysis](metrics_analysis_design.md#per-connection-metrics-analysis)
+for the complete mapping of metrics to each SRT connection.
 
 ### 2.1 Error Metrics Categories
 
@@ -1023,7 +1140,7 @@ type TestValidator interface {
 | SmallBuffers | Low latency confirmed (TSBPD delay) |
 | LargeBuffers | No drops under normal conditions |
 | IoUring-* | io_uring submission count > 0 |
-| Loss Recovery | Retransmit count matches induced loss |
+| Loss Recovery | NAKSingle + NAKRange = NAKPktsTotal ≈ RetransSent |
 
 ### 2.4 Analysis Output Format
 
@@ -1078,9 +1195,27 @@ server, and subscriber processes. A **dual-router architecture** (`ns_router_a` 
 with multiple parallel veth pairs enables:
 
 - **Latency control**: Five fixed-latency links (0ms, 10ms, 60ms, 130ms, 300ms RTT); latency
-  switching via routing table updates (no queue flush)
-- **Loss injection**: `nftables` DROP rules for instant packet loss without affecting netem queues
+  switching via routing table updates (no queue flush); **RTT/2 applied on each side**
+- **Loss injection**: **Bidirectional** - loss applied on BOTH routers
+  - 100% loss: Blackhole routes for instant packet drop (Starlink events)
+  - 1-99% loss: netem loss parameter on inter-router links
 - **Queue sizing**: 50,000 packet netem queue limit to prevent tail-drop at high latency
+
+#### Bidirectional Impairment
+
+All network impairments are applied **bidirectionally** on both Router A and Router B.
+This creates realistic conditions where each SRT connection experiences impairment on
+both its DATA path and its control (ACK/NAK) path.
+
+**Two Independent SRT Connections**:
+- **Publisher ↔ Server**: SRT ARQ repairs this connection; loss affects both DATA and ACK/NAK
+- **Server ↔ Subscriber**: Independent SRT ARQ; starts fresh with repaired data from Connection 1
+
+**Impact of bidirectional 5% loss**:
+- ~5% of DATA packets lost → triggers NAKs
+- ~5% of NAK packets lost → some retransmit requests lost
+- ~5% of retransmissions also lost → cascading gaps possible
+- Each connection repairs independently
 
 #### Metrics Collection
 
@@ -1097,9 +1232,10 @@ curl --unix-socket /tmp/srt_server.sock http://localhost/metrics
 
 #### Key Metrics to Validate
 
-- `gosrt_pkt_recv_loss` matches induced loss
-- `gosrt_pkt_retrans_total` > 0 (recovery happening)
-- `gosrt_congestion_recv_pkt_loss` tracks unrecoverable loss
+- `gosrt_pkt_recv_loss` matches induced loss per connection
+- `gosrt_pkt_retrans_total` > 0 (recovery happening on each connection)
+- `gosrt_congestion_recv_pkt_loss` tracks sequence gaps detected
+- `gosrt_congestion_recv_data_drop` tracks unrecoverable loss (SRT loss)
 - Final data integrity (no missing packets after recovery)
 
 ### 3.2 Video Stream Testing
@@ -1485,14 +1621,19 @@ make test-integration REPORT=html > report.html
 **Configurable Statistical Thresholds**:
 ```go
 type StatisticalThresholds struct {
-    LossRateTolerance float64 // ±X% of expected loss rate
-    MinRetransRate    float64 // Minimum retransmission ratio
-    MaxRetransRate    float64 // Maximum retransmission ratio
-    MinNAKsPerLostPkt float64 // Minimum NAKs per lost packet
-    MaxNAKsPerLostPkt float64 // Maximum NAKs per lost packet
-    MinRecoveryRate   float64 // Minimum packet recovery rate
+    LossRateTolerance   float64 // ±X% of expected loss rate
+    MinRetransRate      float64 // Minimum retransmission ratio
+    MaxRetransRate      float64 // Maximum retransmission ratio
+    MinNAKDeliveryRate  float64 // NAKPktsReceived / NAKPktsRequested (min 0.9)
+    MinNAKFulfillment   float64 // RetransSent / NAKPktsReceived (min 0.8)
+    MinRecoveryRate     float64 // Minimum packet recovery rate
 }
 ```
+
+**NAK Verification (Updated 2024-12-10)**:
+NAK counters now track **packets** (not entries), enabling precise verification:
+- `NAKSingle + NAKRange = NAKPktsTotal` must hold (counter invariant)
+- `RetransSent ≈ NAKPktsReceived` verifies the sender fulfilled NAK requests
 
 Preset threshold functions:
 - `DefaultThresholds()` - ±50% loss tolerance, 95% recovery
@@ -1506,9 +1647,14 @@ Preset threshold functions:
 **Implementation Tracker**: [packet_loss_injection_implementation.md](packet_loss_injection_implementation.md)
 
 **Loss Injection Approach**:
-- **100% loss events** (Starlink, outages): Null/blackhole routes (`ip route add blackhole`)
-- **Probabilistic loss** (2%, 5%, etc.): Netem `loss` parameter on inter-router links
+- **Bidirectional impairment**: Loss and latency applied on BOTH Router A and Router B
+- **100% loss events** (Starlink, outages): Blackhole routes on BOTH routers
+- **Probabilistic loss** (2%, 5%, etc.): Netem `loss` parameter on BOTH sides of inter-router links
 - **No nftables dependency**: Uses only iproute2 and tc (simpler, fewer dependencies)
+
+**Two Independent SRT Connections**:
+- Publisher ↔ Server: SRT ARQ with bidirectional impairment (data + ACK/NAK paths)
+- Server ↔ Subscriber: Independent SRT ARQ, starts fresh with repaired data
 
 - [x] Design namespace-based network isolation
 - [x] Design dual-router architecture with netem
@@ -1518,6 +1664,7 @@ Preset threshold functions:
 - [x] Implement Go network controller (`network_controller.go`)
 - [x] Implement network mode test runner (`test_network_mode.go`)
 - [x] Add network impairment test configurations (10 configs)
+- [x] Make loss bidirectional (both Router A and Router B)
 - [ ] Validate ARQ mechanism under loss (requires running tests with root)
 
 **Shell Scripts** (`contrib/integration_testing/network/`):
@@ -1634,4 +1781,9 @@ contrib/integration_testing/
 | 2024-12-08 | Phase 3 implementation complete: scripts, controller, 10 test configs | - |
 | 2024-12-07 | Added montanaflynn/stats for linear regression | - |
 | 2024-12-07 | Implemented Go runtime stability analysis (Phase 3) | - |
+| 2024-12-09 | **BIDIRECTIONAL impairment**: Loss now applied on BOTH Router A and Router B | - |
+| 2024-12-09 | Clarified two independent SRT connections with bidirectional impairment | - |
+| 2024-12-09 | Updated lib.sh, design docs, and architecture diagrams for bidirectional | - |
+| 2024-12-09 | Added per-connection metrics analysis to metrics_analysis_design.md | - |
+| 2024-12-09 | Verified all 118 metrics exported to Prometheus via metrics-audit tool | - |
 

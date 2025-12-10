@@ -250,37 +250,50 @@ get_latency_description() {
 # LOSS CONTROL - Via blackhole routes (100%) or netem loss (probabilistic)
 #=============================================================================
 
-# Apply 100% packet loss using blackhole routes (instant effect)
+# Apply 100% packet loss using blackhole routes (instant effect) - BIDIRECTIONAL
+# Blackhole routes are applied on BOTH routers for complete outage simulation
 # Usage: set_blackhole_loss
 set_blackhole_loss() {
-    log_info "Applying 100% loss via blackhole routes"
+    log_info "Applying 100% loss via blackhole routes (bidirectional)"
 
-    # Add blackhole routes for server and subscriber subnets
+    # Router A: Block traffic TO server and subscriber subnets
     run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${SUBNET_SERVER}.0/24" 2>/dev/null || \
         run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route replace blackhole "${SUBNET_SERVER}.0/24"
     run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${SUBNET_SUBSCRIBER}.0/24" 2>/dev/null || \
         run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route replace blackhole "${SUBNET_SUBSCRIBER}.0/24"
+
+    # Router B: Block traffic TO publisher and subscriber subnets
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${SUBNET_PUBLISHER}.0/24" 2>/dev/null || \
+        run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route replace blackhole "${SUBNET_PUBLISHER}.0/24"
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${SUBNET_SUBSCRIBER}.0/24" 2>/dev/null || \
+        run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route replace blackhole "${SUBNET_SUBSCRIBER}.0/24"
 }
 
-# Remove blackhole routes (restore normal routing)
+# Remove blackhole routes (restore normal routing) - BIDIRECTIONAL
 # Usage: clear_blackhole_loss
 clear_blackhole_loss() {
-    log_info "Removing blackhole routes"
+    log_info "Removing blackhole routes (bidirectional)"
 
-    # Remove blackhole routes (ignore errors if they don't exist)
+    # Remove blackhole routes from Router A (ignore errors if they don't exist)
     run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${SUBNET_SERVER}.0/24" 2>/dev/null || true
     run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${SUBNET_SUBSCRIBER}.0/24" 2>/dev/null || true
+
+    # Remove blackhole routes from Router B (ignore errors if they don't exist)
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${SUBNET_PUBLISHER}.0/24" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${SUBNET_SUBSCRIBER}.0/24" 2>/dev/null || true
 
     # Restore normal routing via current latency profile
     set_latency_profile "${CURRENT_LATENCY_PROFILE}"
 }
 
-# Apply probabilistic loss using netem
+# Apply probabilistic loss using netem (BIDIRECTIONAL)
+# Loss is applied on BOTH Router A and Router B for realistic simulation
 # Usage: set_netem_loss <percent>
 set_netem_loss() {
     local loss_percent="$1"
     local link_index="${CURRENT_LATENCY_PROFILE}"
-    local interface_name="link${link_index}_a"
+    local interface_a="link${link_index}_a"
+    local interface_b="link${link_index}_b"
 
     # Get current delay for this link
     local profile="${LATENCY_PROFILES[${link_index}]}"
@@ -288,23 +301,32 @@ set_netem_loss() {
     rtt_milliseconds=$(echo "${profile}" | cut -d' ' -f2)
     local delay_milliseconds=$((rtt_milliseconds / 2))
 
-    log_info "Applying ${loss_percent}% loss on link${link_index}"
+    log_info "Applying ${loss_percent}% loss on link${link_index} (bidirectional)"
 
     if [[ "${delay_milliseconds}" -gt 0 ]]; then
-        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" tc qdisc change dev "${interface_name}" \
+        # Router A side (Publisher/Subscriber → Server direction)
+        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" tc qdisc change dev "${interface_a}" \
+            root netem delay "${delay_milliseconds}ms" loss "${loss_percent}%" limit "${NETEM_QUEUE_LIMIT}"
+        # Router B side (Server → Publisher/Subscriber direction)
+        run_in_namespace "${NAMESPACE_ROUTER_SERVER}" tc qdisc change dev "${interface_b}" \
             root netem delay "${delay_milliseconds}ms" loss "${loss_percent}%" limit "${NETEM_QUEUE_LIMIT}"
     else
         # Link 0 has no delay, so we need to add qdisc first or change it
-        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" tc qdisc replace dev "${interface_name}" \
+        # Router A side
+        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" tc qdisc replace dev "${interface_a}" \
+            root netem loss "${loss_percent}%" limit "${NETEM_QUEUE_LIMIT}"
+        # Router B side
+        run_in_namespace "${NAMESPACE_ROUTER_SERVER}" tc qdisc replace dev "${interface_b}" \
             root netem loss "${loss_percent}%" limit "${NETEM_QUEUE_LIMIT}"
     fi
 }
 
-# Clear netem loss (restore delay-only)
+# Clear netem loss (restore delay-only) - BIDIRECTIONAL
 # Usage: clear_netem_loss
 clear_netem_loss() {
     local link_index="${CURRENT_LATENCY_PROFILE}"
-    local interface_name="link${link_index}_a"
+    local interface_a="link${link_index}_a"
+    local interface_b="link${link_index}_b"
 
     # Get current delay for this link
     local profile="${LATENCY_PROFILES[${link_index}]}"
@@ -312,14 +334,22 @@ clear_netem_loss() {
     rtt_milliseconds=$(echo "${profile}" | cut -d' ' -f2)
     local delay_milliseconds=$((rtt_milliseconds / 2))
 
-    log_info "Clearing loss on link${link_index} (restoring delay-only)"
+    log_info "Clearing loss on link${link_index} (restoring delay-only, bidirectional)"
 
     if [[ "${delay_milliseconds}" -gt 0 ]]; then
-        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" tc qdisc change dev "${interface_name}" \
+        # Router A side
+        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" tc qdisc change dev "${interface_a}" \
+            root netem delay "${delay_milliseconds}ms" limit "${NETEM_QUEUE_LIMIT}"
+        # Router B side
+        run_in_namespace "${NAMESPACE_ROUTER_SERVER}" tc qdisc change dev "${interface_b}" \
             root netem delay "${delay_milliseconds}ms" limit "${NETEM_QUEUE_LIMIT}"
     else
         # Link 0 - just remove any loss
-        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" tc qdisc replace dev "${interface_name}" \
+        # Router A side
+        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" tc qdisc replace dev "${interface_a}" \
+            root netem limit "${NETEM_QUEUE_LIMIT}"
+        # Router B side
+        run_in_namespace "${NAMESPACE_ROUTER_SERVER}" tc qdisc replace dev "${interface_b}" \
             root netem limit "${NETEM_QUEUE_LIMIT}"
     fi
 }

@@ -156,12 +156,16 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	}
 
 	// Store packet for metrics tracking (before decommissioning control packets)
-	// Note: Control packets are decommissioned immediately, but we need packet type for metrics
+	// For control packets, we capture the control type BEFORE decommissioning,
+	// then increment the counter directly since IncrementSendMetrics can't classify nil packets.
 	packetForMetrics := p
-	if p.Header().IsControlPacket {
+	var controlType packet.CtrlType
+	isControlPacket := p.Header().IsControlPacket
+	if isControlPacket {
+		controlType = p.Header().ControlType
 		// Decommission control packets immediately (they won't be retransmitted)
 		p.Decommission()
-		packetForMetrics = nil // Can't use after decommission, but we already have header info
+		packetForMetrics = nil // Can't use after decommission
 	}
 	// Data packets are handled by congestion control (may be retransmitted)
 
@@ -296,7 +300,14 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	// 1. Control packets are decommissioned, so we can't get type in completion handler
 	// 2. Submission success means the packet will be sent (completion errors are rare)
 	if c.metrics != nil {
-		metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, true, 0)
+		if isControlPacket {
+			// Control packets were decommissioned, so we use the captured controlType
+			c.metrics.PktSentIoUring.Add(1)
+			metrics.IncrementSendControlMetric(c.metrics, controlType)
+		} else {
+			// Data packets: use standard path
+			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, true, 0)
+		}
 	}
 
 	// Completion will be handled asynchronously by completion handler

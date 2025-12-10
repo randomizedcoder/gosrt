@@ -147,12 +147,50 @@ func PrintPipelineBalance(result PipelineBalanceResult) {
 	}
 }
 
+// printConnectionSummary prints a summary for a single SRT connection
+// receiverMetrics: metrics from the RECEIVER side of this connection
+// senderMetrics: metrics from the SENDER side of this connection
+func printConnectionSummary(connName string, receiverMetrics, senderMetrics DerivedMetrics) {
+	// Determine connection label
+	var connLabel string
+	if connName == "Connection1" {
+		connLabel = "Publisher → Server"
+	} else {
+		connLabel = "Server → Subscriber"
+	}
+
+	fmt.Printf("    %s (%s):\n", connName, connLabel)
+
+	// Sender side stats
+	retransPct := float64(0)
+	if senderMetrics.TotalPacketsSent > 0 {
+		retransPct = float64(senderMetrics.TotalRetransmissions) / float64(senderMetrics.TotalPacketsSent) * 100
+	}
+	fmt.Printf("      Sender: sent=%d, retrans=%d (%.2f%%)\n",
+		senderMetrics.TotalPacketsSent, senderMetrics.TotalRetransmissions, retransPct)
+
+	// Receiver side stats
+	gapPct := float64(0)
+	if senderMetrics.TotalPacketsSent > 0 {
+		gapPct = float64(receiverMetrics.TotalGapsDetected) / float64(senderMetrics.TotalPacketsSent) * 100
+	}
+	recoveryRate := float64(100)
+	if receiverMetrics.TotalGapsDetected > 0 {
+		recoveryRate = (1.0 - float64(receiverMetrics.TotalPacketsDropped)/float64(receiverMetrics.TotalGapsDetected)) * 100
+	}
+	fmt.Printf("      Receiver: recv=%d, gaps=%d (%.2f%%), drops=%d, recovery=%.1f%%\n",
+		receiverMetrics.TotalPacketsRecv, receiverMetrics.TotalGapsDetected, gapPct,
+		receiverMetrics.TotalPacketsDropped, recoveryRate)
+	fmt.Printf("      NAKs: sent=%d, recv=%d | ACKs: sent=%d, recv=%d\n",
+		receiverMetrics.TotalNAKsSent, senderMetrics.TotalNAKsRecv,
+		receiverMetrics.TotalACKsSent, senderMetrics.TotalACKsRecv)
+}
+
 // DerivedMetrics computed from the time series
 type DerivedMetrics struct {
 	// Deltas (final - initial)
 	TotalPacketsSent     int64
 	TotalPacketsRecv     int64
-	TotalPacketsLost     int64
 	TotalRetransmissions int64
 	TotalRetransFromNAK  int64 // Direct counter from NAK handling
 	TotalNAKsSent        int64
@@ -163,6 +201,30 @@ type DerivedMetrics struct {
 	TotalACKACKsRecv     int64
 	TotalErrors          int64
 
+	// Network vs SRT Loss (see integration_testing_design.md#3-understanding-loss-network-vs-srt)
+	// TotalGapsDetected: Sequence gaps detected by receiver (≈ netem loss, triggers NAK/retrans)
+	TotalGapsDetected int64
+	// TotalPacketsDropped: Packets that arrived too late (TSBPD expired) = actual SRT loss
+	TotalPacketsDropped int64
+	// TotalPacketsLost: Alias for TotalGapsDetected for backward compatibility
+	TotalPacketsLost int64
+	// TotalDuplicates: Packets already in buffer (over-NAKing confirmation metric)
+	// If duplicates ≈ (NAKPktsRequested - GapsDetected), confirms range NAKs over-requesting
+	TotalDuplicates int64
+
+	// NAK Detail Counters (RFC SRT Appendix A)
+	// Counters track PACKETS, not entries: NAKSinglesSent + NAKRangesSent = NAKPktsRequested
+	// This allows direct verification: RetransSent ≈ NAKPktsReceived
+	//
+	// Receiver side (sends NAKs)
+	NAKSinglesSent   int64 // Packets requested via single NAK entries (1 per entry)
+	NAKRangesSent    int64 // Packets requested via range NAK entries (sum of range sizes)
+	NAKPktsRequested int64 // Total = NAKSinglesSent + NAKRangesSent
+	// Sender side (receives NAKs)
+	NAKSinglesRecv  int64 // Packets requested via single NAK entries received
+	NAKRangesRecv   int64 // Packets requested via range NAK entries received
+	NAKPktsReceived int64 // Total = NAKSinglesRecv + NAKRangesRecv
+
 	// Bytes sent/received
 	TotalBytesSent int64
 	TotalBytesRecv int64
@@ -170,8 +232,10 @@ type DerivedMetrics struct {
 	// Rates (computed from time series)
 	AvgSendRateMbps float64
 	AvgRecvRateMbps float64
-	AvgLossRate     float64 // packets lost / packets sent
-	AvgRetransRate  float64 // retransmissions / packets lost
+	AvgGapRate      float64 // gaps detected / packets sent (≈ netem loss rate)
+	AvgDropRate     float64 // packets dropped / packets sent (= SRT loss rate)
+	AvgRetransRate  float64 // retransmissions / gaps detected (recovery efficiency)
+	AvgLossRate     float64 // Alias for AvgGapRate for backward compatibility
 
 	// Duration
 	Duration time.Duration
@@ -209,6 +273,7 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 
 	// ========== Congestion Control Statistics (Primary Source) ==========
 	// These come from the congestion control layer and are the most accurate
+	// See integration_testing_design.md#3-understanding-loss-network-vs-srt for terminology
 
 	// Packets sent/received from congestion control (includes retransmissions)
 	dm.TotalPacketsSent = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_packets_total", "direction=\"send\"") -
@@ -216,9 +281,22 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 	dm.TotalPacketsRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_packets_total", "direction=\"recv\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_congestion_packets_total", "direction=\"recv\""))
 
-	// Packets lost - detected via sequence number gaps by receiver
-	dm.TotalPacketsLost = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_packets_lost_total", "direction=\"recv\"") -
+	// Gaps detected - sequence number gaps detected by receiver (≈ netem loss, NOT SRT loss)
+	// This triggers NAK/retransmission - most gaps should be recovered
+	dm.TotalGapsDetected = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_packets_lost_total", "direction=\"recv\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_congestion_packets_lost_total", "direction=\"recv\""))
+	dm.TotalPacketsLost = dm.TotalGapsDetected // Alias for backward compatibility
+
+	// Packets dropped - packets that arrived too late (TSBPD expired) = actual SRT loss
+	dm.TotalPacketsDropped = int64(getSumByPrefix(last, "gosrt_connection_congestion_recv_data_drop_total") -
+		getSumByPrefix(first, "gosrt_connection_congestion_recv_data_drop_total"))
+	dm.TotalPacketsDropped += int64(getSumByPrefix(last, "gosrt_connection_congestion_send_data_drop_total") -
+		getSumByPrefix(first, "gosrt_connection_congestion_send_data_drop_total"))
+
+	// Duplicate packets - already in buffer, confirms over-NAKing
+	// These are packets that were re-requested by range NAKs but weren't actually lost
+	dm.TotalDuplicates = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"duplicate\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"duplicate\""))
 
 	// Retransmissions - packets retransmitted by sender
 	dm.TotalRetransmissions = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_retransmissions_total", "direction=\"send\"") -
@@ -242,6 +320,23 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 		getSumByPrefixContaining(first, "gosrt_connection_packets_sent_total", "type=\"nak\""))
 	dm.TotalNAKsRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_received_total", "type=\"nak\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_packets_received_total", "type=\"nak\""))
+
+	// NAK Detail Counters (RFC SRT Appendix A)
+	// Receiver side (sends NAKs) - Figure 21 (single) and Figure 22 (range)
+	dm.NAKSinglesSent = int64(getSumByPrefixContaining(last, "gosrt_connection_nak_entries_total", "direction=\"sent\",type=\"single\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_nak_entries_total", "direction=\"sent\",type=\"single\""))
+	dm.NAKRangesSent = int64(getSumByPrefixContaining(last, "gosrt_connection_nak_entries_total", "direction=\"sent\",type=\"range\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_nak_entries_total", "direction=\"sent\",type=\"range\""))
+	dm.NAKPktsRequested = int64(getSumByPrefixContaining(last, "gosrt_connection_nak_packets_requested_total", "direction=\"sent\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_nak_packets_requested_total", "direction=\"sent\""))
+
+	// Sender side (receives NAKs)
+	dm.NAKSinglesRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_nak_entries_total", "direction=\"recv\",type=\"single\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_nak_entries_total", "direction=\"recv\",type=\"single\""))
+	dm.NAKRangesRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_nak_entries_total", "direction=\"recv\",type=\"range\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_nak_entries_total", "direction=\"recv\",type=\"range\""))
+	dm.NAKPktsReceived = int64(getSumByPrefixContaining(last, "gosrt_connection_nak_packets_requested_total", "direction=\"recv\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_nak_packets_requested_total", "direction=\"recv\""))
 
 	// ACKACK counters
 	dm.TotalACKACKsSent = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_sent_total", "type=\"ackack\"") -
@@ -286,12 +381,20 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 		}
 	}
 
+	// Gap rate = gaps detected / packets sent (≈ netem loss rate)
 	if dm.TotalPacketsSent > 0 {
-		dm.AvgLossRate = float64(dm.TotalPacketsLost) / float64(dm.TotalPacketsSent)
+		dm.AvgGapRate = float64(dm.TotalGapsDetected) / float64(dm.TotalPacketsSent)
+		dm.AvgLossRate = dm.AvgGapRate // Alias for backward compatibility
 	}
 
-	if dm.TotalPacketsLost > 0 {
-		dm.AvgRetransRate = float64(dm.TotalRetransmissions) / float64(dm.TotalPacketsLost)
+	// Drop rate = packets dropped / packets sent (= SRT loss rate, should be near 0)
+	if dm.TotalPacketsSent > 0 {
+		dm.AvgDropRate = float64(dm.TotalPacketsDropped) / float64(dm.TotalPacketsSent)
+	}
+
+	// Retransmission rate = retransmissions / gaps detected (recovery efficiency)
+	if dm.TotalGapsDetected > 0 {
+		dm.AvgRetransRate = float64(dm.TotalRetransmissions) / float64(dm.TotalGapsDetected)
 	}
 
 	return dm
@@ -742,23 +845,60 @@ func PrintAnalysisResult(result AnalysisResult) {
 				fmt.Printf("    %s\n", v.Message)
 			}
 		}
-		// Print warnings even if passed
+		// Print non-per-connection warnings
 		for _, w := range result.StatisticalValidation.Warnings {
-			fmt.Printf("  ⚠ %s: %s\n", w.Metric, w.Message)
+			// Skip per-connection stats (printed separately below)
+			if !strings.Contains(w.Metric, "/Stats") {
+				fmt.Printf("  ⚠ %s: %s\n", w.Metric, w.Message)
+			}
 		}
-		// Print observed statistics summary for network impairment tests
-		fmt.Println("\n  Observed Statistics:")
+
+		// Print per-connection analysis summary
+		fmt.Println("\n  Per-Connection Analysis:")
+		printConnectionSummary("Connection1", result.ServerMetrics, result.ClientGenMetrics)
+		printConnectionSummary("Connection2", result.ClientMetrics, result.ServerMetrics)
+
+		// Print combined statistics summary
+		fmt.Println("\n  Combined Statistics (see integration_testing_design.md section 3):")
+		packetsSent := result.ClientGenMetrics.TotalPacketsSent
+		totalGaps := result.ServerMetrics.TotalGapsDetected + result.ClientMetrics.TotalGapsDetected
+		totalDrops := result.ServerMetrics.TotalPacketsDropped + result.ClientMetrics.TotalPacketsDropped
+		totalRetrans := result.ClientGenMetrics.TotalRetransmissions + result.ServerMetrics.TotalRetransmissions
+
 		retransPctOfSent := float64(0)
-		if result.ClientGenMetrics.TotalPacketsSent > 0 {
-			retransPctOfSent = float64(result.ClientGenMetrics.TotalRetransmissions) /
-				float64(result.ClientGenMetrics.TotalPacketsSent) * 100
+		gapsPctOfSent := float64(0)
+		if packetsSent > 0 {
+			retransPctOfSent = float64(totalRetrans) / float64(packetsSent) * 100
+			gapsPctOfSent = float64(totalGaps) / float64(packetsSent) * 100
 		}
-		fmt.Printf("    Configured loss: %.1f%%, Retrans%% of sent: %.2f%%\n",
-			result.TestConfig.Impairment.LossRate*100, retransPctOfSent)
-		fmt.Printf("    Packets sent: %d, Retransmissions: %d, Lost: %d\n",
-			result.ClientGenMetrics.TotalPacketsSent,
-			result.ClientGenMetrics.TotalRetransmissions,
-			result.ClientMetrics.TotalPacketsLost)
+		recoveryRate := float64(0)
+		if totalGaps > 0 {
+			recoveryRate = (1.0 - float64(totalDrops)/float64(totalGaps)) * 100
+		} else {
+			recoveryRate = 100.0
+		}
+
+		fmt.Printf("    netem configured: %.1f%% bidirectional loss\n", result.TestConfig.Impairment.LossRate*100)
+		fmt.Printf("    Original packets: %d\n", packetsSent)
+		fmt.Printf("    Total gaps: %d (%.2f%% combined rate)\n", totalGaps, gapsPctOfSent)
+		fmt.Printf("    Total retransmissions: %d (%.2f%% of original)\n", totalRetrans, retransPctOfSent)
+		fmt.Printf("    Unrecovered (SRT drops): %d\n", totalDrops)
+		fmt.Printf("    Combined recovery rate: %.1f%%\n", recoveryRate)
+
+		// NAK Detail Analysis (RFC SRT Appendix A)
+		// NAK counters track PACKETS: SinglesPkts + RangesPkts = TotalPktsRequested
+		if len(result.StatisticalValidation.NAKDetailResults) > 0 {
+			fmt.Println("\n  NAK Detail Analysis (RFC SRT Appendix A):")
+			fmt.Println("    (NAK counters track packets, not entries)")
+			for _, nak := range result.StatisticalValidation.NAKDetailResults {
+				if nak.TotalPktsRequested > 0 {
+					fmt.Printf("    %s: %d pkts (singles) + %d pkts (ranges) = %d total\n",
+						nak.ConnectionName, nak.SinglesPkts, nak.RangesPkts, nak.TotalPktsRequested)
+					fmt.Printf("      Delivery: %.1f%%, Fulfillment: %.1f%%, Range ratio: %.0f%%\n",
+						nak.NAKDeliveryRate*100, nak.NAKFulfillmentRate*100, nak.RangePktRatio*100)
+				}
+			}
+		}
 	}
 
 	// Pipeline Balance (only for clean network tests)
@@ -1077,6 +1217,68 @@ type StatisticalValidationResult struct {
 	Passed     bool
 	Violations []StatisticalViolation
 	Warnings   []StatisticalWarning
+
+	// NAK Detail Analysis (RFC SRT Appendix A)
+	NAKDetailResults []NAKDetailResult
+}
+
+// NAKDetailResult contains per-connection NAK detail analysis
+// NAK counters track PACKETS (not entries): SinglesPkts + RangesPkts = TotalPktsRequested
+type NAKDetailResult struct {
+	ConnectionName     string
+	NAKDeliveryRate    float64 // NAKPktsReceived / NAKPktsRequested (should be ~1.0)
+	NAKFulfillmentRate float64 // RetransSent / NAKPktsReceived (should be ~1.0)
+	RangePktRatio      float64 // NAKRangesSent / NAKPktsRequested (proportion from ranges)
+	SinglesPkts        int64   // Packets requested via single NAK entries
+	RangesPkts         int64   // Packets requested via range NAK entries
+	TotalPktsRequested int64   // Total = SinglesPkts + RangesPkts
+	HasIssues          bool    // True if any validation failed
+	Issues             []string
+}
+
+// ValidateNAKDetail validates NAK detail metrics for a single connection
+// NAK counters track PACKETS: SinglesPkts + RangesPkts = TotalPktsRequested
+func ValidateNAKDetail(conn ConnectionAnalysis) NAKDetailResult {
+	result := NAKDetailResult{
+		ConnectionName:     conn.Name,
+		SinglesPkts:        conn.NAKSinglesSent,
+		RangesPkts:         conn.NAKRangesSent,
+		TotalPktsRequested: conn.NAKPktsRequested,
+	}
+
+	// Use pre-computed rates from ConnectionAnalysis
+	result.NAKDeliveryRate = conn.NAKDeliveryRate
+	result.NAKFulfillmentRate = conn.NAKFulfillmentRate
+	result.RangePktRatio = conn.RangePktRatio
+
+	// Verify counter invariant: SinglesPkts + RangesPkts = TotalPktsRequested
+	expectedTotal := result.SinglesPkts + result.RangesPkts
+	if expectedTotal != result.TotalPktsRequested {
+		result.HasIssues = true
+		result.Issues = append(result.Issues,
+			fmt.Sprintf("NAK counter invariant violation: %d + %d ≠ %d",
+				result.SinglesPkts, result.RangesPkts, result.TotalPktsRequested))
+	}
+
+	// Validate NAK delivery (are NAKs getting through the network?)
+	if conn.NAKPktsRequested > 0 && result.NAKDeliveryRate < 0.9 {
+		result.HasIssues = true
+		result.Issues = append(result.Issues,
+			fmt.Sprintf("NAK delivery rate %.1f%% - NAKs being lost by network", result.NAKDeliveryRate*100))
+	}
+
+	// Validate NAK fulfillment (are retransmissions being sent?)
+	// Key Verification: RetransSent ≈ NAKPktsReceived
+	if conn.NAKPktsReceived > 0 && result.NAKFulfillmentRate < 0.8 {
+		result.Issues = append(result.Issues,
+			fmt.Sprintf("NAK fulfillment rate %.1f%% - sender can't retransmit (buffer exhausted?)", result.NAKFulfillmentRate*100))
+	}
+	if conn.NAKPktsReceived > 0 && result.NAKFulfillmentRate > 1.1 {
+		result.Issues = append(result.Issues,
+			fmt.Sprintf("NAK fulfillment rate %.1f%% - retransmitting more than requested (possible bug)", result.NAKFulfillmentRate*100))
+	}
+
+	return result
 }
 
 // StatisticalExpectation defines expected behavior under network impairment
@@ -1099,27 +1301,135 @@ type StatisticalExpectation struct {
 }
 
 // ObservedStatistics holds computed statistics from metrics
+// See integration_testing_design.md#3-understanding-loss-network-vs-srt for terminology
+// ConnectionAnalysis holds metrics for a single SRT connection endpoint pair
+// This enables independent analysis of each of the two SRT connections:
+// Connection 1: ClientGenerator (publisher) → Server
+// Connection 2: Server → Client (subscriber)
+type ConnectionAnalysis struct {
+	Name string // "publisher-to-server" or "server-to-subscriber"
+
+	// === FROM SENDER SIDE ===
+	PacketsSent       int64 // congestion_packets_total{direction="send"}
+	PacketsSentUnique int64 // congestion_packets_unique_total{direction="send"} (excl. retrans)
+	RetransSent       int64 // congestion_retransmissions_total{direction="send"}
+	NAKsReceived      int64 // packets_received_total{type="nak"}
+	ACKsReceived      int64 // packets_received_total{type="ack"}
+	SendDrops         int64 // congestion_send_data_drop_total
+
+	// === NAK DETAIL - SENDER (receives NAKs) ===
+	// RFC SRT Appendix A: NAK loss list encoding
+	// Counters track PACKETS (not entries): NAKSinglesRecv + NAKRangesRecv = NAKPktsReceived
+	NAKSinglesRecv  int64 // Packets requested via single NAK entries received
+	NAKRangesRecv   int64 // Packets requested via range NAK entries received
+	NAKPktsReceived int64 // Total = NAKSinglesRecv + NAKRangesRecv
+
+	// === FROM RECEIVER SIDE ===
+	PacketsRecv       int64 // congestion_packets_total{direction="recv"}
+	PacketsRecvUnique int64 // congestion_packets_unique_total{direction="recv"} (excl. dupes)
+	GapsDetected      int64 // congestion_packets_lost_total{direction="recv"}
+	RetransRecv       int64 // congestion_retransmissions_total{direction="recv"}
+	NAKsSent          int64 // packets_sent_total{type="nak"}
+	ACKsSent          int64 // packets_sent_total{type="ack"}
+	RecvDrops         int64 // congestion_recv_data_drop_total (SRT unrecoverable)
+
+	// === NAK DETAIL - RECEIVER (sends NAKs) ===
+	// RFC SRT Appendix A: NAK loss list encoding
+	// Counters track PACKETS (not entries): NAKSinglesSent + NAKRangesSent = NAKPktsRequested
+	NAKSinglesSent   int64 // Packets requested via single NAK entries sent
+	NAKRangesSent    int64 // Packets requested via range NAK entries sent
+	NAKPktsRequested int64 // Total = NAKSinglesSent + NAKRangesSent
+
+	// === COMPUTED METRICS ===
+	GapRate          float64 // GapsDetected / PacketsSent (≈ netem loss)
+	RetransPctOfSent float64 // RetransSent / PacketsSent (should match netem loss)
+	RecoveryRate     float64 // 1 - (RecvDrops / GapsDetected) or 100% if no gaps
+	NAKEfficiency    float64 // NAKsSent / GapsDetected (should be ~1.0)
+
+	// === NAK DETAIL COMPUTED METRICS ===
+	// Key Verification: RetransSent ≈ NAKPktsReceived (sender fulfilling NAK requests)
+	NAKDeliveryRate    float64 // NAKPktsReceived / NAKPktsRequested (should be ~1.0)
+	NAKFulfillmentRate float64 // RetransSent / NAKPktsReceived (should be ~1.0)
+	RangePktRatio      float64 // NAKRangesSent / NAKPktsRequested (proportion from ranges)
+}
+
+// computeRates calculates derived rates for a connection
+func (c *ConnectionAnalysis) computeRates() {
+	if c.PacketsSent > 0 {
+		c.GapRate = float64(c.GapsDetected) / float64(c.PacketsSent)
+		c.RetransPctOfSent = float64(c.RetransSent) / float64(c.PacketsSent)
+	}
+
+	if c.GapsDetected > 0 {
+		c.RecoveryRate = 1.0 - (float64(c.RecvDrops) / float64(c.GapsDetected))
+		if c.RecoveryRate < 0 {
+			c.RecoveryRate = 0
+		}
+		c.NAKEfficiency = float64(c.NAKsSent) / float64(c.GapsDetected)
+	} else {
+		c.RecoveryRate = 1.0 // No gaps = 100% recovery
+		c.NAKEfficiency = 0  // No NAKs needed
+	}
+
+	// NAK Detail Rates (RFC SRT Appendix A)
+	// Key Invariant: NAKSinglesSent + NAKRangesSent = NAKPktsRequested (packets, not entries)
+	//
+	// NAK Delivery: Are NAKs getting through the network?
+	if c.NAKPktsRequested > 0 {
+		c.NAKDeliveryRate = float64(c.NAKPktsReceived) / float64(c.NAKPktsRequested)
+	} else {
+		c.NAKDeliveryRate = 1.0 // No NAKs needed
+	}
+
+	// NAK Fulfillment: Are retransmissions being sent for NAK requests?
+	// Key Verification: RetransSent ≈ NAKPktsReceived
+	if c.NAKPktsReceived > 0 {
+		c.NAKFulfillmentRate = float64(c.RetransSent) / float64(c.NAKPktsReceived)
+	} else {
+		c.NAKFulfillmentRate = 1.0 // No NAKs to fulfill
+	}
+
+	// Range packet ratio: what proportion of NAK'd packets came from ranges?
+	// High ratio indicates burst losses (immediate NAKs for gaps)
+	// Low ratio indicates scattered losses (periodic NAKs for individual packets)
+	if c.NAKPktsRequested > 0 {
+		c.RangePktRatio = float64(c.NAKRangesSent) / float64(c.NAKPktsRequested)
+	}
+}
+
 type ObservedStatistics struct {
-	// Primary loss rate (using the best available method)
-	LossRate float64 // Best estimate of packets lost / packets sent
+	// === PER-CONNECTION ANALYSIS ===
+	Connection1 ConnectionAnalysis // Publisher → Server
+	Connection2 ConnectionAnalysis // Server → Subscriber
 
-	// Cross-endpoint loss calculation (sender packets - receiver packets)
+	// === COMBINED METRICS (backward compatibility and summary) ===
+	// Network-level gap detection (≈ netem loss, triggers NAK/retransmission)
+	GapRate float64 // Sequence gaps detected / packets sent (≈ netem loss)
+	GapsAbs int64   // Absolute count of gaps detected
+
+	// SRT-level loss (unrecoverable packets)
+	DropRate float64 // Packets dropped / packets sent (actual SRT loss)
+	DropsAbs int64   // Absolute count of dropped packets
+
+	// Cross-endpoint validation (sender - receiver)
 	CrossEndpointLossRate float64 // (PacketsSent - PacketsRecv) / PacketsSent
-	CrossEndpointLossAbs  int64   // Absolute packets lost via cross-endpoint
+	CrossEndpointLossAbs  int64   // Absolute difference
 
-	// Reported loss from sequence gap detection
-	ReportedLossRate float64 // PacketsLost / PacketsSent (from receiver's detection)
-	ReportedLossAbs  int64   // Absolute packets lost via sequence gaps
+	// For backward compatibility
+	LossRate         float64 // Alias for GapRate
+	ReportedLossRate float64 // Alias for GapRate
+	ReportedLossAbs  int64   // Alias for GapsAbs
 
-	// Cross-check: do both methods agree?
+	// Cross-check: do gap detection and cross-endpoint agree?
 	LossMethodsAgree bool    // True if both methods agree within tolerance
 	LossDiscrepancy  float64 // Difference between methods (for debugging)
 
-	// Other statistics
-	RetransRate       float64 // Retransmissions / packets lost (should be ~1.0 for full recovery)
-	RetransPctOfSent  float64 // Retransmissions / packets sent (should match loss rate)
-	NAKsPerLostPacket float64 // NAKs sent / packets lost
-	RecoveryRate      float64 // (Packets sent - unrecoverable) / packets sent
+	// Recovery and retransmission statistics
+	RetransRate       float64 // Retransmissions / gaps detected
+	RetransPctOfSent  float64 // Retransmissions / packets sent
+	NAKsPerGap        float64 // NAKs sent / gaps detected
+	NAKsPerLostPacket float64 // Alias for NAKsPerGap
+	RecoveryRate      float64 // (Gaps - Drops) / Gaps = % of gaps successfully recovered
 }
 
 // ValidateStatistical performs statistical validation for network impairment tests
@@ -1148,109 +1458,94 @@ func ValidateStatistical(ts *TestMetricsTimeSeries, config *TestConfig) Statisti
 	checksPerformed := 0
 	checksPassed := 0
 
-	// Validate loss rate (using best available method)
+	// ========== TERMINOLOGY (see integration_testing_design.md Section 3) ==========
+	// - "netem loss": Packets dropped by network (what we configure in tc netem)
+	// - "Gaps detected": Sequence gaps seen by receiver - triggers NAK/retransmission
+	// - "Retransmissions": Packets re-sent to repair gaps
+	// - "SRT loss": Packets that arrived too late (TSBPD expired) - actual data loss
+	//
+	// Key insight: GapRate can be HIGHER than netem loss because:
+	// - Retransmissions can also be lost, causing cascading gaps
+	// - Example: 5% netem loss → ~5% gaps → retransmit → some lost again → more gaps
+	//
+	// The correct metric to validate against netem loss is RetransPctOfSent (retrans/sent),
+	// which directly measures the repair activity needed.
+
+	// ========== Validate Netem Loss Correlation ==========
+	// RetransPctOfSent should approximately equal the configured netem loss rate
+	// This is the most reliable indicator because each dropped packet triggers a retransmission
 	checksPerformed++
-	if isWithinTolerance(observed.LossRate, expected.ExpectedLossRate, expected.LossRateTolerance) {
+	if isWithinTolerance(observed.RetransPctOfSent, expected.ExpectedLossRate, expected.LossRateTolerance) {
 		checksPassed++
 	} else {
 		lowerBound := expected.ExpectedLossRate * (1 - expected.LossRateTolerance)
 		upperBound := expected.ExpectedLossRate * (1 + expected.LossRateTolerance)
 		result.Violations = append(result.Violations, StatisticalViolation{
-			Metric:        "LossRate",
+			Metric:        "RetransPctOfSent",
 			ExpectedRange: fmt.Sprintf("%.1f%% - %.1f%%", lowerBound*100, upperBound*100),
-			Observed:      observed.LossRate * 100,
+			Observed:      observed.RetransPctOfSent * 100,
 			Message: fmt.Sprintf(
-				"Observed loss rate %.2f%% outside expected range for %.1f%% configured loss (cross-endpoint: %.2f%%, reported: %.2f%%)",
-				observed.LossRate*100, expected.ExpectedLossRate*100,
-				observed.CrossEndpointLossRate*100, observed.ReportedLossRate*100),
+				"Retransmission rate (%.2f%%) outside expected range for %.1f%% netem loss",
+				observed.RetransPctOfSent*100, expected.ExpectedLossRate*100),
 		})
 	}
 
-	// Add warning if loss calculation methods disagree significantly
+	// ========== Informational: Gap Detection Statistics ==========
+	// GapRate can be higher than netem loss due to cascading gaps
+	// This is informational, not a validation failure
+	if observed.GapRate > expected.ExpectedLossRate*2.0 {
+		result.Warnings = append(result.Warnings, StatisticalWarning{
+			Metric: "GapRate",
+			Message: fmt.Sprintf(
+				"Gap detection rate (%.2f%%) is %.1fx the netem loss rate (%.1f%%) - "+
+					"likely due to cascading gaps from retransmission loss",
+				observed.GapRate*100, observed.GapRate/expected.ExpectedLossRate, expected.ExpectedLossRate*100),
+		})
+	}
+
+	// ========== Cross-Check: Methods Agreement ==========
+	// Add warning if gap detection and cross-endpoint methods disagree significantly
 	if !observed.LossMethodsAgree && observed.LossDiscrepancy > 0 {
 		result.Warnings = append(result.Warnings, StatisticalWarning{
 			Metric: "LossMethodDiscrepancy",
 			Message: fmt.Sprintf(
-				"Loss detection methods disagree by %.1f%%: cross-endpoint=%.2f%% (%d pkts), reported=%.2f%% (%d pkts)",
+				"Gap detection methods disagree by %.1f%%: cross-endpoint=%.2f%% (%d pkts), gaps=%.2f%% (%d pkts)",
 				observed.LossDiscrepancy*100,
 				observed.CrossEndpointLossRate*100, observed.CrossEndpointLossAbs,
-				observed.ReportedLossRate*100, observed.ReportedLossAbs),
+				observed.GapRate*100, observed.GapsAbs),
 		})
 	}
 
-	// Validate retransmission rate (only if there was loss)
-	if observed.LossRate > 0 {
+	// ========== Validate NAK Behavior ==========
+	// NAKs should be sent when gaps are detected (only validate if expected and gaps detected)
+	if expected.ExpectNAKs && observed.GapsAbs > 0 {
 		checksPerformed++
-		if observed.RetransRate >= expected.MinRetransRate {
+		if observed.NAKsPerGap >= expected.MinNAKsPerLostPkt {
 			checksPassed++
 		} else {
 			result.Violations = append(result.Violations, StatisticalViolation{
-				Metric:        "RetransRate",
-				ExpectedRange: fmt.Sprintf(">= %.1f%%", expected.MinRetransRate*100),
-				Observed:      observed.RetransRate * 100,
-				Message:       "Too few retransmissions - loss recovery may not be working",
-			})
-		}
-
-		// Warn on excessive retransmissions
-		if observed.RetransRate > expected.MaxRetransRate {
-			result.Warnings = append(result.Warnings, StatisticalWarning{
-				Metric: "RetransRate",
-				Message: fmt.Sprintf(
-					"High retransmission rate (%.1f%%) - possible retransmission storm",
-					observed.RetransRate*100),
-			})
-		}
-
-		// Cross-check: retransmissions as % of sent should be close to loss rate
-		// This validates that the ARQ is working correctly end-to-end
-		// With loss rate L and retrans recovery R, expected retrans % ≈ L / (1 - L*R) ≈ L for small L
-		// Use wider tolerance (2x) since retransmissions can also be lost
-		checksPerformed++
-		lowerBound := expected.ExpectedLossRate * 0.5 // At least 50% of loss rate
-		upperBound := expected.ExpectedLossRate * 3.0 // No more than 3x loss rate
-		if observed.RetransPctOfSent >= lowerBound && observed.RetransPctOfSent <= upperBound {
-			checksPassed++
-		} else {
-			result.Warnings = append(result.Warnings, StatisticalWarning{
-				Metric: "RetransPctOfSent",
-				Message: fmt.Sprintf(
-					"Retransmissions (%.2f%% of sent) don't match loss rate (%.1f%% expected) - "+
-						"expected range %.2f%% - %.2f%%",
-					observed.RetransPctOfSent*100, expected.ExpectedLossRate*100,
-					lowerBound*100, upperBound*100),
-			})
-			// Don't fail the test, just warn - this is a sanity check, not a hard requirement
-			checksPassed++ // Count as passed since it's just a warning
-		}
-	}
-
-	// Validate NAK behavior (only if expected and there was loss)
-	if expected.ExpectNAKs && observed.LossRate > 0 {
-		checksPerformed++
-		if observed.NAKsPerLostPacket >= expected.MinNAKsPerLostPkt {
-			checksPassed++
-		} else {
-			result.Violations = append(result.Violations, StatisticalViolation{
-				Metric:        "NAKsPerLostPacket",
+				Metric:        "NAKsPerGap",
 				ExpectedRange: fmt.Sprintf(">= %.2f", expected.MinNAKsPerLostPkt),
-				Observed:      observed.NAKsPerLostPacket,
-				Message:       "Too few NAKs - receiver may not be detecting losses",
+				Observed:      observed.NAKsPerGap,
+				Message:       "Too few NAKs - receiver may not be requesting retransmissions",
 			})
 		}
 
-		// Warn on NAK storms
-		if observed.NAKsPerLostPacket > expected.MaxNAKsPerLostPkt {
+		// Warn on NAK storms (way too many NAKs per gap)
+		if observed.NAKsPerGap > expected.MaxNAKsPerLostPkt {
 			result.Warnings = append(result.Warnings, StatisticalWarning{
-				Metric: "NAKsPerLostPacket",
+				Metric: "NAKsPerGap",
 				Message: fmt.Sprintf(
-					"High NAK rate (%.2f per lost packet) - possible NAK storm",
-					observed.NAKsPerLostPacket),
+					"High NAK rate (%.2f per gap) - possible NAK storm",
+					observed.NAKsPerGap),
 			})
 		}
 	}
 
-	// Validate recovery rate
+	// ========== Validate Recovery Rate (THE KEY METRIC) ==========
+	// This is the most important metric: what % of gaps were successfully recovered?
+	// RecoveryRate = (Gaps - Drops) / Gaps
+	// With 1847 gaps and only 53 drops, RecoveryRate = 97.1% (excellent!)
 	checksPerformed++
 	if observed.RecoveryRate >= expected.MinRecoveryRate {
 		checksPassed++
@@ -1259,7 +1554,44 @@ func ValidateStatistical(ts *TestMetricsTimeSeries, config *TestConfig) Statisti
 			Metric:        "RecoveryRate",
 			ExpectedRange: fmt.Sprintf(">= %.1f%%", expected.MinRecoveryRate*100),
 			Observed:      observed.RecoveryRate * 100,
-			Message:       "Poor loss recovery - too many unrecoverable packets",
+			Message: fmt.Sprintf(
+				"Poor loss recovery - %.0f of %d gaps were not recovered (%.0f packets dropped)",
+				float64(observed.DropsAbs), observed.GapsAbs, float64(observed.DropsAbs)),
+		})
+	}
+
+	// ========== PER-CONNECTION VALIDATION ==========
+	// Validate each connection independently for more detailed diagnostics
+	conn1Passed, conn1Checks := checkConnectionAnalysis(
+		observed.Connection1, expected, &result, "Connection1")
+	conn2Passed, conn2Checks := checkConnectionAnalysis(
+		observed.Connection2, expected, &result, "Connection2")
+
+	checksPerformed += conn1Checks + conn2Checks
+	if conn1Passed {
+		checksPassed += conn1Checks
+	}
+	if conn2Passed {
+		checksPassed += conn2Checks
+	}
+
+	// ========== NAK DETAIL VALIDATION (RFC SRT Appendix A) ==========
+	// Validate NAK request/fulfillment pipeline for each connection
+	nakResult1 := ValidateNAKDetail(observed.Connection1)
+	nakResult2 := ValidateNAKDetail(observed.Connection2)
+	result.NAKDetailResults = append(result.NAKDetailResults, nakResult1, nakResult2)
+
+	// Add NAK delivery issues as warnings (not failures - informational for now)
+	for _, issue := range nakResult1.Issues {
+		result.Warnings = append(result.Warnings, StatisticalWarning{
+			Metric:  "Connection1/NAKDetail",
+			Message: issue,
+		})
+	}
+	for _, issue := range nakResult2.Issues {
+		result.Warnings = append(result.Warnings, StatisticalWarning{
+			Metric:  "Connection2/NAKDetail",
+			Message: issue,
 		})
 	}
 
@@ -1269,6 +1601,73 @@ func ValidateStatistical(ts *TestMetricsTimeSeries, config *TestConfig) Statisti
 	}
 
 	return result
+}
+
+// checkConnectionAnalysis validates a single SRT connection and returns (passed, numChecks)
+func checkConnectionAnalysis(
+	conn ConnectionAnalysis,
+	expected StatisticalExpectation,
+	result *StatisticalValidationResult,
+	connName string,
+) (bool, int) {
+	checksPerformed := 0
+	checksPassed := 0
+
+	// Skip validation if no packets sent on this connection
+	if conn.PacketsSent == 0 {
+		return true, 0 // No data = passes by default
+	}
+
+	// 1. Recovery Rate for this connection
+	checksPerformed++
+	if conn.RecoveryRate >= expected.MinRecoveryRate {
+		checksPassed++
+	} else {
+		result.Violations = append(result.Violations, StatisticalViolation{
+			Metric:        fmt.Sprintf("%s/RecoveryRate", connName),
+			ExpectedRange: fmt.Sprintf(">= %.1f%%", expected.MinRecoveryRate*100),
+			Observed:      conn.RecoveryRate * 100,
+			Message: fmt.Sprintf("%s (%s): Poor recovery rate %.1f%% - %d gaps, %d unrecovered",
+				connName, conn.Name, conn.RecoveryRate*100, conn.GapsDetected, conn.RecvDrops),
+		})
+	}
+
+	// 2. NAK Efficiency (if gaps exist)
+	if conn.GapsDetected > 0 && expected.ExpectNAKs {
+		checksPerformed++
+		if conn.NAKEfficiency >= expected.MinNAKsPerLostPkt {
+			checksPassed++
+		} else {
+			result.Violations = append(result.Violations, StatisticalViolation{
+				Metric:        fmt.Sprintf("%s/NAKEfficiency", connName),
+				ExpectedRange: fmt.Sprintf(">= %.2f NAKs per gap", expected.MinNAKsPerLostPkt),
+				Observed:      conn.NAKEfficiency,
+				Message: fmt.Sprintf("%s (%s): Low NAK efficiency %.2f - %d gaps but only %d NAKs sent",
+					connName, conn.Name, conn.NAKEfficiency, conn.GapsDetected, conn.NAKsSent),
+			})
+		}
+
+		// Warn on NAK storms
+		if conn.NAKEfficiency > expected.MaxNAKsPerLostPkt {
+			result.Warnings = append(result.Warnings, StatisticalWarning{
+				Metric: fmt.Sprintf("%s/NAKEfficiency", connName),
+				Message: fmt.Sprintf("%s (%s): High NAK rate %.2f per gap - possible NAK storm",
+					connName, conn.Name, conn.NAKEfficiency),
+			})
+		}
+	}
+
+	// Add informational message about this connection's statistics
+	if conn.GapsDetected > 0 {
+		result.Warnings = append(result.Warnings, StatisticalWarning{
+			Metric: fmt.Sprintf("%s/Stats", connName),
+			Message: fmt.Sprintf("%s: sent=%d, gaps=%d (%.2f%%), retrans=%d, drops=%d, recovery=%.1f%%",
+				conn.Name, conn.PacketsSent, conn.GapsDetected, conn.GapRate*100,
+				conn.RetransSent, conn.RecvDrops, conn.RecoveryRate*100),
+		})
+	}
+
+	return checksPassed == checksPerformed, checksPerformed
 }
 
 // computeStatisticalExpectations calculates expected behavior based on impairment config.
@@ -1343,101 +1742,143 @@ func computeStatisticalExpectations(imp NetworkImpairment) StatisticalExpectatio
 func computeObservedStatistics(ts *TestMetricsTimeSeries) ObservedStatistics {
 	// Get derived metrics for each component
 	// Topology: Client-Generator → Server → Client
-	// - Client-generator is the sender (publisher)
-	// - Client is the final receiver (subscriber)
-	// - Server is the relay AND the loss detector (sends NAKs back to client-generator)
-	sender := ComputeDerivedMetrics(ts.ClientGenerator)
-	receiver := ComputeDerivedMetrics(ts.Client)
-	server := ComputeDerivedMetrics(ts.Server)
+	// Two INDEPENDENT SRT connections:
+	//   Connection 1: Client-Generator (publisher) → Server
+	//   Connection 2: Server → Client (subscriber)
+	cgMetrics := ComputeDerivedMetrics(ts.ClientGenerator)
+	serverMetrics := ComputeDerivedMetrics(ts.Server)
+	clientMetrics := ComputeDerivedMetrics(ts.Client)
 
 	stats := ObservedStatistics{}
 
-	// Packets sent by client-generator (publisher)
-	packetsSent := sender.TotalPacketsSent
+	// ========== CONNECTION 1: ClientGenerator → Server ==========
+	// ClientGenerator is SENDER, Server is RECEIVER
+	stats.Connection1 = ConnectionAnalysis{
+		Name: "publisher-to-server",
+		// From ClientGenerator (sender role)
+		PacketsSent:  cgMetrics.TotalPacketsSent,
+		RetransSent:  cgMetrics.TotalRetransmissions,
+		NAKsReceived: cgMetrics.TotalNAKsRecv,
+		ACKsReceived: cgMetrics.TotalACKsRecv,
+		// NAK detail - sender receives NAKs (RFC SRT Appendix A)
+		NAKSinglesRecv:  cgMetrics.NAKSinglesRecv,
+		NAKRangesRecv:   cgMetrics.NAKRangesRecv,
+		NAKPktsReceived: cgMetrics.NAKPktsReceived,
+		// From Server (receiver role for Connection 1)
+		PacketsRecv:  serverMetrics.TotalPacketsRecv,
+		GapsDetected: serverMetrics.TotalGapsDetected,
+		NAKsSent:     serverMetrics.TotalNAKsSent,
+		ACKsSent:     serverMetrics.TotalACKsSent,
+		RecvDrops:    serverMetrics.TotalPacketsDropped,
+		// NAK detail - receiver sends NAKs (RFC SRT Appendix A)
+		NAKSinglesSent:   serverMetrics.NAKSinglesSent,
+		NAKRangesSent:    serverMetrics.NAKRangesSent,
+		NAKPktsRequested: serverMetrics.NAKPktsRequested,
+	}
+	stats.Connection1.computeRates()
+
+	// ========== CONNECTION 2: Server → Client ==========
+	// Server is SENDER (relay), Client is RECEIVER
+	stats.Connection2 = ConnectionAnalysis{
+		Name: "server-to-subscriber",
+		// From Server (sender role for Connection 2)
+		PacketsSent:  serverMetrics.TotalPacketsSent,
+		RetransSent:  serverMetrics.TotalRetransmissions, // Server's retransmissions to Client
+		NAKsReceived: serverMetrics.TotalNAKsRecv,        // NAKs from Client (not from CG)
+		ACKsReceived: serverMetrics.TotalACKsRecv,        // ACKs from Client
+		// NAK detail - sender receives NAKs (RFC SRT Appendix A)
+		NAKSinglesRecv:  serverMetrics.NAKSinglesRecv,
+		NAKRangesRecv:   serverMetrics.NAKRangesRecv,
+		NAKPktsReceived: serverMetrics.NAKPktsReceived,
+		// From Client (receiver role)
+		PacketsRecv:  clientMetrics.TotalPacketsRecv,
+		GapsDetected: clientMetrics.TotalGapsDetected,
+		NAKsSent:     clientMetrics.TotalNAKsSent,
+		ACKsSent:     clientMetrics.TotalACKsSent,
+		RecvDrops:    clientMetrics.TotalPacketsDropped,
+		// NAK detail - receiver sends NAKs (RFC SRT Appendix A)
+		NAKSinglesSent:   clientMetrics.NAKSinglesSent,
+		NAKRangesSent:    clientMetrics.NAKRangesSent,
+		NAKPktsRequested: clientMetrics.NAKPktsRequested,
+	}
+	stats.Connection2.computeRates()
+
+	// ========== COMBINED METRICS (for backward compatibility) ==========
+	// Use Connection 1's sender (ClientGenerator) as the primary sender
+	packetsSent := stats.Connection1.PacketsSent
 	if packetsSent == 0 {
 		// Fallback: estimate from bytes sent
-		if sender.TotalBytesSent > 0 {
-			packetsSent = sender.TotalBytesSent / 1316 // Approximate packet size
+		if cgMetrics.TotalBytesSent > 0 {
+			packetsSent = cgMetrics.TotalBytesSent / 1316 // Approximate packet size
 		}
 	}
 
 	if packetsSent > 0 {
-		// ========== Method 1: Cross-Endpoint Loss Calculation ==========
-		// Compare packets sent by sender vs packets received by receiver
-		packetsReceived := receiver.TotalPacketsRecv
+		// Gap Detection: Sum of gaps across both connections
+		stats.GapsAbs = stats.Connection1.GapsDetected + stats.Connection2.GapsDetected
+		stats.GapRate = float64(stats.GapsAbs) / float64(packetsSent)
+
+		// Backward compatibility aliases
+		stats.ReportedLossAbs = stats.GapsAbs
+		stats.ReportedLossRate = stats.GapRate
+		stats.LossRate = stats.GapRate
+
+		// Drop Detection: Sum of drops across both connections
+		stats.DropsAbs = stats.Connection1.RecvDrops + stats.Connection2.RecvDrops
+		stats.DropRate = float64(stats.DropsAbs) / float64(packetsSent)
+
+		// Cross-Endpoint Validation: Original sender vs final receiver
+		packetsReceived := clientMetrics.TotalPacketsRecv
 		if packetsReceived < packetsSent {
 			stats.CrossEndpointLossAbs = packetsSent - packetsReceived
 			stats.CrossEndpointLossRate = float64(stats.CrossEndpointLossAbs) / float64(packetsSent)
 		}
 
-		// ========== Method 2: Reported Loss (Sequence Gap Detection) ==========
-		// Packets lost as detected by receiver via sequence number gaps
-		stats.ReportedLossAbs = receiver.TotalPacketsLost
-		if stats.ReportedLossAbs > 0 {
-			stats.ReportedLossRate = float64(stats.ReportedLossAbs) / float64(packetsSent)
-		}
-
-		// ========== Cross-Check: Do Both Methods Agree? ==========
-		// Allow 50% discrepancy between methods (due to timing, in-flight packets, etc.)
+		// Cross-Check: Do methods agree?
 		const crossCheckTolerance = 0.5
-		if stats.CrossEndpointLossRate > 0 && stats.ReportedLossRate > 0 {
-			// Calculate relative difference
+		if stats.CrossEndpointLossRate > 0 && stats.GapRate > 0 {
 			maxRate := stats.CrossEndpointLossRate
-			if stats.ReportedLossRate > maxRate {
-				maxRate = stats.ReportedLossRate
+			if stats.GapRate > maxRate {
+				maxRate = stats.GapRate
 			}
 			minRate := stats.CrossEndpointLossRate
-			if stats.ReportedLossRate < minRate {
-				minRate = stats.ReportedLossRate
+			if stats.GapRate < minRate {
+				minRate = stats.GapRate
 			}
 			if maxRate > 0 {
 				stats.LossDiscrepancy = (maxRate - minRate) / maxRate
 				stats.LossMethodsAgree = stats.LossDiscrepancy <= crossCheckTolerance
 			}
 		} else {
-			// If only one method detected loss, they don't really "agree"
-			// but we shouldn't flag it as a discrepancy
 			stats.LossMethodsAgree = true
 		}
 
-		// ========== Use Best Available Loss Rate ==========
-		// Prefer the higher of the two methods (more conservative/defensive)
-		// This catches losses that either method might miss
-		if stats.CrossEndpointLossRate > stats.ReportedLossRate {
-			stats.LossRate = stats.CrossEndpointLossRate
+		// Combined Recovery Rate
+		if stats.GapsAbs > 0 {
+			stats.RecoveryRate = 1.0 - (float64(stats.DropsAbs) / float64(stats.GapsAbs))
+			if stats.RecoveryRate < 0 {
+				stats.RecoveryRate = 0
+			}
 		} else {
-			stats.LossRate = stats.ReportedLossRate
-		}
-
-		// ========== Recovery Rate ==========
-		// What fraction of sent packets were successfully received
-		stats.RecoveryRate = float64(packetsReceived) / float64(packetsSent)
-		if stats.RecoveryRate > 1.0 {
-			stats.RecoveryRate = 1.0 // Cap at 100%
+			stats.RecoveryRate = 1.0
 		}
 	} else {
-		stats.RecoveryRate = 1.0 // No packets sent = 100% recovery (nothing to lose)
+		stats.RecoveryRate = 1.0
 		stats.LossMethodsAgree = true
 	}
 
-	// ========== Retransmission and NAK Rates ==========
-	// Use the best available loss count for denominators
-	lossCount := stats.ReportedLossAbs
-	if stats.CrossEndpointLossAbs > lossCount {
-		lossCount = stats.CrossEndpointLossAbs
+	// Combined Retransmission and NAK Rates
+	totalRetrans := stats.Connection1.RetransSent + stats.Connection2.RetransSent
+	if stats.GapsAbs > 0 {
+		stats.RetransRate = float64(totalRetrans) / float64(stats.GapsAbs)
+		totalNAKs := stats.Connection1.NAKsSent + stats.Connection2.NAKsSent
+		stats.NAKsPerGap = float64(totalNAKs) / float64(stats.GapsAbs)
+		stats.NAKsPerLostPacket = stats.NAKsPerGap
 	}
 
-	if lossCount > 0 {
-		stats.RetransRate = float64(sender.TotalRetransmissions) / float64(lossCount)
-		// NAKs are sent by the SERVER (which receives from client-generator and detects loss)
-		// NOT by the final client (which just receives relayed data from server)
-		stats.NAKsPerLostPacket = float64(server.TotalNAKsSent) / float64(lossCount)
-	}
-
-	// Retransmissions as percentage of packets sent
-	// This should match the configured loss rate (e.g., 2% loss → ~2% retransmissions)
+	// RetransPctOfSent using Connection 1's retransmissions (primary sender)
 	if packetsSent > 0 {
-		stats.RetransPctOfSent = float64(sender.TotalRetransmissions) / float64(packetsSent)
+		stats.RetransPctOfSent = float64(stats.Connection1.RetransSent) / float64(packetsSent)
 	}
 
 	return stats

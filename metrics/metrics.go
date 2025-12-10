@@ -156,7 +156,17 @@ type ConnectionMetrics struct {
 	CongestionRecvBytePayload      atomic.Uint64
 	CongestionRecvMbpsBandwidth    atomic.Uint64 // Mbps * 1000
 	CongestionRecvMbpsLinkCapacity atomic.Uint64 // Mbps * 1000
-	CongestionRecvPktRetransRate atomic.Uint64 // Retransmission rate: bytesRetrans/bytesRecv * 100 (NOT loss rate)
+	CongestionRecvPktRetransRate   atomic.Uint64 // Retransmission rate: bytesRetrans/bytesRecv * 100 (NOT loss rate)
+
+	// NAK generation counters - Receiver sends NAKs to request retransmission
+	// RFC SRT Appendix A defines two NAK encoding formats:
+	// - Single packet (Figure 21): 4 bytes, bit 0 = 0
+	// - Range of packets (Figure 22): 8 bytes, bit 0 of first = 1
+	// These counters track PACKETS requested, not entries:
+	//   NAKSingle + NAKRange = NAKPktsTotal = expected retransmissions
+	CongestionRecvNAKSingle    atomic.Uint64 // Packets requested via single NAK entries (1 per entry)
+	CongestionRecvNAKRange     atomic.Uint64 // Packets requested via range NAK entries (sum of range sizes)
+	CongestionRecvNAKPktsTotal atomic.Uint64 // Total packets requested = NAKSingle + NAKRange
 
 	// Congestion control - Sender statistics
 	CongestionSendPkt                atomic.Uint64
@@ -178,7 +188,7 @@ type ConnectionMetrics struct {
 	CongestionSendBytePayload        atomic.Uint64
 	CongestionSendMbpsInputBandwidth atomic.Uint64 // Mbps * 1000
 	CongestionSendMbpsSentBandwidth  atomic.Uint64 // Mbps * 1000
-	CongestionSendPktRetransRate atomic.Uint64 // Retransmission rate: bytesRetrans/bytesSent * 100 (NOT loss rate)
+	CongestionSendPktRetransRate     atomic.Uint64 // Retransmission rate: bytesRetrans/bytesSent * 100 (NOT loss rate)
 
 	// Additional error/drop counters for congestion control
 	CongestionRecvPktNil               atomic.Uint64 // Nil packets received
@@ -186,6 +196,16 @@ type ConnectionMetrics struct {
 	// CongestionRecvDeliveryFailed       atomic.Uint64 // Not implemented - delivery callbacks don't fail
 	// CongestionSendDeliveryFailed       atomic.Uint64 // Not implemented - delivery callbacks don't fail
 	CongestionSendNAKNotFound atomic.Uint64 // NAK requests for packets not in lossList
+
+	// NAK receive counters - Sender receives NAKs and retransmits
+	// RFC SRT Appendix A defines two NAK encoding formats:
+	// - Single packet (Figure 21): 4 bytes, bit 0 = 0
+	// - Range of packets (Figure 22): 8 bytes, bit 0 of first = 1
+	// These counters track PACKETS requested, not entries:
+	//   NAKSingleRecv + NAKRangeRecv = NAKPktsRecv = expected retransmissions
+	CongestionSendNAKSingleRecv atomic.Uint64 // Packets requested via single NAK entries (1 per entry)
+	CongestionSendNAKRangeRecv  atomic.Uint64 // Packets requested via range NAK entries (sum of range sizes)
+	CongestionSendNAKPktsRecv   atomic.Uint64 // Total packets requested = NAKSingleRecv + NAKRangeRecv
 
 	// Granular drop counters - Congestion control (DATA packets only)
 	CongestionRecvDataDropTooOld            atomic.Uint64 // Belated, past play time
