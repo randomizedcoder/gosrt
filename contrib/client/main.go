@@ -207,25 +207,27 @@ func main() {
 	clientMetrics := &metrics.ConnectionMetrics{}
 
 	// Start throughput stats display loop (uses shared common function)
-	// Shows receive stats: bytes, packets, success count, loss count, and retransmits
+	// Shows receive stats: bytes, packets, gaps, skips (true losses), and retransmits
+	// Recovery rate = (gaps - skips) / gaps = % of gaps successfully retransmitted
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		common.RunThroughputDisplayWithLabel(ctx, STATS_PERIOD, "SUB", func() (uint64, uint64, uint64, uint64, uint64) {
-			// Get loss and retransmit counts from the actual connection's metrics (if available)
-			var loss, retrans uint64
+			// Get gaps, skips, and retransmit counts from the actual connection's metrics
+			var gaps, skips, retrans uint64
 			if socketId := connSocketId.Load(); socketId != 0 {
 				// Query the actual connection metrics
 				conns, _ := metrics.GetConnections()
 				if connMetrics, ok := conns[socketId]; ok && connMetrics != nil {
-					loss = connMetrics.CongestionRecvPktLoss.Load()
+					gaps = connMetrics.CongestionRecvPktLoss.Load()          // Sequence gaps detected
+					skips = connMetrics.CongestionRecvPktSkippedTSBPD.Load() // TRUE losses (TSBPD expired)
 					retrans = connMetrics.CongestionRecvPktRetrans.Load()
 				}
 			}
 			return clientMetrics.ByteRecvDataSuccess.Load(),
 				clientMetrics.PktRecvDataSuccess.Load(),
-				clientMetrics.PktRecvDataSuccess.Load(), // Use data packets for success count
-				loss,
+				gaps,
+				skips,
 				retrans
 		})
 	}()

@@ -1,8 +1,10 @@
 # Defect 10: High Loss Rate Despite Large SRT Buffers
 
-**Status**: 🔴 Under Investigation
-**Priority**: High
+**Status**: ✅ RESOLVED - Analysis Flaw Fixed
+**Priority**: Medium (was High)
 **Discovered**: 2024-12-10
+**Root Cause Identified**: 2024-12-10
+**Resolution**: 2024-12-10 (Fixed recovery rate calculation in `analysis.go`)
 **Related Documents**:
 - `integration_testing_with_network_impairment_defects.md` - Parent tracking document
 - `integration_testing_design.md` - Test framework design
@@ -10,7 +12,17 @@
 
 ---
 
-## Problem Statement
+## Summary
+
+**TL;DR**: The "low recovery rate" was a **metrics interpretation error**, not an SRT bug.
+
+- **`Skips: 0`** confirms ALL packets eventually arrived (true 100% recovery)
+- The "drops" (`already_acked` + `duplicate`) are **duplicate retransmits**, not unrecovered packets
+- The recovery calculation was counting duplicate arrivals as failures
+
+---
+
+## Problem Statement (Original)
 
 With only **2% netem packet loss** configured and **3-second SRT latency buffers**, the test shows unexpectedly poor recovery:
 
@@ -21,7 +33,9 @@ With only **2% netem packet loss** configured and **3-second SRT latency buffers
 | NAK delivery rate | 98%+ | ~60% | **~38% lower** |
 | Packets unrecovered | <10 | 127 | **12x higher** |
 
-**Key Question**: Why is SRT unable to recover from 2% loss when it has 3-second buffers?
+**Original Question**: Why is SRT unable to recover from 2% loss when it has 3-second buffers?
+
+**Answer**: SRT IS recovering! The metrics were being misinterpreted.
 
 ---
 
@@ -754,29 +768,630 @@ Every 2-second collection shows similar pattern:
 | 1 | Understand NAK Delivery Rate metric | ✅ BUG FOUND |
 | 1.1 | Create shared `CountNAKEntries()` helper | ✅ IMPLEMENTED |
 | 1.2 | Verify Distance() function semantics | ✅ VERIFIED |
-| 1.3 | Re-run tests to verify fix | 🔴 Not Started |
-| 2 | Design Single Connection test | 📝 Documented |
-| 3 | Draw network topology with netem | 📝 Documented |
-| 4 | Review netem configuration | 📝 Documented |
-| 5 | Mathematical analysis | 📝 Documented |
-| 6 | Define experiments | 📝 Documented |
+| 1.3 | Re-run tests to verify NAK fix | ✅ VERIFIED (99% delivery) |
+| 2 | **Metrics Gap Analysis** | ✅ COMPLETE |
+| 2.1 | Add 4 new counters to `metrics.go` | ✅ IMPLEMENTED |
+| 2.2 | Implement TSBPD skip counting | ✅ IMPLEMENTED |
+| 2.3 | Implement tick counters for ACK/NAK routines | ✅ IMPLEMENTED |
+| 2.4 | Export to Prometheus | ✅ IMPLEMENTED |
+| 2.5 | Update `analysis.go` (recovery + health check) | ✅ IMPLEMENTED |
+| 2.6 | Add unit tests | ✅ IMPLEMENTED (3 tests) |
+| 2.7 | Run metrics-audit to verify single increments | ✅ VERIFIED |
+| 2.8 | Re-run network impairment tests | 🔴 Not Started |
 
-**BUG FIXED (Phase 1.1)**: Immediate NAK path in `receive.go` now uses shared `CountNAKEntries()` helper.
-
-**ADDITIONAL BUG FIXED (Phase 1.1)**: Loss counter (`CongestionRecvPktLoss`) was counting 1 extra packet due to using `Distance(pkt, maxSeen)` instead of the actual NAK list.
-
-**Phase 1.3 COMPLETE**: NAK accounting fix verified:
+**Phase 1 COMPLETE**: NAK accounting bugs fixed:
+- Created shared `CountNAKEntries()` helper (100% consistency)
 - NAK Delivery Rate: 99.1% (was 60% before fix) ✅
 - NAK Fulfillment Rate: 100% ✅
 
-**NEW ISSUE DISCOVERED**: Despite NAKs working correctly, recovery rate is still 45%!
+**Phase 2 COMPLETE**: Metrics gap analysis:
+- Reviewed all metrics design documents
+- Identified missing counter: `CongestionRecvPktSkippedTSBPD`
+- Documented complete packet flow audit
+- Created 7-step implementation plan
 
-**Root Cause Identified (Phase 1.4)**: Missing "TSBPD Skip" counter!
+**Phase 2 COMPLETE**: TSBPD skip counter implemented and tested:
+- Counter correctly tracks packets that NEVER arrive (verified in unit tests)
+- In real-world test: `skips=0` because all packets eventually arrive (3s buffer is enough)
+- The 36 "drops" are packets that ARRIVED but were discarded (`already_acked`, `duplicate`)
+- Recovery rate issue is a **timing** problem, not a loss problem
+
+**NEW FINDING**: ACK is advancing past gaps BEFORE retransmits arrive:
+- Retransmit arrives → but ACK already passed → `already_acked` drop
+- This causes low "recovery" even though packets DO arrive
+
+**Root Cause Identified (Phase 1.4)**: Two issues found!
+
+**Issue 1: Missing "TSBPD Skip" Counter**
 - When a packet never arrives (lost + all retransmissions lost), the receiver skips over it at TSBPD time
 - This is NOT counted as a "drop" - the current drop counters only track packets that ARRIVED but were discarded
-- The verbose output shows `DROPS: +5 (too_late: 0, buf_full: 0, dupes: 0)` - the 5 drops are not categorized!
+- Location: `receive.go:363-365` - ACK sequence advances past missing packets, no counter incremented
+- The verbose output shows `DROPS: +5 (too_late: 0, buf_full: 0, dupes: 0)` - mismatch indicates uncounted drops
 
-**Next Step**: Investigate why packets are not being recovered despite 150+ potential NAK cycles
+**Issue 2: Recovery Rate Calculation Flawed**
+- `analysis.go:179` calculates: `recoveryRate = 1 - (TotalPacketsDropped / TotalGapsDetected)`
+- But `TotalPacketsDropped` only counts packets that ARRIVED then were discarded
+- It does NOT count packets that NEVER arrived (the real unrecovered gaps)
+- This explains the 45% "recovery rate" - it's measuring the wrong thing!
+
+**Actual Recovery Analysis (from test output)**:
+- Total retransmissions: 245
+- Total gaps detected: 175
+- Retrans/gap ratio: 1.4
+
+If periodic NAK were working correctly with 150 retry cycles:
+- Expected retransmissions for 45% unrecovered: ~79 gaps × 150 retries = 11,850
+- Actual: only 245 total retransmissions
+- **Conclusion**: Periodic NAK is NOT re-requesting unrecovered packets multiple times!
+
+**Hypothesis**: The periodic NAK stops re-requesting once ACK sequence advances past the gap (TSBPD skip)
+
+---
+
+## Phase 2: Metrics Gap Analysis
+
+### 2.1 Document Review Summary
+
+Reviewed the following documents to understand the gap:
+
+| Document | Relevant Content | Gap Found? |
+|----------|------------------|------------|
+| `metrics_and_statistics_design.md` | Section 1269: "`PktDrop` = Packets dropped locally (too old, duplicate, already ACK'd, etc.)" | ❌ No mention of TSBPD skip |
+| `packet_loss_drop_definitions.md` | "PktRecvDrop = packets not delivered to upstream application" | ❌ Only covers packets that ARRIVE |
+| `metrics_implementation_progress.md` | Phase 3: Receive Path - lists all drop scenarios | ❌ Missing TSBPD skip |
+| `metrics_and_statistics_audit.md` | Checklist for Loss vs Drop counters | ❌ Missing TSBPD skip |
+| `tools/metrics-audit/main.go` | Checks defined vs used vs exported | N/A - can't detect SHOULD-BE metrics |
+
+### 2.2 The Missing Counter
+
+**Counter Name**: `CongestionRecvPktSkippedTSBPD` (or similar)
+
+**Definition**: Packets that **never arrived** and were skipped when the ACK sequence advanced past them due to TSBPD timeout.
+
+**Current Behavior** (line 363-365 in `receive.go`):
+```go
+// If there are packets that should have been delivered by now, move forward.
+if h.PktTsbpdTime <= now {
+    ackSequenceNumber = h.PacketSequenceNumber  // SKIP missing packets silently!
+    return true // Continue
+}
+```
+
+**What Happens**:
+1. Packet 10 is received, TSBPD time = T+3000ms
+2. Packet 11 is NEVER received (lost + all retransmissions lost)
+3. Packet 12 is received, TSBPD time = T+3001ms
+4. At time T+3000ms, receiver checks packet 12's TSBPD time
+5. Since packet 12's time has passed, ACK advances from 10 to 12
+6. Packet 11 is now "skipped" - **NO COUNTER INCREMENTED**
+
+### 2.3 Design Gap in `packet_loss_drop_definitions.md`
+
+The document defines `PktRecvDrop` as:
+> "The total number of dropped by the SRT receiver and, as a result, **not delivered to the upstream application** DATA packets"
+
+The key phrase "not delivered" should include:
+1. ✅ Packets that arrived too old (tracked: `CongestionRecvDataDropTooOld`)
+2. ✅ Packets already ACK'd (tracked: `CongestionRecvDataDropAlreadyAcked`)
+3. ✅ Duplicate packets (tracked: `CongestionRecvDataDropDuplicate`)
+4. ❌ **Packets that NEVER arrived** (NOT tracked!)
+
+### 2.4 Complete Packet Flow Audit
+
+| Stage | Scenario | Counter | Status |
+|-------|----------|---------|--------|
+| **Receive (Push)** | Packet received successfully | `CongestionRecvPkt` | ✅ Tracked |
+| **Receive (Push)** | Gap detected, NAK sent | `CongestionRecvPktLoss` | ✅ Tracked |
+| **Receive (Push)** | Packet too old (belated) | `CongestionRecvDataDropTooOld` | ✅ Tracked |
+| **Receive (Push)** | Packet already ACK'd | `CongestionRecvDataDropAlreadyAcked` | ✅ Tracked |
+| **Receive (Push)** | Duplicate packet | `CongestionRecvDataDropDuplicate` | ✅ Tracked |
+| **Receive (Push)** | Store insert failed | `CongestionRecvDataDropStoreInsertFailed` | ✅ Tracked |
+| **Receive (Tick)** | Packet delivered | `r.deliver(p)` called | ✅ (no counter, but delivered) |
+| **Receive (periodicACK)** | ACK advances past gap | **NONE** | ❌ **MISSING** |
+
+### 2.5 Proposed Counter Addition
+
+**New Counters to Add**:
+
+| Counter | Location | Description |
+|---------|----------|-------------|
+| `CongestionRecvPktSkippedTSBPD` | `receive.go:periodicACK()` | Packets skipped because TSBPD expired before they arrived |
+| `CongestionRecvByteSkippedTSBPD` | `receive.go:periodicACK()` | Bytes skipped (estimated) |
+| `CongestionRecvPeriodicACKRuns` | `receive.go:periodicACKWriteLocked()` | Times periodicACK actually ran (should be ~100/sec) |
+| `CongestionRecvPeriodicNAKRuns` | `receive.go:periodicNAKLocked()` | Times periodicNAK actually ran (should be ~50/sec) |
+
+**Rationale for Tick Counters**:
+- Timer-based routines are critical for SRT's reliability
+- `periodicACK` runs every 10ms (100 times/sec) → enables ACK-based flow control
+- `periodicNAK` runs every 20ms (50 times/sec) → enables NAK-based retransmission
+- If either stops running, SRT can't recover from losses
+- Linear growth expected: `ticks ≈ test_duration_seconds × frequency`
+- Any deviation from linear indicates a problem (timer stuck, lock contention, etc.)
+
+**Timer Configuration** (from `connection.go`):
+```go
+c.tick = 10 * time.Millisecond              // Tick() called every 10ms
+PeriodicACKInterval: 10_000,                // 10ms between ACKs (in µs)
+PeriodicNAKInterval: 20_000,                // 20ms between NAKs (in µs)
+```
+
+**Implementation Location 1**: `receive.go:periodicACKWriteLocked()` (line ~397)
+
+```go
+func (r *receiver) periodicACKWriteLocked(...) (ok bool, sequenceNumber circular.Number, lite bool) {
+    m := r.metrics
+
+    // Track that periodicACK actually ran (not just returned early)
+    if m != nil {
+        m.CongestionRecvPeriodicACKRuns.Add(1)
+    }
+
+    // ... existing logic ...
+
+    // If there are packets that should have been delivered by now, move forward.
+    if h.PktTsbpdTime <= now {
+        // Count skipped packets: gap from current ACK to this packet's sequence
+        skippedCount := h.PacketSequenceNumber.Distance(ackSequenceNumber)
+        if skippedCount > 1 {
+            // Packets between ackSequenceNumber and h.PacketSequenceNumber-1 are skipped
+            m.CongestionRecvPktSkippedTSBPD.Add(uint64(skippedCount - 1))
+            m.CongestionRecvByteSkippedTSBPD.Add(uint64(skippedCount-1) * uint64(r.avgPayloadSize))
+        }
+        ackSequenceNumber = h.PacketSequenceNumber
+        return true // Continue
+    }
+}
+```
+
+**Implementation Location 2**: `receive.go:periodicNAKLocked()` (line ~446)
+
+```go
+func (r *receiver) periodicNAKLocked(now uint64) []circular.Number {
+    if now-r.lastPeriodicNAK < r.periodicNAKInterval {
+        return nil  // Early return - don't count this
+    }
+
+    m := r.metrics
+    if m != nil {
+        m.CongestionRecvPeriodicNAKRuns.Add(1)  // Track actual NAK runs
+    }
+
+    // ... existing logic ...
+}
+```
+
+### 2.6 Impact on Existing Metrics
+
+**Updates Required**:
+
+| File | Change |
+|------|--------|
+| `metrics/metrics.go` | Add 4 new counters (2 TSBPD skip + 2 tick counters) |
+| `congestion/live/receive.go` | Increment counters in `periodicACKWriteLocked()` and `periodicNAKLocked()` |
+| `metrics/handler.go` | Export all 4 new counters to Prometheus |
+| `contrib/integration_testing/analysis.go` | Use TSBPD skip counter in recovery rate, use tick counters for health check |
+
+**New Counters Summary**:
+```go
+// TSBPD Skip counters - track packets that NEVER arrived
+CongestionRecvPktSkippedTSBPD    atomic.Uint64  // Packets skipped at TSBPD time
+CongestionRecvByteSkippedTSBPD   atomic.Uint64  // Bytes skipped (estimated)
+
+// Tick counters - track timer routine execution (for health monitoring)
+CongestionRecvPeriodicACKRuns    atomic.Uint64  // Times periodicACK ran (~100/sec)
+CongestionRecvPeriodicNAKRuns    atomic.Uint64  // Times periodicNAK ran (~50/sec)
+```
+
+**Recovery Rate Recalculation**:
+
+Currently (flawed):
+```go
+recoveryRate = 1 - (TotalPacketsDropped / TotalGapsDetected)
+```
+
+With new counter:
+```go
+// Actual unrecovered = TSBPD skips (packets that never arrived)
+unrecovered := TotalPacketsSkippedTSBPD
+// Recovery rate = gaps that were filled / gaps detected
+recoveryRate = 1 - (unrecovered / TotalGapsDetected)
+```
+
+### 2.7 Relationship to Other Counters
+
+**Key Invariants**:
+
+```
+// Total gaps detected (NAK sent)
+CongestionRecvPktLoss = initial gaps detected
+
+// Packets that arrived late (after TSBPD)
+CongestionRecvDataDropTooOld = packets that ARRIVED too late
+
+// Packets that NEVER arrived (skipped at TSBPD)
+CongestionRecvPktSkippedTSBPD = packets that NEVER arrived
+
+// True undelivered count
+TrueUndelivered = CongestionRecvDataDropTooOld + CongestionRecvPktSkippedTSBPD
+
+// Recovery rate
+RecoveryRate = 1 - (TrueUndelivered / CongestionRecvPktLoss)
+
+// Timer health check (expected values for 30-second test)
+CongestionRecvPeriodicACKRuns ≈ 30 × 100 = 3000  // 100/sec
+CongestionRecvPeriodicNAKRuns ≈ 30 × 50  = 1500  // 50/sec
+
+// If tick count is significantly lower than expected, indicates:
+// - Lock contention (blocking timer execution)
+// - Timer not running (bug)
+// - System overload (can't keep up with 10ms ticks)
+```
+
+### 2.8 Why This Was Missed
+
+1. **Focus on "packets seen"**: All existing drop counters track packets that **arrived** but were dropped
+2. **No "negative space" tracking**: We track what we see, not what we don't see
+3. **periodicACK not audited for drops**: The audit focused on `pushLocked()` and `Tick()`, not `periodicACK()`
+4. **Semantic gap in documentation**: "PktDrop" was defined as "packets not delivered" but implemented as "packets received but discarded"
+
+---
+
+## Phase 2 Implementation Plan
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 2.1 | Add 4 counters to `metrics/metrics.go` (2 skip + 2 tick) | ✅ Complete |
+| 2.2 | Implement TSBPD skip counting in `periodicACK()` | ✅ Complete |
+| 2.3 | Implement tick counting in `periodicACKWriteLocked()` and `periodicNAKLocked()` | ✅ Complete |
+| 2.4 | Export 4 counters in `metrics/handler.go` | ✅ Complete |
+| 2.5 | Update `analysis.go`: recovery rate using skip counter, health check using tick counters | ✅ Complete |
+| 2.6 | Add unit tests for new counters | ✅ Complete |
+| 2.7 | Run metrics-audit to verify single increments | ✅ Complete |
+| 2.8 | Re-run network impairment tests | ✅ Complete |
+
+---
+
+## Phase 2.8 Test Results Analysis
+
+### Test Configuration
+```
+Network-Loss2pct-1Mbps-HighPerf
+- 2% bidirectional packet loss
+- 3000ms TSBPD latency buffer
+- 1 Mbps bitrate
+- btree + io_uring enabled
+```
+
+### Key Findings
+
+**TSBPD Skip Counter Shows 0**:
+```
+unrecov=36 (drops=36, skips=0)
+```
+
+**All Drops Are From Packets That ARRIVED**:
+```
+⚠ DROPS: +3 (too_late: 0, buf_full: 0, dupes: 2)
+```
+Note: `too_late: 0` means no packets arrived after TSBPD expired!
+
+### Why skips=0?
+
+With a 3-second latency buffer and only 2% loss, the probability of a packet NEVER arriving is extremely low:
+
+```
+P(never_recovered) = P(loss)^N_retries
+N_retries = (TSBPD_buffer / NAK_interval) = (3000ms / 20ms) = 150 retries
+P(never_recovered) = 0.02^150 ≈ 0
+```
+
+**Conclusion**: Every missing packet eventually arrives (just sometimes too late).
+
+### What Are The 36 Drops?
+
+The drops are from `CongestionRecvDataDropAlreadyAcked` and `CongestionRecvDataDropDuplicate`:
+
+| Drop Type | Meaning |
+|-----------|---------|
+| `already_acked` | Retransmit arrived AFTER ACK advanced past it |
+| `duplicate` | Same packet received twice (usually from aggressive NAK retries) |
+| `too_old` | Packet arrived after TSBPD expired (0 in our test) |
+
+**Scenario**:
+1. Packet 11 is lost, gap detected, NAK sent
+2. Retransmit of 11 is also lost
+3. Meanwhile, time passes, packet 12's TSBPD expires
+4. ACK advances past 11 to deliver 12 (TSBPD skip would happen here IF 11 never arrives)
+5. Retransmit of 11 finally arrives
+6. But ACK already passed 11 → `already_acked` drop
+
+### TSBPD Skip Counter IS Working
+
+The unit test `TestTSBPDSkipCounter` passes - the counter correctly identifies gaps that are never filled:
+
+```go
+// Packets 0-4 and 7-9 in store (5-6 missing)
+// Tick at time past TSBPD
+// Result: CongestionRecvPktSkippedTSBPD = 2 ✓
+```
+
+### Why Low Recovery Rate (62.9%)?
+
+With drops=36 and gaps=97:
+```
+Recovery = 1 - (36/97) = 62.9%
+```
+
+But these 36 "unrecovered" packets DID eventually arrive - they just arrived TOO LATE.
+
+**Root Cause**: The ACK is advancing past gaps (due to TSBPD expiry on subsequent packets), causing retransmits to arrive after their sequence was ACK'd.
+
+This is a **timing issue**, not a packet loss issue:
+- The retransmit system works (NAK delivery ~99%, fulfillment ~100%)
+- But sometimes the retransmit arrives a few ms after the ACK advances
+
+### Updated Test Results (with granular drop visibility)
+
+After adding `already_acked` to the output, we now have full visibility:
+
+```
+Connection1 (Publisher → Server):
+  Drops: 37 (too_late=0, already_ack=17, dupes=20), Skips: 0
+Connection2 (Server → Subscriber):
+  Drops: 48 (too_late=0, already_ack=22, dupes=26), Skips: 0
+```
+
+| Drop Type | Count | % of Total | Meaning |
+|-----------|-------|------------|---------|
+| `already_ack` | 39 | 46% | Retransmits arrived AFTER ACK advanced |
+| `duplicate` | 46 | 54% | Same packet received twice (over-NAKing) |
+| `too_late` | 0 | 0% | No packets arrived after TSBPD expired |
+| `Skips` | 0 | 0% | All packets eventually arrived |
+
+**Key Finding**: The drops are NOT from TSBPD expiry. They're from:
+1. **Timing (46%)**: Retransmits arriving after ACK has already advanced
+2. **Over-NAKing (54%)**: Same packet requested multiple times
+
+---
+
+## Phase 3: ACK Advancement Investigation
+
+### 3.1 Expected NAK/Retransmit Behavior
+
+**Immediate NAK Path**:
+1. Receiver detects gap (e.g., receives packet 10, then packet 12 → gap at 11)
+2. Receiver sends immediate NAK for packet 11
+3. Sender receives NAK, retransmits packet 11
+4. Receiver gets retransmit, inserts into packet store (btree/list)
+5. ACK advances past 11 when it's delivered
+
+**Periodic NAK Path (every 20ms)**:
+1. Periodic NAK runs, scans packet store for gaps
+2. Sends NAK for any remaining gaps as ranges (e.g., [5,7] for packets 5,6,7)
+3. Sender receives NAK range, retransmits all packets in range
+4. Some may already have arrived (→ duplicates), some may fill gaps
+
+**Expected Outcome with 3-second buffer**:
+- Immediate NAK: ~10ms RTT for retransmit to arrive
+- Periodic NAK: ~20ms between retries
+- 3000ms buffer / 20ms = **150 retry opportunities**
+- With 2% loss per retry: P(never recovered) = 0.02^150 ≈ 0
+
+So ALL packets should eventually arrive. The question is: **why is ACK advancing before they do?**
+
+### 3.2 The Problem: ACK Advancing Past Gaps
+
+The `already_acked` drops (46%) indicate:
+1. Packet was missing (gap detected)
+2. NAK was sent
+3. **ACK advanced past the gap BEFORE retransmit arrived**
+4. Retransmit arrived → dropped because ACK already passed it
+
+**Question**: What causes ACK to advance past a gap?
+
+Looking at `receive.go:periodicACK()`:
+```go
+// If there are packets that should have been delivered by now, move forward.
+if h.PktTsbpdTime <= now {
+    ackSequenceNumber = h.PacketSequenceNumber
+    return true // Continue - ACK advances past the gap!
+}
+```
+
+ACK advances when **ANY packet in the store** has TSBPD time ≤ now. This includes packets AFTER the gap!
+
+**Scenario**:
+1. Receive packets 10, 12, 13 (gap at 11)
+2. Packet 12's TSBPD time = T+3000ms
+3. At time T+3001ms, periodicACK runs
+4. Packet 12's TSBPD time has passed → ACK advances to 12, **skipping 11**
+5. Retransmit of 11 arrives at T+3010ms → **dropped as `already_acked`**
+
+### 3.3 Why Are Retransmits Taking So Long?
+
+With 10ms RTT, retransmits should arrive within ~20ms of NAK. But TSBPD is 3000ms.
+
+**Possible causes**:
+1. **NAK is being lost** - But NAK delivery is 97%+, so most arrive
+2. **Retransmit is being lost** - But we see `already_acked`, meaning it DID arrive
+3. **TSBPD time is too aggressive** - Is packet 12's TSBPD time based on packet 11's send time?
+4. **Reordering in netem** - Are packets arriving out of order, triggering early TSBPD?
+
+### 3.4 Hypothesis: TSBPD Time Calculation Issue
+
+Each packet has a `PktTsbpdTime` calculated from its send timestamp + latency.
+
+If packet 11 is lost and packet 12 arrives, does packet 12's TSBPD time account for the gap?
+
+**Expected**: Packet 12's TSBPD = (packet 12's send time) + latency
+**Issue**: If packet 11 was supposed to be delivered first, shouldn't we wait for it?
+
+The SRT spec says: "ACK advances when all packets up to that point are either received or their TSBPD time has passed."
+
+**Question**: Is our implementation correctly waiting for missing packets?
+
+### 3.5 Understanding the `already_acked` Drops
+
+After tracing through the code, here's what's happening:
+
+**Code Flow in `pushLocked()` (receive.go lines 255-291):**
+
+```go
+// Check 1: Too old (delivered to application already)
+if pkt.Seq.Lte(lastDeliveredSequenceNumber) → drop as "too_old"
+
+// Check 2: Already ACK'd (ACK has advanced past this sequence)
+if pkt.Seq.Lt(lastACKSequenceNumber) → drop as "already_acked"  // ← Our issue!
+
+// Check 3: In order (expected packet)
+if pkt.Seq.Equals(maxSeenSequenceNumber.Inc()) → accept, update maxSeen
+
+// Check 4: Out of order (potential gap filler)
+if pkt.Seq.Lte(maxSeenSequenceNumber):
+    if packetStore.Has(pkt.Seq) → drop as "duplicate"
+    else → Insert into store (fills gap!)
+```
+
+**The Scenario Causing `already_acked`:**
+
+1. **T=0ms**: Packets 10, 12 arrive (11 lost by netem)
+2. **T=0ms**: Gap detected, **immediate NAK** sent for packet 11
+3. **T=10ms**: First retransmit arrives, inserted into packetStore at position 11
+4. **T=10ms**: periodicACK runs, sees no gap, **ACK advances** 10→11→12...
+5. **T=20ms**: **Periodic NAK** runs, but gap is already filled (no NAK sent)
+   - OR -
+6. **T=5ms**: Periodic NAK ran BEFORE retransmit arrived, sent another NAK for 11
+7. **T=25ms**: SECOND retransmit arrives (from periodic NAK)
+8. **T=25ms**: Check: `11 < lastACKSequenceNumber(12)` → **drop as `already_acked`!**
+
+**Key Insight**: The `already_acked` drops are **DUPLICATE retransmits** arriving after the gap was already filled by an earlier retransmit.
+
+### 3.6 Why `duplicate` vs `already_acked`?
+
+| Drop Type | When It Happens | Meaning |
+|-----------|-----------------|---------|
+| `duplicate` | Packet still in packetStore | Two identical packets arrived while buffered |
+| `already_acked` | ACK has advanced past sequence | Retransmit arrived AFTER gap was filled and ACK advanced |
+
+The distinction:
+- Packets remain in `packetStore` until ACK advances and they're delivered
+- Once delivered, `packetStore.Has(seq)` returns false
+- Late arrivals then hit the `already_acked` check instead of `duplicate`
+
+### 3.7 The Real Question: Why 48% Recovery?
+
+The NAK/retransmit mechanism IS working:
+- ✅ Gaps detected → NAKs sent (97%+ delivery)
+- ✅ NAKs received → Retransmits sent (100% fulfillment)
+- ✅ Retransmits arriving → Gaps being filled
+- ✅ `Skips: 0` means ALL packets eventually arrived
+
+**But** we're counting drops as "unrecovered"!
+
+**The Real Issue**: Our `recovery` calculation is wrong!
+
+```go
+recoveryRate = 1 - (drops / gaps)
+```
+
+But `drops` includes:
+- `already_acked` = duplicate retransmits (NOT unrecovered packets!)
+- `duplicate` = over-NAKing (NOT unrecovered packets!)
+
+**Both drop types represent packets that DID arrive** (as retransmits), just after another copy already arrived!
+
+### 3.8 Corrected Analysis
+
+| Metric | Value | Meaning |
+|--------|-------|---------|
+| Gaps | 165 | Unique packets that were lost |
+| Retransmits | 239 | Total retransmit attempts |
+| already_acked | 39 | Retransmits arriving after gap filled |
+| duplicate | 46 | Retransmits arriving while buffered |
+| **TRUE unrecovered** | 0 (Skips) | Packets that NEVER arrived |
+| **TRUE recovery** | 100% | All gaps eventually filled! |
+
+The 48% "recovery" rate is **misleading** because it's counting duplicate arrivals as failures!
+
+### 3.9 Why So Many Duplicate Retransmits?
+
+With bidirectional 2% loss:
+1. P(original packet lost) = 2%
+2. P(NAK lost) = 2%
+3. P(retransmit lost) = 2%
+
+When a retransmit is lost:
+- Periodic NAK (every 20ms) requests again
+- Multiple retransmits in flight
+- Eventually one arrives → gap filled → ACK advances
+- Later retransmits → dropped as `already_acked`
+
+**This is expected behavior** with aggressive NAKing! The drops are "wasted" retransmits, not unrecovered packets.
+
+### 3.10 Resolution: Fixed Recovery Rate Calculation
+
+**Changes made to `analysis.go`**:
+
+1. **TRUE recovery rate now uses ONLY TSBPD skips**:
+   ```go
+   // Old (WRONG):
+   RecoveryRate = 1 - (Drops / Gaps)  // Counted redundant arrivals as losses!
+
+   // New (CORRECT):
+   RecoveryRate = 1 - (TSBPD_Skips / Gaps)  // Only true losses
+   ```
+
+2. **Clarified drop categories**:
+   - **TRUE losses**: `Skips` (TSBPD) - packets that NEVER arrived
+   - **Redundant arrivals**: `Drops` (too_late, already_acked, duplicate) - packets that arrived, but were discarded as duplicates
+
+3. **Updated output format**:
+   ```
+   True losses (TSBPD skips): 0
+   Redundant copies discarded: 85 (late arrivals)
+   Combined recovery rate: 100.0%
+   ```
+
+4. **Updated validation check**:
+   - Violation message now correctly identifies TSBPD skips as the true loss metric
+
+**Changes made to `statistics.go` (real-time display)**:
+
+1. **Renamed "loss" to "gaps"** in throughput display:
+   ```
+   // Old (MISLEADING):
+   [SUB] 14:41:47.23 | 0.5k ok / 22 loss / 35 retx ~= 96.1%
+
+   // New (CORRECT):
+   [SUB] 14:41:47.23 | 0.5k ok / 22 gaps / 35 retx ~= 96.1% success
+   ```
+
+2. **Updated comments** to clarify that "gaps" are sequence gaps (triggers NAK/retrans), NOT true losses
+
+**Expected behavior after fix**:
+- `Skips: 0` → 100% recovery rate (all gaps eventually filled)
+- The drops are not losses - they're duplicate retransmits that arrived after the gap was already filled
+- Real-time display now correctly shows "gaps" instead of "loss"
+
+### 3.11 Verified Results
+
+After fix, the test shows:
+```
+Connection1 (Publisher → Server):
+  Receiver: recv=3721, gaps=112 (2.94%), true_loss=0, recovery=100.0%
+    Drops: 57 (too_late=0, already_ack=33, dupes=24), Skips: 0
+
+Connection2 (Server → Subscriber):
+  Receiver: recv=4090, gaps=108 (2.59%), true_loss=0, recovery=100.0%
+    Drops: 60 (too_late=0, already_ack=26, dupes=34), Skips: 0
+
+Combined Statistics:
+  True losses (TSBPD skips): 0
+  Redundant copies discarded: 117 (late arrivals)
+  Combined recovery rate: 100.0%
+```
+
+**Key insight**: SRT IS working correctly! All gaps are being recovered. The "drops" are just duplicate retransmits - a sign of aggressive (but successful) NAKing.
 
 ---
 
@@ -800,4 +1415,26 @@ Every 2-second collection shows similar pattern:
 | 2024-12-10 | Updated `send.go` NAK receive path to use helper | - |
 | 2024-12-10 | Fixed `CongestionRecvPktLoss` to match actual missing packets | - |
 | 2024-12-10 | All tests pass including updated `TestReceiverLossCounter` | - |
+| 2024-12-10 | **PHASE 1.3 VERIFIED**: NAK accounting fix confirmed (99.1% delivery, 100% fulfillment) | - |
+| 2024-12-10 | Identified remaining issue: 45% recovery despite correct NAK accounting | - |
+| 2024-12-10 | **PHASE 2: METRICS GAP ANALYSIS** | - |
+| 2024-12-10 | Reviewed `metrics_and_statistics_design.md`, `packet_loss_drop_definitions.md` | - |
+| 2024-12-10 | Reviewed `metrics_implementation_progress.md`, `metrics_and_statistics_audit.md` | - |
+| 2024-12-10 | Ran `tools/metrics-audit/main.go` - all counters aligned | - |
+| 2024-12-10 | **FOUND MISSING COUNTER**: `CongestionRecvPktSkippedTSBPD` for packets never arrived | - |
+| 2024-12-10 | Documented design gap: "PktDrop" only tracks packets that ARRIVED | - |
+| 2024-12-10 | Complete packet flow audit shows TSBPD skip is the only missing scenario | - |
+| 2024-12-10 | Added tick counters: `PeriodicACKRuns` (~100/sec) and `PeriodicNAKRuns` (~50/sec) | - |
+| 2024-12-10 | Updated implementation plan for Phase 2 (8 steps, 4 counters total) | - |
+| 2024-12-10 | **PHASE 2 IMPLEMENTATION COMPLETE** | - |
+| 2024-12-10 | Added 4 counters to `metrics/metrics.go` | - |
+| 2024-12-10 | Implemented TSBPD skip counting in `congestion/live/receive.go:periodicACK()` | - |
+| 2024-12-10 | Implemented tick counters in `periodicACKWriteLocked()` and `periodicNAKLocked()` | - |
+| 2024-12-10 | Exported 4 counters in `metrics/handler.go` | - |
+| 2024-12-10 | Updated `analysis.go` with TSBPD skip counter and timer health | - |
+| 2024-12-10 | Added 3 unit tests for new counters (all pass) | - |
+| 2024-12-10 | Metrics audit verified: 135 fields fully aligned, 4 new counters have single increment | - |
+| 2024-12-10 | **PHASE 2.8 TEST RUN**: `skips=0` observed, all 36 drops are from `already_acked`/`duplicate` | - |
+| 2024-12-10 | Finding: With 3s buffer + 2% loss, packets ALWAYS arrive eventually (no true TSBPD skips) | - |
+| 2024-12-10 | The "drops" are retransmits that arrived AFTER ACK advanced, not never-arrived packets | - |
 

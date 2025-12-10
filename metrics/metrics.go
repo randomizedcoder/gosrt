@@ -214,6 +214,17 @@ type ConnectionMetrics struct {
 	CongestionRecvDataDropStoreInsertFailed atomic.Uint64 // Store insert failed
 	CongestionSendDataDropTooOld            atomic.Uint64 // Exceed drop threshold
 
+	// TSBPD skip counters - Packets that NEVER arrived and were skipped when ACK advanced
+	// These are distinct from "drops" which track packets that ARRIVED but were discarded
+	CongestionRecvPktSkippedTSBPD  atomic.Uint64 // Packets skipped at TSBPD time (never arrived)
+	CongestionRecvByteSkippedTSBPD atomic.Uint64 // Bytes skipped (estimated from avgPayloadSize)
+
+	// Periodic timer tick counters - Track that timer routines are running
+	// Used for health monitoring: should grow linearly with test duration
+	// Expected: ACK ~100/sec (10ms interval), NAK ~50/sec (20ms interval)
+	CongestionRecvPeriodicACKRuns atomic.Uint64 // Times periodicACK() actually ran
+	CongestionRecvPeriodicNAKRuns atomic.Uint64 // Times periodicNAK() actually ran
+
 	// Granular error counters - Connection-level receive (DATA and Control packets)
 	PktRecvDataErrorParse      atomic.Uint64 // DATA packet parse errors
 	PktRecvControlErrorParse   atomic.Uint64 // Control packet parse errors

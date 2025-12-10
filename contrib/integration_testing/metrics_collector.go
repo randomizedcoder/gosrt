@@ -400,15 +400,16 @@ type VerboseMetricsDelta struct {
 		SenderNAKPktsRecv   int64 // Total packets requested in received NAKs
 
 		// Receiver (Server) deltas
-		ReceiverPacketsRecv  int64
-		ReceiverGapsDetected int64
-		ReceiverRetransRecv  int64
-		ReceiverNAKsSent     int64
-		ReceiverACKsSent     int64
-		ReceiverDrops        int64
-		ReceiverDropsTooLate int64
-		ReceiverDropsBufFull int64
-		ReceiverDropsDupes   int64 // Duplicate packets (already in buffer) - KEY METRIC for over-NAKing
+		ReceiverPacketsRecv     int64
+		ReceiverGapsDetected    int64
+		ReceiverRetransRecv     int64
+		ReceiverNAKsSent        int64
+		ReceiverACKsSent        int64
+		ReceiverDrops           int64
+		ReceiverDropsTooLate    int64
+		ReceiverDropsBufFull    int64
+		ReceiverDropsDupes      int64 // Duplicate packets (already in buffer) - KEY METRIC for over-NAKing
+		ReceiverDropsAlreadyAck int64 // Packets arrived after ACK advanced past them
 
 		// Receiver NAK detail (RFC SRT Appendix A)
 		ReceiverNAKSingleSent int64 // Single packet NAK entries sent
@@ -498,6 +499,8 @@ func (tm *TestMetrics) PrintVerboseMetricsDelta(prevIndex, currIndex int) {
 		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"buffer_full\"")
 	delta.Conn1.ReceiverDropsDupes = getDelta(serverCurr, serverPrev,
 		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"duplicate\"")
+	delta.Conn1.ReceiverDropsAlreadyAck = getDelta(serverCurr, serverPrev,
+		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"already_acked\"")
 
 	// Server NAK detail (RFC SRT Appendix A - sent NAKs)
 	delta.Conn1.ReceiverNAKSingleSent = getDelta(serverCurr, serverPrev,
@@ -537,10 +540,10 @@ func (tm *TestMetrics) PrintVerboseMetricsDelta(prevIndex, currIndex int) {
 		fmt.Printf("      NAK detail: +%d singles, +%d ranges, requesting %d pkts\n",
 			delta.Conn1.ReceiverNAKSingleSent, delta.Conn1.ReceiverNAKRangeSent, delta.Conn1.ReceiverNAKPktsSent)
 	}
-	if delta.Conn1.ReceiverDrops > 0 || delta.Conn1.ReceiverDropsDupes > 0 {
-		fmt.Printf("      ⚠ DROPS: +%d (too_late: %d, buf_full: %d, dupes: %d)\n",
+	if delta.Conn1.ReceiverDrops > 0 || delta.Conn1.ReceiverDropsDupes > 0 || delta.Conn1.ReceiverDropsAlreadyAck > 0 {
+		fmt.Printf("      ⚠ DROPS: +%d (too_late: %d, already_ack: %d, dupes: %d)\n",
 			delta.Conn1.ReceiverDrops, delta.Conn1.ReceiverDropsTooLate,
-			delta.Conn1.ReceiverDropsBufFull, delta.Conn1.ReceiverDropsDupes)
+			delta.Conn1.ReceiverDropsAlreadyAck, delta.Conn1.ReceiverDropsDupes)
 	}
 
 	fmt.Printf("    Balance Check:\n")

@@ -131,8 +131,8 @@ func mockLiveRecvWithMetrics(onSendACK func(seq circular.Number, light bool), on
 
 	recv := NewReceiver(ReceiveConfig{
 		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
-		PeriodicACKInterval:   10,
-		PeriodicNAKInterval:   20,
+		PeriodicACKInterval:   10_000, // 10ms in microseconds
+		PeriodicNAKInterval:   20_000, // 20ms in microseconds
 		OnSendACK:             onSendACK,
 		OnSendNAK:             onSendNAK,
 		OnDeliver:             onDeliver,
@@ -418,8 +418,8 @@ func TestReceiverACKGeneration(t *testing.T) {
 	// No ACKs yet (need to tick)
 	require.Len(t, ackSequences, 0, "No ACKs before tick")
 
-	// Tick past ACK interval (periodic ACK interval is 10)
-	recv.Tick(10)
+	// Tick past ACK interval (periodic ACK interval is 10_000 µs = 10ms)
+	recv.Tick(10_000)
 
 	// Should have one ACK now
 	require.Len(t, ackSequences, 1, "Should have 1 ACK after tick")
@@ -469,4 +469,142 @@ func TestReceiverPeriodicNAK(t *testing.T) {
 	// Verify receive counters
 	require.Equal(t, uint64(8), testMetrics.CongestionRecvPkt.Load(),
 		"Should have received 8 packets (0-4 and 7-9)")
+}
+
+// TestPeriodicACKRunsCounter verifies that the periodicACK run counter
+// is incremented each time periodicACK actually runs (not early returns).
+func TestPeriodicACKRunsCounter(t *testing.T) {
+	ackCounts := 0
+	recv, testMetrics := mockLiveRecvWithMetrics(
+		func(seq circular.Number, light bool) {
+			ackCounts++
+		},
+		func(list []circular.Number) {},
+		func(p packet.Packet) {},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Push a few packets with TSBPD time in the future
+	for i := 0; i < 5; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = uint64(1_000_000) // Well into the future
+		recv.Push(p)
+	}
+
+	// Initial tick at 10ms (10_000 µs) - should run since lastPeriodicACK = 0
+	recv.Tick(10_000)
+	count1 := testMetrics.CongestionRecvPeriodicACKRuns.Load()
+	require.Equal(t, uint64(1), count1,
+		"CongestionRecvPeriodicACKRuns should be 1 after first tick")
+
+	// Tick at 21ms (21_000 µs) - 11ms after first, should run (> 10ms interval)
+	recv.Tick(21_000)
+	count2 := testMetrics.CongestionRecvPeriodicACKRuns.Load()
+	require.Equal(t, uint64(2), count2,
+		"CongestionRecvPeriodicACKRuns should be 2 after second tick")
+
+	// Tick at 25ms - only 4ms after last, should NOT run (< 10ms interval)
+	recv.Tick(25_000)
+	count3 := testMetrics.CongestionRecvPeriodicACKRuns.Load()
+	require.Equal(t, count2, count3,
+		"CongestionRecvPeriodicACKRuns should not increase when interval not elapsed")
+}
+
+// TestPeriodicNAKRunsCounter verifies that the periodicNAK run counter
+// is incremented each time periodicNAK actually runs (not early returns).
+func TestPeriodicNAKRunsCounter(t *testing.T) {
+	recv, testMetrics := mockLiveRecvWithMetrics(
+		func(seq circular.Number, light bool) {},
+		func(list []circular.Number) {},
+		func(p packet.Packet) {},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Push packets with gap: 0-4, skip 5-6, 7
+	for i := 0; i < 5; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = uint64(1_000_000) // Well into the future
+		recv.Push(p)
+	}
+	// Skip 5-6, push 7
+	p := packet.NewPacket(addr)
+	p.Header().PacketSequenceNumber = circular.New(7, packet.MAX_SEQUENCENUMBER)
+	p.Header().PktTsbpdTime = uint64(1_000_000)
+	recv.Push(p)
+
+	// Immediate NAK was sent on gap detection (not periodic), counter = 0 initially
+	// Tick at 20ms to trigger periodic NAK (interval = 20_000 µs, lastPeriodicNAK = 0)
+	recv.Tick(20_000)
+	count1 := testMetrics.CongestionRecvPeriodicNAKRuns.Load()
+	require.Equal(t, uint64(1), count1,
+		"CongestionRecvPeriodicNAKRuns should be 1 after first periodic NAK")
+
+	// Tick at 41ms (21ms after first), should run (> 20ms interval)
+	recv.Tick(41_000)
+	count2 := testMetrics.CongestionRecvPeriodicNAKRuns.Load()
+	require.Equal(t, uint64(2), count2,
+		"CongestionRecvPeriodicNAKRuns should be 2 after second periodic NAK")
+
+	// Tick at 50ms - only 9ms after last, should NOT run (< 20ms interval)
+	recv.Tick(50_000)
+	count3 := testMetrics.CongestionRecvPeriodicNAKRuns.Load()
+	require.Equal(t, count2, count3,
+		"CongestionRecvPeriodicNAKRuns should not increase when interval not elapsed")
+}
+
+// TestTSBPDSkipCounter verifies that packets skipped at TSBPD time are counted.
+// This happens when ACK advances past gaps because the receiver gave up waiting.
+func TestTSBPDSkipCounter(t *testing.T) {
+	recv, testMetrics := mockLiveRecvWithMetrics(
+		func(seq circular.Number, light bool) {},
+		func(list []circular.Number) {},
+		func(p packet.Packet) {},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Push packets 0-4 with TSBPD time = 100
+	for i := 0; i < 5; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = 100
+		recv.Push(p)
+	}
+
+	// Skip packets 5-6 (the gap - these NEVER arrive)
+
+	// Push packet 7-9 with TSBPD time = 100
+	for i := 7; i < 10; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = 100
+		recv.Push(p)
+	}
+
+	// At this point, we have packets 0-4, 7-9 in store, gap at 5-6
+	// lastACKSequenceNumber should be at 4 (last contiguous before gap)
+
+	// Before TSBPD skip, counter should be 0
+	require.Equal(t, uint64(0), testMetrics.CongestionRecvPktSkippedTSBPD.Load(),
+		"CongestionRecvPktSkippedTSBPD should be 0 before TSBPD expires")
+
+	// Now simulate time passing - TSBPD time (100) has passed
+	// Tick with now = 10_200 (past TSBPD time + interval)
+	// periodicACK should iterate through packets and:
+	// 1. Find packet 7 with TSBPD time 100 <= now (200)
+	// 2. Detect gap from lastACK(4) to 7, skip packets 5-6
+	// 3. Advance ACK to 9 (all packets have TSBPD <= now)
+	recv.Tick(10_200)
+
+	// Verify TSBPD skip counter was incremented for the 2 missing packets (5, 6)
+	require.Equal(t, uint64(2), testMetrics.CongestionRecvPktSkippedTSBPD.Load(),
+		"CongestionRecvPktSkippedTSBPD should be 2 (packets 5 and 6 skipped)")
+
+	// Verify byte skip counter is non-zero (avgPayloadSize varies based on packet sizes)
+	require.Greater(t, testMetrics.CongestionRecvByteSkippedTSBPD.Load(), uint64(0),
+		"CongestionRecvByteSkippedTSBPD should be > 0")
 }

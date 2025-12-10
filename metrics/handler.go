@@ -243,6 +243,22 @@ func MetricsHandler() http.Handler {
 				metrics.CongestionSendDataDropTooOld.Load(),
 				"socket_id", socketIdStr, "reason", "too_old")
 
+			// TSBPD skip counters - Packets that NEVER arrived and were skipped at ACK time
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_recv_pkt_skipped_tsbpd_total",
+				metrics.CongestionRecvPktSkippedTSBPD.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_recv_byte_skipped_tsbpd_total",
+				metrics.CongestionRecvByteSkippedTSBPD.Load(),
+				"socket_id", socketIdStr)
+
+			// Periodic timer tick counters - Health monitoring (expected: ACK ~100/sec, NAK ~50/sec)
+			writeCounterIfNonZero(b, "gosrt_connection_periodic_ack_runs_total",
+				metrics.CongestionRecvPeriodicACKRuns.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_connection_periodic_nak_runs_total",
+				metrics.CongestionRecvPeriodicNAKRuns.Load(),
+				"socket_id", socketIdStr)
+
 			// Granular error counters - Connection-level send (DATA packets)
 			writeCounterIfNonZero(b, "gosrt_connection_send_data_drop_total",
 				metrics.PktSentDataErrorMarshal.Load(),

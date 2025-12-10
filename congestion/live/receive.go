@@ -350,6 +350,8 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 
 	// Find the sequence number up until we have all in a row.
 	// Where the first gap is (or at the end of the list) is where we can ACK to.
+	// Track packets skipped due to TSBPD timeout (never arrived, gap in sequence)
+	m := r.metrics
 	r.packetStore.Iterate(func(p packet.Packet) bool {
 		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 		h := p.Header()
@@ -360,7 +362,20 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 		}
 
 		// If there are packets that should have been delivered by now, move forward.
+		// This is where we "skip" packets that NEVER arrived - count them!
 		if h.PktTsbpdTime <= now {
+			// Count packets skipped: gap between current ACK and this packet
+			// e.g., if ackSequenceNumber=10 and h.PacketSequenceNumber=15,
+			// then packets 11,12,13,14 are being skipped (4 packets)
+			if m != nil {
+				skippedCount := uint64(h.PacketSequenceNumber.Distance(ackSequenceNumber))
+				if skippedCount > 1 {
+					// skippedCount-1 because Distance(10,15)=5, but we skip 11,12,13,14 (4 packets)
+					actualSkipped := skippedCount - 1
+					m.CongestionRecvPktSkippedTSBPD.Add(actualSkipped)
+					m.CongestionRecvByteSkippedTSBPD.Add(actualSkipped * uint64(r.avgPayloadSize))
+				}
+			}
 			ackSequenceNumber = h.PacketSequenceNumber
 			return true // Continue
 		}
@@ -408,6 +423,12 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 		lite = true
 	}
 
+	// Track that periodicACK actually ran (not just returned early)
+	// Used for health monitoring: expected ~100/sec (10ms interval)
+	if m != nil {
+		m.CongestionRecvPeriodicACKRuns.Add(1)
+	}
+
 	// Update fields (write lock held - brief operation)
 	ok = true
 	sequenceNumber = ackSequenceNumber.Inc()
@@ -446,6 +467,13 @@ func (r *receiver) periodicNAK(now uint64) []circular.Number {
 func (r *receiver) periodicNAKLocked(now uint64) []circular.Number {
 	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
 		return nil
+	}
+
+	// Track that periodicNAK actually ran (not just returned early)
+	// Used for health monitoring: expected ~50/sec (20ms interval)
+	m := r.metrics
+	if m != nil {
+		m.CongestionRecvPeriodicNAKRuns.Add(1)
 	}
 
 	list := []circular.Number{}
