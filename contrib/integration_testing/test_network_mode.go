@@ -25,7 +25,8 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	// Create network controller
 	nc, err := NewNetworkController(NetworkControllerConfig{
-		TestID: fmt.Sprintf("test_%d", os.Getpid()),
+		TestID:  fmt.Sprintf("test_%d", os.Getpid()),
+		Verbose: config.VerboseNetwork,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating network controller: %v\n", err)

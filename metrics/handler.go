@@ -628,4 +628,35 @@ func writeListenerMetrics(b *strings.Builder) {
 	// This should always be 0 - indicates the Bug 3 map lookup issue
 	writeCounterIfNonZero(b, "gosrt_send_conn_lookup_not_found_total",
 		lm.SendConnLookupNotFound.Load())
+
+	// ========== Connection Lifecycle Counters ==========
+	// Track connection establishment and closure for debugging and testing.
+	// Helps detect connection replacements during network impairment tests.
+
+	// Active connections gauge (can go up and down)
+	// Note: Always write gauge even if 0 - "0 active" is meaningful information
+	writeGauge(b, "gosrt_connections_active",
+		float64(lm.ConnectionsActive.Load()))
+
+	// Total connections established (monotonically increasing)
+	writeCounterIfNonZero(b, "gosrt_connections_established_total",
+		lm.ConnectionsEstablished.Load())
+
+	// Total connections closed (should equal established at test end)
+	writeCounterIfNonZero(b, "gosrt_connections_closed_total",
+		lm.ConnectionsClosedTotal.Load())
+
+	// Connections closed by reason (sum should equal gosrt_connections_closed_total)
+	writeCounterIfNonZero(b, "gosrt_connections_closed_by_reason_total",
+		lm.ConnectionsClosedGraceful.Load(),
+		"reason", "graceful")
+	writeCounterIfNonZero(b, "gosrt_connections_closed_by_reason_total",
+		lm.ConnectionsClosedPeerIdle.Load(),
+		"reason", "peer_idle_timeout")
+	writeCounterIfNonZero(b, "gosrt_connections_closed_by_reason_total",
+		lm.ConnectionsClosedContextCancel.Load(),
+		"reason", "context_cancelled")
+	writeCounterIfNonZero(b, "gosrt_connections_closed_by_reason_total",
+		lm.ConnectionsClosedError.Load(),
+		"reason", "error")
 }

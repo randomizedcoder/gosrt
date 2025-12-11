@@ -54,10 +54,34 @@ type ListenerMetrics struct {
 	// a connection by DestinationSocketId and fails. This indicates Bug 3.
 	// Should always be 0 with the closure-based fix in place.
 	SendConnLookupNotFound atomic.Uint64
+
+	// === Connection Lifecycle Counters ===
+	// Track connection establishment and closure for debugging and testing.
+	// These help detect connection replacements during network impairment tests
+	// (e.g., Starlink pattern causing unexpected reconnects).
+
+	// ConnectionsActive is a gauge tracking current active connections.
+	// Uses Int64 to support Add(-1) for decrements. Lock-free atomic.
+	ConnectionsActive atomic.Int64
+
+	// ConnectionsEstablished increments when RegisterConnection() is called.
+	// This is the total count of connections established over the listener lifetime.
+	ConnectionsEstablished atomic.Uint64
+
+	// ConnectionsClosedTotal is the total count of all closed connections.
+	// Should equal ConnectionsEstablished at test end (no leaks).
+	ConnectionsClosedTotal atomic.Uint64
+
+	// ConnectionsClosed tracks connections closed by reason.
+	// These help identify unexpected connection terminations during tests.
+	// Sum of all reasons should equal ConnectionsClosedTotal.
+	ConnectionsClosedGraceful      atomic.Uint64 // Normal shutdown (Close() called)
+	ConnectionsClosedPeerIdle      atomic.Uint64 // Peer idle timeout expired
+	ConnectionsClosedContextCancel atomic.Uint64 // Parent context cancelled
+	ConnectionsClosedError         atomic.Uint64 // Error during operation
 }
 
 // NewListenerMetrics creates a new ListenerMetrics instance with all counters at zero.
 func NewListenerMetrics() *ListenerMetrics {
 	return &ListenerMetrics{}
 }
-

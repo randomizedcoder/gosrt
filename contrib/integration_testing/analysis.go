@@ -623,6 +623,254 @@ func getExpectedErrorCount(counter string, config *TestConfig) int64 {
 	return 0
 }
 
+// ============================================================================
+// CONNECTION LIFECYCLE ANALYSIS
+// ============================================================================
+
+// ConnectionLifecycleViolation represents a connection lifecycle issue
+type ConnectionLifecycleViolation struct {
+	Component string
+	Issue     string
+	Expected  int64
+	Actual    int64
+	Message   string
+}
+
+// ConnectionLifecycleResult holds connection lifecycle analysis results
+type ConnectionLifecycleResult struct {
+	Passed     bool
+	Violations []ConnectionLifecycleViolation
+	Warnings   []string
+
+	// Per-component metrics
+	ServerEstablished    int64
+	ServerClosed         int64
+	ServerClosedByReason map[string]int64
+
+	CGEstablished    int64
+	CGClosed         int64
+	CGClosedByReason map[string]int64
+
+	ClientEstablished    int64
+	ClientClosed         int64
+	ClientClosedByReason map[string]int64
+}
+
+// AnalyzeConnectionLifecycle checks that connection establishment and closure
+// match expectations and detects unexpected close reasons (e.g., peer_idle_timeout).
+// This is critical for detecting connection replacements during network impairment tests.
+func AnalyzeConnectionLifecycle(ts *TestMetricsTimeSeries, config *TestConfig) ConnectionLifecycleResult {
+	result := ConnectionLifecycleResult{
+		Passed:               false, // Fail-safe: start with failure
+		ServerClosedByReason: make(map[string]int64),
+		CGClosedByReason:     make(map[string]int64),
+		ClientClosedByReason: make(map[string]int64),
+	}
+
+	// Expected connection counts for standard test setup:
+	// - Server: 2 connections (one from client-generator, one from client)
+	// - Client-Generator: 1 connection (to server)
+	// - Client: 1 connection (to server)
+	// These defaults work for all current integration tests.
+	// If needed, make these configurable via TestConfig in the future.
+	expectedServer := int64(2)
+	expectedCG := int64(1)
+	expectedClient := int64(1)
+
+	componentsChecked := 0
+
+	// Helper to extract lifecycle metrics from a component
+	// NOTE: We use ABSOLUTE values from the final snapshot, not deltas.
+	// Each test runs fresh processes that start with 0 connections.
+	// The "initial metrics" are collected AFTER connections are established,
+	// so deltas would incorrectly show 0. The absolute final value IS the
+	// count of connections established during this test.
+	extractLifecycle := func(component MetricsTimeSeries) (established, closed int64, byReason map[string]int64) {
+		byReason = make(map[string]int64)
+
+		if len(component.Snapshots) < 1 {
+			return 0, 0, byReason
+		}
+
+		// Find the last successful snapshot
+		var last *MetricsSnapshot
+		for _, s := range component.Snapshots {
+			if s.Error == nil {
+				last = s
+			}
+		}
+		if last == nil {
+			return 0, 0, byReason
+		}
+
+		// Get lifecycle counters - use ABSOLUTE values (not deltas)
+		// Since each test runs fresh processes, absolute count = test result
+		established = int64(getMetricValue(last, "gosrt_connections_established_total"))
+		closed = int64(getMetricValue(last, "gosrt_connections_closed_total"))
+
+		// Get close reasons - also absolute values
+		reasons := []string{"graceful", "peer_idle_timeout", "context_cancelled", "error"}
+		for _, reason := range reasons {
+			value := int64(getMetricValueWithLabel(last, "gosrt_connections_closed_by_reason_total", "reason=\""+reason+"\""))
+			if value > 0 {
+				byReason[reason] = value
+			}
+		}
+
+		return established, closed, byReason
+	}
+
+	// Analyze server
+	if len(ts.Server.Snapshots) >= 2 {
+		componentsChecked++
+		result.ServerEstablished, result.ServerClosed, result.ServerClosedByReason = extractLifecycle(ts.Server)
+
+		// Check established matches expected
+		if result.ServerEstablished != expectedServer {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "server",
+				Issue:     "established_mismatch",
+				Expected:  expectedServer,
+				Actual:    result.ServerEstablished,
+				Message:   fmt.Sprintf("Server: expected %d connections established, got %d", expectedServer, result.ServerEstablished),
+			})
+		}
+
+		// Check that connections are still OPEN during pre-shutdown metrics collection.
+		// Per graceful_quiesce_design.md, we collect metrics while connections are alive.
+		// closed > 0 would indicate premature disconnections during the test (bad!).
+		// This is especially important for pattern-based tests (e.g., Starlink) where
+		// we want to verify that outages didn't cause connection failures.
+		if result.ServerClosed != 0 {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "server",
+				Issue:     "premature_closure",
+				Expected:  0,
+				Actual:    result.ServerClosed,
+				Message:   fmt.Sprintf("Server: %d connection(s) closed during test (expected 0 - connections should remain open until shutdown)", result.ServerClosed),
+			})
+		}
+
+		// Check for unexpected close reasons
+		if peerIdle, ok := result.ServerClosedByReason["peer_idle_timeout"]; ok && peerIdle > 0 {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "server",
+				Issue:     "peer_idle_timeout",
+				Expected:  0,
+				Actual:    peerIdle,
+				Message:   fmt.Sprintf("Server: %d connection(s) closed due to peer_idle_timeout (unexpected)", peerIdle),
+			})
+		}
+	}
+
+	// Analyze client-generator
+	if len(ts.ClientGenerator.Snapshots) >= 2 {
+		componentsChecked++
+		result.CGEstablished, result.CGClosed, result.CGClosedByReason = extractLifecycle(ts.ClientGenerator)
+
+		if result.CGEstablished != expectedCG {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "client-generator",
+				Issue:     "established_mismatch",
+				Expected:  expectedCG,
+				Actual:    result.CGEstablished,
+				Message:   fmt.Sprintf("Client-Generator: expected %d connections established, got %d", expectedCG, result.CGEstablished),
+			})
+		}
+
+		// Check for premature closures (see server comment for rationale)
+		if result.CGClosed != 0 {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "client-generator",
+				Issue:     "premature_closure",
+				Expected:  0,
+				Actual:    result.CGClosed,
+				Message:   fmt.Sprintf("Client-Generator: %d connection(s) closed during test (expected 0)", result.CGClosed),
+			})
+		}
+
+		if peerIdle, ok := result.CGClosedByReason["peer_idle_timeout"]; ok && peerIdle > 0 {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "client-generator",
+				Issue:     "peer_idle_timeout",
+				Expected:  0,
+				Actual:    peerIdle,
+				Message:   fmt.Sprintf("Client-Generator: %d connection(s) closed due to peer_idle_timeout (unexpected)", peerIdle),
+			})
+		}
+	}
+
+	// Analyze client
+	if len(ts.Client.Snapshots) >= 2 {
+		componentsChecked++
+		result.ClientEstablished, result.ClientClosed, result.ClientClosedByReason = extractLifecycle(ts.Client)
+
+		if result.ClientEstablished != expectedClient {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "client",
+				Issue:     "established_mismatch",
+				Expected:  expectedClient,
+				Actual:    result.ClientEstablished,
+				Message:   fmt.Sprintf("Client: expected %d connections established, got %d", expectedClient, result.ClientEstablished),
+			})
+		}
+
+		// Check for premature closures (see server comment for rationale)
+		if result.ClientClosed != 0 {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "client",
+				Issue:     "premature_closure",
+				Expected:  0,
+				Actual:    result.ClientClosed,
+				Message:   fmt.Sprintf("Client: %d connection(s) closed during test (expected 0)", result.ClientClosed),
+			})
+		}
+
+		if peerIdle, ok := result.ClientClosedByReason["peer_idle_timeout"]; ok && peerIdle > 0 {
+			result.Violations = append(result.Violations, ConnectionLifecycleViolation{
+				Component: "client",
+				Issue:     "peer_idle_timeout",
+				Expected:  0,
+				Actual:    peerIdle,
+				Message:   fmt.Sprintf("Client: %d connection(s) closed due to peer_idle_timeout (unexpected)", peerIdle),
+			})
+		}
+	}
+
+	// EXPLICIT PASS: Only pass if we checked components AND found no violations
+	if componentsChecked > 0 && len(result.Violations) == 0 {
+		result.Passed = true
+	}
+
+	return result
+}
+
+// getMetricValue gets a single metric value from a snapshot by exact name
+func getMetricValue(snapshot *MetricsSnapshot, name string) float64 {
+	if snapshot == nil {
+		return 0
+	}
+	for metricName, value := range snapshot.Metrics {
+		if metricName == name {
+			return value
+		}
+	}
+	return 0
+}
+
+// getMetricValueWithLabel gets a metric value with a specific label
+func getMetricValueWithLabel(snapshot *MetricsSnapshot, prefix, labelSubstr string) float64 {
+	if snapshot == nil {
+		return 0
+	}
+	for metricName, value := range snapshot.Metrics {
+		if strings.HasPrefix(metricName, prefix) && strings.Contains(metricName, labelSubstr) {
+			return value
+		}
+	}
+	return 0
+}
+
 // SignalViolation represents a missing positive signal
 type SignalViolation struct {
 	Signal    string
@@ -766,6 +1014,7 @@ type AnalysisResult struct {
 	// Component results
 	ErrorAnalysis         ErrorAnalysisResult
 	PositiveSignals       PositiveSignalResult
+	ConnectionLifecycle   ConnectionLifecycleResult   // Connection establishment/closure tracking
 	StatisticalValidation StatisticalValidationResult // For network impairment tests
 	PipelineBalance       PipelineBalanceResult       // Clean network pipeline verification
 
@@ -788,6 +1037,7 @@ type AnalysisResult struct {
 func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisResult {
 	errorResult := AnalyzeErrors(ts, config)
 	signalResult := ValidatePositiveSignals(ts, config)
+	lifecycleResult := AnalyzeConnectionLifecycle(ts, config)
 	statisticalResult := ValidateStatistical(ts, config)
 
 	// FAIL-SAFE: Default to failed - only set to passed after ALL checks confirm success
@@ -797,6 +1047,7 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 		Passed:                false, // NEVER assume success - must be explicitly confirmed
 		ErrorAnalysis:         errorResult,
 		PositiveSignals:       signalResult,
+		ConnectionLifecycle:   lifecycleResult,
 		StatisticalValidation: statisticalResult,
 	}
 
@@ -852,9 +1103,13 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	// EXPLICIT PASS CONDITION: Only set to passed when ALL checks explicitly confirm success
 	// This is the ONLY place where Passed can become true
 	pipelinePassed := !pipelineBalanceRequired || result.PipelineBalance.Passed
-	if errorResult.Passed && signalResult.Passed && statisticalResult.Passed && runtimePassed && pipelinePassed {
+	lifecyclePassed := lifecycleResult.Passed
+	if errorResult.Passed && signalResult.Passed && lifecyclePassed && statisticalResult.Passed && runtimePassed && pipelinePassed {
 		result.Passed = true
 	}
+
+	// Add lifecycle violations to total
+	result.TotalViolations += len(lifecycleResult.Violations)
 
 	// Generate summary
 	if result.Passed {
@@ -898,6 +1153,74 @@ func PrintAnalysisResult(result AnalysisResult) {
 		for _, v := range result.PositiveSignals.Violations {
 			fmt.Printf("  ✗ %s: expected %s, got %s\n", v.Signal, v.Expected, v.Actual)
 			fmt.Printf("    %s\n", v.Message)
+		}
+	}
+
+	// Connection Lifecycle
+	if result.ConnectionLifecycle.Passed {
+		fmt.Println("\nConnection Lifecycle: ✓ PASSED")
+		fmt.Printf("  ✓ Server: %d established, %d closed (graceful)\n",
+			result.ConnectionLifecycle.ServerEstablished, result.ConnectionLifecycle.ServerClosed)
+		fmt.Printf("  ✓ Client-Generator: %d established, %d closed (graceful)\n",
+			result.ConnectionLifecycle.CGEstablished, result.ConnectionLifecycle.CGClosed)
+		fmt.Printf("  ✓ Client: %d established, %d closed (graceful)\n",
+			result.ConnectionLifecycle.ClientEstablished, result.ConnectionLifecycle.ClientClosed)
+	} else {
+		fmt.Println("\nConnection Lifecycle: ✗ FAILED")
+		for _, v := range result.ConnectionLifecycle.Violations {
+			fmt.Printf("  ✗ %s\n", v.Message)
+		}
+		// Show details even if failed
+		if result.ConnectionLifecycle.ServerEstablished > 0 || result.ConnectionLifecycle.ServerClosed > 0 {
+			fmt.Printf("    Server: %d established, %d closed",
+				result.ConnectionLifecycle.ServerEstablished, result.ConnectionLifecycle.ServerClosed)
+			if len(result.ConnectionLifecycle.ServerClosedByReason) > 0 {
+				fmt.Printf(" (")
+				first := true
+				for reason, count := range result.ConnectionLifecycle.ServerClosedByReason {
+					if !first {
+						fmt.Printf(", ")
+					}
+					fmt.Printf("%s=%d", reason, count)
+					first = false
+				}
+				fmt.Printf(")")
+			}
+			fmt.Println()
+		}
+		if result.ConnectionLifecycle.CGEstablished > 0 || result.ConnectionLifecycle.CGClosed > 0 {
+			fmt.Printf("    Client-Generator: %d established, %d closed",
+				result.ConnectionLifecycle.CGEstablished, result.ConnectionLifecycle.CGClosed)
+			if len(result.ConnectionLifecycle.CGClosedByReason) > 0 {
+				fmt.Printf(" (")
+				first := true
+				for reason, count := range result.ConnectionLifecycle.CGClosedByReason {
+					if !first {
+						fmt.Printf(", ")
+					}
+					fmt.Printf("%s=%d", reason, count)
+					first = false
+				}
+				fmt.Printf(")")
+			}
+			fmt.Println()
+		}
+		if result.ConnectionLifecycle.ClientEstablished > 0 || result.ConnectionLifecycle.ClientClosed > 0 {
+			fmt.Printf("    Client: %d established, %d closed",
+				result.ConnectionLifecycle.ClientEstablished, result.ConnectionLifecycle.ClientClosed)
+			if len(result.ConnectionLifecycle.ClientClosedByReason) > 0 {
+				fmt.Printf(" (")
+				first := true
+				for reason, count := range result.ConnectionLifecycle.ClientClosedByReason {
+					if !first {
+						fmt.Printf(", ")
+					}
+					fmt.Printf("%s=%d", reason, count)
+					first = false
+				}
+				fmt.Printf(")")
+			}
+			fmt.Println()
 		}
 	}
 

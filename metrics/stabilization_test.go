@@ -99,7 +99,7 @@ func TestStabilizationHandler(t *testing.T) {
 
 	socketId := uint32(12345)
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Create test server
 	handler := StabilizationHandler()
@@ -360,7 +360,7 @@ func BenchmarkStabilizationHandlerSingleConnection(b *testing.B) {
 	socketId := uint32(0x12345678)
 	m := &ConnectionMetrics{}
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set realistic counter values
 	m.PktSentDataSuccess.Store(100000)
@@ -388,7 +388,7 @@ func BenchmarkStabilizationHandler10Connections(b *testing.B) {
 		socketId := uint32(0x10000000 + i)
 		m := &ConnectionMetrics{}
 		RegisterConnection(socketId, m)
-		defer UnregisterConnection(socketId)
+		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		// Set realistic values
 		m.PktSentDataSuccess.Store(uint64(10000 * (i + 1)))
@@ -435,7 +435,7 @@ func BenchmarkStabilizationVsMetrics(b *testing.B) {
 	socketId := uint32(0xABCDEF00)
 	m := &ConnectionMetrics{}
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	m.PktSentDataSuccess.Store(100000)
 	m.PktRecvDataSuccess.Store(100000)

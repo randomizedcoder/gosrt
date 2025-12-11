@@ -30,14 +30,18 @@ test-integration-config: client server client-generator
 	@cd contrib/integration_testing && go run . graceful-shutdown-sigint-config $(CONFIG)
 
 ## test-integration-list: List available integration test configurations
+## make test-integration-list
 test-integration-list:
 	@cd contrib/integration_testing && go run . list-configs
 
 ## test-network-list: List available network impairment test configurations
+## make test-network-list
 test-network-list:
 	@cd contrib/integration_testing && go run . list-network-configs
 
 ## test-network: Run network impairment test (root, CONFIG=Network-Loss2pct-5Mbps, VERBOSE=1 for detailed metrics)
+## sudo make test-network CONFIG=Network-Starlink-5Mbps
+## sudo make test-network CONFIG=Network-Starlink-5Mbps VERBOSE=1 SRT_NETWORK_DEBUG=1
 test-network: client server client-generator
 	@echo "NOTE: Network impairment tests require root privileges for network namespace creation"
 	@cd contrib/integration_testing && go run . network-test $(CONFIG) $(if $(VERBOSE),--verbose,)

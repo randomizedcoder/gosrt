@@ -1004,7 +1004,7 @@ func (c *srtConn) handleShutdown(p packet.Packet) {
 	c.log("connection:close:reason", func() string {
 		return "shutdown packet received from peer"
 	})
-	go c.close()
+	go c.close(metrics.CloseReasonGraceful)
 }
 
 // handleACK forwards the acknowledge sequence number to the congestion control and
@@ -1157,7 +1157,7 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 		c.log("connection:close:reason", func() string {
 			return fmt.Sprintf("handshake error: unsupported SRT version %#08x", cif.SRTVersion)
 		})
-		c.close()
+		c.close(metrics.CloseReasonError)
 		return
 	}
 
@@ -1167,7 +1167,7 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 		c.log("connection:close:reason", func() string {
 			return "handshake error: missing required flag TSBPDSND"
 		})
-		c.close()
+		c.close(metrics.CloseReasonError)
 
 		return
 	}
@@ -1177,7 +1177,7 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 		c.log("connection:close:reason", func() string {
 			return "handshake error: missing required flag TLPKTDROP"
 		})
-		c.close()
+		c.close(metrics.CloseReasonError)
 
 		return
 	}
@@ -1187,7 +1187,7 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 		c.log("connection:close:reason", func() string {
 			return "handshake error: missing required flag CRYPT"
 		})
-		c.close()
+		c.close(metrics.CloseReasonError)
 
 		return
 	}
@@ -1197,7 +1197,7 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 		c.log("connection:close:reason", func() string {
 			return "handshake error: missing required flag REXMITFLG"
 		})
-		c.close()
+		c.close(metrics.CloseReasonError)
 
 		return
 	}
@@ -1215,7 +1215,7 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 		c.log("connection:close:reason", func() string {
 			return "handshake error: invalid flag STREAM (HSv4 only, flag is HSv5 only)"
 		})
-		c.close()
+		c.close(metrics.CloseReasonError)
 		return
 	}
 
@@ -1224,7 +1224,7 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 		c.log("connection:close:reason", func() string {
 			return "handshake error: invalid flag PACKET_FILTER (HSv4 only, flag is HSv5 only)"
 		})
-		c.close()
+		c.close(metrics.CloseReasonError)
 		return
 	}
 
@@ -1270,7 +1270,7 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 			c.log("connection:close:reason", func() string {
 				return fmt.Sprintf("handshake error: unsupported SRT version %#08x", cif.SRTVersion)
 			})
-			c.close()
+			c.close(metrics.CloseReasonError)
 			return
 		}
 
@@ -1283,7 +1283,7 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 			c.log("connection:close:reason", func() string {
 				return "handshake error: missing required flag TSBPDRCV"
 			})
-			c.close()
+			c.close(metrics.CloseReasonError)
 
 			return
 		}
@@ -1293,7 +1293,7 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 			c.log("connection:close:reason", func() string {
 				return "handshake error: missing required flag TLPKTDROP"
 			})
-			c.close()
+			c.close(metrics.CloseReasonError)
 
 			return
 		}
@@ -1303,7 +1303,7 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 			c.log("connection:close:reason", func() string {
 				return "handshake error: missing required flag CRYPT"
 			})
-			c.close()
+			c.close(metrics.CloseReasonError)
 
 			return
 		}
@@ -1313,7 +1313,7 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 			c.log("connection:close:reason", func() string {
 				return "handshake error: missing required flag REXMITFLG"
 			})
-			c.close()
+			c.close(metrics.CloseReasonError)
 
 			return
 		}
@@ -1324,7 +1324,7 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 			c.log("connection:close:reason", func() string {
 				return "handshake error: invalid flag STREAM (HSv4 only, flag is HSv5 only)"
 			})
-			c.close()
+			c.close(metrics.CloseReasonError)
 			return
 		}
 
@@ -1333,7 +1333,7 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 			c.log("connection:close:reason", func() string {
 				return "handshake error: invalid flag PACKET_FILTER (HSv4 only, flag is HSv5 only)"
 			})
-			c.close()
+			c.close(metrics.CloseReasonError)
 			return
 		}
 
@@ -1384,7 +1384,7 @@ func (c *srtConn) handleKMRequest(p packet.Packet) {
 				return fmt.Sprintf("encryption error: failed to initialize crypto: %s", err)
 			})
 			c.cryptoLock.Unlock()
-			c.close()
+			c.close(metrics.CloseReasonError)
 			return
 		}
 
@@ -1473,7 +1473,7 @@ func (c *srtConn) handleKMResponse(p packet.Packet) {
 				reason = fmt.Sprintf("encryption error: key material error code %d", cif.Error)
 			}
 			c.log("connection:close:reason", func() string { return reason })
-			c.close()
+			c.close(metrics.CloseReasonError)
 			return
 		}
 	}
@@ -1706,7 +1706,7 @@ func (c *srtConn) Close() error {
 	c.log("connection:close:reason", func() string {
 		return "application requested close"
 	})
-	c.close()
+	c.close(metrics.CloseReasonGraceful)
 
 	return nil
 }
@@ -1787,7 +1787,7 @@ func (c *srtConn) watchPeerIdleTimeout() {
 				c.log("connection:close", func() string {
 					return fmt.Sprintf("no more data received from peer for %s. shutting down", c.config.PeerIdleTimeout)
 				})
-				go c.close()
+				go c.close(metrics.CloseReasonPeerIdle)
 				return
 			}
 			// Packets were received - will reset timer after select
@@ -1822,12 +1822,13 @@ func (c *srtConn) watchPeerIdleTimeout() {
 	}
 }
 
-// close closes the connection.
-func (c *srtConn) close() {
+// close closes the connection with the specified reason.
+// The reason is used for metrics tracking to identify why connections were closed.
+func (c *srtConn) close(reason metrics.CloseReason) {
 
 	c.shutdownOnce.Do(func() {
-		// Unregister from metrics registry
-		metrics.UnregisterConnection(c.socketId)
+		// Unregister from metrics registry with close reason
+		metrics.UnregisterConnection(c.socketId, reason)
 
 		// Print statistics before closing (if logger is available)
 		if c.logger != nil {

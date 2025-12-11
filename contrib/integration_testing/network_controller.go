@@ -47,6 +47,9 @@ type NetworkController struct {
 
 	// isSetup tracks whether the network has been created
 	isSetup bool
+
+	// Verbose enables detailed logging of pattern events and script execution
+	Verbose bool
 }
 
 // NetworkControllerConfig holds configuration for creating a NetworkController
@@ -58,6 +61,11 @@ type NetworkControllerConfig struct {
 	// ScriptDir is the directory containing the network scripts
 	// If empty, it will be auto-detected relative to the current executable
 	ScriptDir string
+
+	// Verbose enables detailed logging of pattern events and script execution.
+	// When true, the controller logs each pattern event and passes SRT_NETWORK_DEBUG=1
+	// to shell scripts for additional debug output.
+	Verbose bool
 }
 
 // NewNetworkController creates a new NetworkController with the given configuration
@@ -110,6 +118,7 @@ func NewNetworkController(cfg NetworkControllerConfig) (*NetworkController, erro
 	nc := &NetworkController{
 		TestID:    testID,
 		ScriptDir: scriptDir,
+		Verbose:   cfg.Verbose,
 
 		// Default IP addresses (from lib.sh)
 		IPPublisher:  "10.1.1.2",
@@ -326,6 +335,12 @@ func (nc *NetworkController) StopPattern(ctx context.Context) error {
 func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern) {
 	defer nc.patternWg.Done()
 
+	if nc.Verbose {
+		fmt.Printf("[PATTERN] Starting pattern %q with %d events, repeat=%v\n",
+			pattern.Name, len(pattern.Events), pattern.RepeatInterval)
+	}
+
+	eventCount := 0
 	for {
 		// Calculate time until next event
 		now := time.Now()
@@ -354,20 +369,40 @@ func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern
 
 		if nextEvent == nil {
 			// No events to run
+			if nc.Verbose {
+				fmt.Printf("[PATTERN] No more events, exiting pattern loop\n")
+			}
 			return
+		}
+
+		if nc.Verbose {
+			fmt.Printf("[PATTERN] Next event: %d%% loss for %v, waiting %v\n",
+				nextEvent.LossPercent, nextEvent.Duration, waitDuration)
 		}
 
 		// Wait for next event
 		select {
 		case <-ctx.Done():
+			if nc.Verbose {
+				fmt.Printf("[PATTERN] Context cancelled while waiting for event\n")
+			}
 			return
 		case <-time.After(waitDuration):
 		}
 
+		eventCount++
+
 		// Apply the loss
 		nc.mu.Lock()
 		if nc.isSetup {
-			_ = nc.runScriptUnlocked(ctx, "set_loss.sh", strconv.Itoa(nextEvent.LossPercent))
+			if nc.Verbose {
+				fmt.Printf("[PATTERN] Event #%d: Applying %d%% loss at %v\n",
+					eventCount, nextEvent.LossPercent, time.Now().Format("15:04:05.000"))
+			}
+			if err := nc.runScriptUnlocked(ctx, "set_loss.sh", strconv.Itoa(nextEvent.LossPercent)); err != nil {
+				fmt.Fprintf(os.Stderr, "[PATTERN] ERROR applying %d%% loss: %v\n", nextEvent.LossPercent, err)
+			}
+			nc.dumpRouteTables(ctx)
 		}
 		nc.mu.Unlock()
 
@@ -375,9 +410,15 @@ func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern
 		select {
 		case <-ctx.Done():
 			// Clear loss before exiting
+			if nc.Verbose {
+				fmt.Printf("[PATTERN] Context cancelled during event, clearing loss\n")
+			}
 			nc.mu.Lock()
 			if nc.isSetup {
-				_ = nc.runScriptUnlocked(ctx, "set_loss.sh", "0")
+				if err := nc.runScriptUnlocked(ctx, "set_loss.sh", "0"); err != nil {
+					fmt.Fprintf(os.Stderr, "[PATTERN] ERROR clearing loss on exit: %v\n", err)
+				}
+				nc.dumpRouteTables(ctx)
 			}
 			nc.mu.Unlock()
 			return
@@ -387,9 +428,62 @@ func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern
 		// Clear the loss
 		nc.mu.Lock()
 		if nc.isSetup {
-			_ = nc.runScriptUnlocked(ctx, "set_loss.sh", "0")
+			if nc.Verbose {
+				fmt.Printf("[PATTERN] Event #%d: Clearing loss at %v (after %v)\n",
+					eventCount, time.Now().Format("15:04:05.000"), nextEvent.Duration)
+			}
+			if err := nc.runScriptUnlocked(ctx, "set_loss.sh", "0"); err != nil {
+				fmt.Fprintf(os.Stderr, "[PATTERN] ERROR clearing loss: %v\n", err)
+			}
+			nc.dumpRouteTables(ctx)
 		}
 		nc.mu.Unlock()
+	}
+}
+
+// dumpRouteTables prints the route tables from both routers when verbose mode is enabled.
+// This is useful for debugging blackhole route application/removal.
+func (nc *NetworkController) dumpRouteTables(ctx context.Context) {
+	if !nc.Verbose || !nc.isSetup {
+		return
+	}
+
+	fmt.Printf("[ROUTES] Route tables at %v:\n", time.Now().Format("15:04:05.000"))
+
+	// Router A (client-side router)
+	routerACmd := exec.CommandContext(ctx, "ip", "netns", "exec", nc.NamespaceRouterClient, "ip", "route", "show")
+	if output, err := routerACmd.CombinedOutput(); err == nil {
+		fmt.Printf("[ROUTES] Router A (%s):\n", nc.NamespaceRouterClient)
+		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if line != "" {
+				// Highlight blackhole routes
+				if strings.Contains(line, "blackhole") {
+					fmt.Printf("[ROUTES]   >>> %s <<<\n", line)
+				} else {
+					fmt.Printf("[ROUTES]   %s\n", line)
+				}
+			}
+		}
+	} else {
+		fmt.Printf("[ROUTES] Router A: ERROR: %v\n", err)
+	}
+
+	// Router B (server-side router)
+	routerBCmd := exec.CommandContext(ctx, "ip", "netns", "exec", nc.NamespaceRouterServer, "ip", "route", "show")
+	if output, err := routerBCmd.CombinedOutput(); err == nil {
+		fmt.Printf("[ROUTES] Router B (%s):\n", nc.NamespaceRouterServer)
+		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if line != "" {
+				// Highlight blackhole routes
+				if strings.Contains(line, "blackhole") {
+					fmt.Printf("[ROUTES]   >>> %s <<<\n", line)
+				} else {
+					fmt.Printf("[ROUTES]   %s\n", line)
+				}
+			}
+		}
+	} else {
+		fmt.Printf("[ROUTES] Router B: ERROR: %v\n", err)
 	}
 }
 
@@ -475,11 +569,21 @@ func (nc *NetworkController) IsSetup() bool {
 	return nc.isSetup
 }
 
+// buildScriptEnv returns the environment variables for script execution.
+// Includes TEST_ID and SRT_NETWORK_DEBUG=1 when verbose mode is enabled.
+func (nc *NetworkController) buildScriptEnv() []string {
+	env := append(os.Environ(), fmt.Sprintf("TEST_ID=%s", nc.TestID))
+	if nc.Verbose {
+		env = append(env, "SRT_NETWORK_DEBUG=1")
+	}
+	return env
+}
+
 // runScript executes a script with the TEST_ID environment variable
 func (nc *NetworkController) runScript(ctx context.Context, script string, args ...string) error {
 	scriptPath := filepath.Join(nc.ScriptDir, script)
 	cmd := exec.CommandContext(ctx, scriptPath, args...)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("TEST_ID=%s", nc.TestID))
+	cmd.Env = nc.buildScriptEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -493,7 +597,7 @@ func (nc *NetworkController) runScript(ctx context.Context, script string, args 
 func (nc *NetworkController) runScriptUnlocked(ctx context.Context, script string, args ...string) error {
 	scriptPath := filepath.Join(nc.ScriptDir, script)
 	cmd := exec.CommandContext(ctx, scriptPath, args...)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("TEST_ID=%s", nc.TestID))
+	cmd.Env = nc.buildScriptEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -507,7 +611,7 @@ func (nc *NetworkController) runScriptUnlocked(ctx context.Context, script strin
 func (nc *NetworkController) runScriptWithOutput(ctx context.Context, script string, args ...string) ([]byte, error) {
 	scriptPath := filepath.Join(nc.ScriptDir, script)
 	cmd := exec.CommandContext(ctx, scriptPath, args...)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("TEST_ID=%s", nc.TestID))
+	cmd.Env = nc.buildScriptEnv()
 
 	return cmd.CombinedOutput()
 }

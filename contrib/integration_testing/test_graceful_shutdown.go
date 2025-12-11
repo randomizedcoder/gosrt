@@ -98,7 +98,8 @@ func main() {
 		for _, arg := range os.Args[3:] {
 			if arg == "-v" || arg == "--verbose" {
 				config.VerboseMetrics = true
-				fmt.Println("Verbose metrics enabled")
+				config.VerboseNetwork = true
+				fmt.Println("Verbose mode enabled (metrics + network)")
 			}
 		}
 		testNetworkModeWithConfig(*config)

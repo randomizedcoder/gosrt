@@ -459,6 +459,8 @@ var NetworkTestConfigs = []TestConfig{
 	},
 
 	// ========== Pattern-Based Impairment Tests ==========
+	// Starlink simulates LEO satellite reconvergence events: 60ms total outages
+	// occurring 4 times per minute at 12s, 27s, 42s, 57s
 	{
 		Name:        "Network-Starlink-5Mbps",
 		Description: "Starlink reconvergence pattern (60ms 100% loss at 12,27,42,57s) at 5 Mb/s",
@@ -474,6 +476,82 @@ var NetworkTestConfigs = []TestConfig{
 		MetricsEnabled:  true,
 		CollectInterval: 2 * time.Second,
 		SharedSRT:       &LargeBuffersSRTConfig,
+	},
+	{
+		Name:        "Network-Starlink-20Mbps",
+		Description: "Starlink reconvergence pattern at 20 Mb/s - higher throughput stress",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &LargeBuffersSRTConfig,
+	},
+	{
+		Name:        "Network-Starlink-5Mbps-HighPerf",
+		Description: "Starlink pattern at 5 Mb/s with io_uring + btree optimizations",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT: &SRTConfig{
+			ConnectionTimeout:      3000 * time.Millisecond,
+			PeerIdleTimeout:        30000 * time.Millisecond,
+			Latency:                3000 * time.Millisecond,
+			RecvLatency:            3000 * time.Millisecond,
+			PeerLatency:            3000 * time.Millisecond,
+			IoUringEnabled:         true,
+			IoUringRecvEnabled:     true,
+			PacketReorderAlgorithm: "btree",
+			BTreeDegree:            32,
+			TLPktDrop:              true,
+		},
+		Client: ComponentConfig{
+			IoUringOutput: true,
+		},
+	},
+	{
+		Name:        "Network-Starlink-20Mbps-HighPerf",
+		Description: "Starlink pattern at 20 Mb/s with io_uring + btree - max stress",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT: &SRTConfig{
+			ConnectionTimeout:      3000 * time.Millisecond,
+			PeerIdleTimeout:        30000 * time.Millisecond,
+			Latency:                3000 * time.Millisecond,
+			RecvLatency:            3000 * time.Millisecond,
+			PeerLatency:            3000 * time.Millisecond,
+			IoUringEnabled:         true,
+			IoUringRecvEnabled:     true,
+			PacketReorderAlgorithm: "btree",
+			BTreeDegree:            32,
+			TLPktDrop:              true,
+		},
+		Client: ComponentConfig{
+			IoUringOutput: true,
+		},
 	},
 	{
 		Name:        "Network-HighLossBurst-5Mbps",

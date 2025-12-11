@@ -75,9 +75,9 @@ Metrics Summary:
   Client: recv'd -244 packets, -221 ACKs
 ```
 
-**Root Cause**: Negative packet count indicates a metrics collection bug for pattern-based tests. The Starlink pattern applies 100% loss for 60ms at specific times (12s, 27s, 42s, 57s), which may cause timing issues with metrics collection.
+**Root Cause**: See `defect12_starlink_negative_metrics.md` for detailed investigation.
 
-**Likely Issue**: Final metrics collected before initial metrics established, causing underflow when computing delta.
+**Summary**: The negative packet count suggests the Client's SRT connection was replaced during the test (new socket_id with lower counter values than the original connection). The metrics delta calculation (final - initial) produces negative values when the final snapshot has a different socket_id with fewer accumulated packets.
 
 ### 2. Network-HighLossBurst-5Mbps - FIXED
 

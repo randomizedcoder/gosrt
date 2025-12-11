@@ -29,7 +29,7 @@ func TestPrometheusOutputFormat(t *testing.T) {
 	socketId := uint32(0x12345678)
 	m := newTestConnectionMetrics()
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set some values
 	m.PktRecvDataSuccess.Store(100)
@@ -74,7 +74,7 @@ func TestPrometheusCounterAccuracy(t *testing.T) {
 	socketId := uint32(0xABCD1234)
 	m := newTestConnectionMetrics()
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set specific values
 	m.PktRecvDataSuccess.Store(12345)
@@ -102,7 +102,7 @@ func TestPrometheusExportsAllCounters(t *testing.T) {
 	socketId := uint32(0xDEADBEEF)
 	m := newTestConnectionMetrics()
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Use reflection to find all atomic.Uint64 and atomic.Int64 fields
 	// and set each to a unique value
@@ -235,7 +235,7 @@ func TestPrometheusLabels(t *testing.T) {
 	socketId := uint32(0x99887766)
 	m := newTestConnectionMetrics()
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set values for different packet types
 	m.PktRecvDataSuccess.Store(1)
@@ -287,8 +287,8 @@ func TestPrometheusMultipleConnections(t *testing.T) {
 
 	RegisterConnection(socketId1, m1)
 	RegisterConnection(socketId2, m2)
-	defer UnregisterConnection(socketId1)
-	defer UnregisterConnection(socketId2)
+	defer UnregisterConnection(socketId1, CloseReasonGraceful)
+	defer UnregisterConnection(socketId2, CloseReasonGraceful)
 
 	// Set different values for each connection
 	m1.PktRecvDataSuccess.Store(1111)
@@ -326,7 +326,7 @@ func TestPrometheusZeroFiltering(t *testing.T) {
 	socketId := uint32(0x77777777)
 	m := newTestConnectionMetrics()
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set some counters to non-zero, leave others at zero
 	m.PktRecvDataSuccess.Store(12345) // Non-zero - should appear
@@ -353,7 +353,7 @@ func TestPrometheusCongestionMetrics(t *testing.T) {
 	socketId := uint32(0xCCCCCCCC)
 	m := newTestConnectionMetrics()
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set congestion control values
 	m.CongestionRecvPkt.Store(5000)
@@ -382,7 +382,7 @@ func TestPrometheusNAKDetailMetrics(t *testing.T) {
 	socketId := uint32(0xdddddddd)
 	m := newTestConnectionMetrics()
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set NAK detail values (receiver side - sends NAKs)
 	m.CongestionRecvNAKSingle.Store(5)
@@ -440,7 +440,7 @@ func TestPrometheusOutputSize(t *testing.T) {
 			socketId := uint32(0x50000000 + i)
 			m := newTestConnectionMetrics()
 			RegisterConnection(socketId, m)
-			defer UnregisterConnection(socketId)
+			defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 			// Set realistic values
 			m.PktRecvDataSuccess.Store(uint64(100000 * (i + 1)))
@@ -458,7 +458,7 @@ func TestPrometheusOutputSize(t *testing.T) {
 
 		// Cleanup for next iteration
 		for i := 0; i < numConn; i++ {
-			UnregisterConnection(uint32(0x50000000 + i))
+			UnregisterConnection(uint32(0x50000000+i), CloseReasonGraceful)
 		}
 	}
 }
@@ -484,7 +484,7 @@ func BenchmarkPrometheusHandlerSingleConnection(b *testing.B) {
 	socketId := uint32(0x12345678)
 	m := newTestConnectionMetrics()
 	RegisterConnection(socketId, m)
-	defer UnregisterConnection(socketId)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set realistic counter values
 	m.PktRecvDataSuccess.Store(100000)
@@ -518,7 +518,7 @@ func BenchmarkPrometheusHandler10Connections(b *testing.B) {
 		m := newTestConnectionMetrics()
 		connections[i] = m
 		RegisterConnection(socketId, m)
-		defer UnregisterConnection(socketId)
+		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		// Set realistic values
 		m.PktRecvDataSuccess.Store(uint64(10000 * (i + 1)))
@@ -547,7 +547,7 @@ func BenchmarkPrometheusHandler100Connections(b *testing.B) {
 		m := newTestConnectionMetrics()
 		connections[i] = m
 		RegisterConnection(socketId, m)
-		defer UnregisterConnection(socketId)
+		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		m.PktRecvDataSuccess.Store(uint64(1000 * (i + 1)))
 		m.ByteRecvDataSuccess.Store(uint64(1400000 * (i + 1)))
@@ -584,7 +584,7 @@ func BenchmarkPrometheusOutputSize(b *testing.B) {
 				socketId := uint32(0x40000000 + i)
 				m := newTestConnectionMetrics()
 				RegisterConnection(socketId, m)
-				defer UnregisterConnection(socketId)
+				defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 				m.PktRecvDataSuccess.Store(uint64(100000 * (i + 1)))
 				m.ByteRecvDataSuccess.Store(uint64(140000000 * (i + 1)))
@@ -617,7 +617,7 @@ func BenchmarkPrometheusHandlerParallel(b *testing.B) {
 		socketId := uint32(0x30000000 + i)
 		m := newTestConnectionMetrics()
 		RegisterConnection(socketId, m)
-		defer UnregisterConnection(socketId)
+		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		m.PktRecvDataSuccess.Store(uint64(50000 * (i + 1)))
 		m.ByteRecvDataSuccess.Store(uint64(70000000 * (i + 1)))

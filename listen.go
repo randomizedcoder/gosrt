@@ -447,8 +447,8 @@ func (ln *listener) Close() {
 			if !ok || conn == nil {
 				return true // continue iteration
 			}
-			conn.close() // Connection will call connWg.Done() when done (Phase 5)
-			return true  // continue iteration
+			conn.close(metrics.CloseReasonContextCancel) // Connection will call connWg.Done() when done (Phase 5)
+			return true                                  // continue iteration
 		})
 
 		// Wait for all connections to shutdown

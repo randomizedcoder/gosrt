@@ -250,40 +250,46 @@ get_latency_description() {
 # LOSS CONTROL - Via blackhole routes (100%) or netem loss (probabilistic)
 #=============================================================================
 
-# Apply 100% packet loss using blackhole routes (instant effect) - BIDIRECTIONAL
+# Host IP addresses for blackhole routes (/32 is more specific than /24)
+# Using /32 host routes means we never touch the existing /24 routes
+readonly IP_PUBLISHER="${SUBNET_PUBLISHER}.2"
+readonly IP_SUBSCRIBER="${SUBNET_SUBSCRIBER}.2"
+readonly IP_SERVER="${SUBNET_SERVER}.2"
+
+# Apply 100% packet loss using /32 host-specific blackhole routes
+# Using /32 routes is cleaner than /24 because:
+#   1. More specific routes win (longest prefix match)
+#   2. Original /24 routes remain untouched
+#   3. No restoration needed - just remove the /32 blackholes
 # Blackhole routes are applied on BOTH routers for complete outage simulation
 # Usage: set_blackhole_loss
 set_blackhole_loss() {
-    log_info "Applying 100% loss via blackhole routes (bidirectional)"
+    log_info "Applying 100% loss via /32 host blackhole routes (bidirectional)"
 
-    # Router A: Block traffic TO server and subscriber subnets
-    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${SUBNET_SERVER}.0/24" 2>/dev/null || \
-        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route replace blackhole "${SUBNET_SERVER}.0/24"
-    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${SUBNET_SUBSCRIBER}.0/24" 2>/dev/null || \
-        run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route replace blackhole "${SUBNET_SUBSCRIBER}.0/24"
+    # Router A: Block traffic TO server and subscriber hosts
+    # These /32 routes are more specific than the existing /24 routes
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${IP_SERVER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${IP_SUBSCRIBER}/32" 2>/dev/null || true
 
-    # Router B: Block traffic TO publisher and subscriber subnets
-    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${SUBNET_PUBLISHER}.0/24" 2>/dev/null || \
-        run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route replace blackhole "${SUBNET_PUBLISHER}.0/24"
-    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${SUBNET_SUBSCRIBER}.0/24" 2>/dev/null || \
-        run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route replace blackhole "${SUBNET_SUBSCRIBER}.0/24"
+    # Router B: Block traffic TO publisher and subscriber hosts
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${IP_PUBLISHER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${IP_SUBSCRIBER}/32" 2>/dev/null || true
 }
 
-# Remove blackhole routes (restore normal routing) - BIDIRECTIONAL
+# Remove /32 host blackhole routes (original /24 routes were never touched)
 # Usage: clear_blackhole_loss
 clear_blackhole_loss() {
-    log_info "Removing blackhole routes (bidirectional)"
+    log_info "Removing /32 host blackhole routes (bidirectional)"
 
-    # Remove blackhole routes from Router A (ignore errors if they don't exist)
-    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${SUBNET_SERVER}.0/24" 2>/dev/null || true
-    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${SUBNET_SUBSCRIBER}.0/24" 2>/dev/null || true
+    # Remove /32 blackhole routes from Router A
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${IP_SERVER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${IP_SUBSCRIBER}/32" 2>/dev/null || true
 
-    # Remove blackhole routes from Router B (ignore errors if they don't exist)
-    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${SUBNET_PUBLISHER}.0/24" 2>/dev/null || true
-    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${SUBNET_SUBSCRIBER}.0/24" 2>/dev/null || true
+    # Remove /32 blackhole routes from Router B
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${IP_PUBLISHER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${IP_SUBSCRIBER}/32" 2>/dev/null || true
 
-    # Restore normal routing via current latency profile
-    set_latency_profile "${CURRENT_LATENCY_PROFILE}"
+    # No need to restore routes - the original /24 routes were never touched!
 }
 
 # Apply probabilistic loss using netem (BIDIRECTIONAL)

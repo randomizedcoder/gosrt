@@ -150,3 +150,104 @@ func TestListenerMetricsConcurrency(t *testing.T) {
 	require.Equal(t, uint64(100), lm.SocketIdCollision.Load())
 }
 
+// TestConnectionLifecycleCounters verifies connection lifecycle tracking
+func TestConnectionLifecycleCounters(t *testing.T) {
+	// Save original values from global metrics
+	lm := GetListenerMetrics()
+	origActive := lm.ConnectionsActive.Load()
+	origEstablished := lm.ConnectionsEstablished.Load()
+	origClosedTotal := lm.ConnectionsClosedTotal.Load()
+	origClosedGraceful := lm.ConnectionsClosedGraceful.Load()
+	origClosedPeerIdle := lm.ConnectionsClosedPeerIdle.Load()
+
+	// Create test connection metrics
+	m := NewConnectionMetrics()
+	socketId := uint32(0x11111111)
+
+	// Register connection - should increment active and established
+	RegisterConnection(socketId, m)
+
+	require.Equal(t, origActive+1, lm.ConnectionsActive.Load())
+	require.Equal(t, origEstablished+1, lm.ConnectionsEstablished.Load())
+
+	// Unregister with graceful reason - should decrement active, increment closed counters
+	UnregisterConnection(socketId, CloseReasonGraceful)
+
+	require.Equal(t, origActive, lm.ConnectionsActive.Load())
+	require.Equal(t, origClosedTotal+1, lm.ConnectionsClosedTotal.Load())
+	require.Equal(t, origClosedGraceful+1, lm.ConnectionsClosedGraceful.Load())
+
+	// Test peer idle timeout close reason
+	socketId2 := uint32(0x22222222)
+	m2 := NewConnectionMetrics()
+	RegisterConnection(socketId2, m2)
+	UnregisterConnection(socketId2, CloseReasonPeerIdle)
+
+	require.Equal(t, origClosedPeerIdle+1, lm.ConnectionsClosedPeerIdle.Load())
+	require.Equal(t, origClosedTotal+2, lm.ConnectionsClosedTotal.Load())
+}
+
+// TestConnectionLifecycleBalance verifies established == closed at end
+func TestConnectionLifecycleBalance(t *testing.T) {
+	lm := GetListenerMetrics()
+	origEstablished := lm.ConnectionsEstablished.Load()
+	origClosedTotal := lm.ConnectionsClosedTotal.Load()
+
+	// Create and close multiple connections with different reasons
+	reasons := []CloseReason{
+		CloseReasonGraceful,
+		CloseReasonPeerIdle,
+		CloseReasonContextCancel,
+		CloseReasonError,
+		CloseReasonGraceful,
+	}
+
+	for i, reason := range reasons {
+		socketId := uint32(0x30000000 + i)
+		m := NewConnectionMetrics()
+		RegisterConnection(socketId, m)
+		UnregisterConnection(socketId, reason)
+	}
+
+	// Verify balance: new established == new closed
+	newEstablished := lm.ConnectionsEstablished.Load() - origEstablished
+	newClosedTotal := lm.ConnectionsClosedTotal.Load() - origClosedTotal
+
+	require.Equal(t, uint64(5), newEstablished)
+	require.Equal(t, uint64(5), newClosedTotal)
+	require.Equal(t, newEstablished, newClosedTotal, "Established should equal Closed")
+}
+
+// TestConnectionLifecyclePrometheusExport verifies lifecycle metrics are exported
+func TestConnectionLifecyclePrometheusExport(t *testing.T) {
+	lm := GetListenerMetrics()
+
+	// Set some lifecycle values
+	origEstablished := lm.ConnectionsEstablished.Load()
+	origClosedTotal := lm.ConnectionsClosedTotal.Load()
+	origClosedGraceful := lm.ConnectionsClosedGraceful.Load()
+
+	// Register and unregister a connection
+	socketId := uint32(0x44444444)
+	m := NewConnectionMetrics()
+	RegisterConnection(socketId, m)
+	UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Write to builder
+	var b strings.Builder
+	writeListenerMetrics(&b)
+	output := b.String()
+
+	// Verify lifecycle metrics are present
+	require.Contains(t, output, "gosrt_connections_active")
+	require.Contains(t, output, "gosrt_connections_established_total")
+	require.Contains(t, output, "gosrt_connections_closed_total")
+	require.Contains(t, output, "gosrt_connections_closed_by_reason_total")
+	require.Contains(t, output, `reason="graceful"`)
+
+	// Cleanup verification - values should be incremented
+	require.Equal(t, origEstablished+1, lm.ConnectionsEstablished.Load())
+	require.Equal(t, origClosedTotal+1, lm.ConnectionsClosedTotal.Load())
+	require.Equal(t, origClosedGraceful+1, lm.ConnectionsClosedGraceful.Load())
+}
+

@@ -4,6 +4,17 @@ import (
 	"sync"
 )
 
+// CloseReason indicates why a connection was closed.
+// Used for tracking connection lifecycle in metrics.
+type CloseReason int
+
+const (
+	CloseReasonGraceful      CloseReason = iota // Normal shutdown (Close() called)
+	CloseReasonPeerIdle                         // Peer idle timeout expired
+	CloseReasonContextCancel                    // Parent context cancelled
+	CloseReasonError                            // Error during operation
+)
+
 // MetricsRegistry holds all connection metrics
 type MetricsRegistry struct {
 	connections map[uint32]*ConnectionMetrics
@@ -27,15 +38,35 @@ func GetListenerMetrics() *ListenerMetrics {
 // RegisterConnection registers a connection's metrics
 func RegisterConnection(socketId uint32, metrics *ConnectionMetrics) {
 	globalRegistry.mu.Lock()
-	defer globalRegistry.mu.Unlock()
 	globalRegistry.connections[socketId] = metrics
+	globalRegistry.mu.Unlock()
+
+	// Increment lifecycle counters (lock-free atomics)
+	globalListenerMetrics.ConnectionsActive.Add(1)
+	globalListenerMetrics.ConnectionsEstablished.Add(1)
 }
 
-// UnregisterConnection removes a connection's metrics
-func UnregisterConnection(socketId uint32) {
+// UnregisterConnection removes a connection's metrics and increments the
+// appropriate close counter based on the reason.
+func UnregisterConnection(socketId uint32, reason CloseReason) {
 	globalRegistry.mu.Lock()
-	defer globalRegistry.mu.Unlock()
 	delete(globalRegistry.connections, socketId)
+	globalRegistry.mu.Unlock()
+
+	// Decrement active count and increment close counters (lock-free atomics)
+	globalListenerMetrics.ConnectionsActive.Add(-1)
+	globalListenerMetrics.ConnectionsClosedTotal.Add(1)
+
+	switch reason {
+	case CloseReasonGraceful:
+		globalListenerMetrics.ConnectionsClosedGraceful.Add(1)
+	case CloseReasonPeerIdle:
+		globalListenerMetrics.ConnectionsClosedPeerIdle.Add(1)
+	case CloseReasonContextCancel:
+		globalListenerMetrics.ConnectionsClosedContextCancel.Add(1)
+	case CloseReasonError:
+		globalListenerMetrics.ConnectionsClosedError.Add(1)
+	}
 }
 
 // GetConnections returns a snapshot of all registered connections
@@ -54,4 +85,3 @@ func GetConnections() (map[uint32]*ConnectionMetrics, []uint32) {
 
 	return connections, socketIds
 }
-
