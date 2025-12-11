@@ -476,21 +476,29 @@ func getSumByPrefixContaining(snapshot *MetricsSnapshot, prefix, substr string) 
 
 // AnalysisErrorCounterPrefixes is the list of error counter prefixes to check
 // The actual Prometheus metrics have labels (socket_id, reason, etc.)
+//
+// NOTE: Congestion drop counters (gosrt_connection_congestion_*_drop_total) are
+// intentionally NOT included here. These drops include:
+//   - already_acked: Redundant retransmits (NOT an error)
+//   - duplicate: Duplicate packets (NOT an error)
+//   - too_old: Arrived after TSBPD (TRUE error, but rare)
+//
+// The Statistical Validation properly handles drop analysis by checking:
+//   - TotalPacketsSkippedTSBPD for TRUE unrecoverable losses
+//   - Recovery rate = (gaps - skips) / gaps
+//
+// See defect11_error_analysis_too_strict.md for details.
 var AnalysisErrorCounterPrefixes = []string{
-	// Crypto errors
+	// Crypto errors - TRUE errors, should always be 0
 	"gosrt_connection_crypto_error_total",
 
-	// Receive path errors
+	// Receive path errors - TRUE errors, should always be 0
 	"gosrt_connection_recv_data_error_total",
 	"gosrt_connection_recv_control_error_total",
 
-	// Send path errors (drops)
+	// Send path errors - TRUE errors, should always be 0
 	"gosrt_connection_send_data_drop_total",
 	"gosrt_connection_send_control_drop_total",
-
-	// Congestion control drops
-	"gosrt_connection_congestion_recv_data_drop_total",
-	"gosrt_connection_congestion_send_data_drop_total",
 
 	// Listener-level map lookup failures (programming errors - should be 0)
 	// Note: These indicate bugs like Defect 8 Bug 3 (wrong lookup key)
@@ -595,6 +603,8 @@ func AnalyzeErrors(ts *TestMetricsTimeSeries, config *TestConfig) ErrorAnalysisR
 }
 
 // getExpectedErrorCount returns the expected maximum for an error counter
+// Note: Congestion drop counters are NOT in the error list (see defect11_error_analysis_too_strict.md)
+// so this function no longer needs to handle them.
 func getExpectedErrorCount(counter string, config *TestConfig) int64 {
 	if config == nil {
 		return 0
@@ -608,23 +618,8 @@ func getExpectedErrorCount(counter string, config *TestConfig) int64 {
 		}
 	}
 
-	// For network impairment tests, congestion drops are expected
-	if config.Mode == TestModeNetwork && config.Impairment.LossRate > 0 {
-		// These counters indicate packets dropped due to arriving too late
-		// or buffer overflow - expected with packet loss
-		if counter == "gosrt_connection_congestion_recv_data_drop_total" ||
-			counter == "gosrt_connection_congestion_send_data_drop_total" ||
-			counter == "gosrt_connection_packets_dropped_total" {
-			// Allow drops proportional to expected loss rate
-			// e.g., 2% loss with 10000 packets = ~200 drops allowed (with margin)
-			expectedDrops := int64(config.Impairment.LossRate * 10000 * 5) // 5x margin
-			if expectedDrops < 100 {
-				expectedDrops = 100
-			}
-			return expectedDrops
-		}
-	}
-
+	// All counters in AnalysisErrorCounterPrefixes should be 0
+	// Congestion drops are handled by Statistical Validation, not Error Analysis
 	return 0
 }
 
