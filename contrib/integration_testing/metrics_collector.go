@@ -347,6 +347,52 @@ func (tm *TestMetrics) GetAllStabilizationGetters() []metrics.MetricsGetter {
 	return getters
 }
 
+// GetLastSnapshot returns the last snapshot for a component, or nil if none.
+// component should be one of: "server", "client-generator", "client"
+func (tm *TestMetrics) GetLastSnapshot(component string) *MetricsSnapshot {
+	var cm *ComponentMetrics
+	switch component {
+	case "server":
+		cm = &tm.Server
+	case "client-generator", "clientgen":
+		cm = &tm.ClientGenerator
+	case "client":
+		cm = &tm.Client
+	default:
+		return nil
+	}
+
+	if len(cm.Snapshots) == 0 {
+		return nil
+	}
+	return cm.Snapshots[len(cm.Snapshots)-1]
+}
+
+// GetSnapshotByLabel returns a snapshot with the given point label for a component, or nil if not found.
+// component should be one of: "server", "client-generator", "client"
+// label should be one of: "startup", "mid-test", "pre-shutdown", "final"
+func (tm *TestMetrics) GetSnapshotByLabel(component, label string) *MetricsSnapshot {
+	var cm *ComponentMetrics
+	switch component {
+	case "server":
+		cm = &tm.Server
+	case "client-generator", "clientgen":
+		cm = &tm.ClientGenerator
+	case "client":
+		cm = &tm.Client
+	default:
+		return nil
+	}
+
+	// Search backwards to find the most recent snapshot with this point
+	for i := len(cm.Snapshots) - 1; i >= 0; i-- {
+		if cm.Snapshots[i].Point == label {
+			return cm.Snapshots[i]
+		}
+	}
+	return nil
+}
+
 // WaitForStabilization waits for all components' metrics to stabilize.
 // This should be called after pausing data generation (SIGUSR1 to client-generator)
 // to detect when ACKs, NAKs, and retransmissions have completed.

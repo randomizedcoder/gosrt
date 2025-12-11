@@ -509,3 +509,295 @@ func (c *TestConfig) GetAllMetricsEndpoints() (server, clientGen, client Metrics
 		MetricsEndpoint{HTTPAddr: clientGenNet.MetricsAddr(), UDSPath: clientGenNet.MetricsUDS},
 		MetricsEndpoint{HTTPAddr: clientNet.MetricsAddr(), UDSPath: clientNet.MetricsUDS}
 }
+
+// ============================================================================
+// PARALLEL COMPARISON TEST CONFIGURATION
+// ============================================================================
+// These types support running two pipelines (Baseline + HighPerf) in parallel
+// for direct, side-by-side comparison under identical network conditions.
+
+// PipelineConfig defines the configuration for one pipeline in a parallel test
+type PipelineConfig struct {
+	// Network addresses (uses .2 for Baseline, .3 for HighPerf)
+	PublisherIP  string // e.g., "10.1.1.2" or "10.1.1.3"
+	ServerIP     string // e.g., "10.2.1.2" or "10.2.1.3"
+	SubscriberIP string // e.g., "10.1.2.2" or "10.1.2.3"
+	ServerPort   int    // e.g., 6000 or 6001
+	StreamID     string // e.g., "test-stream-baseline" or "test-stream-highperf"
+
+	// SRT configuration for this pipeline
+	SRT SRTConfig
+
+	// Client-specific configuration
+	ClientConfig ComponentConfig
+}
+
+// GetServerAddr returns the server address string
+func (p *PipelineConfig) GetServerAddr() string {
+	return fmt.Sprintf("%s:%d", p.ServerIP, p.ServerPort)
+}
+
+// ParallelTestConfig defines a parallel comparison test with two pipelines
+type ParallelTestConfig struct {
+	// Test identification
+	Name        string
+	Description string
+
+	// Network impairment (shared by both pipelines)
+	Impairment NetworkImpairment
+
+	// Pipeline configurations
+	Baseline PipelineConfig // Baseline pipeline (list + no io_uring)
+	HighPerf PipelineConfig // High performance pipeline (btree + io_uring)
+
+	// Test timing
+	Bitrate         int64         // Bitrate in bits per second (same for both)
+	TestDuration    time.Duration // How long to run the test
+	ConnectionWait  time.Duration // Time to wait for all connections
+	CollectInterval time.Duration // How often to collect metrics
+
+	// Profiling settings
+	ProfilingEnabled bool          // Enable profiling mode
+	ProfileTypes     []string      // Profile types to collect: "cpu", "heap", "allocs", "block", "mutex"
+	ProfileDuration  time.Duration // Duration for each profile run (default: 5 minutes)
+
+	// Verbose output
+	VerboseMetrics bool // Print detailed metrics deltas
+	VerboseNetwork bool // Print network controller logs
+}
+
+// BaselineSRTConfig is the standard configuration: linked list, no io_uring
+var BaselineSRTConfig = SRTConfig{
+	ConnectionTimeout:      3000 * time.Millisecond,
+	PeerIdleTimeout:        30000 * time.Millisecond,
+	Latency:                3000 * time.Millisecond,
+	RecvLatency:            3000 * time.Millisecond,
+	PeerLatency:            3000 * time.Millisecond,
+	IoUringEnabled:         false,  // NO io_uring
+	IoUringRecvEnabled:     false,  // NO io_uring recv
+	PacketReorderAlgorithm: "list", // Linked list packet store
+	TLPktDrop:              true,
+}
+
+// HighPerfSRTConfig is the high-performance configuration: btree + io_uring
+var HighPerfSRTConfig = SRTConfig{
+	ConnectionTimeout:      3000 * time.Millisecond,
+	PeerIdleTimeout:        30000 * time.Millisecond,
+	Latency:                3000 * time.Millisecond,
+	RecvLatency:            3000 * time.Millisecond,
+	PeerLatency:            3000 * time.Millisecond,
+	IoUringEnabled:         true,    // io_uring for SRT send
+	IoUringRecvEnabled:     true,    // io_uring for SRT recv
+	PacketReorderAlgorithm: "btree", // B-tree packet store
+	BTreeDegree:            32,
+	TLPktDrop:              true,
+}
+
+// GetBaselineServerFlags returns CLI flags for the baseline server
+func (c *ParallelTestConfig) GetBaselineServerFlags(testID string) []string {
+	return c.getServerFlags(c.Baseline, "baseline", testID)
+}
+
+// GetHighPerfServerFlags returns CLI flags for the high-perf server
+func (c *ParallelTestConfig) GetHighPerfServerFlags(testID string) []string {
+	return c.getServerFlags(c.HighPerf, "highperf", testID)
+}
+
+func (c *ParallelTestConfig) getServerFlags(p PipelineConfig, label, testID string) []string {
+	udsPath := fmt.Sprintf("/tmp/srt_server_%s_%s.sock", label, testID)
+	flags := []string{
+		"-addr", p.GetServerAddr(),
+		"-promuds", udsPath,
+	}
+	flags = append(flags, p.SRT.ToCliFlags()...)
+	return flags
+}
+
+// GetBaselineClientGeneratorFlags returns CLI flags for the baseline client-generator
+func (c *ParallelTestConfig) GetBaselineClientGeneratorFlags(testID string) []string {
+	return c.getClientGeneratorFlags(c.Baseline, "baseline", testID)
+}
+
+// GetHighPerfClientGeneratorFlags returns CLI flags for the high-perf client-generator
+func (c *ParallelTestConfig) GetHighPerfClientGeneratorFlags(testID string) []string {
+	return c.getClientGeneratorFlags(c.HighPerf, "highperf", testID)
+}
+
+func (c *ParallelTestConfig) getClientGeneratorFlags(p PipelineConfig, label, testID string) []string {
+	udsPath := fmt.Sprintf("/tmp/srt_clientgen_%s_%s.sock", label, testID)
+	publisherURL := fmt.Sprintf("srt://%s/%s", p.GetServerAddr(), p.StreamID)
+	flags := []string{
+		"-to", publisherURL,
+		"-bitrate", strconv.FormatInt(c.Bitrate, 10),
+		"-localaddr", p.PublisherIP,
+		"-promuds", udsPath,
+	}
+	flags = append(flags, p.SRT.ToCliFlags()...)
+	return flags
+}
+
+// GetBaselineClientFlags returns CLI flags for the baseline client
+func (c *ParallelTestConfig) GetBaselineClientFlags(testID string) []string {
+	return c.getClientFlags(c.Baseline, "baseline", testID, false)
+}
+
+// GetHighPerfClientFlags returns CLI flags for the high-perf client
+func (c *ParallelTestConfig) GetHighPerfClientFlags(testID string) []string {
+	return c.getClientFlags(c.HighPerf, "highperf", testID, true)
+}
+
+func (c *ParallelTestConfig) getClientFlags(p PipelineConfig, label, testID string, ioUringOutput bool) []string {
+	udsPath := fmt.Sprintf("/tmp/srt_client_%s_%s.sock", label, testID)
+	subscriberURL := fmt.Sprintf("srt://%s?streamid=subscribe:/%s&mode=caller", p.GetServerAddr(), p.StreamID)
+	flags := []string{
+		"-from", subscriberURL,
+		"-to", "null",
+		"-localaddr", p.SubscriberIP,
+		"-promuds", udsPath,
+	}
+	if ioUringOutput {
+		flags = append(flags, "-iouringoutput")
+	}
+	flags = append(flags, p.SRT.ToCliFlags()...)
+	return flags
+}
+
+// GetAllUDSPaths returns all 6 UDS paths for metrics collection
+func (c *ParallelTestConfig) GetAllUDSPaths(testID string) map[string]string {
+	return map[string]string{
+		"server_baseline":    fmt.Sprintf("/tmp/srt_server_baseline_%s.sock", testID),
+		"server_highperf":    fmt.Sprintf("/tmp/srt_server_highperf_%s.sock", testID),
+		"clientgen_baseline": fmt.Sprintf("/tmp/srt_clientgen_baseline_%s.sock", testID),
+		"clientgen_highperf": fmt.Sprintf("/tmp/srt_clientgen_highperf_%s.sock", testID),
+		"client_baseline":    fmt.Sprintf("/tmp/srt_client_baseline_%s.sock", testID),
+		"client_highperf":    fmt.Sprintf("/tmp/srt_client_highperf_%s.sock", testID),
+	}
+}
+
+// ============================================================================
+// ISOLATION TEST CONFIGURATION
+// ============================================================================
+// These types support running simplified CG→Server tests to isolate
+// which component/feature causes performance differences.
+// No Client (subscriber), no network impairment, 30 second tests.
+
+// IsolationTestConfig defines a simplified CG→Server test for variable isolation
+type IsolationTestConfig struct {
+	// Test identification
+	Name        string
+	Description string
+
+	// Control pipeline (reference): list, no io_uring
+	ControlCG     SRTConfig
+	ControlServer SRTConfig
+
+	// Test pipeline: one variable changed from control
+	TestCG     SRTConfig
+	TestServer SRTConfig
+
+	// Test settings
+	TestDuration time.Duration // 30 seconds
+	Bitrate      int64         // 5 Mb/s
+	StatsPeriod  time.Duration // Stats display period (e.g., 10s to reduce output)
+}
+
+// ControlSRTConfig is the base control configuration: list, no io_uring
+// This is the reference point for all isolation tests.
+var ControlSRTConfig = SRTConfig{
+	ConnectionTimeout:      3000 * time.Millisecond,
+	PeerIdleTimeout:        30000 * time.Millisecond,
+	Latency:                3000 * time.Millisecond,
+	RecvLatency:            3000 * time.Millisecond,
+	PeerLatency:            3000 * time.Millisecond,
+	IoUringEnabled:         false,  // NO io_uring send
+	IoUringRecvEnabled:     false,  // NO io_uring recv
+	PacketReorderAlgorithm: "list", // Linked list packet store
+	TLPktDrop:              true,
+}
+
+// WithIoUringSend returns a copy of the config with io_uring send enabled
+func (c SRTConfig) WithIoUringSend() SRTConfig {
+	c.IoUringEnabled = true
+	return c
+}
+
+// WithIoUringRecv returns a copy of the config with io_uring recv enabled
+func (c SRTConfig) WithIoUringRecv() SRTConfig {
+	c.IoUringRecvEnabled = true
+	return c
+}
+
+// WithBtree returns a copy of the config with btree packet store
+func (c SRTConfig) WithBtree(degree int) SRTConfig {
+	c.PacketReorderAlgorithm = "btree"
+	c.BTreeDegree = degree
+	return c
+}
+
+// GetControlCGFlags returns CLI flags for the control client-generator
+func (c *IsolationTestConfig) GetControlCGFlags(testID string) []string {
+	udsPath := fmt.Sprintf("/tmp/srt_cg_control_%s.sock", testID)
+	// Control CG → Control Server on port 6000
+	publisherURL := fmt.Sprintf("srt://10.2.1.2:6000/test-stream-control")
+	flags := []string{
+		"-to", publisherURL,
+		"-bitrate", strconv.FormatInt(c.Bitrate, 10),
+		"-localaddr", "10.1.1.2",
+		"-promuds", udsPath,
+	}
+	if c.StatsPeriod > 0 {
+		flags = append(flags, "-statsperiod", c.StatsPeriod.String())
+	}
+	flags = append(flags, c.ControlCG.ToCliFlags()...)
+	return flags
+}
+
+// GetTestCGFlags returns CLI flags for the test client-generator
+func (c *IsolationTestConfig) GetTestCGFlags(testID string) []string {
+	udsPath := fmt.Sprintf("/tmp/srt_cg_test_%s.sock", testID)
+	// Test CG → Test Server on port 6001
+	publisherURL := fmt.Sprintf("srt://10.2.1.3:6001/test-stream-test")
+	flags := []string{
+		"-to", publisherURL,
+		"-bitrate", strconv.FormatInt(c.Bitrate, 10),
+		"-localaddr", "10.1.1.3",
+		"-promuds", udsPath,
+	}
+	if c.StatsPeriod > 0 {
+		flags = append(flags, "-statsperiod", c.StatsPeriod.String())
+	}
+	flags = append(flags, c.TestCG.ToCliFlags()...)
+	return flags
+}
+
+// GetControlServerFlags returns CLI flags for the control server
+func (c *IsolationTestConfig) GetControlServerFlags(testID string) []string {
+	udsPath := fmt.Sprintf("/tmp/srt_server_control_%s.sock", testID)
+	flags := []string{
+		"-addr", "10.2.1.2:6000",
+		"-promuds", udsPath,
+	}
+	flags = append(flags, c.ControlServer.ToCliFlags()...)
+	return flags
+}
+
+// GetTestServerFlags returns CLI flags for the test server
+func (c *IsolationTestConfig) GetTestServerFlags(testID string) []string {
+	udsPath := fmt.Sprintf("/tmp/srt_server_test_%s.sock", testID)
+	flags := []string{
+		"-addr", "10.2.1.3:6001",
+		"-promuds", udsPath,
+	}
+	flags = append(flags, c.TestServer.ToCliFlags()...)
+	return flags
+}
+
+// GetAllUDSPaths returns UDS paths for the 4 processes
+func (c *IsolationTestConfig) GetAllUDSPaths(testID string) map[string]string {
+	return map[string]string{
+		"cg_control":     fmt.Sprintf("/tmp/srt_cg_control_%s.sock", testID),
+		"cg_test":        fmt.Sprintf("/tmp/srt_cg_test_%s.sock", testID),
+		"server_control": fmt.Sprintf("/tmp/srt_server_control_%s.sock", testID),
+		"server_test":    fmt.Sprintf("/tmp/srt_server_test_%s.sock", testID),
+	}
+}

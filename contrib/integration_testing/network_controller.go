@@ -569,6 +569,236 @@ func (nc *NetworkController) IsSetup() bool {
 	return nc.isSetup
 }
 
+// ============================================================================
+// PARALLEL TEST METHODS
+// ============================================================================
+// These methods support running two pipelines in parallel by managing
+// the .3 IP addresses and applying impairments to all 6 participant IPs.
+
+// SetupParallelIPs adds the .3 IP addresses for the HighPerf pipeline
+func (nc *NetworkController) SetupParallelIPs(ctx context.Context) error {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	if !nc.isSetup {
+		return fmt.Errorf("network not setup - call Setup() first")
+	}
+
+	// Source lib.sh and call setup_parallel_ips
+	script := fmt.Sprintf("source %s/lib.sh && setup_parallel_ips", nc.ScriptDir)
+	cmd := exec.CommandContext(ctx, "bash", "-c", script)
+	cmd.Env = nc.buildScriptEnv()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("setup_parallel_ips failed: %w\nOutput: %s", err, string(output))
+	}
+
+	return nil
+}
+
+// CleanupParallelIPs removes the .3 IP addresses for the HighPerf pipeline
+func (nc *NetworkController) CleanupParallelIPs(ctx context.Context) error {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	// Source lib.sh and call cleanup_parallel_ips
+	script := fmt.Sprintf("source %s/lib.sh && cleanup_parallel_ips", nc.ScriptDir)
+	cmd := exec.CommandContext(ctx, "bash", "-c", script)
+	cmd.Env = nc.buildScriptEnv()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("cleanup_parallel_ips failed: %w\nOutput: %s", err, string(output))
+	}
+
+	return nil
+}
+
+// SetLossParallel sets packet loss for parallel tests (affects all 6 IPs)
+func (nc *NetworkController) SetLossParallel(ctx context.Context, lossPercent int) error {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	if !nc.isSetup {
+		return fmt.Errorf("network not setup")
+	}
+
+	// Source lib.sh and call set_loss_percent_parallel
+	script := fmt.Sprintf("source %s/lib.sh && set_loss_percent_parallel %d", nc.ScriptDir, lossPercent)
+	cmd := exec.CommandContext(ctx, "bash", "-c", script)
+	cmd.Env = nc.buildScriptEnv()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("set_loss_percent_parallel failed: %w\nOutput: %s", err, string(output))
+	}
+
+	nc.CurrentLossPercent = lossPercent
+	return nil
+}
+
+// StartPatternParallel starts an impairment pattern for parallel tests (affects all 6 IPs)
+func (nc *NetworkController) StartPatternParallel(ctx context.Context, pattern LossPattern) error {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	if !nc.isSetup {
+		return fmt.Errorf("network not setup")
+	}
+
+	// Cancel any existing pattern
+	if nc.patternCancel != nil {
+		nc.patternCancel()
+		nc.patternWg.Wait()
+	}
+
+	// Create new context for pattern
+	patternCtx, cancel := context.WithCancel(ctx)
+	nc.patternCancel = cancel
+
+	// Start pattern goroutine
+	nc.patternWg.Add(1)
+	go nc.runPatternParallel(patternCtx, pattern)
+
+	return nil
+}
+
+// StopPatternParallel stops any running parallel impairment pattern
+func (nc *NetworkController) StopPatternParallel(ctx context.Context) error {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	if nc.patternCancel != nil {
+		nc.patternCancel()
+		nc.patternWg.Wait()
+		nc.patternCancel = nil
+	}
+
+	// Ensure loss is cleared for all 6 IPs
+	script := fmt.Sprintf("source %s/lib.sh && clear_blackhole_loss_parallel && clear_netem_loss", nc.ScriptDir)
+	cmd := exec.CommandContext(ctx, "bash", "-c", script)
+	cmd.Env = nc.buildScriptEnv()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("clear parallel loss failed: %w\nOutput: %s", err, string(output))
+	}
+
+	nc.CurrentLossPercent = 0
+	return nil
+}
+
+// runPatternParallel executes the impairment pattern for parallel tests
+func (nc *NetworkController) runPatternParallel(ctx context.Context, pattern LossPattern) {
+	defer nc.patternWg.Done()
+
+	if nc.Verbose {
+		fmt.Printf("[PATTERN] Starting parallel pattern \"%s\" with %d events, repeat=%v\n",
+			pattern.Name, len(pattern.Events), pattern.RepeatInterval)
+	}
+
+	eventIndex := 0
+	for {
+		if eventIndex >= len(pattern.Events) {
+			if pattern.RepeatInterval <= 0 {
+				// Pattern complete, no repeat
+				if nc.Verbose {
+					fmt.Printf("[PATTERN] Parallel pattern \"%s\" complete (no repeat)\n", pattern.Name)
+				}
+				return
+			}
+			// Reset for next cycle
+			eventIndex = 0
+		}
+
+		event := pattern.Events[eventIndex]
+
+		// Wait for event time
+		waitDuration := event.Offset
+		if eventIndex > 0 {
+			waitDuration = event.Offset - pattern.Events[eventIndex-1].Offset - pattern.Events[eventIndex-1].Duration
+		}
+
+		if nc.Verbose {
+			fmt.Printf("[PATTERN] Next event: %d%% loss for %v, waiting %v\n",
+				event.LossPercent, event.Duration, waitDuration)
+		}
+
+		select {
+		case <-ctx.Done():
+			if nc.Verbose {
+				fmt.Printf("[PATTERN] Context cancelled while waiting for event\n")
+			}
+			return
+		case <-time.After(waitDuration):
+		}
+
+		// Apply loss (using parallel function for all 6 IPs)
+		if nc.Verbose {
+			fmt.Printf("[PATTERN] Event #%d: Applying %d%% loss at %v\n",
+				eventIndex+1, event.LossPercent, time.Now().Format("15:04:05.000"))
+		}
+
+		nc.mu.Lock()
+		script := fmt.Sprintf("source %s/lib.sh && set_loss_percent_parallel %d", nc.ScriptDir, event.LossPercent)
+		cmd := exec.CommandContext(ctx, "bash", "-c", script)
+		cmd.Env = nc.buildScriptEnv()
+		if err := cmd.Run(); err != nil {
+			if nc.Verbose {
+				fmt.Fprintf(os.Stderr, "[PATTERN] ERROR applying parallel loss: %v\n", err)
+			}
+		}
+		nc.CurrentLossPercent = event.LossPercent
+
+		// Dump route tables if verbose
+		if nc.Verbose {
+			nc.dumpRouteTables(ctx)
+		}
+		nc.mu.Unlock()
+
+		// Wait for event duration
+		select {
+		case <-ctx.Done():
+			// Clear loss before exiting
+			nc.mu.Lock()
+			script := fmt.Sprintf("source %s/lib.sh && set_loss_percent_parallel 0", nc.ScriptDir)
+			cmd := exec.CommandContext(context.Background(), "bash", "-c", script)
+			cmd.Env = nc.buildScriptEnv()
+			_ = cmd.Run()
+			nc.CurrentLossPercent = 0
+			nc.mu.Unlock()
+			return
+		case <-time.After(event.Duration):
+		}
+
+		// Clear loss after event
+		if nc.Verbose {
+			fmt.Printf("[PATTERN] Event #%d: Clearing loss at %v (after %v)\n",
+				eventIndex+1, time.Now().Format("15:04:05.000"), event.Duration)
+		}
+
+		nc.mu.Lock()
+		script = fmt.Sprintf("source %s/lib.sh && set_loss_percent_parallel 0", nc.ScriptDir)
+		cmd = exec.CommandContext(ctx, "bash", "-c", script)
+		cmd.Env = nc.buildScriptEnv()
+		if err := cmd.Run(); err != nil {
+			if nc.Verbose {
+				fmt.Fprintf(os.Stderr, "[PATTERN] ERROR clearing parallel loss: %v\n", err)
+			}
+		}
+		nc.CurrentLossPercent = 0
+
+		// Dump route tables if verbose
+		if nc.Verbose {
+			nc.dumpRouteTables(ctx)
+		}
+		nc.mu.Unlock()
+
+		eventIndex++
+	}
+}
+
 // buildScriptEnv returns the environment variables for script execution.
 // Includes TEST_ID and SRT_NETWORK_DEBUG=1 when verbose mode is enabled.
 func (nc *NetworkController) buildScriptEnv() []string {

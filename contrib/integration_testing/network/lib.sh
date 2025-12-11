@@ -256,6 +256,12 @@ readonly IP_PUBLISHER="${SUBNET_PUBLISHER}.2"
 readonly IP_SUBSCRIBER="${SUBNET_SUBSCRIBER}.2"
 readonly IP_SERVER="${SUBNET_SERVER}.2"
 
+# Parallel test IPs - HighPerf pipeline uses .3 addresses
+# These are used when running two pipelines simultaneously for comparison
+readonly IP_PUBLISHER_HIGHPERF="${SUBNET_PUBLISHER}.3"
+readonly IP_SUBSCRIBER_HIGHPERF="${SUBNET_SUBSCRIBER}.3"
+readonly IP_SERVER_HIGHPERF="${SUBNET_SERVER}.3"
+
 # Apply 100% packet loss using /32 host-specific blackhole routes
 # Using /32 routes is cleaner than /24 because:
 #   1. More specific routes win (longest prefix match)
@@ -467,20 +473,193 @@ cleanup_srt_network() {
 }
 
 #=============================================================================
+# PARALLEL TEST FUNCTIONS
+#=============================================================================
+# These functions support running two pipelines (Baseline + HighPerf) in parallel
+# for direct comparison testing. The HighPerf pipeline uses .3 addresses.
+
+# Add secondary IP addresses (.3) for parallel testing
+# This enables running two pipelines simultaneously in the same namespaces
+# Usage: setup_parallel_ips
+setup_parallel_ips() {
+    log_info "Adding parallel test IPs (.3 addresses for HighPerf pipeline)"
+
+    # Add .3 IP to publisher namespace
+    if ! run_in_namespace "${NAMESPACE_PUBLISHER}" ip addr show eth0 2>/dev/null | grep -q "${IP_PUBLISHER_HIGHPERF}"; then
+        run_in_namespace "${NAMESPACE_PUBLISHER}" ip addr add "${IP_PUBLISHER_HIGHPERF}/24" dev eth0
+        log_debug "Added ${IP_PUBLISHER_HIGHPERF} to ${NAMESPACE_PUBLISHER}"
+    else
+        log_debug "${IP_PUBLISHER_HIGHPERF} already configured in ${NAMESPACE_PUBLISHER}"
+    fi
+
+    # Add .3 IP to subscriber namespace
+    if ! run_in_namespace "${NAMESPACE_SUBSCRIBER}" ip addr show eth0 2>/dev/null | grep -q "${IP_SUBSCRIBER_HIGHPERF}"; then
+        run_in_namespace "${NAMESPACE_SUBSCRIBER}" ip addr add "${IP_SUBSCRIBER_HIGHPERF}/24" dev eth0
+        log_debug "Added ${IP_SUBSCRIBER_HIGHPERF} to ${NAMESPACE_SUBSCRIBER}"
+    else
+        log_debug "${IP_SUBSCRIBER_HIGHPERF} already configured in ${NAMESPACE_SUBSCRIBER}"
+    fi
+
+    # Add .3 IP to server namespace
+    if ! run_in_namespace "${NAMESPACE_SERVER}" ip addr show eth0 2>/dev/null | grep -q "${IP_SERVER_HIGHPERF}"; then
+        run_in_namespace "${NAMESPACE_SERVER}" ip addr add "${IP_SERVER_HIGHPERF}/24" dev eth0
+        log_debug "Added ${IP_SERVER_HIGHPERF} to ${NAMESPACE_SERVER}"
+    else
+        log_debug "${IP_SERVER_HIGHPERF} already configured in ${NAMESPACE_SERVER}"
+    fi
+
+    log_info "Parallel IPs configured:"
+    log_info "  Publisher HighPerf:  ${IP_PUBLISHER_HIGHPERF}"
+    log_info "  Subscriber HighPerf: ${IP_SUBSCRIBER_HIGHPERF}"
+    log_info "  Server HighPerf:     ${IP_SERVER_HIGHPERF}"
+}
+
+# Remove secondary IP addresses (.3) for parallel testing
+# Usage: cleanup_parallel_ips
+cleanup_parallel_ips() {
+    log_info "Removing parallel test IPs (.3 addresses)"
+
+    run_in_namespace "${NAMESPACE_PUBLISHER}" ip addr del "${IP_PUBLISHER_HIGHPERF}/24" dev eth0 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_SUBSCRIBER}" ip addr del "${IP_SUBSCRIBER_HIGHPERF}/24" dev eth0 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_SERVER}" ip addr del "${IP_SERVER_HIGHPERF}/24" dev eth0 2>/dev/null || true
+
+    log_debug "Parallel IPs removed"
+}
+
+# Apply 100% packet loss for parallel tests using /32 host blackhole routes
+# Blocks ALL 6 participant IPs on BOTH routers for complete isolation
+# Usage: set_blackhole_loss_parallel
+set_blackhole_loss_parallel() {
+    log_info "Applying 100% loss via /32 host blackhole routes (parallel mode - 6 IPs on both routers)"
+
+    # Router A: Block ALL 6 participant hosts
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${IP_PUBLISHER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${IP_PUBLISHER_HIGHPERF}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${IP_SUBSCRIBER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${IP_SUBSCRIBER_HIGHPERF}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${IP_SERVER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route add blackhole "${IP_SERVER_HIGHPERF}/32" 2>/dev/null || true
+
+    # Router B: Block ALL 6 participant hosts (same routes)
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${IP_PUBLISHER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${IP_PUBLISHER_HIGHPERF}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${IP_SUBSCRIBER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${IP_SUBSCRIBER_HIGHPERF}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${IP_SERVER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route add blackhole "${IP_SERVER_HIGHPERF}/32" 2>/dev/null || true
+
+    log_debug "Parallel blackhole routes applied (6 IPs × 2 routers = 12 routes)"
+}
+
+# Remove /32 host blackhole routes for parallel tests
+# Usage: clear_blackhole_loss_parallel
+clear_blackhole_loss_parallel() {
+    log_info "Removing /32 host blackhole routes (parallel mode)"
+
+    # Router A: Remove ALL 6 blackholes
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${IP_PUBLISHER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${IP_PUBLISHER_HIGHPERF}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${IP_SUBSCRIBER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${IP_SUBSCRIBER_HIGHPERF}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${IP_SERVER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route del blackhole "${IP_SERVER_HIGHPERF}/32" 2>/dev/null || true
+
+    # Router B: Remove ALL 6 blackholes
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${IP_PUBLISHER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${IP_PUBLISHER_HIGHPERF}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${IP_SUBSCRIBER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${IP_SUBSCRIBER_HIGHPERF}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${IP_SERVER}/32" 2>/dev/null || true
+    run_in_namespace "${NAMESPACE_ROUTER_SERVER}" ip route del blackhole "${IP_SERVER_HIGHPERF}/32" 2>/dev/null || true
+
+    log_debug "Parallel blackhole routes removed"
+}
+
+# Combined parallel loss control - handles both 100% (blackhole) and probabilistic (netem)
+# Usage: set_loss_percent_parallel <percent>
+#   0 = no loss, 100 = blackhole (6 IPs), 1-99 = netem probabilistic
+set_loss_percent_parallel() {
+    local loss_percent="$1"
+
+    if [[ "${loss_percent}" -eq 0 ]]; then
+        clear_blackhole_loss_parallel
+        clear_netem_loss
+    elif [[ "${loss_percent}" -eq 100 ]]; then
+        set_blackhole_loss_parallel
+    else
+        clear_blackhole_loss_parallel
+        set_netem_loss "${loss_percent}"
+    fi
+}
+
+# Verify connectivity for parallel test IPs
+# Usage: verify_parallel_connectivity
+verify_parallel_connectivity() {
+    log_info "Verifying parallel test connectivity..."
+    local failed=0
+
+    # Test Baseline pipeline
+    log_debug "Testing Baseline pipeline (${IP_PUBLISHER} → ${IP_SERVER})"
+    if ! run_in_namespace "${NAMESPACE_PUBLISHER}" ping -c 1 -W 1 "${IP_SERVER}" >/dev/null 2>&1; then
+        log_error "Baseline: Publisher cannot reach Server"
+        failed=1
+    fi
+
+    log_debug "Testing Baseline pipeline (${IP_SUBSCRIBER} → ${IP_SERVER})"
+    if ! run_in_namespace "${NAMESPACE_SUBSCRIBER}" ping -c 1 -W 1 "${IP_SERVER}" >/dev/null 2>&1; then
+        log_error "Baseline: Subscriber cannot reach Server"
+        failed=1
+    fi
+
+    # Test HighPerf pipeline
+    log_debug "Testing HighPerf pipeline (${IP_PUBLISHER_HIGHPERF} → ${IP_SERVER_HIGHPERF})"
+    if ! run_in_namespace "${NAMESPACE_PUBLISHER}" ping -c 1 -W 1 -I "${IP_PUBLISHER_HIGHPERF}" "${IP_SERVER_HIGHPERF}" >/dev/null 2>&1; then
+        log_error "HighPerf: Publisher cannot reach Server"
+        failed=1
+    fi
+
+    log_debug "Testing HighPerf pipeline (${IP_SUBSCRIBER_HIGHPERF} → ${IP_SERVER_HIGHPERF})"
+    if ! run_in_namespace "${NAMESPACE_SUBSCRIBER}" ping -c 1 -W 1 -I "${IP_SUBSCRIBER_HIGHPERF}" "${IP_SERVER_HIGHPERF}" >/dev/null 2>&1; then
+        log_error "HighPerf: Subscriber cannot reach Server"
+        failed=1
+    fi
+
+    if [[ "${failed}" -eq 0 ]]; then
+        log_info "✓ All parallel connectivity tests passed"
+        return 0
+    else
+        log_error "✗ Some parallel connectivity tests failed"
+        return 1
+    fi
+}
+
+#=============================================================================
 # UTILITY FUNCTIONS
 #=============================================================================
 
 # Get the IP address for a component
-# Usage: get_ip <component>
+# Usage: get_ip <component> [pipeline]
 #   component: publisher, subscriber, server
+#   pipeline: baseline (default) or highperf
 get_ip() {
     local component="$1"
-    case "${component}" in
-        publisher)  echo "${SUBNET_PUBLISHER}.2" ;;
-        subscriber) echo "${SUBNET_SUBSCRIBER}.2" ;;
-        server)     echo "${SUBNET_SERVER}.2" ;;
-        *) log_error "Unknown component: ${component}"; return 1 ;;
-    esac
+    local pipeline="${2:-baseline}"
+
+    if [[ "${pipeline}" == "highperf" ]]; then
+        case "${component}" in
+            publisher)  echo "${IP_PUBLISHER_HIGHPERF}" ;;
+            subscriber) echo "${IP_SUBSCRIBER_HIGHPERF}" ;;
+            server)     echo "${IP_SERVER_HIGHPERF}" ;;
+            *) log_error "Unknown component: ${component}"; return 1 ;;
+        esac
+    else
+        case "${component}" in
+            publisher)  echo "${SUBNET_PUBLISHER}.2" ;;
+            subscriber) echo "${SUBNET_SUBSCRIBER}.2" ;;
+            server)     echo "${SUBNET_SERVER}.2" ;;
+            *) log_error "Unknown component: ${component}"; return 1 ;;
+        esac
+    fi
 }
 
 # Get the namespace for a component
@@ -524,15 +703,29 @@ print_network_status() {
     echo ""
     echo "Current latency profile: ${CURRENT_LATENCY_PROFILE}"
     echo ""
-    echo "Publisher (${SUBNET_PUBLISHER}.2):"
+    echo "Publisher:"
     run_in_namespace "${NAMESPACE_PUBLISHER}" ip addr show eth0 2>/dev/null | grep inet || echo "  (not configured)"
     echo ""
-    echo "Subscriber (${SUBNET_SUBSCRIBER}.2):"
+    echo "Subscriber:"
     run_in_namespace "${NAMESPACE_SUBSCRIBER}" ip addr show eth0 2>/dev/null | grep inet || echo "  (not configured)"
     echo ""
-    echo "Server (${SUBNET_SERVER}.2):"
+    echo "Server:"
     run_in_namespace "${NAMESPACE_SERVER}" ip addr show eth0 2>/dev/null | grep inet || echo "  (not configured)"
     echo ""
+
+    # Check for parallel IPs
+    local has_parallel=0
+    if run_in_namespace "${NAMESPACE_PUBLISHER}" ip addr show eth0 2>/dev/null | grep -q "${IP_PUBLISHER_HIGHPERF}"; then
+        has_parallel=1
+    fi
+
+    if [[ "${has_parallel}" -eq 1 ]]; then
+        echo "Parallel Mode: ENABLED"
+        echo "  Baseline:  .2 addresses (${IP_PUBLISHER}, ${IP_SUBSCRIBER}, ${IP_SERVER})"
+        echo "  HighPerf:  .3 addresses (${IP_PUBLISHER_HIGHPERF}, ${IP_SUBSCRIBER_HIGHPERF}, ${IP_SERVER_HIGHPERF})"
+        echo ""
+    fi
+
     echo "Routing (Client Router -> Server):"
     run_in_namespace "${NAMESPACE_ROUTER_CLIENT}" ip route show "${SUBNET_SERVER}.0/24" 2>/dev/null || echo "  (not configured)"
 }

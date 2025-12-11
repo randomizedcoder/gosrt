@@ -25,7 +25,6 @@ import (
 )
 
 const (
-	STATS_PERIOD = 1 * time.Second // Throughput display update interval
 	CHANNEL_SIZE = 2048
 )
 
@@ -212,7 +211,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		common.RunThroughputDisplayWithLabel(ctx, STATS_PERIOD, "SUB", func() (uint64, uint64, uint64, uint64, uint64) {
+		common.RunThroughputDisplayWithLabel(ctx, *common.StatsPeriod, "SUB", func() (uint64, uint64, uint64, uint64, uint64) {
 			// Get gaps, skips, and retransmit counts from the actual connection's metrics
 			var gaps, skips, retrans uint64
 			if socketId := connSocketId.Load(); socketId != 0 {

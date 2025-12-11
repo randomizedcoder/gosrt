@@ -625,3 +625,231 @@ func GetNetworkTestConfigByName(name string) *TestConfig {
 	}
 	return nil
 }
+
+// ============================================================================
+// PARALLEL COMPARISON TEST CONFIGURATIONS
+// ============================================================================
+// These tests run two pipelines (Baseline + HighPerf) in parallel for
+// direct comparison under identical network conditions.
+//
+// Run with: sudo make test-parallel CONFIG=<name>
+// Profile with: sudo make test-parallel-profile CONFIG=<name> PROFILES=cpu,heap
+
+// ParallelTestConfigs contains parallel comparison test configurations
+var ParallelTestConfigs = []ParallelTestConfig{
+	{
+		Name:        "Parallel-Starlink-5Mbps",
+		Description: "Parallel comparison: Starlink pattern at 5 Mb/s (Baseline vs HighPerf)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          HighPerfSRTConfig,
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+	{
+		Name:        "Parallel-Starlink-20Mbps",
+		Description: "Parallel comparison: Starlink pattern at 20 Mb/s (Baseline vs HighPerf)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          HighPerfSRTConfig,
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+	{
+		Name:        "Parallel-Loss2pct-5Mbps",
+		Description: "Parallel comparison: 2% probabilistic loss at 5 Mb/s",
+		Impairment: NetworkImpairment{
+			LossRate:       0.02,
+			LatencyProfile: "regional",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          HighPerfSRTConfig,
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+}
+
+// GetParallelTestConfigByName finds a parallel test configuration by name
+func GetParallelTestConfigByName(name string) *ParallelTestConfig {
+	for i := range ParallelTestConfigs {
+		if ParallelTestConfigs[i].Name == name {
+			return &ParallelTestConfigs[i]
+		}
+	}
+	return nil
+}
+
+// ============================================================================
+// ISOLATION TEST CONFIGURATIONS
+// ============================================================================
+// These tests run simplified CG→Server pairs to isolate which component/feature
+// causes performance differences. No Client, no network impairment, 30s tests.
+//
+// Control pipeline: list + no io_uring (baseline behavior)
+// Test pipeline: exactly ONE variable changed from control
+//
+// Run with: sudo make test-isolation CONFIG=<name>
+// Run all:  sudo make test-isolation-all
+
+// IsolationTestConfigs contains isolation test configurations
+var IsolationTestConfigs = []IsolationTestConfig{
+	// Test 0: Control-Control (sanity check - both identical)
+	{
+		Name:          "Isolation-Control",
+		Description:   "Sanity check: both pipelines identical (should show 0 difference)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig, // Same as control
+		TestServer:    ControlSRTConfig, // Same as control
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second, // Reduce output frequency
+	},
+
+	// Test 1: CG io_uring send only
+	{
+		Name:          "Isolation-CG-IoUringSend",
+		Description:   "Client-Generator: io_uring send path only",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithIoUringSend(), // Changed: io_uring send
+		TestServer:    ControlSRTConfig,
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 2: CG io_uring recv only
+	{
+		Name:          "Isolation-CG-IoUringRecv",
+		Description:   "Client-Generator: io_uring recv path only (for ACKs/NAKs)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithIoUringRecv(), // Changed: io_uring recv
+		TestServer:    ControlSRTConfig,
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 3: CG btree packet store
+	{
+		Name:          "Isolation-CG-Btree",
+		Description:   "Client-Generator: btree packet store (instead of list)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithBtree(32), // Changed: btree
+		TestServer:    ControlSRTConfig,
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 4: Server io_uring send only
+	{
+		Name:          "Isolation-Server-IoUringSend",
+		Description:   "Server: io_uring send path only",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithIoUringSend(), // Changed: io_uring send
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 5: Server io_uring recv only
+	{
+		Name:          "Isolation-Server-IoUringRecv",
+		Description:   "Server: io_uring recv path only",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithIoUringRecv(), // Changed: io_uring recv
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 6: Server btree packet store
+	{
+		Name:          "Isolation-Server-Btree",
+		Description:   "Server: btree packet store (instead of list)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithBtree(32), // Changed: btree
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+}
+
+// GetIsolationTestConfigByName finds an isolation test configuration by name
+func GetIsolationTestConfigByName(name string) *IsolationTestConfig {
+	for i := range IsolationTestConfigs {
+		if IsolationTestConfigs[i].Name == name {
+			return &IsolationTestConfigs[i]
+		}
+	}
+	return nil
+}

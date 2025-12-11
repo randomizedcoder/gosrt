@@ -108,6 +108,86 @@ func main() {
 		// Run all network impairment tests
 		testNetworkModeAllConfigs()
 
+	case "list-parallel-configs":
+		// List parallel comparison test configurations
+		fmt.Println("Available parallel comparison configurations (require root):")
+		fmt.Println()
+		for _, c := range ParallelTestConfigs {
+			fmt.Printf("  %-35s %s\n", c.Name, c.Description)
+		}
+
+	case "parallel-test":
+		// Run a specific parallel comparison test
+		// Usage: parallel-test <config-name> [-v|--verbose]
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Error: config name required\n")
+			fmt.Fprintf(os.Stderr, "Usage: sudo %s parallel-test <config-name> [-v|--verbose]\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for _, c := range ParallelTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", c.Name, c.Description)
+			}
+			os.Exit(1)
+		}
+		configName := os.Args[2]
+		config := GetParallelTestConfigByName(configName)
+		if config == nil {
+			fmt.Fprintf(os.Stderr, "Error: unknown parallel configuration: %s\n", configName)
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for _, c := range ParallelTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", c.Name, c.Description)
+			}
+			os.Exit(1)
+		}
+		// Check for verbose flag
+		for _, arg := range os.Args[3:] {
+			if arg == "-v" || arg == "--verbose" {
+				config.VerboseMetrics = true
+				config.VerboseNetwork = true
+				fmt.Println("Verbose mode enabled (metrics + network)")
+			}
+		}
+		testParallelModeWithConfig(*config)
+
+	case "parallel-test-all":
+		// Run all parallel comparison tests
+		testParallelModeAllConfigs()
+
+	case "list-isolation-configs":
+		// List isolation test configurations
+		fmt.Println("Available isolation test configurations (require root):")
+		fmt.Println()
+		for _, c := range IsolationTestConfigs {
+			fmt.Printf("  %-35s %s\n", c.Name, c.Description)
+		}
+
+	case "isolation-test":
+		// Run a specific isolation test
+		// Usage: isolation-test <config-name>
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Error: config name required\n")
+			fmt.Fprintf(os.Stderr, "Usage: sudo %s isolation-test <config-name>\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for _, c := range IsolationTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", c.Name, c.Description)
+			}
+			os.Exit(1)
+		}
+		configName := os.Args[2]
+		config := GetIsolationTestConfigByName(configName)
+		if config == nil {
+			fmt.Fprintf(os.Stderr, "Error: unknown isolation configuration: %s\n", configName)
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for _, c := range IsolationTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", c.Name, c.Description)
+			}
+			os.Exit(1)
+		}
+		testIsolationModeWithConfig(*config)
+
+	case "isolation-test-all":
+		// Run all isolation tests
+		testIsolationModeAllConfigs()
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown test: %s\n", testName)
 		printUsage()
@@ -126,6 +206,14 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  network-test NAME                     Run network impairment test with specific config\n")
 	fmt.Fprintf(os.Stderr, "  network-test-all                      Run all network impairment tests\n")
 	fmt.Fprintf(os.Stderr, "  list-network-configs                  List all network impairment configurations\n")
+	fmt.Fprintf(os.Stderr, "\nParallel Comparison Tests (require root):\n")
+	fmt.Fprintf(os.Stderr, "  parallel-test NAME                    Run parallel comparison test (Baseline vs HighPerf)\n")
+	fmt.Fprintf(os.Stderr, "  parallel-test-all                     Run all parallel comparison tests\n")
+	fmt.Fprintf(os.Stderr, "  list-parallel-configs                 List all parallel comparison configurations\n")
+	fmt.Fprintf(os.Stderr, "\nIsolation Tests (require root):\n")
+	fmt.Fprintf(os.Stderr, "  isolation-test NAME                   Run CG→Server isolation test (single variable change)\n")
+	fmt.Fprintf(os.Stderr, "  isolation-test-all                    Run all isolation tests (~3.5 min total)\n")
+	fmt.Fprintf(os.Stderr, "  list-isolation-configs                List all isolation test configurations\n")
 }
 
 // testGracefulShutdownSIGINTAllConfigs runs the graceful shutdown test with all configurations
@@ -272,6 +360,80 @@ func testNetworkModeAllConfigs() {
 		os.Exit(1)
 	}
 }
+
+// testParallelModeWithConfig runs a parallel comparison test with a specific configuration
+func testParallelModeWithConfig(config ParallelTestConfig) {
+	printParallelTestHeader(config)
+
+	result := runParallelModeTest(config)
+
+	if !result.Passed {
+		fmt.Fprintf(os.Stderr, "Test FAILED: parallel execution failed\n")
+		os.Exit(1)
+	}
+
+	// Perform comparison analysis
+	if result.BaselineMetrics != nil && result.HighPerfMetrics != nil {
+		// Detailed comparison between pipelines
+		comparisons := CompareParallelPipelines(result.BaselineMetrics, result.HighPerfMetrics)
+		PrintDetailedComparison(comparisons)
+	}
+
+	fmt.Println()
+	fmt.Printf("=== Parallel Test (%s): PASSED ===\n", config.Name)
+}
+
+// testParallelModeAllConfigs runs all parallel comparison tests
+func testParallelModeAllConfigs() {
+	fmt.Println("=== Parallel Comparison Tests (All Configurations) ===")
+	fmt.Println()
+	fmt.Printf("Total configurations to test: %d\n", len(ParallelTestConfigs))
+	fmt.Println()
+	fmt.Println("NOTE: These tests require root privileges for network namespace creation.")
+	fmt.Println()
+
+	passed := 0
+	failed := 0
+	var failedConfigs []string
+
+	for i, config := range ParallelTestConfigs {
+		fmt.Printf("\n--- Configuration %d/%d: %s ---\n", i+1, len(ParallelTestConfigs), config.Name)
+		printParallelTestHeader(config)
+
+		result := runParallelModeTest(config)
+		if !result.Passed {
+			fmt.Printf("✗ Configuration %s FAILED\n", config.Name)
+			failed++
+			failedConfigs = append(failedConfigs, config.Name)
+		} else {
+			// Print detailed comparison
+			if result.BaselineMetrics != nil && result.HighPerfMetrics != nil {
+				comparisons := CompareParallelPipelines(result.BaselineMetrics, result.HighPerfMetrics)
+				PrintDetailedComparison(comparisons)
+			}
+			fmt.Printf("✓ Configuration %s PASSED\n", config.Name)
+			passed++
+		}
+
+		// Wait between tests for cleanup
+		if i < len(ParallelTestConfigs)-1 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("=== Results: %d/%d passed, %d failed ===\n", passed, len(ParallelTestConfigs), failed)
+
+	if failed > 0 {
+		fmt.Println("\nFailed configurations:")
+		for _, name := range failedConfigs {
+			fmt.Printf("  - %s\n", name)
+		}
+		os.Exit(1)
+	}
+}
+
+// Note: printParallelComparisonSummary was replaced by PrintDetailedComparison in parallel_analysis.go
 
 // runTestWithConfig runs the graceful shutdown test with the given configuration
 func runTestWithConfig(config TestConfig) error {

@@ -32,9 +32,9 @@ var (
 	InputBW            = flag.Int64("inputbw", 0, "Input bandwidth in bytes")
 	MinInputBW         = flag.Int64("mininputbw", 0, "Minimum input bandwidth in bytes")
 	OheadBW            = flag.Int64("oheadbw", 0, "Limit bandwidth overhead in percents")
-	PeerIdleTimeo       = flag.Int("peeridletimeo", 0, "Peer idle timeout in milliseconds")
-	KeepaliveThreshold  = flag.Float64("keepalivethreshold", 0.75, "Fraction of peer idle timeout at which to send proactive keepalives (0 to disable, default 0.75)")
-	SndDropDelay        = flag.Int("snddropdelay", 0, "Sender's delay before dropping packets in milliseconds")
+	PeerIdleTimeo      = flag.Int("peeridletimeo", 0, "Peer idle timeout in milliseconds")
+	KeepaliveThreshold = flag.Float64("keepalivethreshold", 0.75, "Fraction of peer idle timeout at which to send proactive keepalives (0 to disable, default 0.75)")
+	SndDropDelay       = flag.Int("snddropdelay", 0, "Sender's delay before dropping packets in milliseconds")
 	IPTOS              = flag.Int("iptos", 0, "IP socket type of service")
 	IPTTL              = flag.Int("ipttl", 0, "IP socket 'time to live' option")
 	IPv6Only           = flag.Int("ipv6only", -1, "Allow only IPv6 (-1 for default)")
@@ -87,6 +87,13 @@ var (
 			"Uses the 'unsafe' package for io_uring's zero-copy interface. "+
 			"The unsafe code is isolated in contrib/common/writer_iouring_linux.go. "+
 			"For most use cases, the default DirectWriter is recommended.")
+
+	// Stats display period flag
+	// This is application-level configuration, NOT part of srt.Config
+	// Controls how often the [PUB]/[SUB] throughput display lines are printed
+	StatsPeriod = flag.Duration("statsperiod", 1*time.Second,
+		"Period for throughput display updates (e.g., 1s, 10s). "+
+			"Controls how often the [PUB]/[SUB] lines are printed to stderr.")
 
 	// Prometheus metrics endpoint flags
 	// These are application-level configuration, NOT part of srt.Config
