@@ -1,4 +1,4 @@
-# Design: NAK btree v2 - Efficient Gap Detection for io_uring
+# Design: NAK btree - Efficient Gap Detection for io_uring
 
 **Status**: DESIGN
 **Date**: 2025-12-11
@@ -13,7 +13,7 @@
 1. [Problem Statement and Motivation](#1-problem-statement-and-motivation)
 2. [Current goSRT Implementation](#2-current-gosrt-implementation)
 3. [Design Requirements](#3-design-requirements) *(HOLD)*
-4. [New Design: NAK btree v2](#4-new-design-nak-btree-v2) *(HOLD)*
+4. [New Design: NAK btree](#4-new-design-nak-btree)
 5. [Metrics and Visibility](#5-metrics-and-visibility) *(HOLD)*
 6. [Error Handling](#6-error-handling) *(HOLD)*
 7. [Comprehensive Testing](#7-comprehensive-testing) *(HOLD)*
@@ -645,7 +645,7 @@ When `IoUringRecvEnabled = true`:
 
 ---
 
-## 4. New Design: NAK btree v2
+## 4. New Design: NAK btree
 
 ### 4.1 Architecture Overview
 
@@ -847,7 +847,7 @@ func (nb *nakBtree) IterateDescending(fn func(seq uint32) bool) {
 type receiver struct {
     // ... existing fields ...
 
-    // NAK btree v2 fields
+    // NAK btree fields
     nakBtree                    *nakBtree
     nakScanStartPoint           atomic.Uint32    // Sequence to start scanning from
     lastPacketArrivalTime       atomic.Value     // time.Time for FastNAK
@@ -889,9 +889,9 @@ type receiver struct {
 The scan window is determined by TSBPD timestamps, not packet counts:
 
 ```go
-// periodicNakV2 implements TSBPD-based scanning.
+// periodicNakBtree implements TSBPD-based scanning.
 // File: congestion/live/receive.go
-func (r *receiver) periodicNakV2(now uint64) []circular.Number {
+func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
     if now-r.lastPeriodicNAK < r.periodicNAKInterval {
         return nil
     }
@@ -956,7 +956,7 @@ func (r *receiver) periodicNakV2(now uint64) []circular.Number {
 }
 ```
 
-**Design Note**: `nakScanStartPoint` is initialized lazily in `periodicNakV2()` using `packetStore.Min()`, rather than via `CompareAndSwap` on every packet in `Push()`. This avoids an atomic operation on the hot path.
+**Design Note**: `nakScanStartPoint` is initialized lazily in `periodicNakBtree()` using `packetStore.Min()`, rather than via `CompareAndSwap` on every packet in `Push()`. This avoids an atomic operation on the hot path.
 
 #### 4.3.2 Scan Window Visualization
 
@@ -989,11 +989,11 @@ func (r *receiver) periodicNakV2(now uint64) []circular.Number {
 The `pushLocked` function is on the data hot path. Variables and operations are moved inside conditionals to minimize overhead when features are disabled:
 
 ```go
-// pushLocked - modified for NAK btree v2 (hot path optimized)
+// pushLocked - modified for NAK btree (hot path optimized)
 func (r *receiver) pushLocked(pkt packet.Packet) {
     // ... existing validation ...
 
-    // NAK btree v2 operations (only when enabled)
+    // NAK btree operations (only when enabled)
     if r.useNakBtree {
         seq := pkt.Header().PacketSequenceNumber.Val()
 
@@ -1355,7 +1355,7 @@ func (r *receiver) checkFastNak(now time.Time) {
 func (r *receiver) triggerFastNak() {
     now := uint64(time.Now().UnixMicro())
 
-    if list := r.periodicNakV2(now); len(list) != 0 {
+    if list := r.periodicNakBtree(now); len(list) != 0 {
         metrics.CountNAKEntries(r.metrics, list, metrics.NAKCounterSend)
         r.sendNAK(list)
     }
@@ -1451,7 +1451,7 @@ Timeline during Starlink outage (with FastNAKRecent):
            - Immediately adds seq 1001-1027 to NAK btree
 
         2. FastNAK triggers:
-           - Runs periodicNakV2()
+           - Runs periodicNakBtree()
            - NAK includes 1001-1027 immediately!
 
         → NAK sent at 60ms with recent loss included
@@ -1489,8 +1489,8 @@ type receiver struct {
 | Operation | packet btree lock | NAK btree lock |
 |-----------|-------------------|----------------|
 | `Push()` packet | Write lock (existing) | Write lock (Delete) |
-| `periodicNakV2()` scan | Read lock | Write lock (Insert) |
-| `periodicNakV2()` consolidate | None | Read lock |
+| `periodicNakBtree()` scan | Read lock | Write lock (Insert) |
+| `periodicNakBtree()` consolidate | None | Read lock |
 | `Tick()` delivery | Write lock | None |
 
 **Key optimization**: Push() only briefly holds NAK btree lock for Delete(). Periodic NAK doesn't block Push() during consolidation.
@@ -1603,7 +1603,7 @@ func TestSeqLess(t *testing.T) {
 
 | File | Modifications |
 |------|---------------|
-| `congestion/live/receive.go` | Add NAK btree fields, `periodicNakV2()`, FastNAK dispatch |
+| `congestion/live/receive.go` | Add NAK btree fields, `periodicNakBtree()`, FastNAK, dispatch |
 | `congestion/live/send.go` | Honor NAK order dispatch, `nakLockedHonorOrder()` |
 | `config.go` | Add operator-visible configuration options |
 | `connection.go` | Pass config to receiver/sender, auto-set internal options |
@@ -1615,7 +1615,7 @@ To maintain backward compatibility, use function dispatch based on configuration
 ```go
 // congestion/live/receive.go
 
-// periodicNAK is the entry point - dispatches to v1 or v2.
+// periodicNAK is the entry point - dispatches to Original or NAKBtree.
 // Counter is incremented here so both implementations are tracked.
 func (r *receiver) periodicNAK(now uint64) []circular.Number {
     // Increment counter regardless of which implementation runs
@@ -1625,13 +1625,13 @@ func (r *receiver) periodicNAK(now uint64) []circular.Number {
     }
 
     if r.useNakBtree {
-        return r.periodicNakV2(now)  // New implementation
+        return r.periodicNakBtree(now)    // NAKBtree implementation
     }
-    return r.periodicNakV1(now)      // Existing implementation (renamed)
+    return r.periodicNakOriginal(now)     // Original implementation
 }
 
-// Rename existing periodicNAKLocked to periodicNakV1
-func (r *receiver) periodicNakV1(now uint64) []circular.Number {
+// periodicNakOriginal is the existing implementation (renamed from periodicNAKLocked)
+func (r *receiver) periodicNakOriginal(now uint64) []circular.Number {
     // ... existing implementation unchanged ...
 }
 ```
@@ -1706,29 +1706,708 @@ The `honorNakOrder` option allows receiver-controlled retransmission priority. W
 
 ## 5. Metrics and Visibility
 
-*HOLD - To be completed in future iteration*
+The NAK btree implementation requires comprehensive metrics for:
+1. **Confirming correct operation** - New code paths work as expected
+2. **Debugging issues** - Identify problems during development and production
+3. **Performance monitoring** - Track overhead of new features
+4. **Comparison testing** - Compare Original vs NAKBtree behavior in parallel tests
 
-See also: `metrics_analysis_design.md`
+See also: `metrics_analysis_design.md` for existing metrics architecture.
 
 ### 5.1 New Counters
 
+All new counters follow the existing pattern in `metrics/metrics.go`:
+- Atomic counters (`atomic.Uint64`)
+- Prometheus export via `metrics/handler.go`
+- Direction labels where applicable (`direction="sent"` or `direction="recv"`)
+
+#### 5.1.1 NAK btree Counters
+
+**File**: `metrics/metrics.go`
+
+```go
+// NAK btree counters (receiver side)
+NakBtreeInserts       atomic.Uint64  // Sequences added to NAK btree
+NakBtreeDeletes       atomic.Uint64  // Sequences removed (packet arrived)
+NakBtreeExpired       atomic.Uint64  // Sequences removed (TSBPD expired)
+NakBtreeSize          atomic.Uint64  // Current size (gauge, updated each periodic NAK)
+NakBtreeScanPackets   atomic.Uint64  // Packets scanned in periodicNakBtree()
+NakBtreeScanGaps      atomic.Uint64  // Gaps found during scan
+```
+
+| Counter | Type | Description | Usage |
+|---------|------|-------------|-------|
+| `NakBtreeInserts` | Counter | Missing sequences added to btree | Gap detection working |
+| `NakBtreeDeletes` | Counter | Sequences deleted (packet arrived) | Reordered packets recovered |
+| `NakBtreeExpired` | Counter | Sequences expired (too late) | Unrecoverable losses |
+| `NakBtreeSize` | Gauge | Current btree size | Memory/backlog monitoring |
+| `NakBtreeScanPackets` | Counter | Packets examined in scan | Scan efficiency |
+| `NakBtreeScanGaps` | Counter | Gaps discovered during scan | True gap detection rate |
+
+#### 5.1.1a Packet Store Counters (Alignment)
+
+**Current state**: The existing packet store (`packetStore` interface in `congestion/live/packet_store.go`) has **no metrics**. Both `listPacketStore` and `btreePacketStore` implementations perform operations without counter tracking.
+
+**Requirement**: Align packet store metrics with NAK btree metrics for observability consistency.
+
+```go
+// Packet store counters (receiver side) - NEW
+PktStoreInserts       atomic.Uint64  // Packets inserted into packet store
+PktStoreDuplicates    atomic.Uint64  // Duplicate packets rejected
+PktStoreRemovals      atomic.Uint64  // Packets removed (delivered or dropped)
+PktStoreSize          atomic.Uint64  // Current size (gauge)
+```
+
+| Counter | Type | Description | Usage |
+|---------|------|-------------|-------|
+| `PktStoreInserts` | Counter | Packets added to packet store | Ingress rate |
+| `PktStoreDuplicates` | Counter | Duplicate packets rejected | Retransmission success indicator |
+| `PktStoreRemovals` | Counter | Packets removed | Egress rate |
+| `PktStoreSize` | Gauge | Current packet store size | Buffer utilization |
+
+**Note**: This aligns both btrees (packet and NAK) with similar observability. The packet store counters are a separate work item but should be implemented alongside the NAK btree feature for consistency.
+
+#### 5.1.2 Periodic NAK Counters
+
+```go
+// Periodic NAK execution counters
+NakPeriodicCalls      atomic.Uint64  // Times periodicNAK() was called
+NakPeriodicOriginalRuns atomic.Uint64  // Times periodicNakOriginal() executed
+NakPeriodicBtreeRuns    atomic.Uint64  // Times periodicNakBtree() executed
+NakPeriodicSkipped    atomic.Uint64  // Times skipped (interval not elapsed)
+```
+
+| Counter | Type | Description | Usage |
+|---------|------|-------------|-------|
+| `NakPeriodicCalls` | Counter | Total calls to periodicNAK | Timer health |
+| `NakPeriodicOriginalRuns` | Counter | Original implementation runs | Compare Original/NAKBtree |
+| `NakPeriodicBtreeRuns` | Counter | NAKBtree implementation runs | Confirm NAKBtree active |
+| `NakPeriodicSkipped` | Counter | Skipped (too soon) | Unexpected if high |
+
+#### 5.1.3 FastNAK Counters
+
+```go
+// FastNAK optimization counters
+NakFastTriggers       atomic.Uint64  // FastNAK triggers (silent period exceeded)
+NakFastRecentInserts  atomic.Uint64  // Sequences added via FastNAKRecent
+NakFastRecentSkipped  atomic.Uint64  // FastNAKRecent skipped (gap too small)
+```
+
+| Counter | Type | Description | Usage |
+|---------|------|-------------|-------|
+| `NakFastTriggers` | Counter | FastNAK activations | Outage recovery events |
+| `NakFastRecentInserts` | Counter | Sequences from FastNAKRecent | Recent gap handling |
+| `NakFastRecentSkipped` | Counter | Gap below threshold | False positive avoidance |
+
+#### 5.1.4 Consolidation Counters
+
+```go
+// Consolidation counters
+NakConsolidationRuns    atomic.Uint64  // Times consolidation ran
+NakConsolidationTimeout atomic.Uint64  // Times consolidation hit time budget
+NakConsolidationEntries atomic.Uint64  // NAKEntry items produced
+NakConsolidationMerged  atomic.Uint64  // Sequences merged (duplicates accepted)
+```
+
+| Counter | Type | Description | Usage |
+|---------|------|-------------|-------|
+| `NakConsolidationRuns` | Counter | Consolidation executions | Per-NAK cycle |
+| `NakConsolidationTimeout` | Counter | Hit 2ms budget | Performance concern if high |
+| `NakConsolidationEntries` | Counter | NAKEntry items created | Consolidation efficiency |
+| `NakConsolidationMerged` | Counter | Sequences merged | Duplicate trade-off tracking |
+
+#### 5.1.5 Sender Honor-Order Counters
+
+```go
+// Sender NAK order counters
+NakHonorOrderRetrans    atomic.Uint64  // Packets retransmitted with honor-order
+NakOriginalOrderRetrans atomic.Uint64  // Packets retransmitted with original order
+```
+
 ### 5.2 Positive Path Metrics
+
+These metrics confirm the system is working correctly. Non-zero values are expected during normal operation.
+
+| Metric | Expected Behavior | Concern If |
+|--------|-------------------|------------|
+| `NakPeriodicBtreeRuns` | Increasing ~50/sec | Zero (NAKBtree not running) |
+| `NakBtreeInserts` | Proportional to packet loss | Zero with loss (not detecting gaps) |
+| `NakBtreeDeletes` | Close to Inserts | Much lower (packets not recovering) |
+| `NakConsolidationRuns` | Equal to BtreeRuns | Lower (consolidation failing) |
+| `NakFastTriggers` | Matches outage events | Zero during outages |
+
+#### 5.2.1 Integration Test Analysis
+
+**Requirement**: Update `contrib/integration_testing/analysis.go` to analyze the new NAK btree metrics at the end of each integration test.
+
+The analysis should:
+1. Verify positive signals (counters increasing as expected)
+2. Check for unexpected error conditions
+3. Compare NAKBtree vs Original behavior in parallel tests
+4. Validate FastNAK triggers during Starlink outage simulations
+
+**Implementation Notes**:
+- This can be planned in detail during the integration test phase
+- Should follow the existing analysis patterns in `metrics_analysis_design.md`
+- New analysis functions needed:
+  - `analyzeNakBtreeHealth()` - Verify NAK btree is operational
+  - `analyzeNakBtreeRecovery()` - Verify inserts ≈ deletes (reordering recovery)
+  - `analyzeNakBtreeExpiry()` - Verify low expiry rate (good recovery)
+  - `analyzeFastNakTriggers()` - Verify triggers during outages
+
+**Health Check Query** (Prometheus):
+
+```promql
+# Verify NAK btree is active and healthy
+sum(rate(gosrt_nak_btree_inserts_total[1m])) > 0
+  and
+sum(rate(gosrt_nak_btree_deletes_total[1m])) > 0
+  and
+sum(rate(gosrt_nak_periodic_btree_runs_total[1m])) > 40  # ~50/sec expected
+```
 
 ### 5.3 Negative Path Metrics
 
-### 5.4 Debugging Support
+These metrics indicate problems. Non-zero values require investigation.
+
+| Metric | Meaning | Action |
+|--------|---------|--------|
+| `NakConsolidationTimeout` | Consolidation taking too long | Increase budget or optimize |
+| `NakBtreeExpired` (high) | Many unrecoverable packets | Check network, increase buffer |
+| `NakFastRecentSkipped` (high) | FastNAKRecent triggering falsely | Tune threshold or disable |
+
+**Alert Conditions**:
+
+```promql
+# Alert: Consolidation timeout rate > 1%
+sum(rate(gosrt_nak_consolidation_timeout_total[5m]))
+  /
+sum(rate(gosrt_nak_consolidation_runs_total[5m])) > 0.01
+
+# Alert: High expiry rate (unrecoverable loss)
+sum(rate(gosrt_nak_btree_expired_total[5m]))
+  /
+sum(rate(gosrt_nak_btree_inserts_total[5m])) > 0.1
+```
+
+### 5.4 Prometheus Export
+
+**File**: `metrics/handler.go` (additions)
+
+```go
+// NAK btree metrics
+writeCounterIfNonZero(b, "gosrt_nak_btree_inserts_total",
+    metrics.NakBtreeInserts.Load(),
+    "socket_id", socketIdStr)
+writeCounterIfNonZero(b, "gosrt_nak_btree_deletes_total",
+    metrics.NakBtreeDeletes.Load(),
+    "socket_id", socketIdStr)
+writeCounterIfNonZero(b, "gosrt_nak_btree_expired_total",
+    metrics.NakBtreeExpired.Load(),
+    "socket_id", socketIdStr)
+writeGauge(b, "gosrt_nak_btree_size",
+    float64(metrics.NakBtreeSize.Load()),
+    "socket_id", socketIdStr)
+
+// Periodic NAK metrics
+writeCounterIfNonZero(b, "gosrt_nak_periodic_calls_total",
+    metrics.NakPeriodicCalls.Load(),
+    "socket_id", socketIdStr)
+writeCounterIfNonZero(b, "gosrt_nak_periodic_btree_runs_total",
+    metrics.NakPeriodicBtreeRuns.Load(),
+    "socket_id", socketIdStr)
+
+// FastNAK metrics
+writeCounterIfNonZero(b, "gosrt_nak_fast_triggers_total",
+    metrics.NakFastTriggers.Load(),
+    "socket_id", socketIdStr)
+writeCounterIfNonZero(b, "gosrt_nak_fast_recent_inserts_total",
+    metrics.NakFastRecentInserts.Load(),
+    "socket_id", socketIdStr)
+
+// Consolidation metrics
+writeCounterIfNonZero(b, "gosrt_nak_consolidation_runs_total",
+    metrics.NakConsolidationRuns.Load(),
+    "socket_id", socketIdStr)
+writeCounterIfNonZero(b, "gosrt_nak_consolidation_timeout_total",
+    metrics.NakConsolidationTimeout.Load(),
+    "socket_id", socketIdStr)
+```
+
+#### 5.4.1 Implementation Testing Requirements
+
+When implementing the Prometheus export, the following must be completed:
+
+1. **Unit Tests**: Add tests to `metrics/handler_test.go`:
+   - Test each new counter is exported with correct Prometheus name
+   - Test counter values are correctly retrieved from metrics struct
+   - Test gauge values (like `NakBtreeSize`) are exported correctly
+   - Follow existing patterns like `TestPrometheusNAKDetailMetrics`
+
+2. **Metrics Audit**: Run and pass the metrics audit tool:
+   ```bash
+   go run tools/metrics-audit/main.go
+   ```
+   The audit verifies:
+   - All atomic counters in `metrics/metrics.go` are exported to Prometheus
+   - Counter names follow naming conventions
+   - No orphaned counters (defined but not exported)
+   - No missing counters (exported but not defined)
+   - No double increments.  Each metric only incremented in a single place.
+
+3. **Documentation**: Update `documentation/metrics_and_statistics_design.md` with new counter definitions.
+
+### 5.5 Integration Test Validation
+
+The parallel comparison tests should validate these metrics:
+
+| Test | Expected |
+|------|----------|
+| Clean network, io_uring | `NakBtreeInserts ≈ NakBtreeDeletes` (reordering, not loss) |
+| Clean network, io_uring | `NakBtreeExpired = 0` (no true loss) |
+| Starlink simulation | `NakFastTriggers > 0` (outage recovery) |
+| 1% loss test | `NakBtreeExpired / NakBtreeInserts < 0.05` (good recovery) |
+
+### 5.6 Log Topics for Debugging
+
+**Implementation status**: These log topics are **not implemented initially**. The detailed metrics (Section 5.1) provide sufficient observability for normal operation and most debugging scenarios.
+
+**When to implement**: If additional debugging is required beyond what metrics provide (e.g., tracing individual packet sequences through the NAK btree), these log topics are the recommended approach:
+
+| Topic | Content | When to Enable |
+|-------|---------|----------------|
+| `nak:btree:insert` | Sequence inserted to btree | Debugging gap detection |
+| `nak:btree:delete` | Sequence deleted (arrived) | Debugging recovery |
+| `nak:btree:expire` | Sequence expired | Debugging unrecoverable loss |
+| `nak:scan:start` | Scan start (startSeq, threshold) | Debugging scan window |
+| `nak:scan:gap` | Gap found (expected, actual) | Debugging gap detection |
+| `nak:consolidate` | Consolidation result (entries, merged) | Debugging NAK building |
+| `nak:fast:trigger` | FastNAK triggered | Debugging outage recovery |
+| `nak:fast:recent` | FastNAKRecent gap detected | Debugging sequence jump |
+
+**Example** (if implemented):
+```bash
+./server -logtopics "nak:btree:insert:nak:scan:gap"
+```
+
+**Note**: These topics would generate high-volume output at scale (one log per packet/sequence). Use only for targeted debugging, not production monitoring.
 
 ---
 
-## 6. Error Handling
+## 6. Error Handling and Risk Analysis
 
-*HOLD - To be completed in future iteration*
+This section identifies where bugs are likely to occur, complex interactions requiring extra attention, and strategies to minimize implementation risk.
 
-### 6.1 Error Scenarios
+### 6.1 High-Risk Areas (Bug-Prone Code)
 
-### 6.2 Recovery Strategies
+#### 6.1.1 Sequence Number Wraparound
 
-### 6.3 Logging
+**Risk Level**: 🔴 HIGH
+
+**What can go wrong**:
+- Incorrect comparison when sequence wraps from `0x7FFFFFFF` to `0`
+- Gap detection produces wrong results near wraparound boundary
+- NAK btree ordering breaks (sequences appear out of order)
+- Consolidation merges wrong ranges
+
+**Why it's risky**:
+- Wraparound happens rarely (~14 days at 20Mbps), so bugs may not appear in short tests
+- Off-by-one errors in the half-max comparison logic
+- Easy to forget wraparound when writing new comparison code
+
+**Mitigation**:
+1. Use `SeqLess()` and `SeqDiff()` generics **everywhere** - never use raw `<` or `>`
+2. Port test cases from goTrackRTP (known working implementation)
+3. Create wraparound-specific unit tests with sequences at `0x7FFFFFFE`, `0x7FFFFFFF`, `0`, `1`
+4. Add fuzz testing for sequence comparisons
+
+**Code review checklist**:
+- [ ] All sequence comparisons use `SeqLess()` family
+- [ ] Gap calculation uses `SeqDiff()` not subtraction
+- [ ] Consolidation range extension handles wraparound
+
+#### 6.1.2 Lock Ordering and Deadlocks
+
+**Risk Level**: 🔴 HIGH
+
+**What can go wrong**:
+- Deadlock between packet btree lock and NAK btree lock
+- Deadlock between receiver lock and metrics updates
+- Race condition if locks acquired in different order by different goroutines
+
+**Complex interactions**:
+```
+Goroutine 1 (packet arrival):     Goroutine 2 (periodic NAK):
+  Lock(receiver.lock)               Lock(nakBtree.mu)
+  ...                               ...
+  Lock(nakBtree.mu) ← WAIT          Lock(receiver.lock) ← DEADLOCK!
+```
+
+**Mitigation**:
+1. **Document and enforce lock ordering**: `nakBtree.mu` → `receiver.lock` (never reverse)
+2. **Minimize lock scope**: Don't hold locks during external calls
+3. **Prefer separate operations**: Push() only touches NAK btree briefly (Delete)
+4. **Add `-race` testing**: Run all tests with Go race detector
+
+**Code review checklist**:
+- [ ] Lock ordering documented in code comments
+- [ ] No nested locks where possible
+- [ ] All tests pass with `-race` flag
+
+#### 6.1.3 NAKScanStartPoint Initialization Race
+
+**Risk Level**: 🟡 MEDIUM (likely mitigated by design)
+
+**What could go wrong**:
+- First packet arrives simultaneously with first periodicNakBtree() call
+- `nakScanStartPoint` initialized to wrong value
+- Scan starts from middle of packet stream, missing early gaps
+
+**Scenario** (theoretical):
+```
+T=0:    First packet seq=100 arrives
+        Push() starts processing
+T=0.1:  periodicNakBtree() fires (20ms timer first tick)
+        Calls packetStore.Min() → returns packet 100
+        Sets nakScanStartPoint = 100
+T=0.2:  Packet seq=50 arrives (delayed, out of order)
+        Push() processes it
+        Gap 51-99 never scanned!
+```
+
+**Why this may already be mitigated**:
+
+The design in Section 4.3.1 uses lazy initialization via `packetStore.Min()`:
+- Initialization happens only in `periodicNakBtree()`, not in `Push()`
+- `packetStore.Min()` returns the oldest packet currently in the btree
+- Packets that arrive out-of-order go into the btree sorted by sequence
+- The btree maintains correct sequence order regardless of arrival order
+
+The remaining edge case is: packets with seq < Min() that arrive *after* `Min()` is called but *before* the scan reaches them. However:
+- These packets are already in the btree (sorted correctly)
+- Next periodic NAK scan will start from where we left off
+- Worst case: first scan misses some early gaps (recovered in next cycle)
+
+**Testing requirement** (important):
+1. Test with concurrent first-packet and first-NAK scenarios
+2. Test with severely out-of-order initial packets
+3. Verify no gaps are permanently missed (recovered within 2-3 NAK cycles)
+4. Consider fuzz testing with random arrival order at connection start
+
+#### 6.1.4 TSBPD Threshold Boundary
+
+**Risk Level**: 🟡 MEDIUM
+
+**What can go wrong**:
+- Off-by-one at "too recent" threshold boundary
+- Packets exactly at threshold included/excluded incorrectly
+- Inconsistent behavior when threshold changes during scan
+
+**What's tricky**:
+- Threshold is `now + (tsbpdDelay × nakRecentPercent)`
+- Comparison is `packet.PktTsbpdTime > threshold`
+- Edge: packet with `PktTsbpdTime == threshold` - include or exclude?
+
+**Mitigation**:
+1. Document boundary decision clearly (use `>` not `>=`)
+2. Unit tests for exact boundary values
+3. Consider small margin to avoid boundary issues
+
+#### 6.1.5 sync.Pool Slice Corruption
+
+**Risk Level**: 🟡 MEDIUM
+
+**What can go wrong**:
+- Returning slice to pool while still in use
+- Slice content corrupted by concurrent user
+- Memory leak if pool entries not returned
+
+**Scenario**:
+```go
+entries := *entriesPtr
+defer func() {
+    *entriesPtr = entries[:0]
+    nakEntryPool.Put(entriesPtr)  // Return to pool
+}()
+return r.entriesToNakList(entries)  // entries still being read!
+```
+
+**Why our design is safe**:
+- `entriesToNakList()` copies data to fresh slice
+- `entries` is fully consumed before defer runs
+- Return value is independent of pooled slice
+
+**Mitigation**:
+1. Never return pooled slice directly to caller
+2. Document pool lifetime in code comments
+3. Add tests that detect use-after-pool-return (with race detector)
+
+#### 6.1.6 Consolidation Time Budget Exceeded
+
+**Risk Level**: 🟢 LOW
+
+**What can go wrong**:
+- Very large NAK btree causes consolidation to always timeout
+- Partial consolidation produces incomplete NAK list
+- Starvation: always timing out, never completing
+
+**Mitigation**:
+1. Metric tracks timeout frequency
+2. Accept partial results (most urgent entries are first anyway)
+3. Alert if timeout rate exceeds threshold
+4. Consider adaptive budget based on btree size
+
+### 6.2 Complex Interactions
+
+#### 6.2.1 FastNAK vs Periodic NAK Race
+
+**Interaction**:
+```
+T=0:    Silent period exceeds threshold
+T=50ms: Packet arrives, triggers FastNAK
+        FastNAK calls periodicNakBtree()
+T=60ms: Periodic timer fires, also calls periodicNakBtree()
+        → Double NAK for same gaps?
+```
+
+**Protection in design**:
+```go
+if r.timeSinceLastNak() < r.periodicNAKInterval {
+    return  // Don't trigger if we just sent a NAK
+}
+```
+
+**Testing requirement**: Verify no duplicate NAKs within interval.
+
+#### 6.2.2 FastNAKRecent Sequence Jump Detection
+
+**Interaction**: io_uring reordering may cause `lastDataPacketSeq` to not be the actual highest sequence.
+
+**Scenario**:
+```
+Actual sequence: 100, 101, 102, 103 (all arrive)
+io_uring order:  102, 100, 103, 101
+
+lastDataPacketSeq progression: 102, 102, 103, 103
+  (only updates if higher, but doesn't handle reordering correctly)
+```
+
+**Risk**: After outage, gap detection may be inaccurate.
+
+**Mitigation**:
+1. Use minimum gap threshold (10 packets) to avoid false positives
+2. Accept that FastNAKRecent may add some extra sequences (harmless)
+3. Feature flag allows disabling if problematic
+
+#### 6.2.3 Packet Arrival During Scan
+
+**Interaction**: While scanning packet btree, new packets arrive.
+
+**What happens**:
+- Packet btree: Read lock during scan
+- New packet: Write lock for insert
+- Result: Scan may see partially-updated btree state
+
+**Protection**: btree iteration is snapshot-consistent (Google btree behavior).
+
+**Testing requirement**: Stress test with concurrent inserts during iteration.
+
+### 6.3 Defensive Measures
+
+#### 6.3.1 Runtime Failure Scenarios
+
+**Question**: How could the NAK btree feature fail at runtime?
+
+**Answer**: With proper testing, it shouldn't. The NAK btree uses:
+- Standard Go data structures (Google btree library, well-tested)
+- Atomic operations (built into Go runtime)
+- No external dependencies, network calls, or file I/O
+
+**Realistic "failure" scenarios are actually bugs**:
+- Nil pointer dereference → bug in implementation, caught by testing
+- Deadlock → bug in lock ordering, caught by race detector
+- Wrong results → bug in logic, caught by unit/integration tests
+
+**Conclusion**: We do NOT implement panic recovery or runtime fallback. Instead:
+1. Rely on thorough testing (Section 7) to catch bugs before deployment
+2. Use feature flag to enable/disable at startup (not runtime switching)
+3. If a bug is found in production, fix it and redeploy
+
+**Why no runtime fallback**:
+- Adds complexity
+- Masks bugs (silent fallback hides problems)
+- If NAK btree has a bug, the original implementation may also have issues in the same scenario
+
+#### 6.3.2 NAK btree Size Limits
+
+**What could cause large NAK btree?**
+
+1. **Extreme packet loss** - Many missing sequences to track
+2. **Coding bug** - Entries not being removed correctly (mitigated by testing)
+
+**Calculating expected size**:
+
+| Data Rate | Packet Size | Packets/sec | 3s Buffer | 20% Loss | NAK btree |
+|-----------|-------------|-------------|-----------|----------|-----------|
+| 50 Mbps | 1316 bytes | ~4,750 | ~14,250 | ~2,850 | ~2,850 |
+| 100 Mbps | 1316 bytes | ~9,500 | ~28,500 | ~5,700 | ~5,700 |
+
+**Analysis**:
+- At 100 Mbps with 20% loss (extreme), NAK btree ≈ 5,700 entries
+- NAK btree is roughly `lossRate × packetBuffer` in size
+- 100,000 limit = ~17× worst-case scenario (very generous)
+
+**Recommended approach**:
+
+1. **Primary defense**: Prometheus alerting when `NakBtreeSize` exceeds threshold
+   ```promql
+   # Alert: NAK btree size > 10,000 (investigate)
+   gosrt_nak_btree_size > 10000
+
+   # Alert: NAK btree size > 50,000 (critical)
+   gosrt_nak_btree_size > 50000
+   ```
+
+2. **Safety valve** (optional): Hard limit to prevent runaway memory
+   ```go
+   const maxNakBtreeSize = 50000  // ~50K - well above normal operation
+
+   func (nb *nakBtree) Insert(seq uint32) bool {
+       if nb.tree.Len() >= maxNakBtreeSize {
+           // Log warning - this shouldn't happen in normal operation
+           // Btree full - trim oldest entries
+           nb.trimOldest(1000)
+       }
+       nb.tree.ReplaceOrInsert(seq)
+       return true
+   }
+   ```
+
+**Note**: If we hit the hard limit in production, it indicates either:
+- Network conditions far worse than expected (investigate network)
+- A bug in expiry/deletion logic (investigate code)
+
+#### 6.3.3 Integration Test Validation: Btree Size Ratios
+
+**Key insight**: The ratio of NAK btree size to packet btree size should approximate the packet loss rate.
+
+```
+NAK btree size / Packet btree size ≈ Loss Rate
+```
+
+**Integration test validation** (add to `analysis.go`):
+
+For network impairment tests with known loss rate:
+
+```go
+func analyzeNakBtreeRatio(metrics TestMetrics, expectedLossRate float64) AnalysisResult {
+    nakSize := metrics.NakBtreeSize
+    pktSize := metrics.PktStoreSize
+
+    if pktSize == 0 {
+        return fail("No packets in store")
+    }
+
+    actualRatio := float64(nakSize) / float64(pktSize)
+    tolerance := 0.5  // Allow 50% variance
+
+    minExpected := expectedLossRate * (1 - tolerance)
+    maxExpected := expectedLossRate * (1 + tolerance)
+
+    if actualRatio < minExpected || actualRatio > maxExpected {
+        return fail(fmt.Sprintf(
+            "NAK/Packet ratio %.2f outside expected range [%.2f, %.2f] for %.0f%% loss",
+            actualRatio, minExpected, maxExpected, expectedLossRate*100))
+    }
+
+    return pass()
+}
+```
+
+**Expected ratios by test scenario**:
+
+| Test | Expected Loss | Expected Ratio | Alert If |
+|------|---------------|----------------|----------|
+| Clean network | 0% | ~0 | > 0.01 |
+| 1% loss | 1% | ~0.01 | > 0.05 |
+| 5% loss | 5% | ~0.05 | > 0.15 |
+| Starlink sim | Variable | ~0.02-0.10 | > 0.20 |
+
+**Prometheus alert**:
+
+```promql
+# Alert: NAK btree ratio unexpectedly high (possible bug or extreme loss)
+(gosrt_nak_btree_size / gosrt_pkt_store_size) > 0.30
+
+# Alert: NAK btree ratio high for clean network (should be ~0)
+(gosrt_nak_btree_size / gosrt_pkt_store_size) > 0.01
+  unless on(instance) (network_impairment_active == 1)
+```
+
+**Note**: This ratio check requires adding `PktStoreSize` metric to the packet store (see Section 5.1.1a for packet store counter alignment).
+
+#### 6.3.3 Consolidation Timeout Handling
+
+Return partial results rather than nothing:
+
+```go
+// Current design already handles this:
+// - Iterates oldest-first (most urgent)
+// - Returns whatever was consolidated before timeout
+// - Remaining entries will be included in next cycle
+```
+
+### 6.4 Implementation Risk Mitigation
+
+#### 6.4.1 Incremental Implementation Order
+
+Implement in order of dependency, testing each step:
+
+| Phase | Component | Risk | Testing Gate |
+|-------|-----------|------|--------------|
+| 1 | `seq_math.go` | 🔴 HIGH | All wraparound tests pass |
+| 2 | `nakBtree` struct | 🟡 MED | Insert/Delete/Iterate tests pass |
+| 3 | `consolidateNakBtree()` | 🟡 MED | Consolidation tests pass |
+| 4 | `periodicNakBtree()` | 🟡 MED | Scan tests pass |
+| 5 | FastNAK | 🟢 LOW | Trigger tests pass |
+| 6 | Integration | 🟡 MED | Isolation tests show 0 false gaps |
+
+**Gate rule**: Do not proceed to next phase until current phase tests pass.
+
+#### 6.4.2 Feature Flag Rollout
+
+```go
+// Start disabled
+UseNakBtree = false
+
+// Enable only when:
+// 1. All unit tests pass
+// 2. Isolation tests show improvement
+// 3. Parallel comparison tests confirm parity
+```
+
+#### 6.4.3 Code Review Focus Areas
+
+| File | Focus Area | Reviewer Should Check |
+|------|------------|----------------------|
+| `seq_math.go` | Wraparound correctness | Comparison logic, edge cases |
+| `nak_btree.go` | Lock safety | Deadlock potential, race conditions |
+| `nak_consolidate.go` | Pool usage | Lifetime, corruption potential |
+| `receive.go` changes | Lock ordering | No nested locks, correct order |
+| `fast_nak.go` | Race conditions | Concurrent access to atomics |
+
+#### 6.4.4 Pre-Merge Checklist
+
+Before merging NAK btree feature:
+
+- [ ] All unit tests pass (`go test ./...`)
+- [ ] All tests pass with race detector (`go test -race ./...`)
+- [ ] Benchmarks show acceptable overhead (`go test -bench ./...`)
+- [ ] Isolation test `Isolation-Server-IoUringRecv` shows 0 gaps on clean network
+- [ ] Parallel comparison shows NAKBtree ≤ Original in gap detection
+- [ ] Metrics audit passes (`go run tools/metrics-audit/main.go`)
+- [ ] No new linter warnings
+- [ ] Code review completed with focus areas addressed
 
 ---
 
