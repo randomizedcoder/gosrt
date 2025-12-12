@@ -12,14 +12,15 @@
 
 1. [Problem Statement and Motivation](#1-problem-statement-and-motivation)
 2. [Current goSRT Implementation](#2-current-gosrt-implementation)
-3. [Design Requirements](#3-design-requirements) *(HOLD)*
+3. [Design Requirements](#3-design-requirements)
 4. [New Design: NAK btree](#4-new-design-nak-btree)
-5. [Metrics and Visibility](#5-metrics-and-visibility) *(HOLD)*
-6. [Error Handling](#6-error-handling) *(HOLD)*
-7. [Comprehensive Testing](#7-comprehensive-testing) *(HOLD)*
-8. [Comprehensive Benchmarking](#8-comprehensive-benchmarking) *(HOLD)*
-9. [Integration: Parallel Isolation Tests](#9-integration-parallel-isolation-tests) *(HOLD)*
-10. [Integration: Parallel Comparison Tests](#10-integration-parallel-comparison-tests) *(HOLD)*
+5. [Metrics and Visibility](#5-metrics-and-visibility)
+6. [Error Handling](#6-error-handling)
+7. [Comprehensive Testing](#7-comprehensive-testing)
+8. [Comprehensive Benchmarking](#8-comprehensive-benchmarking)
+9. [Integration: Parallel Isolation Tests](#9-integration-parallel-isolation-tests)
+10. [Integration: Parallel Comparison Tests](#10-integration-parallel-comparison-tests)
+11. [Appendix](#appendix)
 
 ---
 
@@ -3647,10 +3648,12 @@ benchstat old.txt new.txt
 
 | Benchmark | Baseline | Max Acceptable | Action If Exceeded |
 |-----------|----------|----------------|-------------------|
-| `Push_WithNakBtree` | TBD | +20% | Optimize delete path |
-| `Consolidate_1000entries` | TBD | 500µs | Increase timeout budget |
-| `PeriodicNak_NAKBtree` | TBD | +50% | Acceptable if accuracy improved |
-| `Push_Allocations` | TBD | 0 allocs/op | Check pool usage |
+| `Push_WithNakBtree` | *Establish after impl* | +20% vs Original | Optimize delete path |
+| `Consolidate_1000entries` | *Establish after impl* | < 500µs | Increase timeout budget |
+| `PeriodicNak_NAKBtree` | *Establish after impl* | +50% vs Original | Acceptable if accuracy improved |
+| `Push_Allocations` | *Establish after impl* | 0 allocs/op | Check pool usage |
+
+**Process**: Run benchmarks before and after NAK btree implementation to establish baselines.
 
 **CI Integration**: Add benchmark comparison to PR checks; flag regressions > 20%.
 
