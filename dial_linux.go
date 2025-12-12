@@ -304,6 +304,15 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 	// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 	h := p.Header()
 
+	// Debug logging for sequence analysis (topic: dial:io_uring:completion:seq)
+	// This helps diagnose out-of-order packet delivery in io_uring path
+	if !h.IsControlPacket {
+		dl.log("dial:io_uring:completion:seq", func() string {
+			return fmt.Sprintf("DATA seq=%d reqID=%d",
+				h.PacketSequenceNumber.Val(), cqe.UserData)
+		})
+	}
+
 	// For dialer, we need to handle handshake packets before connection is established
 	if h.IsControlPacket && h.ControlType == packet.CTRLTYPE_HANDSHAKE {
 		// Handshake packet - route to handleHandshake (non-blocking channel)

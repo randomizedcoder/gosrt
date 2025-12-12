@@ -450,6 +450,15 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	h := p.Header()
 	socketId := h.DestinationSocketId
 
+	// Debug logging for sequence analysis (topic: listen:io_uring:completion:seq)
+	// This helps diagnose out-of-order packet delivery in io_uring path
+	if !h.IsControlPacket {
+		ln.log("listen:io_uring:completion:seq", func() string {
+			return fmt.Sprintf("DATA seq=%d reqID=%d socketID=0x%08x",
+				h.PacketSequenceNumber.Val(), cqe.UserData, socketId)
+		})
+	}
+
 	// Handle handshake packets (DestinationSocketId == 0)
 	if socketId == 0 {
 		if h.IsControlPacket && h.ControlType == packet.CTRLTYPE_HANDSHAKE {

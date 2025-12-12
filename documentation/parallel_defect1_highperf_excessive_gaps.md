@@ -1,8 +1,9 @@
 # Parallel Defect 1: HighPerf Pipeline Detects 11x More Gaps Than Baseline
 
-**Status**: ROOT CAUSE IDENTIFIED ✅
-**Date**: 2025-12-10
+**Status**: ROOT CAUSE CONFIRMED ✅ — OUT-OF-ORDER DELIVERY PROVEN
+**Date**: 2025-12-10 → 2025-12-11
 **Test**: `Parallel-Starlink-5Mbps`
+**Design Doc**: `design_io_uring_reorder_solutions.md`
 
 ## Investigation Progress
 
@@ -13,10 +14,57 @@
 | 2025-12-10 | Designed isolation test plan | 7 tests to isolate single variable changes |
 | 2025-12-10 | Implemented isolation framework | `test_isolation_mode.go`, `run_isolation_tests.sh` |
 | 2025-12-10 | **Ran all 7 isolation tests** | **ROOT CAUSE: Server io_uring recv** |
+| 2025-12-10 | Documented io_uring architecture | See "io_uring Architecture Analysis" section |
+| 2025-12-11 | Added sequence logging | `listen:io_uring:completion:seq` topic |
+| 2025-12-11 | **Ran debug test** | **OUT-OF-ORDER DELIVERY CONFIRMED** ✅ |
 
-## 🎯 ROOT CAUSE IDENTIFIED
+## 🎯 ROOT CAUSE CONFIRMED: OUT-OF-ORDER DELIVERY
 
 **The issue is specifically `io_uring receive` on the SERVER side.**
+
+### Debug Logging Results (2025-12-11)
+
+Sequence number logging was added to confirm out-of-order packet delivery. The results are **definitive**:
+
+```
+seq=194811147 reqID=77
+seq=194811150 reqID=3776    ← GAP (148, 149 missing)
+seq=194811152 reqID=3787    ← GAP (151 missing)
+seq=194811146 reqID=4140    ← OUT OF ORDER! (went back 6 packets)
+seq=194811148 reqID=4313    ← filling gap
+seq=194811149 reqID=4258    ← filling gap
+seq=194811151 reqID=4201    ← filling gap
+seq=194811153 reqID=4161
+...
+seq=194811181 reqID=4206
+seq=194811122 reqID=4224    ← MAJOR OUT OF ORDER! (went back 59 packets!)
+seq=194811124 reqID=4135
+seq=194811135 reqID=4257
+seq=194811134 reqID=4160    ← backwards
+seq=194811133 reqID=4177    ← backwards
+seq=194811132 reqID=3989    ← backwards
+seq=194811131 reqID=3906    ← backwards
+seq=194811130 reqID=4270    ← backwards
+```
+
+**Key Observations**:
+
+1. **Packets ARE delivered out of order** — This is now proven, not hypothesized
+2. **Small gaps (1-3 packets)** — Common, filled shortly after
+3. **Large gaps (50+ packets)** — Occasional, packets arrive very late
+4. **Request IDs are NOT sequential** — Shows different io_uring requests completing in arbitrary order
+5. **Sequences eventually arrive** — No actual packet loss, just reordering
+
+### Impact Analysis
+
+When packet `seq=194811150` arrives but `seq=194811148` and `seq=194811149` haven't yet:
+1. SRT receiver sees a gap of 2 packets
+2. NAK is sent requesting seq=148, 149
+3. Packets 148, 149 arrive ~10 completions later (already in kernel!)
+4. Original sender retransmits 148, 149 (unnecessary)
+5. Both the late original AND retransmission arrive → `already_acked` drops
+
+**This explains the 2,476 gaps on a CLEAN NETWORK with 0% packet loss.**
 
 ### Isolation Test Results (Clean Network - No Packet Loss!)
 
@@ -197,15 +245,294 @@ For deeper analysis, add counters to measure packet ordering:
 3. Verify 0 gaps on clean network
 4. Re-run full parallel test to verify fix under network impairment
 
-## Questions for Further Investigation
+---
 
-1. Is the HighPerf pipeline using io_uring for the **receive** path on the client? (Yes - `-iouringrecvenabled`)
+## io_uring Architecture Analysis
 
-2. Are the 7,332 gaps detected all during the 60ms outages, or distributed throughout?
+### How io_uring Receive Works
 
-3. What is the average reorder depth? Are packets arriving 1-2 behind, or much more?
+The io_uring receive path is implemented in `listen_linux.go` (for server/listener).
 
-4. Does the issue persist without network impairment (clean network test)?
+#### Initialization (`initializeIoUringRecv`)
+
+1. Creates a ring with 512 entries (configurable via `IoUringRecvRingSize`)
+2. Pre-populates ring with `initialPending` read requests (default: 512)
+3. Each read request has:
+   - Unique `requestID` (atomic counter)
+   - Buffer from pool
+   - `recvCompletionInfo` stored in map
+
+#### Submission (`submitRecvRequest`)
+
+```go
+// Simplified flow:
+bufferPtr := recvBufferPool.Get()
+requestID := recvRequestID.Add(1)
+recvCompletions[requestID] = &recvCompletionInfo{buffer: bufferPtr, ...}
+sqe.PrepareRecvMsg(recvRingFd, msg, 0)
+sqe.SetData64(requestID)
+ring.Submit()
+```
+
+**Key insight**: The kernel now has **512 outstanding reads** simultaneously!
+
+#### Completion Handler (`recvCompletionHandler`)
+
+```go
+for {
+    cqe, compInfo := getRecvCompletion(ctx, ring)  // Polls for completions
+    processRecvCompletion(ring, cqe, compInfo)      // Deserialize + route
+    pendingResubmits++
+    if pendingResubmits >= batchSize {
+        submitRecvRequestBatch(pendingResubmits)    // Batch resubmit
+    }
+}
+```
+
+**Critical**: Completions are processed in **CQE arrival order**, NOT packet sequence order!
+
+### The Out-of-Order Problem
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    KERNEL NETWORK STACK                      │
+│  Packets arrive in order: seq=100, seq=101, seq=102, seq=103 │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│              io_uring (512 pending recvmsg requests)         │
+│                                                              │
+│  Request 42 (buffer 42) ← receives seq=100                   │
+│  Request 17 (buffer 17) ← receives seq=101                   │
+│  Request 89 (buffer 89) ← receives seq=102                   │
+│  Request 3  (buffer 3)  ← receives seq=103                   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼  Completions may arrive out of order!
+┌─────────────────────────────────────────────────────────────┐
+│             COMPLETION QUEUE (CQE order)                     │
+│                                                              │
+│  CQE 1: Request 17, buffer 17 → seq=101 ← Delivered FIRST!   │
+│  CQE 2: Request 42, buffer 42 → seq=100 ← "Gap" detected!    │
+│  CQE 3: Request 3,  buffer 3  → seq=103                      │
+│  CQE 4: Request 89, buffer 89 → seq=102 ← Another "gap"      │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    SRT GAP DETECTION                         │
+│                                                              │
+│  Sees seq=101, expected seq=100 → GAP! Send NAK for seq=100  │
+│  Sees seq=100 → Already sent NAK, packet arrives "late"      │
+│  Sees seq=103, expected seq=102 → GAP! Send NAK for seq=102  │
+│  Sees seq=102 → Already sent NAK, packet arrives "late"      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Why This Happens
+
+The `recvmsg` operations complete in the order the **kernel's io_uring subsystem** processes them, not necessarily the order packets arrived on the wire. With 512 outstanding requests, there's significant opportunity for reordering:
+
+1. **Kernel scheduling**: Different CPU cores may complete requests in different orders
+2. **Memory allocation**: Buffer availability can affect completion timing
+3. **io_uring internal batching**: Completions may be batched and reordered
+
+### Evidence from Isolation Tests
+
+On a **clean network** (0% loss, 0ms latency):
+- Control pipeline (no io_uring): **0 gaps**
+- Test pipeline (io_uring recv): **2,476 gaps**
+
+This proves the reordering is happening in the io_uring path, not the network.
+
+---
+
+## Phase 2a: Debug Logging Plan
+
+### A) Add Sequence Number Logging
+
+**Goal**: Confirm packets are being delivered out-of-order by logging sequence numbers as they arrive.
+
+**Implementation**:
+
+Add logging to `listen_linux.go::processRecvCompletion` after successful packet deserialization:
+
+```go
+// After: p, err := packet.NewPacketFromData(addr, bufferSlice)
+// Add:
+h := p.Header()
+if !h.IsControlPacket {
+    ln.log("listen:io_uring:completion:seq", func() string {
+        return fmt.Sprintf("DATA seq=%d requestID=%d",
+            h.PacketSequenceNumber.Val(), cqe.UserData)
+    })
+}
+```
+
+**Log Topic**: `listen:io_uring:completion:seq`
+- Hierarchical: subscribing to `listen:io_uring` will also capture these
+- Can be filtered specifically for sequence analysis
+
+### B) Test Plan
+
+1. **Add logging topic to server flags** in isolation test:
+   ```go
+   // Add to GetControlServerFlags/GetTestServerFlags:
+   "-logtopics", "listen:io_uring:completion:seq"
+   ```
+
+2. **Run short test** (reduce duration to 10s for less output):
+   ```bash
+   sudo make test-isolation CONFIG=Isolation-Server-IoUringRecv 2>&1 | tee /tmp/seq_debug.log
+   ```
+
+3. **Analyze output** - Look for patterns like:
+   ```
+   seq=100 requestID=1
+   seq=102 requestID=3  ← GAP! Expected 101
+   seq=101 requestID=2  ← Out of order delivery
+   seq=103 requestID=4
+   ```
+
+### C) Expected Findings
+
+If our hypothesis is correct, we should see:
+- Sequence numbers arriving out of order
+- `requestID` values NOT correlating with sequence order
+- Gaps of 1-10+ packets (measuring reorder depth)
+
+### D) Implementation Files
+
+| File | Change |
+|------|--------|
+| `listen_linux.go` | Add sequence logging in `processRecvCompletion` |
+| `dial_linux.go` | Add sequence logging in `processRecvCompletion` (if needed for client) |
+
+---
+
+---
+
+## Phase 3: Fix Design Discussion
+
+### The Core Problem
+
+The current SRT NAK logic triggers immediately when a sequence gap is detected:
+
+```
+Receive seq=101 → expected seq=100 → GAP! → Send NAK for seq=100
+```
+
+This works fine for synchronous receive (packets arrive in order from kernel), but with io_uring's async completions, packets arrive out of order at the application layer.
+
+### Potential Solution: Delayed NAK with Sliding Window
+
+Inspired by [goTrackRTP](https://github.com/randomizedcoder/goTrackRTP), we can use a **sliding window** approach:
+
+#### goTrackRTP Design Overview
+
+```
+                     ← Behind Window (bw) →         ← Ahead Window (aw) →
+                     ┌───────────────────────────────────────────────────┐
+   ...──────────────│    ACCEPTABLE WINDOW    │    Max()    │           │────...
+                     └───────────────────────────────────────────────────┘
+                     │                        │              │           │
+              Packets here are          Max seen        Ahead packets
+              "late but OK"             sequence        (shouldn't happen)
+                                        number
+```
+
+Key concepts:
+- **Max()** — Highest sequence number seen (current reference point)
+- **Behind Window (bw)** — Packets arriving with seq < Max but within range are acceptable
+- **Ahead Window (aw)** — Packets arriving with seq > Max+1 (gaps)
+- **btree storage** — Efficient O(log n) insert/lookup for tracking seen sequences
+
+#### Adaptation for goSRT with io_uring
+
+**Proposal**: When io_uring receive is enabled, require btree and delay NAK generation.
+
+```go
+// Current behavior (immediate NAK):
+if seq > maxSeen+1 {
+    NAK(maxSeen+1, seq-1)  // Request all missing packets
+    maxSeen = seq
+}
+
+// Proposed behavior (delayed NAK with window):
+if seq > maxSeen+1 {
+    // Don't NAK immediately - packets may be in-flight in io_uring
+    maxSeen = seq
+}
+// Only NAK when packets fall off the "behind window"
+if maxSeen - oldestMissing > behindWindow {
+    NAK(oldestMissing)     // Only NAK truly late packets
+}
+```
+
+#### Why This Works
+
+1. **btree naturally sorts** — Even if packets arrive out of order, btree stores them in sequence order
+2. **3-second buffer** — SRT already has a large receive buffer; we can afford to wait
+3. **behindWindow sizing** — Based on observed reorder depth (50-100 packets), we'd set `bw` accordingly
+4. **Only truly lost packets get NAK'd** — If a packet hasn't arrived after `bw` packets pass, it's probably lost
+
+#### Window Sizing for goSRT
+
+From the debug output, we observe:
+- Most reordering is within 10 packets
+- Occasional reordering up to 60 packets
+- No actual packet loss (all packets eventually arrive)
+
+Suggested initial parameters:
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Behind Window | 100 packets | Covers observed max reorder depth + margin |
+| NAK Delay | 50 packets | Conservative - wait for most reordering to settle |
+
+At 5 Mbps with 1316-byte packets:
+- Packets per second: ~475
+- 100 packets = ~210ms of buffer time
+- This is well within the 3-second SRT latency buffer
+
+### Alternative Approaches
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Sliding window NAK delay** | Preserves io_uring perf, clean fix | Requires careful tuning |
+| **Reorder buffer before SRT** | Simple, transparent | Extra memory copy, latency |
+| **Single outstanding io_uring read** | Simple, preserves ordering | Loses async benefit |
+| **IOSQE_IO_LINK ordering** | Kernel-enforced order | May not work for UDP recvmsg |
+
+### Implementation Considerations
+
+1. **Make btree mandatory with io_uring recv** — btree handles sorting automatically
+2. **Add `NAKDelayPackets` config option** — Allow tuning the behind window size
+3. **Metrics for reorder depth** — Track max/avg reorder to inform tuning
+4. **Fallback to immediate NAK** — If non-io_uring receive, keep current behavior
+
+### Questions to Resolve Before Implementation
+
+1. How does the current NAK logic interact with the receive buffer and TSBPD?
+2. Should the window be packet-count based or time-based?
+3. How do we handle the edge case of connection startup (initial sequence)?
+4. Does the btree already provide any reordering benefit we can leverage?
+
+---
+
+## Questions Answered ✅
+
+1. ~~Is the HighPerf pipeline using io_uring for the **receive** path on the client?~~
+   **Answer**: Yes, via `-iouringrecvenabled`
+
+2. ~~Are the 7,332 gaps detected all during the 60ms outages, or distributed throughout?~~
+   **Answer**: Distributed throughout — gaps occur even on clean network
+
+3. ~~What is the average reorder depth? Are packets arriving 1-2 behind, or much more?~~
+   **Answer**: Mostly 1-10 packets, occasionally 50-60 packets behind
+
+4. ~~Does the issue persist without network impairment (clean network test)?~~
+   **Answer**: YES — 2,476 gaps on 0% loss network = purely software reordering
 
 ## Test Commands for Investigation
 
@@ -257,9 +584,9 @@ sudo make test-isolation-all
 - `contrib/integration_testing/test_configs.go` - 7 isolation test configurations
 
 ### Core SRT Code (Under Investigation)
+- `listen_linux.go` - io_uring receive path for listener (SERVER) ← **ROOT CAUSE HERE**
+- `dial_linux.go` - io_uring receive path for dialer (CLIENT)
 - `congestion/live/receive.go` - Gap detection logic
-- `io_uring_reader.go` - io_uring receive path
-- `io_uring_writer.go` - io_uring send path
 - `packet/store_btree.go` - B-tree packet store
 - `packet/store_list.go` - Linked list packet store
 

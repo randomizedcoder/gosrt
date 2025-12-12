@@ -699,6 +699,7 @@ type IsolationTestConfig struct {
 	TestDuration time.Duration // 30 seconds
 	Bitrate      int64         // 5 Mb/s
 	StatsPeriod  time.Duration // Stats display period (e.g., 10s to reduce output)
+	LogTopics    string        // Comma-separated log topics for debugging (e.g., "listen:io_uring:completion:seq")
 }
 
 // ControlSRTConfig is the base control configuration: list, no io_uring
@@ -787,6 +788,9 @@ func (c *IsolationTestConfig) GetTestServerFlags(testID string) []string {
 	flags := []string{
 		"-addr", "10.2.1.3:6001",
 		"-promuds", udsPath,
+	}
+	if c.LogTopics != "" {
+		flags = append(flags, "-logtopics", c.LogTopics)
 	}
 	flags = append(flags, c.TestServer.ToCliFlags()...)
 	return flags
