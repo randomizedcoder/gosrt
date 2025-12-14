@@ -606,6 +606,9 @@ if tdiff > r.rate.period {  // period = 1 second
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `TickIntervalMs` | uint64 | 10 | TSBPD delivery tick interval (ms) |
+| `PeriodicNakIntervalMs` | uint64 | 20 | Periodic NAK timer interval (ms) |
+| `PeriodicAckIntervalMs` | uint64 | 10 | Periodic ACK timer interval (ms) |
 | `NakRecentPercent` | float64 | 0.10 | Percentage of tsbpdDelay for "too recent" threshold |
 | `NakMergeGap` | uint32 | 3 | Max sequence gap to merge in consolidation (packets) |
 | `NakConsolidationBudgetMs` | uint64 | 2 | Max time for consolidation (ms) |
@@ -613,6 +616,15 @@ if tdiff > r.rate.period {  // period = 1 second
 | `FastNakThresholdMs` | uint64 | 50 | Silent period to trigger FastNAK (ms) |
 | `FastNakRecentEnabled` | bool | true | Add recent gap immediately on FastNAK trigger |
 | `HonorNakOrder` | bool | false | Sender retransmits in NAK packet order |
+
+**Timer Interval Trade-offs**:
+
+| Interval | Lower Value | Higher Value |
+|----------|-------------|--------------|
+| `TickIntervalMs` (5ms) | Lower latency delivery, higher CPU | Higher latency, lower CPU |
+| `TickIntervalMs` (20ms) | Higher latency, lower CPU | Even higher latency, minimal CPU |
+| `PeriodicNakIntervalMs` (10ms) | Faster loss recovery, more NAK overhead | Slower recovery, less overhead |
+| `PeriodicNakIntervalMs` (40ms) | Slower loss recovery, less overhead | May exceed TSBPD for low-latency configs |
 
 #### 3.5.2 Internal Configuration (Auto-Set)
 
@@ -1780,6 +1792,257 @@ type sender struct {
 ```
 
 The `honorNakOrder` option allows receiver-controlled retransmission priority. When enabled, packets are retransmitted in the order specified in the NAK packet (oldest/most-urgent first).
+
+### 4.9 Configurable Timer Intervals
+
+Currently, the Tick interval (10ms) and Periodic NAK interval (20ms) are hardcoded. This design makes them configurable to allow operators to tune for different deployment scenarios.
+
+#### 4.9.1 Motivation
+
+| Scenario | Optimal Tick | Optimal NAK | Rationale |
+|----------|--------------|-------------|-----------|
+| Low-latency (120ms TSBPD) | 5ms | 10ms | Faster delivery and recovery needed |
+| Standard (3s TSBPD) | 10ms | 20ms | Default, good balance |
+| High-latency/satellite | 20ms | 40ms | Reduce CPU overhead, buffer is large |
+| Battery-constrained | 20ms | 50ms | Minimize wake-ups, save power |
+
+#### 4.9.2 Current Hardcoded Values
+
+**File**: `connection.go`
+
+```go
+// Line ~382 - Hardcoded tick interval
+c.tick = 10 * time.Millisecond
+
+// Line ~388-389 - Hardcoded NAK/ACK intervals (microseconds)
+c.recv = live.NewReceiver(live.ReceiveConfig{
+    InitialSequenceNumber:  c.initialPacketSequenceNumber,
+    PeriodicACKInterval:    10_000,   // 10ms in microseconds
+    PeriodicNAKInterval:    20_000,   // 20ms in microseconds
+    // ...
+})
+```
+
+**File**: `congestion/live/receive.go`
+
+```go
+// Line ~468 - Uses periodicNAKInterval from config
+func (r *receiver) periodicNAKLocked(now uint64) []circular.Number {
+    if now-r.lastPeriodicNAK < r.periodicNAKInterval {
+        return nil
+    }
+    // ...
+}
+```
+
+#### 4.9.3 Implementation Changes
+
+##### config.go - Add New Options
+
+```go
+type Config struct {
+    // ... existing fields ...
+
+    // Timer intervals (defaults maintained for backward compatibility)
+    TickIntervalMs        uint64 // Default: 10 (10ms TSBPD delivery tick)
+    PeriodicNakIntervalMs uint64 // Default: 20 (20ms periodic NAK)
+    PeriodicAckIntervalMs uint64 // Default: 10 (10ms periodic ACK)
+}
+
+// WithTickInterval sets the TSBPD delivery tick interval.
+func (c Config) WithTickInterval(ms uint64) Config {
+    c.TickIntervalMs = ms
+    return c
+}
+
+// WithPeriodicNakInterval sets the periodic NAK timer interval.
+func (c Config) WithPeriodicNakInterval(ms uint64) Config {
+    c.PeriodicNakIntervalMs = ms
+    return c
+}
+
+// WithPeriodicAckInterval sets the periodic ACK timer interval.
+func (c Config) WithPeriodicAckInterval(ms uint64) Config {
+    c.PeriodicAckIntervalMs = ms
+    return c
+}
+```
+
+##### contrib/common/flags.go - Add CLI Flags
+
+```go
+var (
+    // ... existing flags ...
+
+    // Timer interval flags
+    TickIntervalMs = flag.Uint64("tickintervalms", 10,
+        "TSBPD delivery tick interval in milliseconds (default: 10)")
+
+    PeriodicNakIntervalMs = flag.Uint64("periodicnakintervalms", 20,
+        "Periodic NAK timer interval in milliseconds (default: 20)")
+
+    PeriodicAckIntervalMs = flag.Uint64("periodicackintervalms", 10,
+        "Periodic ACK timer interval in milliseconds (default: 10)")
+)
+```
+
+##### connection.go - Use Config Values
+
+```go
+// In newConnection() or dial/listen initialization
+func (c *connection) initialize(config Config) {
+    // Use config values with defaults
+    tickMs := config.TickIntervalMs
+    if tickMs == 0 {
+        tickMs = 10  // Default 10ms
+    }
+    c.tick = time.Duration(tickMs) * time.Millisecond
+
+    nakIntervalUs := config.PeriodicNakIntervalMs * 1000  // Convert ms to µs
+    if nakIntervalUs == 0 {
+        nakIntervalUs = 20_000  // Default 20ms = 20,000µs
+    }
+
+    ackIntervalUs := config.PeriodicAckIntervalMs * 1000
+    if ackIntervalUs == 0 {
+        ackIntervalUs = 10_000  // Default 10ms
+    }
+
+    c.recv = live.NewReceiver(live.ReceiveConfig{
+        InitialSequenceNumber:  c.initialPacketSequenceNumber,
+        PeriodicACKInterval:    ackIntervalUs,
+        PeriodicNAKInterval:    nakIntervalUs,
+        // ... other config ...
+    })
+}
+```
+
+##### contrib/server/main.go - Wire Up Flags
+
+```go
+func main() {
+    flag.Parse()
+
+    config := srt.DefaultConfig()
+
+    // Apply timer interval flags
+    if *common.TickIntervalMs > 0 {
+        config = config.WithTickInterval(*common.TickIntervalMs)
+    }
+    if *common.PeriodicNakIntervalMs > 0 {
+        config = config.WithPeriodicNakInterval(*common.PeriodicNakIntervalMs)
+    }
+    if *common.PeriodicAckIntervalMs > 0 {
+        config = config.WithPeriodicAckInterval(*common.PeriodicAckIntervalMs)
+    }
+
+    // ... rest of main ...
+}
+```
+
+##### contrib/client/main.go and contrib/client-generator/main.go
+
+Same pattern as server - wire up the flags to config.
+
+#### 4.9.4 Files Requiring Changes
+
+| File | Change Type | Description |
+|------|-------------|-------------|
+| `config.go` | Add fields | `TickIntervalMs`, `PeriodicNakIntervalMs`, `PeriodicAckIntervalMs` |
+| `config.go` | Add methods | `WithTickInterval()`, `WithPeriodicNakInterval()`, `WithPeriodicAckInterval()` |
+| `contrib/common/flags.go` | Add flags | Three new CLI flags |
+| `connection.go` | Modify | Use config values instead of hardcoded 10/20ms |
+| `contrib/server/main.go` | Modify | Wire up new flags to config |
+| `contrib/client/main.go` | Modify | Wire up new flags to config |
+| `contrib/client-generator/main.go` | Modify | Wire up new flags to config |
+| `contrib/common/test_flags.sh` | Add tests | Verify new flags work correctly |
+
+#### 4.9.5 Testing Requirements
+
+**File**: `contrib/common/test_flags.sh`
+
+Add tests for the new timer interval flags:
+
+```bash
+# Test tick interval flag
+test_flag "-tickintervalms" "5" "tick interval 5ms"
+test_flag "-tickintervalms" "20" "tick interval 20ms"
+
+# Test periodic NAK interval flag
+test_flag "-periodicnakintervalms" "10" "NAK interval 10ms"
+test_flag "-periodicnakintervalms" "40" "NAK interval 40ms"
+
+# Test periodic ACK interval flag
+test_flag "-periodicackintervalms" "5" "ACK interval 5ms"
+test_flag "-periodicackintervalms" "20" "ACK interval 20ms"
+
+# Test combinations
+test_combo "-tickintervalms 5 -periodicnakintervalms 10" "low-latency combo"
+```
+
+**Unit tests** (in appropriate `_test.go` files):
+
+```go
+func TestConfig_TimerIntervals(t *testing.T) {
+    // Test defaults
+    cfg := DefaultConfig()
+    require.Equal(t, uint64(10), cfg.TickIntervalMs)
+    require.Equal(t, uint64(20), cfg.PeriodicNakIntervalMs)
+    require.Equal(t, uint64(10), cfg.PeriodicAckIntervalMs)
+
+    // Test WithXxx methods
+    cfg = cfg.WithTickInterval(5)
+    require.Equal(t, uint64(5), cfg.TickIntervalMs)
+
+    cfg = cfg.WithPeriodicNakInterval(40)
+    require.Equal(t, uint64(40), cfg.PeriodicNakIntervalMs)
+}
+
+func TestConnection_UsesConfigTimerIntervals(t *testing.T) {
+    cfg := DefaultConfig().
+        WithTickInterval(5).
+        WithPeriodicNakInterval(15)
+
+    conn := newConnectionWithConfig(cfg)
+
+    require.Equal(t, 5*time.Millisecond, conn.tick)
+    // Verify receiver got correct NAK interval
+}
+```
+
+#### 4.9.6 Validation
+
+Add validation to reject invalid values:
+
+```go
+func (c Config) Validate() error {
+    // Timer intervals must be reasonable
+    if c.TickIntervalMs > 0 && c.TickIntervalMs < 1 {
+        return fmt.Errorf("TickIntervalMs must be >= 1ms, got %d", c.TickIntervalMs)
+    }
+    if c.TickIntervalMs > 1000 {
+        return fmt.Errorf("TickIntervalMs must be <= 1000ms, got %d", c.TickIntervalMs)
+    }
+
+    if c.PeriodicNakIntervalMs > 0 && c.PeriodicNakIntervalMs < 5 {
+        return fmt.Errorf("PeriodicNakIntervalMs must be >= 5ms, got %d", c.PeriodicNakIntervalMs)
+    }
+    if c.PeriodicNakIntervalMs > 500 {
+        return fmt.Errorf("PeriodicNakIntervalMs must be <= 500ms, got %d", c.PeriodicNakIntervalMs)
+    }
+
+    // NAK interval should generally be >= tick interval
+    if c.PeriodicNakIntervalMs > 0 && c.TickIntervalMs > 0 {
+        if c.PeriodicNakIntervalMs < c.TickIntervalMs {
+            // Warning, not error - operator may have reasons
+            log.Printf("Warning: PeriodicNakIntervalMs (%d) < TickIntervalMs (%d)",
+                c.PeriodicNakIntervalMs, c.TickIntervalMs)
+        }
+    }
+
+    return nil
+}
+```
 
 ---
 
