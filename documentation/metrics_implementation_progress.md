@@ -336,6 +336,22 @@ The implementation is divided into phases:
 
 ---
 
+## Future Work: Rate Metrics Performance
+
+**Identified during NAK btree implementation**: 20 rate-related fields across receiver and sender still use lock-based protection and were not migrated to atomics.
+
+**Impact**: Lock contention on hot path (every packet arrival)
+
+**Fields affected**:
+- Receiver: `rate.packets`, `rate.bytes`, `rate.bytesRetrans`, `nPackets`, `avgPayloadSize`, `avgLinkCapacity` (6 hot path fields)
+- Sender: `rate.bytes`, `rate.bytesSent`, `rate.bytesRetrans`, `avgPayloadSize` (4 hot path fields)
+
+**See**: [`rate_metrics_performance_design.md`](./rate_metrics_performance_design.md) for full analysis and migration plan.
+
+**Status**: Deferred until NAK btree implementation is complete.
+
+---
+
 ## Notes
 
 - All metrics use atomic operations (no locks needed)

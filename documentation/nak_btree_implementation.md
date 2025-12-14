@@ -132,6 +132,150 @@ func (nb *nakBtree) Clear()
 
 ---
 
+## Phase 4: Receiver Integration
+
+**Goal**: Wire NAK btree into receiver, add function dispatch, update Push().
+
+| Step | Description | Status | Notes |
+|------|-------------|--------|-------|
+| 4.1 | Update `ReceiveConfig` struct | ✅ | Added NAK btree and FastNAK config fields |
+| 4.2 | Update `receiver` struct | ✅ | Added useNakBtree, nakBtree, fastNak fields |
+| 4.3 | Update `NewReceiver()` | ✅ | Initialize new fields, create nakBtree if enabled |
+| 4.4 | Add function dispatch for `periodicNAK` | ✅ | Dispatches to Original or Btree based on config |
+| 4.5 | Rename to `periodicNakOriginal()` | ✅ | Original implementation preserved |
+| 4.6 | Add `periodicNakBtree()` | ✅ | New implementation using NAK btree |
+| 4.7 | Update `pushLocked()` | ✅ | Add/delete from NAK btree, suppress immediate NAK |
+
+### Changes to `receive.go`
+
+**New config fields in `ReceiveConfig`**:
+- `UseNakBtree` - Enable NAK btree
+- `SuppressImmediateNak` - Let periodic NAK handle gaps
+- `TsbpdDelay`, `NakRecentPercent`, `NakMergeGap`, `NakConsolidationBudget`
+- `FastNakEnabled`, `FastNakThresholdUs`, `FastNakRecentEnabled`
+
+**New receiver fields**:
+- `useNakBtree`, `suppressImmediateNak`, `nakBtree`
+- `tsbpdDelay`, `nakRecentPercent`, `nakMergeGap`, `nakConsolidationBudget`
+- `fastNakEnabled`, `fastNakThreshold`, `fastNakRecentEnabled`
+
+**Function dispatch**:
+```go
+func (r *receiver) periodicNAK(now uint64) []circular.Number {
+    if r.useNakBtree {
+        return r.periodicNakBtree(now)
+    }
+    return r.periodicNakOriginal(now)
+}
+```
+
+**pushLocked changes**:
+- When gap detected: Add missing sequences to NAK btree
+- Immediate NAK suppressed if `suppressImmediateNak` is true
+- When packet arrives: Delete from NAK btree
+
+---
+
+### ⚠️ ISSUE IDENTIFIED: Rate Statistics Locking Analysis
+
+**User concern**: Are `r.rate.*` updates properly protected from races?
+
+**Analysis of current locking**:
+
+| Operation | Lock Type | Fields Accessed |
+|-----------|-----------|-----------------|
+| `Push()` → `pushLockedNakBtree()` | `Lock()` (exclusive) | `r.rate.packets++`, `r.rate.bytes+=`, `r.rate.bytesRetrans+=` |
+| `Push()` → `pushLockedOriginal()` | `Lock()` (exclusive) | Same as above |
+| `Tick()` → `updateRateStats()` | `Lock()` (exclusive) | Reads all, resets counters, writes computed values |
+| `Stats()` | `RLock()` (shared) | Reads `r.rate.bytesPerSecond`, `r.rate.pktRetransRate` |
+| `PacketRate()` | `Lock()` (exclusive) | Reads `r.rate.packetsPerSecond`, `r.rate.bytesPerSecond` |
+
+**Conclusion**: The current locking appears **correct** for race safety:
+- All writes use exclusive `Lock()`
+- `Stats()` uses `RLock()` which is mutually exclusive with `Lock()`
+- Go's `sync.RWMutex` guarantees no concurrent read/write access
+
+**However, potential concerns to investigate**:
+
+1. **Performance**: `Push()` holds `Lock()` for entire packet processing. With high packet rates, this could cause contention between:
+   - Multiple connections calling `Push()`
+   - `Tick()` trying to call `updateRateStats()`
+   - `Stats()` trying to read values
+
+2. **Missing probe timing in NAK btree path**: In `pushLockedNakBtree()`, the probe timing code that updates `r.avgLinkCapacity` was **not included**.
+
+   **Probe timing purpose**: Every 16th and 17th packet are sent as pairs. The time between them estimates link capacity (PUMASK_SEQNO_PROBE in SRT spec).
+
+   **Question**: Should probe timing be included in NAK btree path?
+   - The design doc (`design_nak_btree.md` Section 4.1.2) doesn't mention it
+   - Probe timing is for congestion control, orthogonal to NAK handling
+   - With io_uring, packet arrival order is random, so probe timing may not work correctly anyway
+
+   **Recommendation**: Verify with design whether probe timing should be:
+   - Omitted (current implementation)
+   - Added back (same as original path)
+   - Modified for io_uring (e.g., timestamp-based instead of arrival-order-based)
+
+3. **Design doc verification needed**: The design doc focuses on NAK handling but doesn't explicitly address:
+   - Probe timing for link capacity estimation
+   - Rate statistics update strategy
+   - Whether atomic counters should replace lock-protected fields
+
+**Recommendation**:
+- No immediate changes needed for correctness
+- The probe timing omission in `pushLockedNakBtree()` should be addressed before Phase 4 completion
+
+### ⚠️ Future Work: Rate Fields Not Migrated to Atomics
+
+**Issue**: 20 rate-related fields across receiver and sender still use lock-based protection (not migrated to atomics during the metrics overhaul).
+
+**Full design and migration plan**: See [`rate_metrics_performance_design.md`](./rate_metrics_performance_design.md)
+
+**Status**: Deferred until NAK btree implementation is complete.
+
+---
+
+### ⚠️ ISSUE IDENTIFIED: Gap Detection Logic Mismatch
+
+**Problem**: The current Phase 4 implementation still uses `maxSeenSequenceNumber` for gap detection in `pushLocked()`, which is fundamentally incompatible with io_uring's out-of-order delivery.
+
+**What the design document says** (Section 4.3.1):
+1. **In Push()**: Just insert packet, delete from NAK btree. **NO gap detection**
+2. **In periodicNakBtree()**: Scan packet btree to find actual gaps, add them to NAK btree
+
+**What current implementation does** (wrong):
+1. **In pushLocked()**: Detects "gaps" using `maxSeenSequenceNumber` and adds to NAK btree
+2. This causes false positives because with io_uring, packets arrive out of order
+
+**Why this is wrong**:
+With io_uring, if packets arrive as: 100, 103, 101, 102
+- Current code sees 100→103 as a "gap" and NAKs for 101, 102
+- But 101, 102 are just reordered, not lost
+- The packet btree will sort them correctly
+
+**Correct approach per design**:
+```
+Push() with io_uring NAK btree enabled:
+  1. Insert packet into packet btree (btree sorts automatically)
+  2. Delete seq from NAK btree (if present - packet arrived)
+  3. NO gap detection, NO immediate NAK
+  4. NO updating maxSeenSequenceNumber in the normal way
+
+periodicNakBtree():
+  1. Scan packet btree from NAKScanStartPoint
+  2. For each gap in the btree sequence, add to NAK btree
+  3. Only scan packets older than "too recent" threshold
+  4. Consolidate NAK btree into ranges and send
+```
+
+**Required Changes**:
+1. Add `useNakBtreePath` dispatch in `pushLocked()` - completely different path
+2. Create `pushLockedNakBtree()` - simple insert, no gap detection
+3. Update `periodicNakBtree()` to scan packet btree for gaps
+4. The NAK btree gets populated by periodicNak, not by Push
+
+---
+
 ### Key Learnings
 
 1. **Signed arithmetic for wraparound** works when sequences are within half the range
@@ -428,6 +572,7 @@ Track `go build ./...` results after each step:
 | 2025-12-14 | 2.6 | ✅ Pass | Phase 2 extended - generic implementations + benchmarks |
 | 2025-12-14 | 2.10 | ✅ Pass | Packet btree now uses SeqLess() - all tests pass |
 | 2025-12-14 | 3.1 | ✅ Pass | Phase 3 complete - NAK btree created with tests |
+| 2025-12-14 | 4.1-4.7 | ✅ Pass | Phase 4 - Receiver integration complete |
 
 ---
 

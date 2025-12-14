@@ -24,6 +24,19 @@ type ReceiveConfig struct {
 	BTreeDegree            int                        // B-tree degree (default: 32, only used if PacketReorderAlgorithm == "btree")
 	LockTimingMetrics      *metrics.LockTimingMetrics // Optional lock timing metrics for performance monitoring
 	ConnectionMetrics      *metrics.ConnectionMetrics // For atomic statistics updates
+
+	// NAK btree configuration (Phase 4)
+	UseNakBtree            bool    // Enable NAK btree for improved out-of-order handling
+	SuppressImmediateNak   bool    // Suppress immediate NAK, let periodic NAK handle gaps
+	TsbpdDelay             uint64  // Microseconds, for scan window calculation
+	NakRecentPercent       float64 // Percentage of TSBPD delay for "recent" window (e.g., 0.10)
+	NakMergeGap            uint32  // Maximum gap to merge into a single range
+	NakConsolidationBudget uint64  // Microseconds, time budget for consolidation
+
+	// FastNAK configuration
+	FastNakEnabled       bool   // Enable FastNAK after silence
+	FastNakThresholdUs   uint64 // Microseconds, silence threshold to trigger FastNAK
+	FastNakRecentEnabled bool   // Enable FastNAKRecent to detect sequence jumps
 }
 
 // receiver implements the Receiver interface
@@ -67,6 +80,20 @@ type receiver struct {
 	sendACK func(seq circular.Number, light bool)
 	sendNAK func(list []circular.Number)
 	deliver func(p packet.Packet)
+
+	// NAK btree fields (Phase 4)
+	useNakBtree            bool
+	suppressImmediateNak   bool
+	nakBtree               *nakBtree
+	tsbpdDelay             uint64 // Microseconds
+	nakRecentPercent       float64
+	nakMergeGap            uint32
+	nakConsolidationBudget time.Duration
+
+	// FastNAK fields
+	fastNakEnabled       bool
+	fastNakThreshold     time.Duration
+	fastNakRecentEnabled bool
 }
 
 // NewReceiver takes a ReceiveConfig and returns a new Receiver
@@ -100,6 +127,28 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		sendACK: config.OnSendACK,
 		sendNAK: config.OnSendNAK,
 		deliver: config.OnDeliver,
+
+		// NAK btree configuration
+		useNakBtree:            config.UseNakBtree,
+		suppressImmediateNak:   config.SuppressImmediateNak,
+		tsbpdDelay:             config.TsbpdDelay,
+		nakRecentPercent:       config.NakRecentPercent,
+		nakMergeGap:            config.NakMergeGap,
+		nakConsolidationBudget: time.Duration(config.NakConsolidationBudget) * time.Microsecond,
+
+		// FastNAK configuration
+		fastNakEnabled:       config.FastNakEnabled,
+		fastNakThreshold:     time.Duration(config.FastNakThresholdUs) * time.Microsecond,
+		fastNakRecentEnabled: config.FastNakRecentEnabled,
+	}
+
+	// Create NAK btree if enabled
+	if r.useNakBtree {
+		degree := config.BTreeDegree
+		if degree <= 0 {
+			degree = 32 // Default btree degree
+		}
+		r.nakBtree = newNakBtree(degree)
 	}
 
 	if r.sendACK == nil {
@@ -196,6 +245,86 @@ func (r *receiver) Push(pkt packet.Packet) {
 }
 
 func (r *receiver) pushLocked(pkt packet.Packet) {
+	// Dispatch to appropriate implementation based on NAK btree mode
+	if r.useNakBtree {
+		r.pushLockedNakBtree(pkt)
+		return
+	}
+	r.pushLockedOriginal(pkt)
+}
+
+// pushLockedNakBtree handles packet arrival when NAK btree is enabled (io_uring path).
+// Key difference: NO gap detection or immediate NAK.
+// With io_uring, packets arrive out of order, so gap detection would cause false positives.
+// Instead, the btree sorts packets automatically, and periodicNakBtree scans for real gaps.
+func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
+	m := r.metrics
+
+	if pkt == nil {
+		m.CongestionRecvPktNil.Add(1)
+		return
+	}
+
+	r.nPackets++
+	pktLen := pkt.Len()
+	r.rate.packets++
+	r.rate.bytes += pktLen
+
+	m.CongestionRecvPkt.Add(1)
+	m.CongestionRecvByte.Add(uint64(pktLen))
+
+	if pkt.Header().RetransmittedPacketFlag {
+		m.CongestionRecvPktRetrans.Add(1)
+		m.CongestionRecvByteRetrans.Add(uint64(pktLen))
+		r.rate.bytesRetrans += pktLen
+	}
+
+	// 5.1.2. SRT's Default LiveCC Algorithm
+	r.avgPayloadSize = 0.875*r.avgPayloadSize + 0.125*float64(pktLen)
+
+	// Check if too old (already delivered)
+	if pkt.Header().PacketSequenceNumber.Lte(r.lastDeliveredSequenceNumber) {
+		m.CongestionRecvPktBelated.Add(1)
+		m.CongestionRecvByteBelated.Add(uint64(pktLen))
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, uint64(pktLen))
+		return
+	}
+
+	// Check if already acknowledged
+	if pkt.Header().PacketSequenceNumber.Lt(r.lastACKSequenceNumber) {
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, uint64(pktLen))
+		return
+	}
+
+	// Check for duplicate (already in store)
+	if r.packetStore.Has(pkt.Header().PacketSequenceNumber) {
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, uint64(pktLen))
+		return
+	}
+
+	// Delete from NAK btree - this packet is no longer missing
+	if r.nakBtree != nil {
+		r.nakBtree.Delete(pkt.Header().PacketSequenceNumber.Val())
+	}
+
+	// Insert into packet btree (btree handles ordering automatically)
+	if r.packetStore.Insert(pkt) {
+		m.CongestionRecvPktBuf.Add(1)
+		m.CongestionRecvPktUnique.Add(1)
+		m.CongestionRecvByteBuf.Add(uint64(pktLen))
+		m.CongestionRecvByteUnique.Add(uint64(pktLen))
+	} else {
+		m.CongestionRecvPktStoreInsertFailed.Add(1)
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonStoreInsertFailed, uint64(pktLen))
+	}
+
+	// NOTE: No gap detection, no immediate NAK, no maxSeenSequenceNumber tracking
+	// Gaps are detected by periodicNakBtree() which scans the packet btree
+}
+
+// pushLockedOriginal is the original implementation with gap detection and immediate NAK.
+// Used when NAK btree is disabled (non-io_uring path).
+func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 	// Check metrics once at the beginning of the function
 	m := r.metrics
 
@@ -447,24 +576,33 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 }
 
 func (r *receiver) periodicNAK(now uint64) []circular.Number {
+	// Dispatch to appropriate implementation
+	if r.useNakBtree {
+		return r.periodicNakBtree(now)
+	}
+	return r.periodicNakOriginal(now)
+}
+
+// periodicNakOriginal is the original implementation that iterates through the packet store.
+func (r *receiver) periodicNakOriginal(now uint64) []circular.Number {
 	if r.lockTiming != nil {
 		var result []circular.Number
 		metrics.WithRLockTiming(r.lockTiming, &r.lock, func() {
-			result = r.periodicNAKLocked(now)
+			result = r.periodicNakOriginalLocked(now)
 		})
 		return result
 	}
 	r.lock.RLock()
 	defer r.lock.RUnlock()
-	return r.periodicNAKLocked(now)
+	return r.periodicNakOriginalLocked(now)
 }
 
-// periodicNAKLocked builds the NAK loss list by iterating through the packet store.
+// periodicNakOriginalLocked builds the NAK loss list by iterating through the packet store.
 // RFC SRT Appendix A defines two NAK encoding formats:
 // - Figure 21: Single sequence number (start == end) - 4 bytes on wire
 // - Figure 22: Range of sequence numbers (start != end) - 8 bytes on wire
 // The list contains pairs [start, end] for each gap found.
-func (r *receiver) periodicNAKLocked(now uint64) []circular.Number {
+func (r *receiver) periodicNakOriginalLocked(now uint64) []circular.Number {
 	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
 		return nil
 	}
@@ -504,6 +642,117 @@ func (r *receiver) periodicNAKLocked(now uint64) []circular.Number {
 		ackSequenceNumber = h.PacketSequenceNumber
 		return true // Continue
 	})
+
+	r.lastPeriodicNAK = now
+
+	return list
+}
+
+// periodicNakBtree scans the packet btree to find gaps and builds NAK list.
+// This is the new implementation for handling out-of-order packets with io_uring.
+//
+// Algorithm:
+// 1. Scan packet btree from last ACK'd sequence
+// 2. For each gap in the sequence, add missing seqs to NAK btree
+// 3. Skip packets that are "too recent" (might still be in flight)
+// 4. Consolidate NAK btree into ranges and return
+func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
+		return nil
+	}
+
+	// Track that periodicNAK actually ran
+	m := r.metrics
+	if m != nil {
+		m.CongestionRecvPeriodicNAKRuns.Add(1)
+	}
+
+	if r.nakBtree == nil {
+		return nil
+	}
+
+	// Step 1: Calculate "too recent" threshold
+	// Packets with TSBPD beyond this are too new to NAK (might be reordered, not lost)
+	tooRecentThreshold := now
+	if r.nakRecentPercent > 0 && r.tsbpdDelay > 0 {
+		tooRecentThreshold = now + uint64(float64(r.tsbpdDelay)*r.nakRecentPercent)
+	}
+
+	// Step 2: Scan packet btree from last ACK'd sequence to find gaps
+	expectedSeq := r.lastACKSequenceNumber.Inc()
+
+	r.packetStore.Iterate(func(pkt packet.Packet) bool {
+		h := pkt.Header()
+
+		// Skip packets already ACK'd
+		if h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) {
+			return true // Continue
+		}
+
+		// Stop if this packet is "too recent" (might still be reordered)
+		if h.PktTsbpdTime > tooRecentThreshold {
+			return false // Stop iteration
+		}
+
+		actualSeq := h.PacketSequenceNumber
+
+		// Detect gaps: expected vs actual
+		if actualSeq.Gt(expectedSeq) {
+			// There's a gap - add missing sequences to NAK btree
+			seq := expectedSeq.Val()
+			endSeq := actualSeq.Dec().Val()
+			for circular.SeqLess(seq, endSeq) || seq == endSeq {
+				r.nakBtree.Insert(seq)
+				seq = circular.SeqAdd(seq, 1)
+			}
+		}
+
+		expectedSeq = actualSeq.Inc()
+		return true // Continue
+	})
+
+	// Step 3: Build NAK list from NAK btree with range consolidation
+	list := make([]circular.Number, 0, r.nakBtree.Len()*2)
+
+	var currentStart, currentEnd uint32
+	inRange := false
+
+	r.nakBtree.Iterate(func(seq uint32) bool {
+		if !inRange {
+			// Start a new range
+			currentStart = seq
+			currentEnd = seq
+			inRange = true
+			return true
+		}
+
+		// Check if this sequence is contiguous or within merge gap
+		gap := circular.SeqDiff(seq, currentEnd)
+		if gap >= 1 && uint32(gap) <= r.nakMergeGap+1 {
+			// Extend current range (contiguous or within merge gap)
+			currentEnd = seq
+		} else {
+			// Emit current range and start a new one
+			list = append(list,
+				circular.New(currentStart, packet.MAX_SEQUENCENUMBER),
+				circular.New(currentEnd, packet.MAX_SEQUENCENUMBER),
+			)
+			currentStart = seq
+			currentEnd = seq
+		}
+		return true
+	})
+
+	// Emit final range
+	if inRange {
+		list = append(list,
+			circular.New(currentStart, packet.MAX_SEQUENCENUMBER),
+			circular.New(currentEnd, packet.MAX_SEQUENCENUMBER),
+		)
+	}
 
 	r.lastPeriodicNAK = now
 
