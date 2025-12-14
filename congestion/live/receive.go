@@ -682,6 +682,9 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	defer r.lock.RUnlock()
 
 	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
+		if r.metrics != nil {
+			r.metrics.NakPeriodicSkipped.Add(1)
+		}
 		return nil
 	}
 
@@ -695,6 +698,10 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	if r.nakBtree == nil {
 		return nil
 	}
+
+	// Step 0: Expire old NAK entries before scanning
+	// Removes entries for sequences already released via TSBPD
+	r.expireNakEntries()
 
 	// Step 1: Calculate "too recent" threshold
 	// Packets with TSBPD beyond this are too new to NAK (might be reordered, not lost)
@@ -752,6 +759,35 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	r.lastPeriodicNAK = now
 
 	return list
+}
+
+// expireNakEntries removes entries from the NAK btree that are too old to be useful.
+// An entry is expired if its sequence is less than the oldest packet in the packet btree.
+// This is called at the start of periodicNakBtree to ensure we don't NAK for packets
+// that have already been released via TSBPD.
+//
+// Must be called with r.lock held (at least RLock).
+func (r *receiver) expireNakEntries() int {
+	if r.nakBtree == nil {
+		return 0
+	}
+
+	// Find the oldest packet in the packet btree
+	minPkt := r.packetStore.Min()
+	if minPkt == nil {
+		return 0 // Empty packet store, nothing to expire
+	}
+
+	// Any NAK entry older than the oldest packet's sequence is expired
+	// (the packet btree has already released those packets via TSBPD)
+	cutoff := minPkt.Header().PacketSequenceNumber.Val()
+
+	expired := r.nakBtree.DeleteBefore(cutoff)
+	if expired > 0 && r.metrics != nil {
+		r.metrics.NakBtreeExpired.Add(uint64(expired))
+	}
+
+	return expired
 }
 
 func (r *receiver) Tick(now uint64) {

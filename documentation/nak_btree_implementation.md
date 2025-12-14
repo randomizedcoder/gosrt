@@ -37,6 +37,135 @@ This document tracks the implementation progress of the NAK btree feature. Each 
 
 ---
 
+## Design vs Implementation Checklist
+
+This section verifies all design requirements from `design_nak_btree.md` have been implemented.
+
+### Functional Requirements (FR-*)
+
+| ID | Requirement | Status | Notes |
+|----|-------------|--------|-------|
+| FR-1 | Suppress immediate NAK for io_uring | ✅ | `suppressImmediateNak` in pushLockedNakBtree |
+| FR-2 | Maintain immediate NAK for non-io_uring | ✅ | pushLockedOriginal unchanged |
+| FR-3 | Periodic NAK every 20ms | ✅ | periodicNakBtree runs on timer |
+| FR-4 | NAK btree stores singles only | ✅ | `nak_btree.go` stores uint32 |
+| FR-5 | TSBPD-based scan boundary | ✅ | `tooRecentThreshold` in periodicNakBtree |
+| FR-6 | NAKScanStartPoint tracking | ⚠️ Partial | Uses lastACKSequenceNumber instead |
+| FR-7 | Configurable "too recent" percentage | ✅ | `NakRecentPercent` config |
+| FR-8 | Consolidate singles into ranges | ✅ | `consolidateNakBtree()` |
+| FR-9 | MergeGap for range consolidation | ✅ | `nakMergeGap` config |
+| FR-10 | Time-budgeted consolidation | ⚠️ Partial | Budget exists but check is amortized |
+| FR-11 | **Multiple NAK packets when exceeds MSS** | ❌ Missing | Not implemented |
+| FR-12 | Urgency ordering (oldest first) | ✅ | Btree ascends in sequence order |
+| FR-13 | FastNAK trigger after silent period | ✅ | `checkFastNak()` |
+| FR-14 | Configurable FastNAK threshold | ✅ | `FastNakThresholdMs` config |
+| FR-15 | Track last packet arrival atomically | ✅ | `AtomicTime` type |
+| FR-16 | Honor NAK packet order in sender | ✅ | `nakLockedHonorOrder()` |
+| FR-17 | Feature flag for new retrans behavior | ✅ | `HonorNakOrder` config |
+| FR-18 | Delete from NAK btree on arrival | ✅ | In pushLockedNakBtree |
+| FR-19 | **Expire entries based on TSBPD** | ✅ | `expireNakEntries()` implemented |
+| FR-20 | Initialize NAKScanStartPoint on first pkt | ⚠️ N/A | Uses lastACKSequenceNumber |
+
+### Non-Functional Requirements (NFR-*)
+
+| ID | Requirement | Status | Notes |
+|----|-------------|--------|-------|
+| NFR-1 | Go idiomatic code | ✅ | Uses time.Time, atomic.Value |
+| NFR-2 | Specific file/function references | ✅ | Design cites exact locations |
+| NFR-3 | Atomic operations for hot-path | ✅ | lastPacketArrivalTime, lastDataPacketSeq |
+| NFR-4 | Go generics for sequence math | ✅ | `seq_math_generic.go` |
+| NFR-5 | Feature flags for enable/disable | ✅ | All features have config flags |
+| NFR-6 | Separate lock for NAK btree | ✅ | `nakBtree` has own RWMutex |
+| NFR-7 | Clear lock ordering | ✅ | Documented in code |
+| NFR-8 | Function substitution | ✅ | Dispatch functions |
+| NFR-9 | Existing path unchanged | ✅ | pushLockedOriginal, periodicNakOriginal |
+| NFR-10 | Configuration-driven activation | ✅ | `UseNakBtree`, auto-config |
+| NFR-11 | Graceful degradation | ⚠️ Partial | No runtime fallback (by design) |
+
+### Performance Requirements (PERF-*)
+
+| ID | Benchmark | Status | Result |
+|----|-----------|--------|--------|
+| PERF-1 | BenchmarkPushWithNakBtree | ✅ | ~500ns/op |
+| PERF-2 | BenchmarkPeriodicNakScan | ⚠️ Partial | Consolidation benchmarked, not full scan |
+| PERF-3 | BenchmarkConsolidation | ✅ | 28µs/1k entries |
+| PERF-4 | BenchmarkSeqMath | ✅ | ~0.24ns/op |
+| PERF-5 | BenchmarkNakBtreeOperations | ⚠️ Partial | Basic ops tested |
+
+### Testing Requirements
+
+| Component | Test File | Status | Notes |
+|-----------|-----------|--------|-------|
+| NAK btree | `nak_btree_test.go` | ✅ | Insert, delete, iterate, concurrent |
+| Scan window | N/A | ⚠️ | Covered in periodicNakBtree tests |
+| Consolidation | `nak_consolidate_test.go` | ✅ | All scenarios covered |
+| Sequence math | `seq_math_test.go` | ✅ | Wraparound, edge cases |
+| FastNAK | `fast_nak_test.go` | ✅ | Trigger conditions |
+| FastNAKRecent | `fast_nak_test.go` | ✅ | Sequence jump detection |
+| Push hot path | `receive_bench_test.go` | ✅ | List vs btree comparison |
+
+### Configuration Options
+
+| Option | Design Default | Implementation | Match? |
+|--------|----------------|----------------|--------|
+| `TickIntervalMs` | 10 | 10 | ✅ |
+| `PeriodicNakIntervalMs` | 20 | 20 | ✅ |
+| `PeriodicAckIntervalMs` | 10 | 10 | ✅ |
+| `NakRecentPercent` | 0.10 | 0.10 | ✅ |
+| `NakMergeGap` | 3 | 3 | ✅ |
+| `NakConsolidationBudget` | 2ms | 2000µs | ✅ |
+| `FastNakEnabled` | true | true (auto) | ✅ |
+| `FastNakThresholdMs` | 50 | 50 | ✅ |
+| `FastNakRecentEnabled` | true | true (auto) | ✅ |
+| `HonorNakOrder` | false | false | ✅ |
+
+### Metrics
+
+| Metric Category | Count Designed | Count Implemented | Match? |
+|-----------------|----------------|-------------------|--------|
+| NAK btree core | 6 | 6 | ✅ |
+| Periodic NAK | 4 | 4 | ✅ (NakPeriodicSkipped added) |
+| FastNAK | 3 | 4 | ✅ (+overflow) |
+| Consolidation | 4 | 4 | ✅ |
+| Sender honor-order | 1 | 1 | ✅ |
+
+### ❌ Missing Implementation Items
+
+1. **FR-11: Multiple NAK packets when exceeds MSS**
+   - Design: Handle large gap scenarios by generating multiple NAK packets
+   - Status: **Deferred** - Known limitation, acceptable for initial release
+   - Analysis:
+     - NAK CIF payload limit: ~360 single entries or ~180 ranges
+     - With consolidation (MergeGap=3), typical scenarios fit
+     - Extreme case (20% loss at 20 Mbps): ~100 ranges (fits)
+     - If exceeded: Partial NAK sent, remaining gaps caught next cycle
+   - Future work: Split in `sendNAK()` if `cif.LostPacketSequenceNumber` exceeds threshold
+
+### ✅ Fixed During Review
+
+1. **FR-19: expireNakEntries() function** ✅
+   - Implemented: `expireNakEntries()` in `receive.go`
+   - Called at start of `periodicNakBtree()` before scanning
+   - Uses `packetStore.Min()` as cutoff
+   - Increments `NakBtreeExpired` metric
+
+2. **NakPeriodicSkipped metric** ✅
+   - Added increment when `periodicNakBtree()` returns early
+
+### ⚠️ Partial Implementation Items
+
+1. **FR-6: NAKScanStartPoint tracking**
+   - Design: Explicit atomic variable to track scan position
+   - Implementation: Uses `lastACKSequenceNumber` instead
+   - Impact: Functionally equivalent, simpler
+
+2. **FR-10: Time-budgeted consolidation**
+   - Design: Check every iteration
+   - Implementation: Amortized check every 100 iterations
+   - Impact: Acceptable trade-off for performance
+
+---
+
 ## Phase 1: Configuration & Flags
 
 **Goal**: Add all new configuration options and CLI flags.
