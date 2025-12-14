@@ -180,6 +180,13 @@ type SRTConfig struct {
 
 	// NAK reports
 	NAKReport bool // -nakreport
+
+	// NAK btree configuration (for io_uring reorder handling)
+	UseNakBtree          bool // -usenakrebtree
+	SuppressImmediateNak bool // -suppressimmediatenak
+	FastNakEnabled       bool // -fastnakEnabled
+	FastNakRecentEnabled bool // -fastnakrecentenabled
+	HonorNakOrder        bool // -honornakorder
 }
 
 // ToCliFlags converts SRTConfig to CLI flag arguments
@@ -277,6 +284,23 @@ func (c *SRTConfig) ToCliFlags() []string {
 	// NAK reports
 	if c.NAKReport {
 		flags = append(flags, "-nakreport")
+	}
+
+	// NAK btree configuration
+	if c.UseNakBtree {
+		flags = append(flags, "-usenakbtree")
+	}
+	if c.SuppressImmediateNak {
+		flags = append(flags, "-suppressimmediatenak")
+	}
+	if c.FastNakEnabled {
+		flags = append(flags, "-fastnakenabled")
+	}
+	if c.FastNakRecentEnabled {
+		flags = append(flags, "-fastnakrecentenabled")
+	}
+	if c.HonorNakOrder {
+		flags = append(flags, "-honornakorder")
 	}
 
 	return flags
@@ -579,7 +603,7 @@ var BaselineSRTConfig = SRTConfig{
 	TLPktDrop:              true,
 }
 
-// HighPerfSRTConfig is the high-performance configuration: btree + io_uring
+// HighPerfSRTConfig is the high-performance configuration: btree + io_uring + NAK btree
 var HighPerfSRTConfig = SRTConfig{
 	ConnectionTimeout:      3000 * time.Millisecond,
 	PeerIdleTimeout:        30000 * time.Millisecond,
@@ -591,6 +615,12 @@ var HighPerfSRTConfig = SRTConfig{
 	PacketReorderAlgorithm: "btree", // B-tree packet store
 	BTreeDegree:            32,
 	TLPktDrop:              true,
+	// NAK btree for io_uring reorder handling
+	UseNakBtree:          true, // NAK btree for efficient gap detection
+	SuppressImmediateNak: true, // Let periodic NAK handle gaps (prevents false positives)
+	FastNakEnabled:       true, // FastNAK for outage recovery
+	FastNakRecentEnabled: true, // FastNAKRecent for sequence jump detection
+	HonorNakOrder:        true, // Sender honors receiver priority in NAK order
 }
 
 // GetBaselineServerFlags returns CLI flags for the baseline server
@@ -732,6 +762,17 @@ func (c SRTConfig) WithIoUringRecv() SRTConfig {
 func (c SRTConfig) WithBtree(degree int) SRTConfig {
 	c.PacketReorderAlgorithm = "btree"
 	c.BTreeDegree = degree
+	return c
+}
+
+// WithNakBtree returns a copy of the config with NAK btree enabled
+// This enables all NAK btree features: NAK btree, suppress immediate NAK, FastNAK, and honor order
+func (c SRTConfig) WithNakBtree() SRTConfig {
+	c.UseNakBtree = true
+	c.SuppressImmediateNak = true
+	c.FastNakEnabled = true
+	c.FastNakRecentEnabled = true
+	c.HonorNakOrder = true
 	return c
 }
 

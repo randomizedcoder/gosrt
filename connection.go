@@ -414,6 +414,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		OnDeliver:             c.pop,
 		LockTimingMetrics:     c.metrics.SenderLockTiming,
 		ConnectionMetrics:     c.metrics,
+		HonorNakOrder:         c.config.HonorNakOrder,
 	})
 
 	// Store parent waitgroup

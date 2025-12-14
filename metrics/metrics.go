@@ -203,9 +203,10 @@ type ConnectionMetrics struct {
 	// - Range of packets (Figure 22): 8 bytes, bit 0 of first = 1
 	// These counters track PACKETS requested, not entries:
 	//   NAKSingleRecv + NAKRangeRecv = NAKPktsRecv = expected retransmissions
-	CongestionSendNAKSingleRecv atomic.Uint64 // Packets requested via single NAK entries (1 per entry)
-	CongestionSendNAKRangeRecv  atomic.Uint64 // Packets requested via range NAK entries (sum of range sizes)
-	CongestionSendNAKPktsRecv   atomic.Uint64 // Total packets requested = NAKSingleRecv + NAKRangeRecv
+	CongestionSendNAKSingleRecv   atomic.Uint64 // Packets requested via single NAK entries (1 per entry)
+	CongestionSendNAKRangeRecv    atomic.Uint64 // Packets requested via range NAK entries (sum of range sizes)
+	CongestionSendNAKPktsRecv     atomic.Uint64 // Total packets requested = NAKSingleRecv + NAKRangeRecv
+	CongestionSendNAKHonoredOrder atomic.Uint64 // NAK processing runs that honored receiver priority order
 
 	// Granular drop counters - Congestion control (DATA packets only)
 	CongestionRecvDataDropTooOld            atomic.Uint64 // Belated, past play time
@@ -224,6 +225,31 @@ type ConnectionMetrics struct {
 	// Expected: ACK ~100/sec (10ms interval), NAK ~50/sec (20ms interval)
 	CongestionRecvPeriodicACKRuns atomic.Uint64 // Times periodicACK() actually ran
 	CongestionRecvPeriodicNAKRuns atomic.Uint64 // Times periodicNAK() actually ran
+
+	// NAK btree metrics - Core operations
+	NakBtreeInserts     atomic.Uint64 // Sequences added to NAK btree
+	NakBtreeDeletes     atomic.Uint64 // Sequences removed (packet arrived)
+	NakBtreeExpired     atomic.Uint64 // Sequences removed (TSBPD expired)
+	NakBtreeSize        atomic.Uint64 // Current size (gauge, updated each periodic NAK)
+	NakBtreeScanPackets atomic.Uint64 // Packets scanned in periodicNakBtree()
+	NakBtreeScanGaps    atomic.Uint64 // Gaps found during scan
+
+	// NAK btree metrics - Periodic NAK execution
+	NakPeriodicOriginalRuns atomic.Uint64 // Times periodicNakOriginal() executed
+	NakPeriodicBtreeRuns    atomic.Uint64 // Times periodicNakBtree() executed
+	NakPeriodicSkipped      atomic.Uint64 // Times skipped (interval not elapsed)
+
+	// NAK btree metrics - Consolidation
+	NakConsolidationRuns    atomic.Uint64 // Times consolidateNakBtree() ran
+	NakConsolidationEntries atomic.Uint64 // Total entries produced by consolidation
+	NakConsolidationMerged  atomic.Uint64 // Times adjacent sequences merged into ranges
+	NakConsolidationTimeout atomic.Uint64 // Times consolidation hit time budget
+
+	// NAK btree metrics - FastNAK
+	NakFastTriggers       atomic.Uint64 // Times FastNAK triggered after silence
+	NakFastRecentInserts  atomic.Uint64 // Sequences added by FastNAKRecent jump detection
+	NakFastRecentSkipped  atomic.Uint64 // FastNAKRecent skipped (gap too small)
+	NakFastRecentOverflow atomic.Uint64 // FastNAKRecent gap too large (capped)
 
 	// Granular error counters - Connection-level receive (DATA and Control packets)
 	PktRecvDataErrorParse      atomic.Uint64 // DATA packet parse errors

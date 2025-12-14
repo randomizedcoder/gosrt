@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/datarhei/gosrt/circular"
@@ -94,6 +95,11 @@ type receiver struct {
 	fastNakEnabled       bool
 	fastNakThreshold     time.Duration
 	fastNakRecentEnabled bool
+
+	// FastNAK tracking (atomic for lock-free access)
+	lastPacketArrivalTime AtomicTime    // Time of last packet arrival
+	lastNakTime           AtomicTime    // Time of last NAK sent
+	lastDataPacketSeq     atomic.Uint32 // Last data packet sequence (for FastNAKRecent)
 }
 
 // NewReceiver takes a ReceiveConfig and returns a new Receiver
@@ -265,6 +271,14 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 		return
 	}
 
+	now := time.Now()
+	seq := pkt.Header().PacketSequenceNumber.Val()
+
+	// FastNAK tracking: detect outage recovery
+	if r.fastNakEnabled && r.fastNakRecentEnabled {
+		r.checkFastNakRecent(seq, now)
+	}
+
 	r.nPackets++
 	pktLen := pkt.Len()
 	r.rate.packets++
@@ -304,7 +318,9 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 
 	// Delete from NAK btree - this packet is no longer missing
 	if r.nakBtree != nil {
-		r.nakBtree.Delete(pkt.Header().PacketSequenceNumber.Val())
+		if r.nakBtree.Delete(seq) {
+			m.NakBtreeDeletes.Add(1)
+		}
 	}
 
 	// Insert into packet btree (btree handles ordering automatically)
@@ -317,6 +333,10 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 		m.CongestionRecvPktStoreInsertFailed.Add(1)
 		metrics.IncrementRecvDataDrop(m, metrics.DropReasonStoreInsertFailed, uint64(pktLen))
 	}
+
+	// Update FastNAK tracking (after packet is accepted)
+	r.lastPacketArrivalTime.Store(now)
+	r.lastDataPacketSeq.Store(seq)
 
 	// NOTE: No gap detection, no immediate NAK, no maxSeenSequenceNumber tracking
 	// Gaps are detected by periodicNakBtree() which scans the packet btree
@@ -612,6 +632,7 @@ func (r *receiver) periodicNakOriginalLocked(now uint64) []circular.Number {
 	m := r.metrics
 	if m != nil {
 		m.CongestionRecvPeriodicNAKRuns.Add(1)
+		m.NakPeriodicOriginalRuns.Add(1)
 	}
 
 	list := []circular.Number{}
@@ -668,6 +689,7 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	m := r.metrics
 	if m != nil {
 		m.CongestionRecvPeriodicNAKRuns.Add(1)
+		m.NakPeriodicBtreeRuns.Add(1)
 	}
 
 	if r.nakBtree == nil {
@@ -706,52 +728,25 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 			endSeq := actualSeq.Dec().Val()
 			for circular.SeqLess(seq, endSeq) || seq == endSeq {
 				r.nakBtree.Insert(seq)
+				m.NakBtreeInserts.Add(1)
+				m.NakBtreeScanGaps.Add(1)
 				seq = circular.SeqAdd(seq, 1)
 			}
 		}
+
+		m.NakBtreeScanPackets.Add(1)
 
 		expectedSeq = actualSeq.Inc()
 		return true // Continue
 	})
 
-	// Step 3: Build NAK list from NAK btree with range consolidation
-	list := make([]circular.Number, 0, r.nakBtree.Len()*2)
+	// Step 3: Consolidate NAK btree into ranges using optimized function
+	// (uses sync.Pool and time budget)
+	list := r.consolidateNakBtree()
 
-	var currentStart, currentEnd uint32
-	inRange := false
-
-	r.nakBtree.Iterate(func(seq uint32) bool {
-		if !inRange {
-			// Start a new range
-			currentStart = seq
-			currentEnd = seq
-			inRange = true
-			return true
-		}
-
-		// Check if this sequence is contiguous or within merge gap
-		gap := circular.SeqDiff(seq, currentEnd)
-		if gap >= 1 && uint32(gap) <= r.nakMergeGap+1 {
-			// Extend current range (contiguous or within merge gap)
-			currentEnd = seq
-		} else {
-			// Emit current range and start a new one
-			list = append(list,
-				circular.New(currentStart, packet.MAX_SEQUENCENUMBER),
-				circular.New(currentEnd, packet.MAX_SEQUENCENUMBER),
-			)
-			currentStart = seq
-			currentEnd = seq
-		}
-		return true
-	})
-
-	// Emit final range
-	if inRange {
-		list = append(list,
-			circular.New(currentStart, packet.MAX_SEQUENCENUMBER),
-			circular.New(currentEnd, packet.MAX_SEQUENCENUMBER),
-		)
+	// Update NAK btree size gauge
+	if m != nil {
+		m.NakBtreeSize.Store(uint64(r.nakBtree.Len()))
 	}
 
 	r.lastPeriodicNAK = now

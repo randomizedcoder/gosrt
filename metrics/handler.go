@@ -572,6 +572,69 @@ func MetricsHandler() http.Handler {
 			writeCounterIfNonZero(b, "gosrt_connection_nak_packets_requested_total",
 				metrics.CongestionSendNAKPktsRecv.Load(),
 				"socket_id", socketIdStr, "direction", "recv")
+			writeCounterIfNonZero(b, "gosrt_connection_nak_honored_order_total",
+				metrics.CongestionSendNAKHonoredOrder.Load(),
+				"socket_id", socketIdStr)
+
+			// ========== NAK btree Metrics ==========
+			// Core operations
+			writeCounterIfNonZero(b, "gosrt_nak_btree_inserts_total",
+				metrics.NakBtreeInserts.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_btree_deletes_total",
+				metrics.NakBtreeDeletes.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_btree_expired_total",
+				metrics.NakBtreeExpired.Load(),
+				"socket_id", socketIdStr)
+			writeGaugeIfNonZero(b, "gosrt_nak_btree_size",
+				float64(metrics.NakBtreeSize.Load()),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_btree_scan_packets_total",
+				metrics.NakBtreeScanPackets.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_btree_scan_gaps_total",
+				metrics.NakBtreeScanGaps.Load(),
+				"socket_id", socketIdStr)
+
+			// Periodic NAK execution
+			writeCounterIfNonZero(b, "gosrt_nak_periodic_runs_total",
+				metrics.NakPeriodicOriginalRuns.Load(),
+				"socket_id", socketIdStr, "impl", "original")
+			writeCounterIfNonZero(b, "gosrt_nak_periodic_runs_total",
+				metrics.NakPeriodicBtreeRuns.Load(),
+				"socket_id", socketIdStr, "impl", "btree")
+			writeCounterIfNonZero(b, "gosrt_nak_periodic_skipped_total",
+				metrics.NakPeriodicSkipped.Load(),
+				"socket_id", socketIdStr)
+
+			// Consolidation
+			writeCounterIfNonZero(b, "gosrt_nak_consolidation_runs_total",
+				metrics.NakConsolidationRuns.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_consolidation_entries_total",
+				metrics.NakConsolidationEntries.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_consolidation_merged_total",
+				metrics.NakConsolidationMerged.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_consolidation_timeout_total",
+				metrics.NakConsolidationTimeout.Load(),
+				"socket_id", socketIdStr)
+
+			// FastNAK
+			writeCounterIfNonZero(b, "gosrt_nak_fast_triggers_total",
+				metrics.NakFastTriggers.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_fast_recent_inserts_total",
+				metrics.NakFastRecentInserts.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_fast_recent_skipped_total",
+				metrics.NakFastRecentSkipped.Load(),
+				"socket_id", socketIdStr)
+			writeCounterIfNonZero(b, "gosrt_nak_fast_recent_overflow_total",
+				metrics.NakFastRecentOverflow.Load(),
+				"socket_id", socketIdStr)
 
 			// ========== Congestion Control Rate Gauges ==========
 			// Stored as percentage * 100 for precision (e.g., 5.5% = 550)

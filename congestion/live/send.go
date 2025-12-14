@@ -22,6 +22,9 @@ type SendConfig struct {
 	OnDeliver             func(p packet.Packet)
 	LockTimingMetrics     *metrics.LockTimingMetrics // Optional lock timing metrics for performance monitoring
 	ConnectionMetrics     *metrics.ConnectionMetrics // For atomic statistics updates
+
+	// NAK order configuration - when true, retransmit in NAK packet order (receiver-controlled priority)
+	HonorNakOrder bool
 }
 
 // sender implements the Sender interface
@@ -58,6 +61,9 @@ type sender struct {
 	}
 
 	deliver func(p packet.Packet)
+
+	// NAK order configuration
+	honorNakOrder bool // When true, retransmit in NAK packet order (receiver-controlled priority)
 }
 
 // NewSender takes a SendConfig and returns a new Sender
@@ -76,6 +82,8 @@ func NewSender(config SendConfig) congestion.Sender {
 		overheadBW:     float64(config.OverheadBW),
 
 		deliver: config.OnDeliver,
+
+		honorNakOrder: config.HonorNakOrder,
 	}
 
 	if s.deliver == nil {
@@ -392,11 +400,20 @@ func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 	return s.nakLocked(sequenceNumbers)
 }
 
-// nakLocked processes a NAK (Negative Acknowledgement) from the receiver.
+// nakLocked dispatches to the original or honor-order implementation.
+func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
+	if s.honorNakOrder {
+		return s.nakLockedHonorOrder(sequenceNumbers)
+	}
+	return s.nakLockedOriginal(sequenceNumbers)
+}
+
+// nakLockedOriginal processes a NAK (Negative Acknowledgement) from the receiver.
+// This is the original implementation that iterates backward through the loss list.
 // RFC SRT Appendix A defines two NAK encoding formats in the loss list:
 // - Figure 21: Single sequence number (start == end) - 4 bytes on wire
 // - Figure 22: Range of sequence numbers (start != end) - 8 bytes on wire
-func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
+func (s *sender) nakLockedOriginal(sequenceNumbers []circular.Number) uint64 {
 	// Check metrics once at the beginning of the function
 	m := s.metrics
 
@@ -441,6 +458,69 @@ func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
 	// exceeded our drop threshold and were discarded
 	if retransCount < totalLossCount {
 		m.CongestionSendNAKNotFound.Add(totalLossCount - retransCount)
+	}
+
+	return retransCount
+}
+
+// nakLockedHonorOrder processes a NAK by retransmitting packets in the order
+// they appear in the NAK packet (receiver-controlled priority).
+// This allows the receiver to prioritize which packets get retransmitted first,
+// which is useful when the NAK btree consolidation orders entries by urgency.
+func (s *sender) nakLockedHonorOrder(sequenceNumbers []circular.Number) uint64 {
+	m := s.metrics
+
+	// Count packets requested by this NAK using shared helper.
+	totalLossCount := metrics.CountNAKEntries(m, sequenceNumbers, metrics.NAKCounterRecv)
+	totalLossBytes := totalLossCount * uint64(s.avgPayloadSize)
+
+	// Increment loss counters for all reported losses
+	m.CongestionSendPktLoss.Add(totalLossCount)
+	m.CongestionSendByteLoss.Add(totalLossBytes)
+
+	// Retransmit packets in NAK order (honoring receiver priority)
+	retransCount := uint64(0)
+
+	// Process each range/single in the NAK list in order
+	for i := 0; i < len(sequenceNumbers); i += 2 {
+		startSeq := sequenceNumbers[i]
+		endSeq := sequenceNumbers[i+1]
+
+		// Find and retransmit packets in this range, in sequence order
+		for e := s.lossList.Front(); e != nil; e = e.Next() {
+			p := e.Value.(packet.Packet)
+			pktSeq := p.Header().PacketSequenceNumber
+
+			// Check if this packet is in the requested range
+			if pktSeq.Gte(startSeq) && pktSeq.Lte(endSeq) {
+				pktLen := p.Len()
+				m.CongestionSendPktRetrans.Add(1)
+				m.CongestionSendPkt.Add(1)
+				m.CongestionSendByteRetrans.Add(uint64(pktLen))
+				m.CongestionSendByte.Add(uint64(pktLen))
+
+				// Update running average payload size
+				s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
+
+				s.rate.bytesSent += pktLen
+				s.rate.bytesRetrans += pktLen
+
+				p.Header().RetransmittedPacketFlag = true
+				s.deliver(p)
+
+				retransCount++
+			}
+		}
+	}
+
+	// Track NAK requests we couldn't fulfill
+	if retransCount < totalLossCount {
+		m.CongestionSendNAKNotFound.Add(totalLossCount - retransCount)
+	}
+
+	// Track that we honored NAK order (for metrics)
+	if m != nil {
+		m.CongestionSendNAKHonoredOrder.Add(1)
 	}
 
 	return retransCount

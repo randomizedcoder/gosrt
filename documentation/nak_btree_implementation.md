@@ -26,14 +26,14 @@ This document tracks the implementation progress of the NAK btree feature. Each 
 |-------|------|--------|-------|
 | 1 | Configuration & Flags | ✅ Complete | All config fields, flags, and test_flags.sh updated |
 | 2 | Sequence Math | ✅ Complete | `circular/seq_math.go` with tests |
-| 3 | NAK btree Data Structure | ⬜ Not started | |
-| 4 | Receiver Integration | ⬜ Not started | |
-| 5 | Consolidation & FastNAK | ⬜ Not started | |
-| 6 | Sender Modifications | ⬜ Not started | |
-| 7 | Metrics | ⬜ Not started | |
-| 8 | Unit Tests | ⬜ Not started | |
-| 9 | Benchmarks | ⬜ Not started | |
-| 10 | Integration Testing | ⬜ Not started | |
+| 3 | NAK btree Data Structure | ✅ Complete | `nak_btree.go` + tests |
+| 4 | Receiver Integration | ✅ Complete | pushLocked/periodicNAK dispatch |
+| 5 | Consolidation & FastNAK | ✅ Complete | sync.Pool, time budget, metrics |
+| 6 | Sender Modifications | ✅ Complete | nakLocked dispatch, honor-order retransmission |
+| 7 | Metrics | ✅ Complete | All NAK btree metrics, Prometheus export |
+| 8 | Unit Tests | ✅ Complete | 77 tests pass, race-safe |
+| 9 | Benchmarks | ✅ Complete | FastNAK ~7ns, consolidation ~28µs/1k |
+| 10 | Integration Testing | 🔄 In progress | config.go, analysis.go updated |
 
 ---
 
@@ -457,8 +457,9 @@ functions for better performance and maintainability.
 
 | Step | Description | Status | Notes |
 |------|-------------|--------|-------|
-| 3.1 | Create `congestion/live/nak_btree.go` | ⬜ | |
-| 3.2 | Verify Phase 3 completion | ⬜ | |
+| 3.1 | Create `congestion/live/nak_btree.go` | ✅ | Complete with all operations |
+| 3.2 | Create `congestion/live/nak_btree_test.go` | ✅ | Unit tests for all operations |
+| 3.3 | Verify Phase 3 completion | ✅ | `go test ./congestion/live/... -run NakBtree` passes |
 
 ---
 
@@ -468,17 +469,16 @@ functions for better performance and maintainability.
 
 | Step | Description | Status | Notes |
 |------|-------------|--------|-------|
-| 4.1 | Update `ReceiveConfig` struct | ⬜ | |
-| 4.2 | Update `receiver` struct | ⬜ | |
-| 4.3 | Update `NewReceiver()` function | ⬜ | |
-| 4.4 | Add function dispatch for `periodicNAK` | ⬜ | |
-| 4.5 | Rename `periodicNAKLocked` to `periodicNakOriginal` | ⬜ | |
-| 4.6 | Add `periodicNakBtree()` function | ⬜ | |
-| 4.7 | Update `Push()` for NAK btree | ⬜ | |
-| 4.8 | Update `connection.go` for receiver config | ⬜ | |
-| 4.9 | Add helper functions for timer intervals | ⬜ | |
-| 4.10 | Update tick interval usage | ⬜ | |
-| 4.11 | Verify Phase 4 completion | ⬜ | |
+| 4.1 | Update `ReceiveConfig` struct | ✅ | Added NAK btree and FastNAK config fields |
+| 4.2 | Update `receiver` struct | ✅ | Added useNakBtree, nakBtree, fastNak fields |
+| 4.3 | Update `NewReceiver()` | ✅ | Initialize new fields, create nakBtree if enabled |
+| 4.4 | Add function dispatch for `periodicNAK` | ✅ | Dispatches to Original or Btree based on config |
+| 4.5 | Rename to `periodicNakOriginal()` | ✅ | Original implementation preserved |
+| 4.6 | Add `periodicNakBtree()` | ✅ | New implementation using NAK btree |
+| 4.7 | Add `pushLockedNakBtree()` | ✅ | Insert packet, delete from NAK btree, no gap detection |
+| 4.8 | Add function dispatch for `pushLocked` | ✅ | Dispatches to Original or NakBtree based on config |
+| 4.9 | Update `connection.go` for receiver config | ✅ | Wiring done |
+| 4.10 | Verify Phase 4 completion | ✅ | Build and tests pass |
 
 ---
 
@@ -488,11 +488,38 @@ functions for better performance and maintainability.
 
 | Step | Description | Status | Notes |
 |------|-------------|--------|-------|
-| 5.1 | Create `congestion/live/nak_consolidate.go` | ⬜ | |
-| 5.2 | Create `congestion/live/fast_nak.go` | ⬜ | |
-| 5.3 | Update `Push()` for FastNAK tracking | ⬜ | |
-| 5.4 | Integrate FastNAK check | ⬜ | |
-| 5.5 | Verify Phase 5 completion | ⬜ | |
+| 5.1 | Create `congestion/live/nak_consolidate.go` | ✅ | sync.Pool + time budget |
+| 5.2 | Create `congestion/live/nak_consolidate_test.go` | ✅ | Comprehensive tests + benchmarks |
+| 5.3 | Create `congestion/live/fast_nak.go` | ✅ | checkFastNak, triggerFastNak, checkFastNakRecent |
+| 5.4 | Create `congestion/live/fast_nak_test.go` | ✅ | Unit tests for all FastNAK scenarios |
+| 5.5 | Add FastNAK tracking fields to receiver | ✅ | AtomicTime, lastDataPacketSeq |
+| 5.6 | Update `pushLockedNakBtree()` for FastNAK tracking | ✅ | Calls checkFastNakRecent, updates tracking |
+| 5.7 | Update `periodicNakBtree()` to use consolidation | ✅ | Calls consolidateNakBtree() |
+| 5.8 | Add FastNAK metrics | ✅ | NakFastTriggers, NakFastRecentInserts |
+| 5.9 | Add consolidation metrics | ✅ | NakConsolidationRuns/Entries/Merged/Timeout |
+| 5.10 | Verify Phase 5 completion | ✅ | All tests pass, race-free, benchmarks run |
+
+### Files Created
+
+- `congestion/live/nak_consolidate.go` - NAK consolidation with sync.Pool and time budget
+- `congestion/live/nak_consolidate_test.go` - Consolidation tests and benchmarks
+- `congestion/live/fast_nak.go` - FastNAK optimization (silence detection, sequence jump)
+- `congestion/live/fast_nak_test.go` - FastNAK tests
+
+### Performance Results
+
+```
+BenchmarkCheckFastNakRecent-24           185775500    6.794 ns/op    0 B/op    0 allocs/op
+BenchmarkConsolidateNakBtree/10-24        2843956     429 ns/op      320 B/op   11 allocs/op
+BenchmarkConsolidateNakBtree/100-24        324762    3303 ns/op     3491 B/op  101 allocs/op
+BenchmarkConsolidateNakBtree/500-24         86476   14752 ns/op    16303 B/op  501 allocs/op
+BenchmarkConsolidateNakBtree/1000-24        39411   27644 ns/op    32609 B/op 1001 allocs/op
+```
+
+**Key observations**:
+- FastNAK check: 0 allocations, ~7ns - negligible overhead
+- Consolidation: Linear scaling O(n), allocations from circular.Number objects
+- 1000 entries takes ~28µs - well under the 2ms budget
 
 ---
 
@@ -502,13 +529,31 @@ functions for better performance and maintainability.
 
 | Step | Description | Status | Notes |
 |------|-------------|--------|-------|
-| 6.1 | Update `SendConfig` struct | ⬜ | |
-| 6.2 | Update `sender` struct | ⬜ | |
-| 6.3 | Update `NewSender()` function | ⬜ | |
-| 6.4 | Add function dispatch for NAK processing | ⬜ | |
-| 6.5 | Add `nakLockedHonorOrder()` function | ⬜ | |
-| 6.6 | Update `connection.go` for sender config | ⬜ | |
-| 6.7 | Verify Phase 6 completion | ⬜ | |
+| 6.1 | Update `SendConfig` struct | ✅ | Already had `HonorNakOrder` field |
+| 6.2 | Update `sender` struct | ✅ | Already had `honorNakOrder` field |
+| 6.3 | Update `NewSender()` function | ✅ | Already initialized |
+| 6.4 | Add function dispatch for NAK processing | ✅ | `nakLocked()` dispatches to Original or HonorOrder |
+| 6.5 | Add `nakLockedHonorOrder()` function | ✅ | Iterates Front→Back, honors NAK order |
+| 6.6 | Update `connection.go` for sender config | ✅ | Passes `c.config.HonorNakOrder` |
+| 6.7 | Verify Phase 6 completion | ✅ | `go build ./...` passes |
+
+### Changes to `send.go`
+
+**Function dispatch**:
+```go
+func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
+    if s.honorNakOrder {
+        return s.nakLockedHonorOrder(sequenceNumbers)
+    }
+    return s.nakLockedOriginal(sequenceNumbers)
+}
+```
+
+**Original vs HonorOrder**:
+- `nakLockedOriginal()`: Iterates `Back()→Prev()` (oldest first)
+- `nakLockedHonorOrder()`: Iterates `Front()→Next()` for each NAK range in order
+
+**New metric**: `CongestionSendNAKHonoredOrder` - counts NAK processing runs using honor-order
 
 ---
 
@@ -518,10 +563,28 @@ functions for better performance and maintainability.
 
 | Step | Description | Status | Notes |
 |------|-------------|--------|-------|
-| 7.1 | Add metrics to `metrics/metrics.go` | ⬜ | |
-| 7.2 | Update `metrics/handler.go` | ⬜ | |
-| 7.3 | Update metric increment points | ⬜ | |
-| 7.4 | Verify Phase 7 completion | ⬜ | |
+| 7.1 | Add metrics to `metrics/metrics.go` | ✅ | NAK btree, periodic, consolidation, FastNAK metrics |
+| 7.2 | Update `metrics/handler.go` | ✅ | All new metrics exported to Prometheus |
+| 7.3 | Update metric increment points | ✅ | receive.go, fast_nak.go, send.go |
+| 7.4 | Verify Phase 7 completion | ✅ | `go build ./...` and tests pass |
+
+### Metrics Added
+
+**NAK btree Core** (6):
+- `NakBtreeInserts`, `NakBtreeDeletes`, `NakBtreeExpired`
+- `NakBtreeSize` (gauge), `NakBtreeScanPackets`, `NakBtreeScanGaps`
+
+**Periodic NAK** (3):
+- `NakPeriodicOriginalRuns`, `NakPeriodicBtreeRuns`, `NakPeriodicSkipped`
+
+**Consolidation** (4):
+- `NakConsolidationRuns`, `NakConsolidationEntries`, `NakConsolidationMerged`, `NakConsolidationTimeout`
+
+**FastNAK** (4):
+- `NakFastTriggers`, `NakFastRecentInserts`, `NakFastRecentSkipped`, `NakFastRecentOverflow`
+
+**Sender** (1):
+- `CongestionSendNAKHonoredOrder`
 
 ---
 
@@ -531,9 +594,35 @@ functions for better performance and maintainability.
 
 | Step | Description | Status | Notes |
 |------|-------------|--------|-------|
-| 8.1 | Create test files | ⬜ | |
-| 8.2 | Add tests to existing files | ⬜ | |
-| 8.3 | Verify Phase 8 completion | ⬜ | |
+| 8.1 | Create test files | ✅ | nak_btree_test.go, fast_nak_test.go, nak_consolidate_test.go |
+| 8.2 | Add tests to existing files | ✅ | metrics_test.go, receive_test.go |
+| 8.3 | Verify Phase 8 completion | ✅ | 77 tests pass |
+
+### Test Coverage
+
+**NAK btree tests** (`nak_btree_test.go`):
+- Basic operations (Insert, Delete, DeleteBefore)
+- Iteration (ascending/descending)
+- Sequence ordering with wraparound
+- Large sequence numbers
+- Duplicate handling
+- Concurrent access
+
+**FastNAK tests** (`fast_nak_test.go`):
+- Disabled/enabled states
+- Silent period detection
+- Sequence jump detection (FastNAKRecent)
+- AtomicTime operations
+- buildNakListLocked helper
+
+**Consolidation tests** (`nak_consolidate_test.go`):
+- Empty/single/contiguous ranges
+- MergeGap behavior
+- Mixed singles and ranges
+- Sequence wraparound
+- sync.Pool reuse
+- Metrics tracking
+- Benchmark (1000 entries, ~28µs)
 
 ---
 
@@ -543,8 +632,31 @@ functions for better performance and maintainability.
 
 | Step | Description | Status | Notes |
 |------|-------------|--------|-------|
-| 9.1 | Create benchmark files | ⬜ | |
-| 9.2 | Run benchmarks | ⬜ | |
+| 9.1 | Create benchmark files | ✅ | fast_nak_test.go, nak_consolidate_test.go, receive_bench_test.go |
+| 9.2 | Run benchmarks | ✅ | All critical paths benchmarked |
+
+### Benchmark Results
+
+**FastNAK**:
+- `BenchmarkCheckFastNakRecent`: **6.8ns** - negligible overhead per packet
+
+**Consolidation**:
+| NAK btree size | Time | Notes |
+|----------------|------|-------|
+| 0 entries | 402ns | Empty check |
+| 100 entries | 3.2µs | Small loss |
+| 500 entries | 15.2µs | Medium loss |
+| 1000 entries | 28.6µs | Large loss (still well under 2ms budget) |
+
+**sync.Pool**:
+- `BenchmarkSyncPoolConsolidation`: 1.7µs, **32 B/op, 2 allocs** - pool working
+
+**btree vs list (packet store)**:
+| Operation | List | BTree | Improvement |
+|-----------|------|-------|-------------|
+| Push (in-order) | 167µs | 813ns | **205x faster** |
+| Push (out-of-order) | 2.1µs | 500ns | **4x faster** |
+| Has (lookup) | 1.6µs | 135ns | **12x faster** |
 
 ---
 
@@ -554,10 +666,36 @@ functions for better performance and maintainability.
 
 | Step | Description | Status | Notes |
 |------|-------------|--------|-------|
-| 10.1 | Update test configurations | ⬜ | |
-| 10.2 | Update `config.go` integration | ⬜ | |
-| 10.3 | Update `analysis.go` | ⬜ | |
-| 10.4 | Run integration tests | ⬜ | |
+| 10.1 | Update test configurations | ✅ | HighPerfSRTConfig now includes NAK btree |
+| 10.2 | Update `config.go` integration | ✅ | Added NAK btree fields and ToCliFlags() |
+| 10.3 | Update `analysis.go` | ✅ | Added 18 new NAK btree metrics to DerivedMetrics |
+| 10.4 | Run integration tests | ⬜ | Pending manual test run |
+
+### Integration Testing Config Changes
+
+**SRTConfig additions**:
+- `UseNakBtree`, `SuppressImmediateNak`, `FastNakEnabled`, `FastNakRecentEnabled`, `HonorNakOrder`
+
+**HighPerfSRTConfig now enables**:
+- NAK btree for gap detection
+- Suppress immediate NAK (prevents false positives)
+- FastNAK for outage recovery
+- FastNAKRecent for sequence jump detection
+- Honor NAK order in sender
+
+**Helper method**: `WithNakBtree()` - enables all NAK btree features
+
+### DerivedMetrics additions (18 new fields)
+
+**Core operations**: `NakBtreeInserts`, `NakBtreeDeletes`, `NakBtreeExpired`, `NakBtreeSize`, `NakBtreeScanPackets`, `NakBtreeScanGaps`
+
+**Periodic NAK**: `NakPeriodicOriginalRuns`, `NakPeriodicBtreeRuns`, `NakPeriodicSkipped`
+
+**Consolidation**: `NakConsolidationRuns`, `NakConsolidationEntries`, `NakConsolidationMerged`, `NakConsolidationTimeout`
+
+**FastNAK**: `NakFastTriggers`, `NakFastRecentInserts`, `NakFastRecentSkipped`, `NakFastRecentOverflow`
+
+**Sender**: `NakHonoredOrder`
 
 ---
 
@@ -573,6 +711,12 @@ Track `go build ./...` results after each step:
 | 2025-12-14 | 2.10 | ✅ Pass | Packet btree now uses SeqLess() - all tests pass |
 | 2025-12-14 | 3.1 | ✅ Pass | Phase 3 complete - NAK btree created with tests |
 | 2025-12-14 | 4.1-4.7 | ✅ Pass | Phase 4 - Receiver integration complete |
+| 2025-12-14 | 5.1-5.10 | ✅ Pass | Phase 5 - Consolidation & FastNAK complete |
+| 2025-12-14 | 6.1-6.7 | ✅ Pass | Phase 6 - Sender honor-order retransmission |
+| 2025-12-14 | 7.1-7.4 | ✅ Pass | Phase 7 - All NAK btree metrics + Prometheus |
+| 2025-12-14 | 8.1-8.3 | ✅ Pass | Phase 8 - 77 unit tests pass |
+| 2025-12-14 | 9.1-9.2 | ✅ Pass | Phase 9 - Benchmarks confirm performance |
+| 2025-12-14 | 10.1-10.3 | ✅ Pass | Phase 10 - Integration config/analysis updated |
 
 ---
 

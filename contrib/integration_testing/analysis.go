@@ -267,6 +267,30 @@ type DerivedMetrics struct {
 	AvgRetransRate  float64 // retransmissions / gaps detected (recovery efficiency)
 	AvgLossRate     float64 // Alias for AvgGapRate for backward compatibility
 
+	// NAK btree metrics (receiver side - for io_uring reorder handling)
+	NakBtreeInserts     int64 // Sequences added to NAK btree
+	NakBtreeDeletes     int64 // Sequences removed (packet arrived)
+	NakBtreeExpired     int64 // Sequences removed (TSBPD expired)
+	NakBtreeSize        int64 // Current btree size (gauge)
+	NakBtreeScanPackets int64 // Packets scanned in periodicNakBtree()
+	NakBtreeScanGaps    int64 // Gaps found during scan
+	// NAK btree periodic NAK execution
+	NakPeriodicOriginalRuns int64 // Times periodicNakOriginal() ran
+	NakPeriodicBtreeRuns    int64 // Times periodicNakBtree() ran
+	NakPeriodicSkipped      int64 // Times skipped (interval not elapsed)
+	// NAK btree consolidation
+	NakConsolidationRuns    int64 // Times consolidation ran
+	NakConsolidationEntries int64 // Total entries produced
+	NakConsolidationMerged  int64 // Sequences merged into ranges
+	NakConsolidationTimeout int64 // Times hit time budget
+	// FastNAK metrics
+	NakFastTriggers       int64 // FastNAK activations
+	NakFastRecentInserts  int64 // Sequences from FastNAKRecent
+	NakFastRecentSkipped  int64 // Gap below threshold
+	NakFastRecentOverflow int64 // Gap too large
+	// Sender honor-order
+	NakHonoredOrder int64 // NAK processing with honor-order
+
 	// Duration
 	Duration time.Duration
 
@@ -395,6 +419,52 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 		getSumByPrefixContaining(first, "gosrt_connection_packets_sent_total", "type=\"ackack\""))
 	dm.TotalACKACKsRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_received_total", "type=\"ackack\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_packets_received_total", "type=\"ackack\""))
+
+	// ========== NAK btree Metrics (io_uring reorder handling) ==========
+	// Core operations
+	dm.NakBtreeInserts = int64(getSumByPrefix(last, "gosrt_nak_btree_inserts_total") -
+		getSumByPrefix(first, "gosrt_nak_btree_inserts_total"))
+	dm.NakBtreeDeletes = int64(getSumByPrefix(last, "gosrt_nak_btree_deletes_total") -
+		getSumByPrefix(first, "gosrt_nak_btree_deletes_total"))
+	dm.NakBtreeExpired = int64(getSumByPrefix(last, "gosrt_nak_btree_expired_total") -
+		getSumByPrefix(first, "gosrt_nak_btree_expired_total"))
+	dm.NakBtreeSize = int64(getSumByPrefix(last, "gosrt_nak_btree_size"))
+	dm.NakBtreeScanPackets = int64(getSumByPrefix(last, "gosrt_nak_btree_scan_packets_total") -
+		getSumByPrefix(first, "gosrt_nak_btree_scan_packets_total"))
+	dm.NakBtreeScanGaps = int64(getSumByPrefix(last, "gosrt_nak_btree_scan_gaps_total") -
+		getSumByPrefix(first, "gosrt_nak_btree_scan_gaps_total"))
+
+	// Periodic NAK execution
+	dm.NakPeriodicOriginalRuns = int64(getSumByPrefixContaining(last, "gosrt_nak_periodic_runs_total", "impl=\"original\"") -
+		getSumByPrefixContaining(first, "gosrt_nak_periodic_runs_total", "impl=\"original\""))
+	dm.NakPeriodicBtreeRuns = int64(getSumByPrefixContaining(last, "gosrt_nak_periodic_runs_total", "impl=\"btree\"") -
+		getSumByPrefixContaining(first, "gosrt_nak_periodic_runs_total", "impl=\"btree\""))
+	dm.NakPeriodicSkipped = int64(getSumByPrefix(last, "gosrt_nak_periodic_skipped_total") -
+		getSumByPrefix(first, "gosrt_nak_periodic_skipped_total"))
+
+	// Consolidation
+	dm.NakConsolidationRuns = int64(getSumByPrefix(last, "gosrt_nak_consolidation_runs_total") -
+		getSumByPrefix(first, "gosrt_nak_consolidation_runs_total"))
+	dm.NakConsolidationEntries = int64(getSumByPrefix(last, "gosrt_nak_consolidation_entries_total") -
+		getSumByPrefix(first, "gosrt_nak_consolidation_entries_total"))
+	dm.NakConsolidationMerged = int64(getSumByPrefix(last, "gosrt_nak_consolidation_merged_total") -
+		getSumByPrefix(first, "gosrt_nak_consolidation_merged_total"))
+	dm.NakConsolidationTimeout = int64(getSumByPrefix(last, "gosrt_nak_consolidation_timeout_total") -
+		getSumByPrefix(first, "gosrt_nak_consolidation_timeout_total"))
+
+	// FastNAK
+	dm.NakFastTriggers = int64(getSumByPrefix(last, "gosrt_nak_fast_triggers_total") -
+		getSumByPrefix(first, "gosrt_nak_fast_triggers_total"))
+	dm.NakFastRecentInserts = int64(getSumByPrefix(last, "gosrt_nak_fast_recent_inserts_total") -
+		getSumByPrefix(first, "gosrt_nak_fast_recent_inserts_total"))
+	dm.NakFastRecentSkipped = int64(getSumByPrefix(last, "gosrt_nak_fast_recent_skipped_total") -
+		getSumByPrefix(first, "gosrt_nak_fast_recent_skipped_total"))
+	dm.NakFastRecentOverflow = int64(getSumByPrefix(last, "gosrt_nak_fast_recent_overflow_total") -
+		getSumByPrefix(first, "gosrt_nak_fast_recent_overflow_total"))
+
+	// Sender honor-order
+	dm.NakHonoredOrder = int64(getSumByPrefix(last, "gosrt_connection_nak_honored_order_total") -
+		getSumByPrefix(first, "gosrt_connection_nak_honored_order_total"))
 
 	// Direct retransmission counter (from NAK handling)
 	dm.TotalRetransFromNAK = int64(getSumByPrefix(last, "gosrt_connection_retransmissions_from_nak_total") -
