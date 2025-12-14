@@ -257,6 +257,62 @@ type Config struct {
 	// If empty, the system chooses an ephemeral address
 	// Only used by Dial(), not Listen()
 	LocalAddr string
+
+	// --- NAK btree Configuration (for io_uring receive path) ---
+
+	// Timer intervals (replaces hardcoded 10ms/20ms values)
+	// TickIntervalMs is the TSBPD delivery tick interval in milliseconds
+	// Default: 10. Lower = lower latency but higher CPU. Higher = higher latency but lower CPU.
+	TickIntervalMs uint64
+
+	// PeriodicNakIntervalMs is the periodic NAK timer interval in milliseconds
+	// Default: 20. Lower = faster loss recovery but more NAK overhead.
+	PeriodicNakIntervalMs uint64
+
+	// PeriodicAckIntervalMs is the periodic ACK timer interval in milliseconds
+	// Default: 10.
+	PeriodicAckIntervalMs uint64
+
+	// UseNakBtree enables the NAK btree for efficient gap detection
+	// Auto-set to true when IoUringRecvEnabled=true
+	UseNakBtree bool
+
+	// SuppressImmediateNak prevents immediate NAK on gap detection
+	// Auto-set to true when IoUringRecvEnabled=true (required to handle io_uring reordering)
+	SuppressImmediateNak bool
+
+	// NakRecentPercent is the percentage of TSBPD delay for "too recent" threshold
+	// Packets within this threshold won't be added to NAK btree yet
+	// Default: 0.10 (10% of TSBPD delay)
+	NakRecentPercent float64
+
+	// NakMergeGap is the maximum sequence gap to merge in NAK consolidation
+	// Adjacent missing sequences within this gap are merged into ranges
+	// Default: 3
+	NakMergeGap uint32
+
+	// NakConsolidationBudgetUs is the max time for NAK consolidation in microseconds
+	// Default: 2000 (2ms)
+	NakConsolidationBudgetUs uint64
+
+	// FastNakEnabled enables the FastNAK optimization
+	// When enabled, NAK is triggered immediately after silent period ends
+	// Default: true when NAK btree is enabled
+	FastNakEnabled bool
+
+	// FastNakThresholdMs is the silent period to trigger FastNAK in milliseconds
+	// Default: 50ms (typical Starlink outage is ~60ms)
+	FastNakThresholdMs uint64
+
+	// FastNakRecentEnabled adds recent gap immediately on FastNAK trigger
+	// Detects sequence jump after outage and adds missing range to NAK btree
+	// Default: true
+	FastNakRecentEnabled bool
+
+	// HonorNakOrder makes sender retransmit packets in NAK packet order
+	// When enabled, oldest/most-urgent packets are retransmitted first
+	// Default: false (existing behavior: newest-first)
+	HonorNakOrder bool
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -316,11 +372,50 @@ var defaultConfig Config = Config{
 	MetricsListenAddr:         "",                      // Disabled by default
 	HandshakeTimeout:          1500 * time.Millisecond, // 1.5 seconds (must be < PeerIdleTimeout)
 	ShutdownDelay:             5 * time.Second,         // 5 seconds
+
+	// NAK btree defaults
+	TickIntervalMs:           10,    // 10ms TSBPD tick
+	PeriodicNakIntervalMs:    20,    // 20ms periodic NAK
+	PeriodicAckIntervalMs:    10,    // 10ms periodic ACK
+	UseNakBtree:              false, // Auto-set when IoUringRecvEnabled=true
+	SuppressImmediateNak:     false, // Auto-set when IoUringRecvEnabled=true
+	NakRecentPercent:         0.10,  // 10% of TSBPD delay
+	NakMergeGap:              3,     // Merge gaps of 3 or less
+	NakConsolidationBudgetUs: 2000,  // 2ms consolidation budget
+	FastNakEnabled:           false, // Auto-set when UseNakBtree=true
+	FastNakThresholdMs:       50,    // 50ms silent period triggers FastNAK
+	FastNakRecentEnabled:     false, // Auto-set when FastNakEnabled=true
+	HonorNakOrder:            false, // Existing behavior: newest-first
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
 func DefaultConfig() Config {
 	return defaultConfig
+}
+
+// ApplyAutoConfiguration sets internal configuration based on other settings.
+// Call this after user configuration is applied but before connection creation.
+// This ensures that when io_uring recv is enabled, the NAK btree and related
+// features are automatically configured.
+func (c *Config) ApplyAutoConfiguration() {
+	// When io_uring recv is enabled, NAK btree and suppress immediate NAK are required
+	// to handle the out-of-order packet delivery from io_uring
+	if c.IoUringRecvEnabled {
+		c.UseNakBtree = true
+		c.SuppressImmediateNak = true
+	}
+
+	// When NAK btree is enabled, enable FastNAK by default
+	if c.UseNakBtree {
+		// Only set if not already explicitly set to true
+		// (we can't tell if user explicitly set false, so we enable by default)
+		if !c.FastNakEnabled {
+			c.FastNakEnabled = true
+		}
+		if !c.FastNakRecentEnabled {
+			c.FastNakRecentEnabled = true
+		}
+	}
 }
 
 // UnmarshalURL takes a SRT URL and parses out the configuration. A SRT URL is

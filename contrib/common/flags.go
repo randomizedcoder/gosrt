@@ -70,6 +70,25 @@ var (
 	IoUringRecvInitialPending = flag.Int("iouringrecvinitialpending", 0, "Initial number of pending receive requests at startup (default: ring size)")
 	IoUringRecvBatchSize      = flag.Int("iouringrecvbatchsize", 0, "Batch size for resubmitting receive requests after completions (default: 256)")
 
+	// Timer interval configuration flags
+	TickIntervalMs        = flag.Uint64("tickintervalms", 0, "TSBPD delivery tick interval in milliseconds (default: 10)")
+	PeriodicNakIntervalMs = flag.Uint64("periodicnakintervalms", 0, "Periodic NAK timer interval in milliseconds (default: 20)")
+	PeriodicAckIntervalMs = flag.Uint64("periodicackintervalms", 0, "Periodic ACK timer interval in milliseconds (default: 10)")
+
+	// NAK btree configuration flags
+	UseNakBtree              = flag.Bool("usenakbtree", false, "Enable NAK btree for efficient gap detection (auto-enabled with -iouringrecvenabled)")
+	NakRecentPercent         = flag.Float64("nakrecentpercent", 0, "Percentage of TSBPD delay for 'too recent' threshold (default: 0.10)")
+	NakMergeGap              = flag.Uint64("nakmergegap", 0, "Max sequence gap to merge in NAK consolidation (default: 3)")
+	NakConsolidationBudgetMs = flag.Uint64("nakconsolidationbudgetms", 0, "Max time for NAK consolidation in milliseconds (default: 2)")
+
+	// FastNAK configuration flags
+	FastNakEnabled       = flag.Bool("fastnakenabled", false, "Enable FastNAK optimization (default: true when NAK btree enabled)")
+	FastNakThresholdMs   = flag.Uint64("fastnakthresholdms", 0, "Silent period to trigger FastNAK in milliseconds (default: 50)")
+	FastNakRecentEnabled = flag.Bool("fastnakrecentenabled", false, "Add recent gap immediately on FastNAK trigger (default: true)")
+
+	// Sender retransmission configuration flags
+	HonorNakOrder = flag.Bool("honornakorder", false, "Retransmit packets in NAK packet order (oldest first)")
+
 	// Statistics configuration flags
 	StatisticsPrintInterval = flag.Duration("statisticsinterval", 0, "Interval for printing connection statistics (e.g., 10s). 0 disables periodic statistics printing")
 
@@ -267,6 +286,48 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	if FlagSet["iouringrecvbatchsize"] {
 		config.IoUringRecvBatchSize = *IoUringRecvBatchSize
 	}
+
+	// Timer interval flags
+	if FlagSet["tickintervalms"] {
+		config.TickIntervalMs = *TickIntervalMs
+	}
+	if FlagSet["periodicnakintervalms"] {
+		config.PeriodicNakIntervalMs = *PeriodicNakIntervalMs
+	}
+	if FlagSet["periodicackintervalms"] {
+		config.PeriodicAckIntervalMs = *PeriodicAckIntervalMs
+	}
+
+	// NAK btree flags
+	if FlagSet["usenakbtree"] {
+		config.UseNakBtree = *UseNakBtree
+	}
+	if FlagSet["nakrecentpercent"] {
+		config.NakRecentPercent = *NakRecentPercent
+	}
+	if FlagSet["nakmergegap"] {
+		config.NakMergeGap = uint32(*NakMergeGap)
+	}
+	if FlagSet["nakconsolidationbudgetms"] {
+		config.NakConsolidationBudgetUs = *NakConsolidationBudgetMs * 1000 // Convert ms to µs
+	}
+
+	// FastNAK flags
+	if FlagSet["fastnakenabled"] {
+		config.FastNakEnabled = *FastNakEnabled
+	}
+	if FlagSet["fastnakthresholdms"] {
+		config.FastNakThresholdMs = *FastNakThresholdMs
+	}
+	if FlagSet["fastnakrecentenabled"] {
+		config.FastNakRecentEnabled = *FastNakRecentEnabled
+	}
+
+	// Sender flags
+	if FlagSet["honornakorder"] {
+		config.HonorNakOrder = *HonorNakOrder
+	}
+
 	if FlagSet["statisticsinterval"] {
 		config.StatisticsPrintInterval = *StatisticsPrintInterval
 	}

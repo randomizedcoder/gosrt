@@ -185,7 +185,29 @@ run_test "KeepaliveThreshold flag (0 - disabled)" "-keepalivethreshold 0" '"Keep
 # Test 30: KeepaliveThreshold flag (server)
 run_test "KeepaliveThreshold flag (server)" "-keepalivethreshold 0.8" '"KeepaliveThreshold" *: *0\.8' "$SERVER_BIN"
 
-# Test 31: All flag types combined (excluding drifttracer=false due to known limitation)
+# Test 31: Timer interval flags
+run_test "TickIntervalMs flag" "-tickintervalms 5" '"TickIntervalMs" *: *5' "$SERVER_BIN"
+run_test "PeriodicNakIntervalMs flag" "-periodicnakintervalms 40" '"PeriodicNakIntervalMs" *: *40' "$SERVER_BIN"
+run_test "PeriodicAckIntervalMs flag" "-periodicackintervalms 15" '"PeriodicAckIntervalMs" *: *15' "$SERVER_BIN"
+
+# Test 32: NAK btree flags
+run_test "UseNakBtree flag" "-usenakbtree" '"UseNakBtree" *: *true' "$SERVER_BIN"
+run_test "NakRecentPercent flag" "-nakrecentpercent 0.15" '"NakRecentPercent" *: *0\.15' "$SERVER_BIN"
+run_test "NakMergeGap flag" "-nakmergegap 5" '"NakMergeGap" *: *5' "$SERVER_BIN"
+run_test "NakConsolidationBudgetMs flag" "-nakconsolidationbudgetms 3" '"NakConsolidationBudgetUs" *: *3000' "$SERVER_BIN"
+
+# Test 33: FastNAK flags
+run_test "FastNakEnabled flag" "-fastnakenabled" '"FastNakEnabled" *: *true' "$SERVER_BIN"
+run_test "FastNakThresholdMs flag" "-fastnakthresholdms 100" '"FastNakThresholdMs" *: *100' "$SERVER_BIN"
+run_test "FastNakRecentEnabled flag" "-fastnakrecentenabled" '"FastNakRecentEnabled" *: *true' "$SERVER_BIN"
+
+# Test 34: Sender flags
+run_test "HonorNakOrder flag" "-honornakorder" '"HonorNakOrder" *: *true' "$SERVER_BIN"
+
+# Test 35: NAK btree flag combinations
+run_test "NAK btree full config" "-usenakbtree -nakrecentpercent 0.2 -nakmergegap 4 -fastnakenabled -fastnakthresholdms 75" '"UseNakBtree" *: *true.*"NakRecentPercent" *: *0\.2.*"NakMergeGap" *: *4.*"FastNakEnabled" *: *true.*"FastNakThresholdMs" *: *75' "$SERVER_BIN"
+
+# Test 36: All flag types combined (excluding drifttracer=false due to known limitation)
 # Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
 run_test "All flag types" "-statisticsinterval 10s -keepalivethreshold 0.6 -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"KeepaliveThreshold" *: *0\.6.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 
