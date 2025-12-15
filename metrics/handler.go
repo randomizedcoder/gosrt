@@ -636,6 +636,11 @@ func MetricsHandler() http.Handler {
 				metrics.NakFastRecentOverflow.Load(),
 				"socket_id", socketIdStr)
 
+			// NAK packet splitting (FR-11: MSS overflow)
+			writeCounterIfNonZero(b, "gosrt_nak_packets_split_total",
+				metrics.NakPacketsSplit.Load(),
+				"socket_id", socketIdStr)
+
 			// ========== Congestion Control Rate Gauges ==========
 			// Stored as percentage * 100 for precision (e.g., 5.5% = 550)
 			writeGaugeIfNonZero(b, "gosrt_connection_congestion_retrans_rate_permille",

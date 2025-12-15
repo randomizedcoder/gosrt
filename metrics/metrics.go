@@ -251,6 +251,9 @@ type ConnectionMetrics struct {
 	NakFastRecentSkipped  atomic.Uint64 // FastNAKRecent skipped (gap too small)
 	NakFastRecentOverflow atomic.Uint64 // FastNAKRecent gap too large (capped)
 
+	// NAK packet splitting metrics (FR-11: MSS overflow handling)
+	NakPacketsSplit atomic.Uint64 // Extra NAK packets needed due to MSS overflow
+
 	// Granular error counters - Connection-level receive (DATA and Control packets)
 	PktRecvDataErrorParse      atomic.Uint64 // DATA packet parse errors
 	PktRecvControlErrorParse   atomic.Uint64 // Control packet parse errors

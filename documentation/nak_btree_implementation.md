@@ -31,7 +31,7 @@ This document tracks the implementation progress of the NAK btree feature. Each 
 | 5 | Consolidation & FastNAK | ✅ Complete | sync.Pool, time budget, metrics |
 | 6 | Sender Modifications | ✅ Complete | nakLocked dispatch, honor-order retransmission |
 | 7 | Metrics | ✅ Complete | All NAK btree metrics, Prometheus export |
-| 8 | Unit Tests | ✅ Complete | 77 tests pass, race-safe |
+| 8 | Unit Tests | ✅ Complete | 88 tests pass including comprehensive out-of-order + modulus/burst tests |
 | 9 | Benchmarks | ✅ Complete | FastNAK ~7ns, consolidation ~28µs/1k |
 | 10 | Integration Testing | 🔄 In progress | config.go, analysis.go updated |
 
@@ -50,7 +50,7 @@ This section verifies all design requirements from `design_nak_btree.md` have be
 | FR-3 | Periodic NAK every 20ms | ✅ | periodicNakBtree runs on timer |
 | FR-4 | NAK btree stores singles only | ✅ | `nak_btree.go` stores uint32 |
 | FR-5 | TSBPD-based scan boundary | ✅ | `tooRecentThreshold` in periodicNakBtree |
-| FR-6 | NAKScanStartPoint tracking | ⚠️ Partial | Uses lastACKSequenceNumber instead |
+| FR-6 | NAKScanStartPoint tracking | ✅ | Independent atomic, immune to ACK jumps |
 | FR-7 | Configurable "too recent" percentage | ✅ | `NakRecentPercent` config |
 | FR-8 | Consolidate singles into ranges | ✅ | `consolidateNakBtree()` |
 | FR-9 | MergeGap for range consolidation | ✅ | `nakMergeGap` config |
@@ -64,7 +64,7 @@ This section verifies all design requirements from `design_nak_btree.md` have be
 | FR-17 | Feature flag for new retrans behavior | ✅ | `HonorNakOrder` config |
 | FR-18 | Delete from NAK btree on arrival | ✅ | In pushLockedNakBtree |
 | FR-19 | **Expire entries based on TSBPD** | ✅ | `expireNakEntries()` implemented |
-| FR-20 | Initialize NAKScanStartPoint on first pkt | ⚠️ N/A | Uses lastACKSequenceNumber |
+| FR-20 | Initialize NAKScanStartPoint on first pkt | ✅ | Lazy init from packetStore.Min() |
 
 ### Non-Functional Requirements (NFR-*)
 
@@ -97,7 +97,7 @@ This section verifies all design requirements from `design_nak_btree.md` have be
 | Component | Test File | Status | Notes |
 |-----------|-----------|--------|-------|
 | NAK btree | `nak_btree_test.go` | ✅ | Insert, delete, iterate, concurrent |
-| Scan window | N/A | ⚠️ | Covered in periodicNakBtree tests |
+| Scan window | `receive_iouring_reorder_test.go` | ✅ | 7 deterministic out-of-order tests |
 | Consolidation | `nak_consolidate_test.go` | ✅ | All scenarios covered |
 | Sequence math | `seq_math_test.go` | ✅ | Wraparound, edge cases |
 | FastNAK | `fast_nak_test.go` | ✅ | Trigger conditions |
@@ -129,17 +129,108 @@ This section verifies all design requirements from `design_nak_btree.md` have be
 | Consolidation | 4 | 4 | ✅ |
 | Sender honor-order | 1 | 1 | ✅ |
 
-### ❌ Missing Implementation Items
+### ✅ Original and HonorNakOrder Tests - IMPLEMENTED
 
-1. **FR-11: Multiple NAK packets when exceeds MSS**
-   - Design: Handle large gap scenarios by generating multiple NAK packets
-   - Status: **Deferred** - Known limitation, acceptable for initial release
-   - Analysis:
-     - NAK CIF payload limit: ~360 single entries or ~180 ranges
-     - With consolidation (MergeGap=3), typical scenarios fit
-     - Extreme case (20% loss at 20 Mbps): ~100 ranges (fits)
-     - If exceeded: Partial NAK sent, remaining gaps caught next cycle
-   - Future work: Split in `sendNAK()` if `cif.LostPacketSequenceNumber` exceeds threshold
+**Problem**: Need comprehensive test coverage for both `nakLockedOriginal` and `nakLockedHonorOrder` to verify they correctly handle complex consolidated NAK packets from the receiver (modulus drops, burst drops, mixed patterns).
+
+**Key Behavioral Difference**:
+- **Original**: Iterates lossList backwards (newest-first), retransmits highest seq first
+- **HonorOrder**: Iterates NAK list in order, retransmits per receiver's priority
+
+**Original NAK Tests Added** (`congestion/live/send_test.go`):
+- `TestSendOriginal_BasicSingle` - Single packet NAK
+- `TestSendOriginal_BasicRange` - Range NAK (3-6) → returns [6,5,4,3] (reverse)
+- `TestSendOriginal_MultipleSingles` - 15,5,10 → returns [15,10,5] (highest first)
+- `TestSendOriginal_MultipleRanges` - Multiple ranges → highest seq first across all
+- `TestSendOriginal_MixedSinglesAndRanges` - Complex mix
+- `TestSendOriginal_ModulusDrops` - 9 singles → [90,80,70,60,50,40,30,20,10]
+- `TestSendOriginal_BurstDrops` - 3 burst ranges → highest burst first
+- `TestSendOriginal_RealisticConsolidatedNAK` - 24 packets, newest-first order
+- `TestSendOriginal_NotFoundPackets` - Verify NakNotFound metric
+- `TestSendOriginal_LargeScale` - 499 singles from 10k packets
+- `TestSendOriginal_VsHonorOrder_Difference` - Demonstrates key behavioral difference
+
+**HonorOrder NAK Tests Added**:
+- `TestSendHonorOrder_BasicSingle` - Single packet NAK
+- `TestSendHonorOrder_BasicRange` - Range NAK (3-6) → returns [3,4,5,6] (NAK order)
+- `TestSendHonorOrder_MultipleSingles` - 15,5,10 → returns [15,5,10] (NAK order)
+- `TestSendHonorOrder_MultipleRanges` - Multiple ranges → NAK order
+- `TestSendHonorOrder_MixedSinglesAndRanges` - Complex mix, NAK order
+- `TestSendHonorOrder_ModulusDrops` - 9 singles → [10,20,30,40,50,60,70,80,90]
+- `TestSendHonorOrder_BurstDrops` - 3 burst ranges → NAK order
+- `TestSendHonorOrder_RealisticConsolidatedNAK` - 24 packets, receiver priority
+- `TestSendHonorOrder_NotFoundPackets` - Verify NakNotFound metric
+- `TestSendHonorOrder_Metric` - Verify CongestionSendNAKHonoredOrder metric
+- `TestSendHonorOrder_LargeScale` - 499 singles from 10k packets
+
+**Benchmarks**:
+```
+BenchmarkNAK_Original-24      5,781 ns/op    0 B/op
+BenchmarkNAK_HonorOrder-24  424,034 ns/op    0 B/op
+```
+Note: HonorOrder is ~73x slower due to O(n×m) iteration (scans lossList for each NAK entry). This is acceptable for the trade-off of preserving receiver priority order.
+
+---
+
+### ✅ FastNAKRecent Large Burst Tests - IMPLEMENTED
+
+**Problem**: Need tests for the FastNAKRecent feature handling large burst losses (~60ms outages typical of Starlink).
+
+**Tests Added** (`congestion/live/fast_nak_test.go`):
+- `TestCheckFastNakRecent_LargeBurstLoss_5Mbps` - 299 packets (60ms × 5000pps)
+- `TestCheckFastNakRecent_LargeBurstLoss_20Mbps` - 1199 packets (60ms × 20000pps)
+- `TestCheckFastNakRecent_LargeBurstLoss_100Mbps` - 5999 packets (60ms × 100000pps)
+- `TestCheckFastNakRecent_MultipleBurstLosses` - 3 separate bursts with gaps → 3 ranges
+- `TestCheckFastNakRecent_LargeBurstThenConsolidate` - Verify 300-packet burst → single 8-byte range
+- `TestCheckFastNakRecent_LargeBurstWithPriorGaps` - Mix of prior singles + burst range
+- `TestCheckFastNakRecent_VeryLongOutage` - 500ms outage → 2499 packets
+
+**Key Verification**:
+```
+✅ 300-packet burst loss encoded as single 8-byte range entry
+✅ 1200-packet burst (20Mbps) consolidated to: 50001-51199
+✅ 3 separate bursts with gaps → 3 separate ranges
+✅ Prior singles + burst range → correct mixed consolidation
+```
+
+**Benchmarks**:
+```
+BenchmarkFastNakRecent_SmallBurst-24       3,115 ns/op    576 B/op    7 allocs
+BenchmarkFastNakRecent_MediumBurst-24     21,477 ns/op  4,512 B/op   39 allocs  (300 pkts)
+BenchmarkFastNakRecent_LargeBurst-24      84,932 ns/op 18,272 B/op  128 allocs  (1200 pkts)
+BenchmarkFastNakRecent_VeryLargeBurst-24 412,091 ns/op 75,376 B/op  505 allocs  (5000 pkts)
+```
+
+---
+
+### ✅ FR-11: Multiple NAK Packets (MSS Overflow Handling) - IMPLEMENTED
+
+**Problem**: Large SRT buffers (30-60s) at high data rates (20-100 Mbps) with significant loss
+can generate NAK lists that exceed the MSS limit (1456 bytes for NAK CIF payload).
+
+**Solution**: Added `splitNakList()` function in `connection.go` that:
+- Calculates wire size for each entry (4 bytes for singles, 8 bytes for ranges)
+- Splits the list into MSS-sized chunks
+- `sendNAK()` now sends multiple NAK packets if needed
+
+**Files Changed**:
+- `connection.go`: Added `splitNakList()`, updated `sendNAK()` to split and send multiple packets
+- `metrics/metrics.go`: Added `NakPacketsSplit` counter
+- `metrics/handler.go`: Added Prometheus export for `gosrt_nak_packets_split_total`
+- `connection_nak_test.go`: Comprehensive tests for splitting logic
+
+**Test Coverage**:
+- 12 unit tests for `splitNakList()` including extreme 50k entry test
+- Verified 50,000 singles split into 138 NAK packets correctly
+
+**Extreme Scale Calculations**:
+```
+100 Mbps = ~8,900 packets/sec
+60s buffer = ~534,000 packets
+20% loss = ~107,000 packets to NAK
+Wire size: 428 KB
+NAK packets needed: ~294 packets ✅ SUPPORTED
+```
 
 ### ✅ Fixed During Review
 
@@ -152,17 +243,454 @@ This section verifies all design requirements from `design_nak_btree.md` have be
 2. **NakPeriodicSkipped metric** ✅
    - Added increment when `periodicNakBtree()` returns early
 
+3. **FR-6: NAKScanStartPoint** ✅ (Critical fix!)
+   - **Problem**: Using `lastACKSequenceNumber` is dangerous because ACK can "jump forward"
+     when TSBPD skips occur, causing us to skip scanning a region entirely
+   - **Solution**: Added independent `nakScanStartPoint atomic.Uint32` to receiver struct
+   - **Behavior**:
+     - Initialized lazily from `packetStore.Min()` on first scan
+     - Updated to `lastScannedSeq` after each scan (where we actually stopped)
+     - Independent of ACK - immune to TSBPD jumps
+   - **Why this matters**: With io_uring reordering + low TSBPD delay, there's a race where:
+     1. Packets are delayed in io_uring completion queue
+     2. TSBPD skip causes ACK to jump forward
+     3. We'd never NAK for the skipped region!
+   - Now we always scan from where we left off, not from where ACK is
+
 ### ⚠️ Partial Implementation Items
 
-1. **FR-6: NAKScanStartPoint tracking**
-   - Design: Explicit atomic variable to track scan position
-   - Implementation: Uses `lastACKSequenceNumber` instead
-   - Impact: Functionally equivalent, simpler
-
-2. **FR-10: Time-budgeted consolidation**
+1. **FR-10: Time-budgeted consolidation**
    - Design: Check every iteration
    - Implementation: Amortized check every 100 iterations
    - Impact: Acceptable trade-off for performance
+
+---
+
+## 🚨 Critical Testing Gap: Out-of-Order Packet Arrival
+
+### The Problem
+
+The `NAKScanStartPoint` bug (FR-6) was found during design review, **NOT** by an automated test. This is concerning because:
+
+1. The entire NAK btree design exists to handle io_uring packet reordering
+2. No existing test simulates packets arriving with out-of-order sequence numbers
+3. No test exercises the concurrent interaction between:
+   - `Push()` (packets arriving out-of-order)
+   - `periodicNAK()` (scanning for gaps)
+   - `periodicACK()` (advancing ACK, potentially with TSBPD skips)
+   - `Tick()` (TSBPD delivery and packet store cleanup)
+
+### Why Existing Tests Didn't Catch This
+
+| Test Type | What It Tests | What It Misses |
+|-----------|---------------|----------------|
+| `nak_btree_test.go` | btree Insert/Delete/Iterate | Doesn't test interaction with ACK/Tick |
+| `fast_nak_test.go` | FastNAK trigger conditions | Uses minimal packet scenarios |
+| `nak_consolidate_test.go` | Consolidation algorithm | Doesn't test with concurrent operations |
+| `receive_test.go` | Basic receiver operations | Packets arrive in order |
+| `receive_bench_test.go` | Performance comparison | Doesn't test correctness of gap detection |
+
+### Required New Tests
+
+**File**: `congestion/live/receive_iouring_reorder_test.go` (new file)
+
+#### Test 1: Out-of-Order Arrival with Concurrent Operations
+
+```go
+// TestOutOfOrderArrival_NakScanStartPoint tests that nakScanStartPoint
+// correctly tracks scanning progress independent of ACK, preventing
+// the bug where TSBPD skips could cause us to miss NAKing packets.
+//
+// Scenario:
+// 1. Send 1000 packets with out-of-order arrival (simulating io_uring)
+// 2. Run Tick, periodicNAK, periodicACK concurrently
+// 3. Inject TSBPD skip scenario (some packets never arrive)
+// 4. Verify: All truly lost packets were NAK'd
+// 5. Verify: nakScanStartPoint progresses to 90% boundary
+func TestOutOfOrderArrival_NakScanStartPoint(t *testing.T)
+```
+
+**Key test mechanics**:
+- Generate 1000+ packets with sequential sequence numbers
+- Shuffle arrival order to simulate io_uring reordering
+- Drop ~5% of packets (never deliver them)
+- Run for multiple NAK cycles (at least 5-10 iterations)
+- Track which packets were NAK'd via metrics or callback
+- Verify ALL dropped packets appear in NAK lists
+- Verify `nakScanStartPoint` advances correctly
+
+#### Test 2: TSBPD Skip Race Condition
+
+```go
+// TestTSBPDSkip_DoesNotSkipScanning tests the specific race condition:
+// ACK jumps forward due to TSBPD expiry, but we still scan the region
+// between old and new ACK positions.
+//
+// Scenario:
+// 1. Deliver packets 100-110 (in order)
+// 2. Skip packets 111-120 (simulate loss during "io_uring delay")
+// 3. Deliver packets 121-130 (in order)
+// 4. Wait for TSBPD expiry of packet 130
+// 5. Verify: ACK jumps from 110 to 130 (TSBPD skip)
+// 6. Verify: Packets 111-120 WERE NAK'd (nakScanStartPoint saved us)
+func TestTSBPDSkip_DoesNotSkipScanning(t *testing.T)
+```
+
+**Key test mechanics**:
+- Use short TSBPD delay (e.g., 100ms) to trigger skips faster
+- Time the test to ensure TSBPD expiry occurs
+- Capture NAK lists via mock `sendNAK` callback
+- Verify the "lost" region was covered
+
+#### Test 3: Concurrent Push/Tick/NAK/ACK Stress Test
+
+```go
+// TestConcurrent_PushTickNAKACK_OutOfOrder is a stress test that runs
+// all receiver operations concurrently with out-of-order packet arrival.
+//
+// This test uses race detector to find any data races and verifies
+// correctness of gap detection under concurrent load.
+func TestConcurrent_PushTickNAKACK_OutOfOrder(t *testing.T)
+```
+
+**Key test mechanics**:
+- Multiple goroutines:
+  - Goroutine 1: Push packets in random order (1000+ packets)
+  - Goroutine 2: Call Tick() every 10ms
+  - Goroutine 3: Call periodicNAK() every 20ms
+  - Goroutine 4: Call periodicACK() every 10ms
+- Run with `-race` flag
+- Verify no data races
+- Verify gap detection correctness
+
+#### Test 4: nakScanStartPoint Progression Verification
+
+```go
+// TestNakScanStartPoint_ProgressesToRecentBoundary verifies that
+// nakScanStartPoint correctly advances to the "too recent" boundary
+// (90% of TSBPD) and doesn't scan packets that might still be reordered.
+func TestNakScanStartPoint_ProgressesToRecentBoundary(t *testing.T)
+```
+
+**Key test mechanics**:
+- Deliver packets with TSBPD times spread across the buffer
+- Run multiple NAK cycles
+- After each cycle, verify `nakScanStartPoint` value
+- Verify it stops at ~90% boundary (NakRecentPercent)
+- Verify packets beyond boundary are NOT added to NAK btree prematurely
+
+#### Test 5: Arrival Order Permutations
+
+```go
+// TestOutOfOrder_ArrivalPermutations tests various out-of-order patterns:
+// - Random shuffle
+// - Reverse order
+// - Interleaved (odd then even)
+// - Burst with gaps (1-10, skip 11-15, 16-25, skip 26-30, ...)
+// - io_uring-like: small batches arriving in random order
+func TestOutOfOrder_ArrivalPermutations(t *testing.T)
+```
+
+### Deterministic Test Design
+
+**Key principle**: Use modulus-based packet dropping for deterministic, verifiable tests.
+
+#### Why Deterministic Dropping?
+
+| Approach | Reproducibility | Verifiability | Consolidation Check |
+|----------|-----------------|---------------|---------------------|
+| Random drop | ❌ Different each run | ❌ Hard to verify | ❌ Unknown ranges |
+| **Modulus drop** | ✅ Same every run | ✅ Exact expectations | ✅ Known ranges |
+
+#### Modulus Dropping Pattern
+
+```go
+// Drop every 10th packet: sequences 10, 20, 30, 40, ...
+// For 1000 packets (seq 1-1000):
+//   Dropped: 10, 20, 30, ..., 1000 = 100 packets
+//   Delivered: 999 - 100 = 900 packets
+dropModulus := 10
+
+for _, pkt := range packets {
+    seq := pkt.Header().PacketSequenceNumber.Val()
+    if seq % dropModulus == 0 {
+        dropped = append(dropped, pkt)
+    } else {
+        delivered = append(delivered, pkt)
+    }
+}
+```
+
+#### Expected NAK btree Entries (with dropModulus=10)
+
+```
+Dropped sequences: [10, 20, 30, 40, 50, ..., 1000]
+
+After scanning packets 1-100 (with 10, 20, 30, ... missing):
+  NAK btree should contain: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+
+Since drops are evenly spaced (gap=9 between each):
+  With NakMergeGap=3: Each drop is a SINGLE (gap too large to merge)
+  Expected consolidation: 10 singles, 0 ranges
+```
+
+#### Expected NAK Packet Format
+
+```
+For dropped [10, 20, 30, 40]:
+  NAK packet CIF should contain:
+    [10, 10]  // Single: seq 10
+    [20, 20]  // Single: seq 20
+    [30, 30]  // Single: seq 30
+    [40, 40]  // Single: seq 40
+
+  Total entries: 4 singles × 2 = 8 circular.Number values
+```
+
+#### Alternative Pattern: Burst Drops for Range Testing
+
+```go
+// Drop consecutive sequences to test RANGE consolidation
+// Drop sequences 100-109, 200-209, 300-309, ...
+dropBurstStart := []uint32{100, 200, 300, 400, 500}
+dropBurstSize := 10
+
+// Expected NAK btree: [100-109, 200-209, 300-309, ...]
+// Expected consolidation with NakMergeGap=3:
+//   5 RANGES: (100,109), (200,209), (300,309), (400,409), (500,509)
+```
+
+### Test Helper Functions Needed
+
+```go
+// generatePackets creates n packets with sequential sequence numbers
+// starting from startSeq, with TSBPD times spread across tsbpdDelay
+func generatePackets(startSeq uint32, n int, tsbpdDelay time.Duration) []packet.Packet
+
+// shufflePacketsDeterministic returns packets in shuffled order using seeded RNG
+// This simulates io_uring reordering but is reproducible
+func shufflePacketsDeterministic(packets []packet.Packet, seed int64) []packet.Packet
+
+// dropByModulus drops packets where seq % modulus == 0
+// Returns (delivered, dropped) with exact known contents
+func dropByModulus(packets []packet.Packet, modulus int) (delivered, dropped []packet.Packet)
+
+// dropByBursts drops consecutive sequences at specified start points
+// Returns (delivered, dropped) with exact known contents
+func dropByBursts(packets []packet.Packet, burstStarts []uint32, burstSize int) (delivered, dropped []packet.Packet)
+
+// captureNakCallback returns a sendNAK function that captures all NAK lists
+func captureNakCallback() (sendNAK func([]circular.Number), getNakLists func() [][]circular.Number)
+
+// expectedNakEntriesModulus calculates expected NAK entries for modulus dropping
+// Returns expected singles and ranges based on NakMergeGap
+func expectedNakEntriesModulus(startSeq uint32, n int, modulus int, mergeGap uint32) (singles, ranges []uint32)
+
+// expectedNakEntriesBursts calculates expected NAK entries for burst dropping
+func expectedNakEntriesBursts(burstStarts []uint32, burstSize int, mergeGap uint32) (singles []uint32, ranges [][2]uint32)
+
+// verifyNakList checks that a NAK list contains exactly the expected entries
+func verifyNakList(t *testing.T, nakList []circular.Number, expectedSingles []uint32, expectedRanges [][2]uint32)
+
+// verifyAllDroppedWereNAKd checks that every dropped packet's sequence
+// appears in at least one NAK list
+func verifyAllDroppedWereNAKd(t *testing.T, dropped []packet.Packet, nakLists [][]circular.Number)
+```
+
+### Updated Test Designs
+
+#### Test 1: Out-of-Order Arrival with Modulus Dropping
+
+```go
+func TestOutOfOrderArrival_NakScanStartPoint(t *testing.T) {
+    // Setup
+    const (
+        numPackets   = 1000
+        startSeq     = uint32(1)
+        dropModulus  = 10  // Drop every 10th packet
+        tsbpdDelay   = 200 * time.Millisecond
+        nakMergeGap  = uint32(3)
+    )
+
+    // Generate packets
+    packets := generatePackets(startSeq, numPackets, tsbpdDelay)
+
+    // Drop deterministically: 10, 20, 30, ...
+    delivered, dropped := dropByModulus(packets, dropModulus)
+    // dropped = [10, 20, 30, ..., 1000] = 100 packets
+
+    // Shuffle delivered packets (simulating io_uring reordering)
+    delivered = shufflePacketsDeterministic(delivered, 42) // Fixed seed
+
+    // Calculate expected NAK entries
+    expectedSingles, expectedRanges := expectedNakEntriesModulus(
+        startSeq, numPackets, dropModulus, nakMergeGap)
+    // expectedSingles = [10, 20, 30, ..., 1000] (100 singles)
+    // expectedRanges = [] (no ranges - gaps too large to merge)
+
+    // ... run test with concurrent Push/Tick/NAK/ACK ...
+
+    // Verify
+    nakLists := getNakLists()
+    verifyAllDroppedWereNAKd(t, dropped, nakLists)
+
+    // Verify consolidation produced expected format
+    for _, nakList := range nakLists {
+        verifyNakListFormat(t, nakList, expectedSingles, expectedRanges)
+    }
+}
+```
+
+#### Test 2: Burst Drops for Range Consolidation
+
+```go
+func TestOutOfOrderArrival_BurstDrops_RangeConsolidation(t *testing.T) {
+    // Setup
+    const (
+        numPackets  = 1000
+        startSeq    = uint32(1)
+        burstSize   = 10  // Each burst drops 10 consecutive packets
+        nakMergeGap = uint32(3)
+    )
+    burstStarts := []uint32{100, 200, 300, 400, 500}
+
+    // Generate and drop
+    packets := generatePackets(startSeq, numPackets, 200*time.Millisecond)
+    delivered, dropped := dropByBursts(packets, burstStarts, burstSize)
+    // dropped = [100-109, 200-209, 300-309, 400-409, 500-509] = 50 packets
+
+    // Calculate expected ranges
+    expectedSingles, expectedRanges := expectedNakEntriesBursts(
+        burstStarts, burstSize, nakMergeGap)
+    // expectedSingles = []
+    // expectedRanges = [(100,109), (200,209), (300,309), (400,409), (500,509)]
+
+    // Shuffle and deliver
+    delivered = shufflePacketsDeterministic(delivered, 42)
+
+    // ... run test ...
+
+    // Verify consolidation produced RANGES (not singles)
+    nakLists := getNakLists()
+    for _, nakList := range nakLists {
+        verifyNakListFormat(t, nakList, expectedSingles, expectedRanges)
+    }
+}
+```
+
+#### Test 3: Mixed Pattern (Singles + Ranges)
+
+```go
+func TestOutOfOrderArrival_MixedPattern(t *testing.T) {
+    // Combines modulus drops (singles) and burst drops (ranges)
+    // to verify consolidation handles both correctly
+
+    // Drop pattern:
+    //   Every 50th packet: 50, 100, 150, ... (singles, gap > mergeGap)
+    //   Burst at 500-504: consecutive (range)
+    //   Burst at 700-702: consecutive (range)
+
+    // Expected consolidation:
+    //   Singles: [50, 100, 150, 200, 250, 300, 350, 400, 450, ...]
+    //   Ranges: [(500,504), (700,702)]
+}
+```
+
+### Implementation Notes
+
+1. **Test file location**: `congestion/live/receive_iouring_reorder_test.go`
+2. **Run with race detector**: All tests should pass `go test -race`
+3. **Timing considerations**: Tests that rely on TSBPD need careful timing; use `testing.Short()` to skip long tests
+4. **Metrics verification**: Use receiver's metrics to verify internal state
+5. **Deterministic shuffle**: Use seeded RNG for reproducible tests
+
+### Priority
+
+| Test | Priority | Why |
+|------|----------|-----|
+| Test 1: Modulus Drops + Out-of-Order | **HIGH** | Would have caught FR-6, deterministic verification |
+| Test 2: TSBPD Skip race | **HIGH** | Specific regression test |
+| Test 3: Concurrent stress | **HIGH** | Race detection |
+| Test 4: Burst Drops (Range testing) | **HIGH** | Verify range consolidation is correct |
+| Test 5: Mixed Pattern (Singles + Ranges) | Medium | Combined verification |
+| Test 6: nakScanStartPoint progression | Medium | Verifies scan window behavior |
+| Test 7: Arrival permutations | Low | Comprehensive coverage |
+
+### Status
+
+| Test | Status | Notes |
+|------|--------|-------|
+| Test 0: In-Order Baseline | ✅ Implemented | `TestInOrderArrival_Baseline` - control test |
+| Test 1: Modulus Drops | ✅ Implemented | `TestOutOfOrderArrival_ModulusDrops` |
+| Test 2: TSBPD Skip | ✅ Implemented | `TestTSBPDSkip_DoesNotSkipScanning` |
+| Test 3: Concurrent stress | ✅ Implemented | `TestConcurrent_PushTickNAKACK_OutOfOrder` |
+| Test 4: Burst Drops | ✅ Implemented | `TestOutOfOrderArrival_BurstDrops_RangeConsolidation` |
+| Test 5: Mixed Pattern | ✅ Implemented | `TestOutOfOrderArrival_MixedPattern` |
+| Test 6: Progression | ✅ Implemented | `TestNakScanStartPoint_ProgressesToRecentBoundary` |
+| Test 7: Permutations | ✅ Implemented | `TestOutOfOrder_ArrivalPermutations` (5 subtests) |
+
+### Consolidation Tests in `nak_consolidate_test.go`
+
+#### Out-of-Order Tests
+| Test | Status | Notes |
+|------|--------|-------|
+| OutOfOrderInsertion | ✅ Implemented | Verifies btree sorts correctly |
+| OutOfOrderWithGaps | ✅ Implemented | Multiple groups with gaps |
+| InOrderBaseline | ✅ Implemented | Control test for consolidation |
+| InOrderVsOutOfOrder_Consistency | ✅ Implemented | Verifies identical results |
+
+#### Modulus-Based Drop Tests
+| Test | Status | Notes |
+|------|--------|-------|
+| ModulusDrops_Every10th | ✅ Implemented | 10% loss → all singles |
+| ModulusDrops_Every5th | ✅ Implemented | 20% loss → all singles |
+| ModulusDrops_Every3rd_WithMerge | ✅ Implemented | Gap <= mergeGap → merged |
+| LargeScale_ModulusDrops | ✅ Implemented | 10k packets, 10% loss |
+
+#### Burst Drop Tests
+| Test | Status | Notes |
+|------|--------|-------|
+| BurstDrops | ✅ Implemented | 5 bursts of 10 packets |
+| MixedModulusAndBurst | ✅ Implemented | Singles + range combined |
+| LargeScale_BurstDrops | ✅ Implemented | 10 bursts of 20 packets |
+
+#### Benchmarks Added
+| Benchmark | Patterns |
+|-----------|----------|
+| BenchmarkConsolidate_ModulusDrops | 1%/5%/10%/20% loss at 1k/10k packets |
+| BenchmarkConsolidate_BurstDrops | 5-50 bursts, 10-50 packets each |
+| BenchmarkConsolidate_MixedPatterns | Light/moderate/heavy/burst-heavy/singles-heavy |
+| BenchmarkConsolidate_OutOfOrderInsertion | In-order vs out-of-order comparison |
+| BenchmarkConsolidate_RealisticScenarios | Clean/Starlink/Congestion/Heavy loss |
+
+**Key benchmark results:**
+- Clean network (1 drop): ~144ns
+- Starlink outage (50 packet burst): ~479ns
+- Multiple outages (3 bursts): ~1012ns
+- Heavy loss 20% (1000 singles): ~32µs
+- In-order vs out-of-order: **identical** performance (~3µs for 100 entries)
+
+### Implementation Notes
+
+All receiver tests implemented in `congestion/live/receive_iouring_reorder_test.go`:
+
+1. **Deterministic dropping**: Uses modulus-based dropping (`seq % 10 == 0`) for reproducible tests
+2. **Realistic TSBPD times**: All packets have properly calculated TSBPD times based on sequence offset
+3. **Time advancement**: Tests advance time properly to allow scan window progression
+4. **Recent boundary handling**: Tests account for packets at the "recent" boundary (last 10% of TSBPD) not being NAK'd immediately by design
+5. **Race detection**: All tests pass with `-race` flag
+
+**Verification output from Test 6 (nakScanStartPoint progression)**:
+```
+After cycle 9 (time=1500000): nakScanStartPoint=21
+After cycle 10 (time=1550000): nakScanStartPoint=41
+After cycle 11 (time=1600000): nakScanStartPoint=61
+...
+After cycle 18 (time=1950000): nakScanStartPoint=199
+Final nakScanStartPoint: 199 (advanced by 199)
+```
+
+This confirms the scan window correctly progresses through the buffer over time.
 
 ---
 
@@ -726,6 +1254,7 @@ func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
 | 8.1 | Create test files | ✅ | nak_btree_test.go, fast_nak_test.go, nak_consolidate_test.go |
 | 8.2 | Add tests to existing files | ✅ | metrics_test.go, receive_test.go |
 | 8.3 | Verify Phase 8 completion | ✅ | 77 tests pass |
+| 8.4 | **Out-of-order arrival tests** | ✅ | 7 tests in `receive_iouring_reorder_test.go` |
 
 ### Test Coverage
 

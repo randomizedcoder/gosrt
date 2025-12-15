@@ -1512,29 +1512,117 @@ func (c *srtConn) sendShutdown() {
 	c.pop(p)
 }
 
-// sendNAK sends a NAK to the peer with the given range of sequence numbers.
+// NAK CIF size constants for MSS overflow handling (FR-11)
+const (
+	// nakCIFMaxBytes is the maximum bytes available for NAK CIF payload
+	// MSS (1500) - UDP header (28) - SRT header (16) = 1456 bytes
+	nakCIFMaxBytes = MAX_MSS_SIZE - UDP_HEADER_SIZE - SRT_HEADER_SIZE
+
+	// nakSingleEntryWireSize is the wire size of a single NAK entry (4 bytes)
+	nakSingleEntryWireSize = 4
+
+	// nakRangeEntryWireSize is the wire size of a range NAK entry (8 bytes: start + end)
+	nakRangeEntryWireSize = 8
+)
+
+// splitNakList splits a NAK list into chunks that fit within MSS.
+// Each chunk can be sent as a separate NAK packet.
+// Returns a slice of NAK lists, each fitting within nakCIFMaxBytes.
+func splitNakList(list []circular.Number, maxBytes int) [][]circular.Number {
+	if len(list) == 0 {
+		return nil
+	}
+
+	var chunks [][]circular.Number
+	var currentChunk []circular.Number
+	currentBytes := 0
+
+	// Process pairs (start, end)
+	for i := 0; i < len(list); i += 2 {
+		if i+1 >= len(list) {
+			break // Malformed list, ignore incomplete pair
+		}
+
+		start := list[i]
+		end := list[i+1]
+
+		// Calculate wire size for this entry
+		var entrySize int
+		if start.Val() == end.Val() {
+			entrySize = nakSingleEntryWireSize // Single: 4 bytes
+		} else {
+			entrySize = nakRangeEntryWireSize // Range: 8 bytes
+		}
+
+		// Would this entry overflow the current chunk?
+		if currentBytes+entrySize > maxBytes && len(currentChunk) > 0 {
+			// Save current chunk and start a new one
+			chunks = append(chunks, currentChunk)
+			currentChunk = nil
+			currentBytes = 0
+		}
+
+		// Add entry to current chunk
+		currentChunk = append(currentChunk, start, end)
+		currentBytes += entrySize
+	}
+
+	// Don't forget the last chunk
+	if len(currentChunk) > 0 {
+		chunks = append(chunks, currentChunk)
+	}
+
+	return chunks
+}
+
+// sendNAK sends NAK packet(s) to the peer with the given range of sequence numbers.
+// If the list exceeds MSS, it will be split into multiple NAK packets (FR-11).
 func (c *srtConn) sendNAK(list []circular.Number) {
-	p := packet.NewPacket(c.remoteAddr)
+	if len(list) == 0 {
+		return
+	}
 
-	p.Header().IsControlPacket = true
+	// Split the list into MSS-sized chunks
+	chunks := splitNakList(list, nakCIFMaxBytes)
 
-	p.Header().ControlType = packet.CTRLTYPE_NAK
-	p.Header().Timestamp = c.getTimestampForPacket()
+	// Track if we needed to split (for debugging/metrics)
+	if len(chunks) > 1 {
+		c.log("control:send:NAK:split", func() string {
+			return fmt.Sprintf("NAK list split into %d packets (total %d entries)", len(chunks), len(list)/2)
+		})
+		// Increment split counter metric if available
+		if c.metrics != nil {
+			c.metrics.NakPacketsSplit.Add(uint64(len(chunks) - 1)) // Count extra packets needed
+		}
+	}
 
-	cif := packet.CIFNAK{}
+	// Send each chunk as a separate NAK packet
+	for i, chunk := range chunks {
+		p := packet.NewPacket(c.remoteAddr)
 
-	cif.LostPacketSequenceNumber = append(cif.LostPacketSequenceNumber, list...)
+		p.Header().IsControlPacket = true
+		p.Header().ControlType = packet.CTRLTYPE_NAK
+		p.Header().Timestamp = c.getTimestampForPacket()
 
-	p.MarshalCIF(&cif)
+		cif := packet.CIFNAK{}
+		cif.LostPacketSequenceNumber = append(cif.LostPacketSequenceNumber, chunk...)
 
-	c.log("control:send:NAK:dump", func() string { return p.Dump() })
-	c.log("control:send:NAK:cif", func() string { return cif.String() })
+		p.MarshalCIF(&cif)
 
-	// Note: NAK send metrics are tracked in the send path:
-	// - io_uring path: connection_linux.go captures controlType before decommission
-	// - non-io_uring path: listen.go/dial.go calls IncrementSendMetrics with valid packet
+		c.log("control:send:NAK:dump", func() string {
+			if len(chunks) > 1 {
+				return fmt.Sprintf("NAK packet %d/%d: %s", i+1, len(chunks), p.Dump())
+			}
+			return p.Dump()
+		})
+		c.log("control:send:NAK:cif", func() string { return cif.String() })
 
-	c.pop(p)
+		// Note: NAK send metrics are tracked in the send path:
+		// - io_uring path: connection_linux.go captures controlType before decommission
+		// - non-io_uring path: listen.go/dial.go calls IncrementSendMetrics with valid packet
+
+		c.pop(p)
+	}
 }
 
 // sendACK sends an ACK to the peer with the given sequence number.

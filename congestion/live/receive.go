@@ -100,6 +100,10 @@ type receiver struct {
 	lastPacketArrivalTime AtomicTime    // Time of last packet arrival
 	lastNakTime           AtomicTime    // Time of last NAK sent
 	lastDataPacketSeq     atomic.Uint32 // Last data packet sequence (for FastNAKRecent)
+
+	// NAK scan tracking - independent of ACK to avoid TSBPD skip issues
+	// This ensures we never skip scanning a region even if ACK jumps forward
+	nakScanStartPoint atomic.Uint32 // Starting sequence for next NAK btree scan
 }
 
 // NewReceiver takes a ReceiveConfig and returns a new Receiver
@@ -710,15 +714,35 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 		tooRecentThreshold = now + uint64(float64(r.tsbpdDelay)*r.nakRecentPercent)
 	}
 
-	// Step 2: Scan packet btree from last ACK'd sequence to find gaps
-	expectedSeq := r.lastACKSequenceNumber.Inc()
+	// Step 2: Get starting point - independent of ACK to avoid TSBPD skip issues
+	// This is critical: if ACK jumps forward (TSBPD skip), we don't want to skip scanning
+	// Initialize lazily from oldest packet in store (more efficient than CompareAndSwap on every Push)
+	startSeq := r.nakScanStartPoint.Load()
+	if startSeq == 0 {
+		// First run: Initialize from oldest packet in store
+		minPkt := r.packetStore.Min()
+		if minPkt == nil {
+			return nil // No packets yet
+		}
+		startSeq = minPkt.Header().PacketSequenceNumber.Val()
+		r.nakScanStartPoint.Store(startSeq)
+	}
+
+	// Step 3: Scan packet btree from startSeq to find gaps
+	expectedSeq := circular.New(startSeq, packet.MAX_SEQUENCENUMBER)
+	var lastScannedSeq uint32
 
 	r.packetStore.Iterate(func(pkt packet.Packet) bool {
 		h := pkt.Header()
+		actualSeqNum := h.PacketSequenceNumber
 
-		// Skip packets already ACK'd
-		if h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) {
-			return true // Continue
+		// Skip packets before our scan start point
+		if actualSeqNum.Val() < startSeq && !circular.SeqLess(actualSeqNum.Val(), startSeq) {
+			// Handle wraparound: if actualSeq appears less but isn't due to wrap, skip
+			return true
+		}
+		if circular.SeqLess(actualSeqNum.Val(), startSeq) {
+			return true // Continue - this packet is before our scan window
 		}
 
 		// Stop if this packet is "too recent" (might still be reordered)
@@ -726,13 +750,11 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 			return false // Stop iteration
 		}
 
-		actualSeq := h.PacketSequenceNumber
-
 		// Detect gaps: expected vs actual
-		if actualSeq.Gt(expectedSeq) {
+		if actualSeqNum.Gt(expectedSeq) {
 			// There's a gap - add missing sequences to NAK btree
 			seq := expectedSeq.Val()
-			endSeq := actualSeq.Dec().Val()
+			endSeq := actualSeqNum.Dec().Val()
 			for circular.SeqLess(seq, endSeq) || seq == endSeq {
 				r.nakBtree.Insert(seq)
 				m.NakBtreeInserts.Add(1)
@@ -743,9 +765,16 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 
 		m.NakBtreeScanPackets.Add(1)
 
-		expectedSeq = actualSeq.Inc()
+		lastScannedSeq = actualSeqNum.Val()
+		expectedSeq = actualSeqNum.Inc()
 		return true // Continue
 	})
+
+	// Step 4: Update scan start point for next iteration
+	// Only move forward to where we actually scanned (not where ACK is)
+	if lastScannedSeq > 0 {
+		r.nakScanStartPoint.Store(lastScannedSeq)
+	}
 
 	// Step 3: Consolidate NAK btree into ranges using optimized function
 	// (uses sync.Pool and time budget)
