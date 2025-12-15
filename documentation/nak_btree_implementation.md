@@ -1443,6 +1443,55 @@ The algorithm is sound - the issue was applying 16-bit test expectations to a 31
 
 ---
 
+## Known Issues & Pending Work
+
+### ✅ ISSUE-001: Missing Defensive Metrics for "Should Never Happen" Conditions - FIXED
+
+**Problem**: The NAK btree implementation has defensive nil checks that protect against invalid states, but these conditions were not being tracked with metrics.
+
+**Solution Implemented**:
+
+1. **Added metric** in `metrics/metrics.go`:
+```go
+// Defensive counters for "should never happen" conditions (ISSUE-001)
+NakBtreeNilWhenEnabled atomic.Uint64 // nakBtree nil when useNakBtree=true
+```
+
+2. **Exported to Prometheus** in `metrics/handler.go`:
+```go
+writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
+    metrics.NakBtreeNilWhenEnabled.Load(),
+    "socket_id", socketIdStr, "type", "nak_btree_nil_when_enabled")
+```
+
+3. **Increment locations** (5 places):
+   - `receive.go:705` - periodicNakBtree()
+   - `receive.go:807` - expireNakEntries()
+   - `fast_nak.go:83` - checkFastNakRecent()
+   - `fast_nak.go:172` - buildNakListLocked()
+   - `nak_consolidate.go:47` - consolidateNakBtree()
+
+4. **Updated analysis.go** - Added `NakBtreeNilWhenEnabled` field to `DerivedMetrics` struct and extraction logic.
+
+5. **Verified with metrics-audit**:
+```
+✅ NakBtreeNilWhenEnabled (5 locations) - defined, used, exported
+```
+
+**Status**: ✅ Complete (2025-12-15)
+
+---
+
+### Related: Other Defensive Checks to Consider
+
+| Code Pattern | Description | Current Handling |
+|--------------|-------------|------------------|
+| `if r.metrics == nil` | Metrics struct not initialized | Multiple places - should always be set |
+| `CongestionRecvPktNil` | Nil packet received | ✅ Already has metric |
+| `CongestionRecvPktStoreInsertFailed` | Store insert failed after Has() check | ✅ Already has metric |
+
+---
+
 ## Test Results Log
 
 Track test runs:

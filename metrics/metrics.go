@@ -195,6 +195,10 @@ type ConnectionMetrics struct {
 	CongestionRecvPktStoreInsertFailed atomic.Uint64 // Packet store insertion failures
 	// CongestionRecvDeliveryFailed       atomic.Uint64 // Not implemented - delivery callbacks don't fail
 	// CongestionSendDeliveryFailed       atomic.Uint64 // Not implemented - delivery callbacks don't fail
+
+	// Defensive counters for "should never happen" conditions (ISSUE-001)
+	// These track programming errors or invalid state - should always be 0
+	NakBtreeNilWhenEnabled    atomic.Uint64 // nakBtree nil when useNakBtree=true
 	CongestionSendNAKNotFound atomic.Uint64 // NAK requests for packets not in lossList
 
 	// NAK receive counters - Sender receives NAKs and retransmits

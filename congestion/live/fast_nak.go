@@ -74,7 +74,14 @@ func (r *receiver) triggerFastNak(now time.Time) {
 //
 // Must be called with r.lock held.
 func (r *receiver) checkFastNakRecent(currentSeq uint32, now time.Time) {
-	if !r.fastNakRecentEnabled || r.nakBtree == nil {
+	if !r.fastNakRecentEnabled {
+		return
+	}
+	if r.nakBtree == nil {
+		// This should never happen when fastNakRecentEnabled=true (ISSUE-001)
+		if r.metrics != nil {
+			r.metrics.NakBtreeNilWhenEnabled.Add(1)
+		}
 		return
 	}
 
@@ -159,7 +166,14 @@ func (at *AtomicTime) Store(t time.Time) {
 // This is a helper used by both periodicNakBtree and triggerFastNak.
 // Must be called with r.lock held.
 func (r *receiver) buildNakListLocked(now uint64) []circular.Number {
-	if r.nakBtree == nil || r.nakBtree.Len() == 0 {
+	if r.nakBtree == nil {
+		// This should never happen when called (ISSUE-001)
+		if r.metrics != nil {
+			r.metrics.NakBtreeNilWhenEnabled.Add(1)
+		}
+		return nil
+	}
+	if r.nakBtree.Len() == 0 {
 		return nil
 	}
 

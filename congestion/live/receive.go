@@ -700,6 +700,10 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	}
 
 	if r.nakBtree == nil {
+		// This should never happen when useNakBtree=true (ISSUE-001)
+		if m != nil {
+			m.NakBtreeNilWhenEnabled.Add(1)
+		}
 		return nil
 	}
 
@@ -798,6 +802,10 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 // Must be called with r.lock held (at least RLock).
 func (r *receiver) expireNakEntries() int {
 	if r.nakBtree == nil {
+		// This should never happen when useNakBtree=true (ISSUE-001)
+		if r.metrics != nil {
+			r.metrics.NakBtreeNilWhenEnabled.Add(1)
+		}
 		return 0
 	}
 

@@ -296,6 +296,9 @@ type DerivedMetrics struct {
 
 	// Error breakdown
 	ErrorsByType map[string]int64
+
+	// Defensive counters (should always be 0 in normal operation)
+	NakBtreeNilWhenEnabled int64 // nakBtree nil when useNakBtree=true (ISSUE-001)
 }
 
 // ComputeDerivedMetrics computes derived metrics from a time series
@@ -465,6 +468,10 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 	// Sender honor-order
 	dm.NakHonoredOrder = int64(getSumByPrefix(last, "gosrt_connection_nak_honored_order_total") -
 		getSumByPrefix(first, "gosrt_connection_nak_honored_order_total"))
+
+	// Defensive counters (should always be 0)
+	dm.NakBtreeNilWhenEnabled = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_internal_total", "nak_btree_nil_when_enabled") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_internal_total", "nak_btree_nil_when_enabled"))
 
 	// Direct retransmission counter (from NAK handling)
 	dm.TotalRetransFromNAK = int64(getSumByPrefix(last, "gosrt_connection_retransmissions_from_nak_total") -

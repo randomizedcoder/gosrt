@@ -547,6 +547,9 @@ func MetricsHandler() http.Handler {
 			writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
 				metrics.CongestionSendNAKNotFound.Load(),
 				"socket_id", socketIdStr, "type", "nak_not_found")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
+				metrics.NakBtreeNilWhenEnabled.Load(),
+				"socket_id", socketIdStr, "type", "nak_btree_nil_when_enabled")
 
 			// ========== NAK Detail Counters (RFC SRT Appendix A) ==========
 			// Receiver-side: NAKs generated and sent

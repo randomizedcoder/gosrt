@@ -41,7 +41,14 @@ var nakEntryPool = sync.Pool{
 //
 // Must be called with r.lock held (at least RLock).
 func (r *receiver) consolidateNakBtree() []circular.Number {
-	if r.nakBtree == nil || r.nakBtree.Len() == 0 {
+	if r.nakBtree == nil {
+		// This should never happen when called (ISSUE-001)
+		if r.metrics != nil {
+			r.metrics.NakBtreeNilWhenEnabled.Add(1)
+		}
+		return nil
+	}
+	if r.nakBtree.Len() == 0 {
 		return nil
 	}
 
@@ -134,4 +141,3 @@ func (r *receiver) entriesToNakList(entries []NAKEntry) []circular.Number {
 
 	return list
 }
-
