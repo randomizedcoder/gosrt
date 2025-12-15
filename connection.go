@@ -411,6 +411,19 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		BTreeDegree:            c.config.BTreeDegree,
 		LockTimingMetrics:      c.metrics.ReceiverLockTiming,
 		ConnectionMetrics:      c.metrics,
+
+		// NAK btree configuration - enables TSBPD-based "too recent" protection for io_uring
+		UseNakBtree:            c.config.UseNakBtree,
+		SuppressImmediateNak:   c.config.SuppressImmediateNak,
+		TsbpdDelay:             c.tsbpdDelay, // Note: Set after handshake, initially 0
+		NakRecentPercent:       c.config.NakRecentPercent,
+		NakMergeGap:            c.config.NakMergeGap,
+		NakConsolidationBudget: c.config.NakConsolidationBudgetUs,
+
+		// FastNAK configuration - quick NAK after silence period
+		FastNakEnabled:       c.config.FastNakEnabled,
+		FastNakThresholdUs:   c.config.FastNakThresholdMs * 1000, // Convert ms to µs
+		FastNakRecentEnabled: c.config.FastNakRecentEnabled,
 	})
 
 	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second

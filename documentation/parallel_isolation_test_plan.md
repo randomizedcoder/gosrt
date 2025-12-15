@@ -12,6 +12,8 @@
 
 ## Test Matrix
 
+### Phase 1: io_uring and Packet Store Isolation (Tests 0-6)
+
 | Test # | Name | Variable Changed | Control Config | Test Config |
 |--------|------|------------------|----------------|-------------|
 | 0 | Control-Control | None (baseline) | list, no io_uring | list, no io_uring |
@@ -21,6 +23,28 @@
 | 4 | Server-IoUringSend | Server io_uring send | list, no io_uring | list, io_uring send only |
 | 5 | Server-IoUringRecv | Server io_uring recv | list, no io_uring | list, io_uring recv only |
 | 6 | Server-Btree | Server packet store | list, no io_uring | btree, no io_uring |
+
+### Phase 2: NAK btree Isolation (Tests 7-10)
+
+The NAK btree is a new mechanism for loss detection and NAK generation. These tests isolate the NAK btree from other features:
+
+| Test # | Name | Variable Changed | Description |
+|--------|------|------------------|-------------|
+| 7 | Server-NakBtree | Server NAK btree | NAK btree replaces lossList scan for gap detection |
+| 8 | Server-NakBtree-IoUringRecv | Server NAK btree + io_uring recv | Combined receiver path - realistic high-perf scenario |
+| 9 | CG-HonorNakOrder | CG HonorNakOrder | Sender retransmits in NAK packet order (receiver priority) |
+| 10 | FullNakBtree | Both NAK btree + HonorNakOrder | Full NAK btree pipeline (server NAK btree + CG honor order) |
+
+**NAK btree vs Packet Store btree** (IMPORTANT DISTINCTION):
+- **Packet store btree** (Test 6): Stores received packets in sorted order for O(log n) insertion/lookup
+- **NAK btree** (Tests 7-10): Tracks missing sequence numbers for the NAK mechanism (completely different feature)
+
+The NAK btree enables:
+- `UseNakBtree`: Use btree instead of lossList for tracking missing sequences
+- `SuppressImmediateNak`: Let periodic NAK handle gaps (prevents false positives with io_uring reordering)
+- `FastNakEnabled`: Trigger NAK immediately after detecting burst loss
+- `FastNakRecentEnabled`: Detect sequence jumps for burst loss detection
+- `HonorNakOrder`: Sender retransmits in the order specified by the NAK packet
 
 ## Test Architecture (Simplified)
 
@@ -130,6 +154,60 @@ Test:    CG(list, no io_uring) → Server(btree, no io_uring) → Client(list, n
 ```
 -packetreorderalgorithm btree -btreedegree 32
 ```
+
+### Test 7: Server-NakBtree
+Only the server uses NAK btree for gap detection.
+
+```
+Control: CG(list, no io_uring, original NAK) → Server(list, no io_uring, original NAK)
+Test:    CG(list, no io_uring, original NAK) → Server(list, no io_uring, NAK btree)
+```
+
+**CLI difference for Test pipeline Server:**
+```
+-usenakbtree -fastnakenabled -fastnakrecentenabled -honornakorder
+```
+Note: `SuppressImmediateNak` is auto-set internally when `-usenakbtree` is enabled.
+
+### Test 8: Server-NakBtree-IoUringRecv
+Server uses NAK btree + io_uring recv (realistic high-performance receiver).
+
+```
+Control: CG(list, no io_uring, original NAK) → Server(list, no io_uring, original NAK)
+Test:    CG(list, no io_uring, original NAK) → Server(list, io_uring recv, NAK btree)
+```
+
+**CLI difference for Test pipeline Server:**
+```
+-iouringrecvenabled -usenakbtree -fastnakenabled -fastnakrecentenabled -honornakorder
+```
+Note: `SuppressImmediateNak` is auto-set internally when `-usenakbtree` or `-iouringrecvenabled` is enabled.
+
+### Test 9: CG-HonorNakOrder
+Only the client-generator uses HonorNakOrder (sender-side feature).
+
+```
+Control: CG(list, no io_uring, original NAK) → Server(list, no io_uring, original NAK)
+Test:    CG(list, no io_uring, HonorNakOrder) → Server(list, no io_uring, original NAK)
+```
+
+**CLI difference for Test pipeline CG:**
+```
+-honornakorder
+```
+
+### Test 10: FullNakBtree
+Full NAK btree pipeline: Server NAK btree + CG HonorNakOrder.
+
+```
+Control: CG(list, no io_uring, original NAK) → Server(list, no io_uring, original NAK)
+Test:    CG(list, no io_uring, HonorNakOrder) → Server(list, no io_uring, NAK btree)
+```
+
+**CLI differences:**
+- Test Server: `-usenakbtree -fastnakenabled -fastnakrecentenabled -honornakorder`
+- Test CG: `-honornakorder`
+Note: `SuppressImmediateNak` is auto-set internally when `-usenakbtree` is enabled.
 
 ## Implementation Plan
 
@@ -333,6 +411,8 @@ test-isolation-all: server client-generator
 
 With **no network impairment**, we expect:
 
+### Phase 1: io_uring and Packet Store Isolation
+
 | Test | Variable | Gaps (Control) | Gaps (Test) | Expected Diff |
 |------|----------|----------------|-------------|---------------|
 | 0 | None | 0 | 0 | 0 (sanity) |
@@ -343,17 +423,38 @@ With **no network impairment**, we expect:
 | 5 | Server io_uring recv | 0 | ? | 0 if recv path is OK |
 | 6 | Server btree | 0 | ? | 0 if btree is OK |
 
+### Phase 2: NAK btree Isolation
+
+| Test | Variable | Gaps (Control) | Gaps (Test) | Expected Diff |
+|------|----------|----------------|-------------|---------------|
+| 7 | Server NAK btree | 0 | ? | 0 if NAK btree is OK |
+| 8 | Server NAK btree + io_uring recv | 0 | ? | 0 if combined path is OK |
+| 9 | CG HonorNakOrder | 0 | ? | 0 (HonorNakOrder is retransmit-order only) |
+| 10 | Full NAK btree | 0 | ? | 0 if full pipeline is OK |
+
 **Any non-zero gaps on clean network = code bug!**
 
-## Phase 2: Client Isolation (if needed)
+### NAK btree Specific Metrics to Watch
+
+In addition to gaps, the NAK btree tests should show these metrics in the Test pipeline:
+
+| Metric | Test 7-10 Expected | Meaning |
+|--------|-------------------|---------|
+| `gosrt_nak_btree_inserts_total` | 0 on clean | NAK btree insertions (should be 0 with no loss) |
+| `gosrt_nak_periodic_btree_runs_total` | > 0 | Periodic NAK scans running |
+| `gosrt_nak_periodic_original_runs_total` | 0 | Original path disabled |
+| `gosrt_nak_fast_triggers_total` | 0 on clean | FastNAK triggers (should be 0 with no loss) |
+| `gosrt_nak_honored_order_total` | 0 on clean | NAKs processed in honor order (0 with no loss) |
+
+## Phase 3: Client Isolation (if needed)
 
 If CG and Server tests don't reveal the issue, add Client tests:
 
 | Test # | Name | Variable Changed |
 |--------|------|------------------|
-| 7 | Client-IoUringRecv | Client io_uring recv |
-| 8 | Client-IoUringOutput | Client io_uring output (to /dev/null) |
-| 9 | Client-Btree | Client btree packet store |
+| 11 | Client-IoUringRecv | Client io_uring recv |
+| 12 | Client-IoUringOutput | Client io_uring output (to /dev/null) |
+| 13 | Client-Btree | Client btree packet store |
 
 ## Decisions Made
 
@@ -361,7 +462,7 @@ If CG and Server tests don't reveal the issue, add Client tests:
 2. **Network Impairment**: None (clean path) - any gaps = code bug
 3. **Architecture**: CG → Server only (no Client)
 4. **Automation**: Shell script wrapper with output capture to temp files
-5. **Total Runtime**: ~3.5 minutes for all 7 tests
+5. **Total Runtime**: ~6.5 minutes for all 11 tests (original 7 + NAK btree 4)
 
 ## File Changes Required
 

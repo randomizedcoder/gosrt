@@ -13,6 +13,7 @@
 | Phase 3 | Metrics Collection and Comparison | ✅ Basic Complete |
 | Phase 4 | Profiling Support | ⏳ Pending |
 | Phase 5 | Test Configurations and Makefile | ✅ Complete |
+| Phase 6 | NAK btree Isolation Tests | ✅ Complete |
 
 ---
 
@@ -440,6 +441,101 @@ test-parallel-profile:
 
 ---
 
+---
+
+## Phase 6: NAK btree Isolation Tests
+
+**Status**: ✅ Complete
+**Date Added**: 2024-12-15
+
+### Objectives
+Add isolation tests specifically for the NAK btree mechanism to compare against the default gosrt implementation.
+
+### Background
+The NAK btree is a completely different feature from the packet store btree:
+- **Packet store btree** (Test 6): Stores received packets in sorted order for O(log n) insertion/lookup
+- **NAK btree** (Tests 7-10): Tracks missing sequence numbers for the NAK mechanism
+
+### New Test Configurations Added
+
+| Test # | Name | Description |
+|--------|------|-------------|
+| 7 | `Isolation-Server-NakBtree` | Server NAK btree for gap detection (replaces lossList scan) |
+| 8 | `Isolation-Server-NakBtree-IoUringRecv` | Server NAK btree + io_uring recv (combined receiver path) |
+| 9 | `Isolation-CG-HonorNakOrder` | Client-Generator HonorNakOrder (sender retransmits in NAK order) |
+| 10 | `Isolation-FullNakBtree` | Full NAK btree pipeline (Server NAK btree + CG HonorNakOrder) |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `contrib/integration_testing/test_configs.go` | Added 4 new `IsolationTestConfig` entries (Tests 7-10) |
+| `contrib/integration_testing/config.go` | Added `WithHonorNakOrder()` helper method |
+| `contrib/integration_testing/run_isolation_tests.sh` | Updated to run all 11 isolation tests |
+| `documentation/parallel_isolation_test_plan.md` | Added NAK btree test documentation |
+
+### Helper Method Added
+
+```go
+// WithHonorNakOrder returns a copy of the config with HonorNakOrder enabled
+// This is a SENDER feature: retransmit packets in the order specified by the NAK packet
+func (c SRTConfig) WithHonorNakOrder() SRTConfig {
+    c.HonorNakOrder = true
+    return c
+}
+```
+
+### NAK btree Features Being Tested
+
+| Feature | CLI Flag | Test Coverage |
+|---------|----------|---------------|
+| NAK btree for gap detection | `-usenakbtree` | Tests 7, 8, 10 |
+| Suppress immediate NAK | (auto-set with `-usenakbtree`) | Tests 7, 8, 10 |
+| FastNAK for burst detection | `-fastnakenabled` | Tests 7, 8, 10 |
+| FastNAK sequence jump detection | `-fastnakrecentenabled` | Tests 7, 8, 10 |
+| Honor NAK order in sender | `-honornakorder` | Tests 9, 10 |
+
+### Expected Metrics on Clean Network
+
+| Metric | Expected Value | Meaning |
+|--------|---------------|---------|
+| `gosrt_nak_btree_inserts_total` | 0 | No gaps detected (no loss) |
+| `gosrt_nak_periodic_btree_runs_total` | > 0 | NAK btree path is active |
+| `gosrt_nak_periodic_original_runs_total` | 0 | Original path is disabled |
+| `gosrt_nak_fast_triggers_total` | 0 | No burst loss detected |
+| `gosrt_nak_honored_order_total` | 0 | No NAKs to process |
+
+### How to Run
+
+```bash
+# Single NAK btree test
+cd contrib/integration_testing
+sudo go run . isolation-test Isolation-Server-NakBtree
+
+# All NAK btree tests
+sudo go run . isolation-test Isolation-Server-NakBtree
+sudo go run . isolation-test Isolation-Server-NakBtree-IoUringRecv
+sudo go run . isolation-test Isolation-CG-HonorNakOrder
+sudo go run . isolation-test Isolation-FullNakBtree
+
+# All 11 isolation tests (~6.5 minutes)
+sudo ./run_isolation_tests.sh
+```
+
+### Progress
+
+- [x] Add `WithHonorNakOrder()` helper method to `config.go`
+- [x] Add `Isolation-Server-NakBtree` test configuration
+- [x] Add `Isolation-Server-NakBtree-IoUringRecv` test configuration
+- [x] Add `Isolation-CG-HonorNakOrder` test configuration
+- [x] Add `Isolation-FullNakBtree` test configuration
+- [x] Update `run_isolation_tests.sh` to include all 11 tests
+- [x] Update `parallel_isolation_test_plan.md` documentation
+- [x] Verify code compiles (`go build ./contrib/integration_testing/...`)
+- [ ] Run isolation tests with root privileges (user to run)
+
+---
+
 ## Testing Checklist
 
 ### Backward Compatibility Tests
@@ -454,6 +550,12 @@ test-parallel-profile:
 - [ ] Metrics collection works for all 6 endpoints
 - [ ] Comparison output is correctly formatted
 - [ ] Profiling produces valid pprof files
+
+### Isolation Test Validation (Phase 6)
+- [ ] All 11 isolation tests complete without errors
+- [ ] Control pipeline shows 0 gaps on clean network
+- [ ] Test pipeline shows 0 gaps on clean network (for each isolated variable)
+- [ ] NAK btree metrics are correctly exported and collected
 
 ---
 

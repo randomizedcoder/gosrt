@@ -843,6 +843,80 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		Bitrate:       5_000_000,
 		StatsPeriod:   10 * time.Second,
 	},
+
+	// ========================================================================
+	// NAK BTREE ISOLATION TESTS
+	// ========================================================================
+	// These tests isolate the new NAK btree mechanism vs the default.
+	// NAK btree is primarily a RECEIVER feature (gap detection, NAK generation).
+	// HonorNakOrder is a SENDER feature (processes NAKs in receiver's priority order).
+
+	// Test 7: Server NAK btree (receiver side - core feature)
+	{
+		Name:          "Isolation-Server-NakBtree",
+		Description:   "Server: NAK btree for gap detection (replaces lossList scan)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithNakBtree(), // Changed: NAK btree + all features
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 8: Server NAK btree + io_uring recv (realistic high-perf receiver)
+	{
+		Name:          "Isolation-Server-NakBtree-IoUringRecv",
+		Description:   "Server: NAK btree + io_uring recv (combined receiver path)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithNakBtree().WithIoUringRecv(), // NAK btree + io_uring recv
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 8b: Server NAK btree + io_uring recv + 50% NakRecentPercent
+	// This tests whether a larger "too recent" window fixes false gap detection
+	// caused by io_uring's out-of-order packet delivery
+	{
+		Name:          "Isolation-Server-NakBtree-IoUringRecv-LargeWindow",
+		Description:   "Server: NAK btree + io_uring recv + 50% recent window (debug test)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithNakBtree().WithIoUringRecv().WithNakRecentPercent(0.50), // 50% instead of 10%
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 9: CG HonorNakOrder (sender side - processes NAKs in order)
+	{
+		Name:          "Isolation-CG-HonorNakOrder",
+		Description:   "Client-Generator: HonorNakOrder (retransmits in NAK packet order)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithHonorNakOrder(), // Changed: honor NAK order
+		TestServer:    ControlSRTConfig,
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 10: Full NAK btree pipeline (Server NAK btree + CG HonorNakOrder)
+	{
+		Name:          "Isolation-FullNakBtree",
+		Description:   "Full NAK btree: Server(NAK btree) + CG(HonorNakOrder)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithHonorNakOrder(), // Sender honors NAK order
+		TestServer:    ControlSRTConfig.WithNakBtree(),      // Receiver uses NAK btree
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
 }
 
 // GetIsolationTestConfigByName finds an isolation test configuration by name

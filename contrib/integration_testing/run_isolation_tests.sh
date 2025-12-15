@@ -3,8 +3,11 @@
 #
 # Usage: sudo ./run_isolation_tests.sh
 #
-# This script runs all 7 isolation tests sequentially, capturing output
+# This script runs all 11 isolation tests sequentially, capturing output
 # to temporary files for later review.
+#
+# Tests 0-6: Original io_uring and packet store btree isolation
+# Tests 7-10: NAK btree isolation tests
 
 # Don't use set -e as tee can cause false failures
 
@@ -17,6 +20,7 @@ fi
 
 # Test configurations in order
 TESTS=(
+    # Original isolation tests (0-6)
     "Isolation-Control"
     "Isolation-CG-IoUringSend"
     "Isolation-CG-IoUringRecv"
@@ -24,6 +28,11 @@ TESTS=(
     "Isolation-Server-IoUringSend"
     "Isolation-Server-IoUringRecv"
     "Isolation-Server-Btree"
+    # NAK btree isolation tests (7-10)
+    "Isolation-Server-NakBtree"
+    "Isolation-Server-NakBtree-IoUringRecv"
+    "Isolation-CG-HonorNakOrder"
+    "Isolation-FullNakBtree"
 )
 
 # Create output directory with timestamp

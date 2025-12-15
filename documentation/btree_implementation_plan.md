@@ -889,3 +889,58 @@ If issues arise:
 - Phase 3 complete! The b-tree implementation is fully integrated and tested.
 - Future work: Run performance benchmarks to measure actual improvements in production scenarios
 
+---
+
+## Related: NAK btree (Different Feature)
+
+**IMPORTANT**: This document covers the **packet store btree** for storing received packets. There is a separate feature called **NAK btree** for tracking missing sequence numbers for the NAK mechanism.
+
+| Feature | Purpose | Document |
+|---------|---------|----------|
+| **Packet Store btree** (this doc) | Store received packets in sorted order for O(log n) insertion/lookup | `btree_implementation_plan.md` |
+| **NAK btree** | Track missing sequence numbers for efficient NAK generation | `nak_btree_implementation.md`, `design_nak_btree.md` |
+
+---
+
+## Integration Testing (Added 2024-12-15)
+
+### Isolation Tests for Packet Store btree
+
+The packet store btree is tested via the isolation test framework. These tests compare list vs btree on a clean network to verify correct behavior.
+
+| Test # | Name | Description |
+|--------|------|-------------|
+| 3 | `Isolation-CG-Btree` | Client-Generator: btree packet store |
+| 6 | `Isolation-Server-Btree` | Server: btree packet store |
+
+### How to Run
+
+```bash
+# List all isolation tests
+cd contrib/integration_testing
+go run . list-isolation-configs
+
+# Run packet store btree tests (require root)
+sudo go run . isolation-test Isolation-CG-Btree
+sudo go run . isolation-test Isolation-Server-Btree
+
+# Run all 11 isolation tests (~6.5 minutes)
+sudo ./run_isolation_tests.sh
+```
+
+### Expected Results
+
+On a clean network (no packet loss):
+- Both Control (list) and Test (btree) pipelines should show **0 gaps**
+- Any gaps detected = potential code bug in packet ordering
+
+### Benchmark Results (from Phase 3)
+
+| Operation | List | btree | Improvement |
+|-----------|------|-------|-------------|
+| Push (in-order) | 167µs/1000 | 813ns/1000 | **205x faster** |
+| Push (out-of-order) | 2.1µs | 500ns | **4x faster** |
+| Has (lookup) | 1.6µs | 135ns | **12x faster** |
+
+See `congestion/live/receive_bench_test.go` for full benchmark code.
+

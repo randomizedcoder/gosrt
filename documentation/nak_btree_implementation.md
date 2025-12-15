@@ -33,7 +33,7 @@ This document tracks the implementation progress of the NAK btree feature. Each 
 | 7 | Metrics | ✅ Complete | All NAK btree metrics, Prometheus export |
 | 8 | Unit Tests | ✅ Complete | 88 tests pass including comprehensive out-of-order + modulus/burst tests |
 | 9 | Benchmarks | ✅ Complete | FastNAK ~7ns, consolidation ~28µs/1k |
-| 10 | Integration Testing | 🔄 In progress | config.go, analysis.go updated |
+| 10 | Integration Testing | ✅ Complete | config.go, analysis.go, 4 isolation tests added |
 
 ---
 
@@ -1327,7 +1327,59 @@ func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
 | 10.1 | Update test configurations | ✅ | HighPerfSRTConfig now includes NAK btree |
 | 10.2 | Update `config.go` integration | ✅ | Added NAK btree fields and ToCliFlags() |
 | 10.3 | Update `analysis.go` | ✅ | Added 18 new NAK btree metrics to DerivedMetrics |
-| 10.4 | Run integration tests | ⬜ | Pending manual test run |
+| 10.4 | Add NAK btree isolation tests | ✅ | 4 new isolation tests added (Tests 7-10) |
+| 10.5 | Add `WithHonorNakOrder()` helper | ✅ | Enables sender-side NAK order honoring |
+| 10.6 | Update `run_isolation_tests.sh` | ✅ | Now runs all 11 isolation tests |
+| 10.7 | Update documentation | ✅ | `parallel_isolation_test_plan.md` updated |
+| 10.8 | Run isolation tests | ⬜ | Pending manual test run (requires root) |
+
+### NAK btree Isolation Tests (Added 2024-12-15)
+
+Four new isolation tests specifically for comparing NAK btree vs default gosrt:
+
+| Test # | Name | Description | Component |
+|--------|------|-------------|-----------|
+| 7 | `Isolation-Server-NakBtree` | NAK btree for gap detection | Server (receiver) |
+| 8 | `Isolation-Server-NakBtree-IoUringRecv` | NAK btree + io_uring recv combined | Server (receiver) |
+| 9 | `Isolation-CG-HonorNakOrder` | Sender honors NAK packet order | CG (sender) |
+| 10 | `Isolation-FullNakBtree` | Full pipeline (Server NAK btree + CG HonorNakOrder) | Both |
+
+**Key distinction from existing tests**:
+- **Packet store btree** (Test 6): Stores received packets in sorted order
+- **NAK btree** (Tests 7-10): Tracks missing sequence numbers for NAK mechanism
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `contrib/integration_testing/test_configs.go` | Added 4 `IsolationTestConfig` entries |
+| `contrib/integration_testing/config.go` | Added `WithHonorNakOrder()` helper |
+| `contrib/integration_testing/run_isolation_tests.sh` | Updated to run 11 tests |
+| `documentation/parallel_isolation_test_plan.md` | Added Phase 2 NAK btree section |
+| `documentation/parallel_comparison_implementation.md` | Added Phase 6 |
+
+### How to Run NAK btree Isolation Tests
+
+```bash
+# List all 11 isolation tests
+cd contrib/integration_testing && go run . list-isolation-configs
+
+# Run a single NAK btree test
+sudo go run . isolation-test Isolation-Server-NakBtree
+
+# Run all isolation tests (~6.5 minutes)
+sudo ./run_isolation_tests.sh
+```
+
+### Expected Results on Clean Network
+
+| Metric | Control | Test (NAK btree) | Notes |
+|--------|---------|------------------|-------|
+| Gaps Detected | 0 | 0 | Clean network = no loss |
+| NAK btree inserts | N/A | 0 | No missing packets |
+| Periodic NAK runs (original) | > 0 | 0 | Path disabled |
+| Periodic NAK runs (btree) | 0 | > 0 | Path enabled |
+| FastNAK triggers | N/A | 0 | No burst loss |
 
 ### Integration Testing Config Changes
 
@@ -1341,7 +1393,9 @@ func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
 - FastNAKRecent for sequence jump detection
 - Honor NAK order in sender
 
-**Helper method**: `WithNakBtree()` - enables all NAK btree features
+**Helper methods**:
+- `WithNakBtree()` - enables all NAK btree features (receiver + sender)
+- `WithHonorNakOrder()` - enables only sender-side NAK order honoring
 
 ### DerivedMetrics additions (18 new fields)
 
@@ -1375,6 +1429,7 @@ Track `go build ./...` results after each step:
 | 2025-12-14 | 8.1-8.3 | ✅ Pass | Phase 8 - 77 unit tests pass |
 | 2025-12-14 | 9.1-9.2 | ✅ Pass | Phase 9 - Benchmarks confirm performance |
 | 2025-12-14 | 10.1-10.3 | ✅ Pass | Phase 10 - Integration config/analysis updated |
+| 2025-12-15 | 10.4-10.7 | ✅ Pass | Phase 10 - NAK btree isolation tests added (4 tests) |
 
 ---
 

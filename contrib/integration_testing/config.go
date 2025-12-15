@@ -182,11 +182,12 @@ type SRTConfig struct {
 	NAKReport bool // -nakreport
 
 	// NAK btree configuration (for io_uring reorder handling)
-	UseNakBtree          bool // -usenakrebtree
-	SuppressImmediateNak bool // -suppressimmediatenak
-	FastNakEnabled       bool // -fastnakEnabled
-	FastNakRecentEnabled bool // -fastnakrecentenabled
-	HonorNakOrder        bool // -honornakorder
+	UseNakBtree          bool    // -usenakbtree
+	SuppressImmediateNak bool    // (auto-set internally, not a CLI flag)
+	FastNakEnabled       bool    // -fastnakenabled
+	FastNakRecentEnabled bool    // -fastnakrecentenabled
+	HonorNakOrder        bool    // -honornakorder
+	NakRecentPercent     float64 // -nakrecentpercent (default: 0.10, 10% of TSBPD delay)
 }
 
 // ToCliFlags converts SRTConfig to CLI flag arguments
@@ -287,11 +288,10 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 
 	// NAK btree configuration
+	// Note: SuppressImmediateNak is auto-set internally when UseNakBtree=true,
+	// so we don't need to pass it as a CLI flag
 	if c.UseNakBtree {
 		flags = append(flags, "-usenakbtree")
-	}
-	if c.SuppressImmediateNak {
-		flags = append(flags, "-suppressimmediatenak")
 	}
 	if c.FastNakEnabled {
 		flags = append(flags, "-fastnakenabled")
@@ -301,6 +301,9 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 	if c.HonorNakOrder {
 		flags = append(flags, "-honornakorder")
+	}
+	if c.NakRecentPercent > 0 {
+		flags = append(flags, "-nakrecentpercent", strconv.FormatFloat(c.NakRecentPercent, 'f', 2, 64))
 	}
 
 	return flags
@@ -616,8 +619,8 @@ var HighPerfSRTConfig = SRTConfig{
 	BTreeDegree:            32,
 	TLPktDrop:              true,
 	// NAK btree for io_uring reorder handling
-	UseNakBtree:          true, // NAK btree for efficient gap detection
-	SuppressImmediateNak: true, // Let periodic NAK handle gaps (prevents false positives)
+	UseNakBtree: true, // NAK btree for efficient gap detection
+	// Note: SuppressImmediateNak is auto-set internally when UseNakBtree=true
 	FastNakEnabled:       true, // FastNAK for outage recovery
 	FastNakRecentEnabled: true, // FastNAKRecent for sequence jump detection
 	HonorNakOrder:        true, // Sender honors receiver priority in NAK order
@@ -766,13 +769,30 @@ func (c SRTConfig) WithBtree(degree int) SRTConfig {
 }
 
 // WithNakBtree returns a copy of the config with NAK btree enabled
-// This enables all NAK btree features: NAK btree, suppress immediate NAK, FastNAK, and honor order
+// This enables NAK btree + FastNAK + HonorNakOrder.
+// Note: SuppressImmediateNak is auto-set internally when UseNakBtree=true
 func (c SRTConfig) WithNakBtree() SRTConfig {
 	c.UseNakBtree = true
-	c.SuppressImmediateNak = true
+	// SuppressImmediateNak is auto-set by ApplyAutoConfiguration() when UseNakBtree=true
 	c.FastNakEnabled = true
 	c.FastNakRecentEnabled = true
 	c.HonorNakOrder = true
+	return c
+}
+
+// WithHonorNakOrder returns a copy of the config with HonorNakOrder enabled
+// This is a SENDER feature: retransmit packets in the order specified by the NAK packet
+func (c SRTConfig) WithHonorNakOrder() SRTConfig {
+	c.HonorNakOrder = true
+	return c
+}
+
+// WithNakRecentPercent returns a copy of the config with a custom NakRecentPercent
+// This controls the "too recent" window as a percentage of TSBPD delay.
+// Default is 0.10 (10%), but for io_uring recv which can cause more reordering,
+// a higher value like 0.50 (50%) may be needed.
+func (c SRTConfig) WithNakRecentPercent(percent float64) SRTConfig {
+	c.NakRecentPercent = percent
 	return c
 }
 
