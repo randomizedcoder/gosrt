@@ -198,6 +198,7 @@ type srtConn struct {
 	readBuffer bytes.Buffer
 
 	onSend     func(p packet.Packet)
+	sendFilter func(p packet.Packet) bool // Optional filter for testing (returns false to drop)
 	onShutdown func(socketId uint32)
 
 	tick time.Duration
@@ -282,14 +283,49 @@ type srtConnConfig struct {
 	crypto                      crypto.Crypto
 	keyBaseEncryption           packet.PacketEncryption
 	onSend                      func(p packet.Packet)
+	sendFilter                  func(p packet.Packet) bool // Optional filter for testing
 	onShutdown                  func(socketId uint32)
 	logger                      Logger
-	socketFd                    int             // File descriptor for the UDP socket (for io_uring)
-	parentCtx                   context.Context // Parent context (from listener/dialer)
-	parentWg                    *sync.WaitGroup // Parent waitgroup (from listener/dialer)
+	socketFd                    int                        // File descriptor for the UDP socket (for io_uring)
+	parentCtx                   context.Context            // Parent context (from listener/dialer)
+	parentWg                    *sync.WaitGroup            // Parent waitgroup (from listener/dialer)
+	metrics                     *metrics.ConnectionMetrics // Pre-created metrics (required)
+}
+
+// createConnectionMetrics creates a ConnectionMetrics instance for a connection.
+// This should be called BEFORE newSRTConn() so that onSend closures can capture
+// the metrics reference, avoiding initialization race conditions.
+func createConnectionMetrics(localAddr net.Addr, socketId uint32) *metrics.ConnectionMetrics {
+	// Calculate header size (needed for metrics initialization)
+	headerSize := uint64(8 + 16) // 8 bytes UDP + 16 bytes SRT
+	if strings.Count(localAddr.String(), ":") < 2 {
+		headerSize += 20 // 20 bytes IPv4 header
+	} else {
+		headerSize += 40 // 40 bytes IPv6 header
+	}
+
+	m := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	m.HeaderSize.Store(headerSize)
+
+	// Register with metrics registry
+	metrics.RegisterConnection(socketId, m)
+
+	return m
 }
 
 func newSRTConn(config srtConnConfig) *srtConn {
+	// Validate required fields
+	if config.metrics == nil {
+		panic("newSRTConn: metrics must be pre-created via createConnectionMetrics()")
+	}
+	if config.onSend == nil {
+		panic("newSRTConn: onSend must be provided (use createConnectionMetrics() first to build closure)")
+	}
+
 	c := &srtConn{
 		version:                     config.version,
 		isCaller:                    config.isCaller,
@@ -305,13 +341,11 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		initialPacketSequenceNumber: config.initialPacketSequenceNumber,
 		crypto:                      config.crypto,
 		keyBaseEncryption:           config.keyBaseEncryption,
-		onSend:                      config.onSend,
+		onSend:                      config.onSend,     // Now fully initialized - no race!
+		sendFilter:                  config.sendFilter, // Optional test filter
 		onShutdown:                  config.onShutdown,
 		logger:                      config.logger,
-	}
-
-	if c.onSend == nil {
-		c.onSend = func(p packet.Packet) {}
+		metrics:                     config.metrics, // Pre-created - no race!
 	}
 
 	if c.onShutdown == nil {
@@ -360,24 +394,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	c.debug.expectedRcvPacketSequenceNumber = c.initialPacketSequenceNumber
 	c.debug.expectedReadPacketSequenceNumber = c.initialPacketSequenceNumber
 
-	// Calculate header size (needed for metrics initialization)
-	headerSize := uint64(8 + 16) // 8 bytes UDP + 16 bytes SRT
-	if strings.Count(c.localAddr.String(), ":") < 2 {
-		headerSize += 20 // 20 bytes IPv4 header
-	} else {
-		headerSize += 40 // 40 bytes IPv6 header
-	}
-
-	// Initialize metrics BEFORE creating receiver and sender (they need metrics)
-	c.metrics = &metrics.ConnectionMetrics{
-		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
-		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
-		SenderLockTiming:       &metrics.LockTimingMetrics{},
-	}
-	c.metrics.HeaderSize.Store(headerSize)
-
-	// Register with metrics registry
-	metrics.RegisterConnection(c.socketId, c.metrics)
+	// Metrics already created and registered via createConnectionMetrics()
 
 	c.tick = 10 * time.Millisecond
 
@@ -433,7 +450,8 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	c.peerIdleTimeout = time.NewTimer(c.config.PeerIdleTimeout)
 	c.peerIdleTimeoutLastReset.Store(time.Now().UnixNano())
 
-	// Start connection goroutines with waitgroup tracking
+	// Start connection goroutines with waitgroup tracking.
+	// Safe to start immediately because onSend and metrics are pre-initialized.
 	c.connWg.Add(1)
 	go func() {
 		defer c.connWg.Done()
@@ -717,6 +735,11 @@ func (c *srtConn) pop(p packet.Packet) {
 		c.cryptoLock.Unlock()
 
 		c.log("data:send:dump", func() string { return p.Dump() })
+	}
+
+	// Check optional send filter (for testing packet drops)
+	if c.sendFilter != nil && !c.sendFilter(p) {
+		return // Filter returned false - drop packet
 	}
 
 	// Send the packet on the wire

@@ -1492,6 +1492,326 @@ writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
 
 ---
 
+### 🔴 ISSUE-002: Pre-existing Race Conditions in Connection Tests
+
+**Problem**: Running `go test ./ -race` fails with data race warnings. These are **pre-existing issues** in the gosrt codebase, NOT introduced by the NAK btree implementation.
+
+**Tests Affected**:
+- `TestConnectionMetricsDataPackets`
+- `TestConnectionMetricsNAKRetransmit`
+- `TestListenerSendMetricsNAK`
+- `TestListenerSendMetricsAllControlTypes`
+- `TestEncryptionRetransmit`
+
+**Race Condition Details**:
+
+```
+WARNING: DATA RACE
+Read at 0x00c000418408 by goroutine 54:
+  github.com/datarhei/gosrt.(*srtConn).pop()
+      /home/das/Downloads/srt/gosrt/connection.go:723 +0xb54
+  github.com/datarhei/gosrt.(*srtConn).sendACK()
+      /home/das/Downloads/srt/gosrt/connection.go:1675 +0x927
+  github.com/datarhei/gosrt/congestion/live.(*receiver).Tick()
+      /home/das/Downloads/srt/gosrt/congestion/live/receive.go:832 +0x9d
+  github.com/datarhei/gosrt.(*srtConn).ticker()
+      /home/das/Downloads/srt/gosrt/connection.go:536 +0x252
+
+Previous write at 0x00c000418408 by goroutine 51:
+  github.com/datarhei/gosrt.(*connRequest).Accept()
+      /home/das/Downloads/srt/gosrt/conn_request.go:503 +0xd32
+```
+
+**Root Cause Analysis**:
+
+The race is on the `c.onSend` function field in `srtConn`:
+
+1. **Connection Creation** (`newSRTConn()`):
+   - Creates connection with `onSend = config.onSend` (may be nil)
+   - If nil, sets `c.onSend = func(p packet.Packet) {}` (empty default)
+   - **Immediately starts the ticker goroutine** at line 450
+
+2. **Accept Path** (`conn_request.go:503`):
+   - After `newSRTConn()` returns, `Accept()` sets `conn.onSend` to the actual function:
+     ```go
+     conn.onSend = func(p packet.Packet) {
+         req.ln.sendWithMetrics(p, conn.metrics)
+     }
+     ```
+
+3. **Race Window**:
+   - The ticker goroutine may call `c.onSend(p)` (line 723) BEFORE `Accept()` assigns the real function
+   - This is a classic TOCTOU (time-of-check-time-of-use) race on a struct field
+
+**Chicken-and-Egg Problem**:
+
+The closure needs to capture `conn.metrics`, but `conn` doesn't exist until AFTER `newSRTConn()` returns:
+
+```go
+// conn_request.go lines 478-505:
+conn := newSRTConn(srtConnConfig{
+    // ...
+    onSend: nil, // ← Can't set closure here - conn doesn't exist yet!
+})
+
+// Now conn exists, so we can create the closure:
+conn.onSend = func(p packet.Packet) {
+    req.ln.sendWithMetrics(p, conn.metrics) // ← Needs conn.metrics!
+}
+```
+
+The sequence is:
+1. To build the closure, you need `conn.metrics`
+2. To get `conn`, you need to call `newSRTConn(config)`
+3. But `config` needs the closure!
+
+So the current code passes `onSend: nil` and sets it after, but `newSRTConn()` already started the ticker which may call `c.onSend()` before it's set.
+
+**Why This Was Not Caught Earlier**:
+- Without `-race` flag, the Go runtime doesn't detect this
+- The race window is small (microseconds), so it rarely causes actual failures
+- The default empty function `func(p packet.Packet) {}` is safe but loses packets
+
+**NOT Related to NAK btree**:
+- This race existed before NAK btree implementation
+- NAK btree code paths (`congestion/live/receive.go`) appear in the stack trace only because `Tick()` calls `sendACK()`, which calls `pop()`, which calls `c.onSend()`
+- The NAK btree tests (`./congestion/live/...`) pass with `-race` because they don't involve full connection setup
+
+**Verification**:
+```bash
+# All tests now pass with race detector
+go test ./ -race -count=1                      # ✅ PASS
+go test ./congestion/live/... -race -count=1   # ✅ PASS
+```
+
+**Solution Implemented**:
+
+Combined approach using **Option A (Atomic Function Pointer)** and **Option D (Defer Ticker Start)**:
+
+1. **`connection.go`**:
+   - Changed `onSend` from `func(p packet.Packet)` to `atomic.Pointer[func(p packet.Packet)]`
+   - Updated `newSRTConn()` to use `c.onSend.Store(&config.onSend)` instead of direct assignment
+   - Updated `pop()` to use `if fn := c.onSend.Load(); fn != nil { (*fn)(p) }`
+   - Created new `Start()` method that starts all goroutines (ticker, networkQueueReader, etc.)
+   - `newSRTConn()` no longer starts goroutines - just initializes the connection
+
+2. **`conn_request.go`**:
+   - Sets `onSend` using `conn.onSend.Store(&sendFn)`
+   - Calls `conn.Start()` AFTER setting `onSend`
+
+3. **`dial.go`**:
+   - Calls `conn.Start()` after `newSRTConn()` returns
+
+4. **`connection_linux.go`**:
+   - Updated io_uring path to use `c.onSend.Store(&sendFn)`
+
+5. **Test files updated**:
+   - `connection_test.go`: Uses `onSend.Load()` and `onSend.Store()`
+   - `connection_metrics_test.go`: Uses `onSend.Load()` and `onSend.Store()`
+   - `connection_io_uring_bench_test.go`: Uses `onSend.Load()`
+
+**Verification**:
+```bash
+$ go test ./ -race -count=1
+ok  	github.com/datarhei/gosrt	36.384s
+```
+
+All race conditions on `onSend` are now eliminated.
+
+**Status**: ✅ Complete
+
+---
+
+## ISSUE-002b: Deeper Root Cause Analysis - Metrics Creation Location
+
+**Observation**: While ISSUE-002 is fixed, the user correctly identified that the atomic pointer solution treats the symptom rather than the root cause. The fundamental issue is **where metrics are created**.
+
+### Current Architecture (Problematic)
+
+```
+Accept() / Dial()
+    │
+    ├── newSRTConn(config{onSend: nil})  ← Can't pass onSend yet!
+    │       │
+    │       ├── Create c.metrics         ← Metrics created INSIDE
+    │       ├── Create receiver/sender (need metrics)
+    │       └── Return conn
+    │
+    ├── Build onSend closure             ← Needs conn.metrics
+    │   conn.onSend = func(p) {
+    │       sendWithMetrics(p, conn.metrics)  ← Chicken-and-egg!
+    │   }
+    │
+    └── conn.Start()                     ← Start goroutines
+```
+
+The problem: `onSend` closure needs `conn.metrics`, but `conn` (with its metrics) doesn't exist until AFTER `newSRTConn()` returns.
+
+### Root Cause: Metrics Created in Wrong Location
+
+Looking at `connection.go:374-383`:
+```go
+// Initialize metrics BEFORE creating receiver and sender (they need metrics)
+c.metrics = &metrics.ConnectionMetrics{
+    HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+    ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+    SenderLockTiming:       &metrics.LockTimingMetrics{},
+}
+c.metrics.HeaderSize.Store(headerSize)
+
+// Register with metrics registry
+metrics.RegisterConnection(c.socketId, c.metrics)
+```
+
+The metrics are created INSIDE `newSRTConn()`. But metrics creation only depends on:
+- `headerSize` - computed from `localAddr` (available before call)
+- `socketId` - available before call (passed in config)
+
+**Nothing prevents creating metrics BEFORE calling `newSRTConn()`.**
+
+### Proposed Cleaner Architecture
+
+```
+Accept() / Dial()
+    │
+    ├── Create metrics FIRST             ← Move metrics creation here
+    │   metrics := createConnectionMetrics(localAddr, socketId)
+    │
+    ├── Build onSend closure             ← Now possible!
+    │   onSend := func(p) {
+    │       sendWithMetrics(p, metrics)  ← Has metrics reference
+    │   }
+    │
+    └── newSRTConn(config{
+            onSend:  onSend,             ← Fully formed closure
+            metrics: metrics,            ← Pre-created metrics
+        })
+            │
+            ├── Use passed metrics (don't create)
+            ├── Create receiver/sender with metrics
+            └── Start goroutines immediately ← No race!
+```
+
+### Implementation Changes Required
+
+**1. Add `metrics` to `srtConnConfig`:**
+```go
+type srtConnConfig struct {
+    // ... existing fields ...
+    metrics *metrics.ConnectionMetrics  // NEW: Pre-created metrics
+}
+```
+
+**2. Extract metrics creation to helper:**
+```go
+// In metrics/metrics.go or connection.go
+func createConnectionMetrics(localAddr net.Addr, socketId uint32) *metrics.ConnectionMetrics {
+    headerSize := uint64(8 + 16) // UDP + SRT
+    if strings.Count(localAddr.String(), ":") < 2 {
+        headerSize += 20 // IPv4
+    } else {
+        headerSize += 40 // IPv6
+    }
+
+    m := &metrics.ConnectionMetrics{
+        HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+        ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+        SenderLockTiming:       &metrics.LockTimingMetrics{},
+    }
+    m.HeaderSize.Store(headerSize)
+    metrics.RegisterConnection(socketId, m)
+    return m
+}
+```
+
+**3. Update `conn_request.go`:**
+```go
+// Create metrics FIRST
+connMetrics := createConnectionMetrics(req.ln.addr, req.socketId)
+
+// Build onSend closure with metrics reference
+onSend := func(p packet.Packet) {
+    req.ln.sendWithMetrics(p, connMetrics)
+}
+
+// Pass both to newSRTConn
+conn := newSRTConn(srtConnConfig{
+    // ... existing fields ...
+    onSend:  onSend,      // Fully formed - no nil!
+    metrics: connMetrics, // Pre-created
+})
+// No need for conn.Start() - goroutines start in newSRTConn()
+```
+
+**4. Update `newSRTConn()`:**
+```go
+func newSRTConn(config srtConnConfig) *srtConn {
+    c := &srtConn{...}
+
+    // Use passed metrics instead of creating
+    c.metrics = config.metrics
+
+    // onSend already set from config - no nil check needed
+    c.onSend = config.onSend
+
+    // ... rest of initialization ...
+
+    // Start goroutines immediately - safe because onSend is set
+    go c.ticker(c.ctx)
+    // ...
+
+    return c
+}
+```
+
+### Comparison of Solutions
+
+| Aspect | Current Fix (Atomic + Start()) | Proposed (Pre-create Metrics) |
+|--------|-------------------------------|-------------------------------|
+| Complexity | Medium - 2 mechanisms | Low - just reorder creation |
+| Runtime overhead | Atomic load on every send | None |
+| Code clarity | Requires understanding atomic/Start() | Follows natural data flow |
+| Goroutine safety | Deferred start + atomic | No special handling needed |
+| Test injection | Works (atomic swap) | Slightly harder (metrics fixed) |
+| Backward compat | Requires updating tests | Requires updating call sites |
+
+### Why We Chose the Current Fix
+
+1. **Lower risk**: Atomic + Start() is a surgical change
+2. **Test injection**: Tests can still swap `onSend` for packet dropping
+3. **Faster to implement**: Didn't require restructuring call sites
+
+### Implementation Complete
+
+The "Pre-create Metrics" approach has been fully implemented:
+
+1. ✅ Extracted metrics creation to `createConnectionMetrics()` function
+2. ✅ Updated all call sites (`conn_request.go`, `dial.go`)
+3. ✅ Removed the atomic wrapper on `onSend` - now a regular function field
+4. ✅ Removed the `Start()` method - goroutines start in `newSRTConn()` again
+5. ✅ Added `SendFilter` to `Config` for test packet injection (set before Dial())
+6. ✅ Updated tests to use `config.SendFilter` instead of modifying `onSend` after connection
+
+**Key Changes**:
+- `config.go`: Added `SendFilter func(p packet.Packet) bool` for safe test injection
+- `connection.go`: Added `createConnectionMetrics()`, added `sendFilter` field, check filter in `pop()`
+- `conn_request.go`: Pre-create metrics, build onSend closure with metrics, pass to newSRTConn
+- `dial.go`: Pre-create metrics, pass to newSRTConn
+- Test files: Use `config.SendFilter` to inject packet drops before dialing
+
+**Verification**:
+```bash
+$ go test ./... -race -count=1
+ok  	github.com/datarhei/gosrt	36.380s
+# All packages pass with race detector
+```
+
+All race conditions eliminated with no runtime overhead on the hot path!
+
+**Status**: ✅ Complete
+
+---
+
 ## Test Results Log
 
 Track test runs:

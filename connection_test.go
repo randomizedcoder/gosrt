@@ -261,31 +261,27 @@ func TestEncryptionRetransmit(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
+		// Set up packet drop filter BEFORE dialing (to avoid race)
+		counter := 0
 		config := DefaultConfig()
 		config.StreamId = "publish"
 		config.Passphrase = "foobarfoobar"
-
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
-		}
-
-		counter := 0
-
-		dialer, _ := conn.(*dialer)
-		originalOnSend := dialer.conn.onSend
-		dialer.conn.onSend = func(p packet.Packet) {
+		config.SendFilter = func(p packet.Packet) bool {
 			if !p.Header().IsControlPacket {
 				// Drop every 2nd original packet
 				if !p.Header().RetransmittedPacketFlag {
 					counter++
 					if counter%2 == 0 {
-						return
+						return false // Drop this packet
 					}
 				}
 			}
+			return true // Send the packet
+		}
 
-			originalOnSend(p)
+		conn, err := testDial(t, "127.0.0.1:6003", config)
+		if !assert.NoError(t, err) {
+			panic(err.Error())
 		}
 
 		for i := 0; i < 5; i++ {

@@ -392,8 +392,22 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
+		// Set up packet drop filter BEFORE dialing (to avoid race)
+		counter := 0
 		config := DefaultConfig()
 		config.StreamId = "publish"
+		config.SendFilter = func(p packet.Packet) bool {
+			if !p.Header().IsControlPacket {
+				if !p.Header().RetransmittedPacketFlag {
+					counter++
+					if counter%2 == 0 {
+						// Drop this packet
+						return false
+					}
+				}
+			}
+			return true
+		}
 
 		conn, err := testDial(t, "127.0.0.1:6015", config)
 		if !assert.NoError(t, err) {
@@ -402,24 +416,6 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 
 		if d, ok := conn.(*dialer); ok {
 			writerSocketId = d.conn.socketId
-		}
-
-		// Inject packet drops to trigger NAKs
-		// Drop every 2nd original (non-retransmit) packet
-		counter := 0
-		dialer, _ := conn.(*dialer)
-		originalOnSend := dialer.conn.onSend
-		dialer.conn.onSend = func(p packet.Packet) {
-			if !p.Header().IsControlPacket {
-				if !p.Header().RetransmittedPacketFlag {
-					counter++
-					if counter%2 == 0 {
-						// Drop this packet - don't call originalOnSend
-						return
-					}
-				}
-			}
-			originalOnSend(p)
 		}
 
 		// Write messages
@@ -651,8 +647,22 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
+		// Set up packet drop filter BEFORE dialing (to avoid race)
+		counter := 0
 		config := DefaultConfig()
 		config.StreamId = "publish"
+		config.SendFilter = func(p packet.Packet) bool {
+			if !p.Header().IsControlPacket {
+				if !p.Header().RetransmittedPacketFlag {
+					counter++
+					if counter%2 == 0 {
+						// Drop this packet
+						return false
+					}
+				}
+			}
+			return true
+		}
 
 		conn, err := testDial(t, "127.0.0.1:6018", config)
 		if !assert.NoError(t, err) {
@@ -661,24 +671,6 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 
 		if d, ok := conn.(*dialer); ok {
 			writerSocketId = d.conn.socketId
-		}
-
-		// Inject packet drops to trigger NAKs from the SERVER
-		// Drop every 2nd original (non-retransmit) packet
-		counter := 0
-		dialer, _ := conn.(*dialer)
-		originalOnSend := dialer.conn.onSend
-		dialer.conn.onSend = func(p packet.Packet) {
-			if !p.Header().IsControlPacket {
-				if !p.Header().RetransmittedPacketFlag {
-					counter++
-					if counter%2 == 0 {
-						// Drop this packet - don't call originalOnSend
-						return
-					}
-				}
-			}
-			originalOnSend(p)
 		}
 
 		// Write messages
@@ -990,8 +982,22 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
+		// Set up packet drop filter BEFORE dialing (to avoid race)
+		counter := 0
 		config := DefaultConfig()
 		config.StreamId = "publish"
+		config.SendFilter = func(p packet.Packet) bool {
+			if !p.Header().IsControlPacket {
+				if !p.Header().RetransmittedPacketFlag {
+					counter++
+					if counter%3 == 0 {
+						// Drop every 3rd original packet
+						return false
+					}
+				}
+			}
+			return true
+		}
 
 		conn, err := testDial(t, "127.0.0.1:6020", config)
 		if !assert.NoError(t, err) {
@@ -1000,23 +1006,6 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 
 		if d, ok := conn.(*dialer); ok {
 			writerSocketId = d.conn.socketId
-		}
-
-		// Inject packet drops to trigger NAKs from the SERVER
-		counter := 0
-		dialer, _ := conn.(*dialer)
-		originalOnSend := dialer.conn.onSend
-		dialer.conn.onSend = func(p packet.Packet) {
-			if !p.Header().IsControlPacket {
-				if !p.Header().RetransmittedPacketFlag {
-					counter++
-					if counter%3 == 0 {
-						// Drop every 3rd original packet
-						return
-					}
-				}
-			}
-			originalOnSend(p)
 		}
 
 		// Write multiple messages to trigger:

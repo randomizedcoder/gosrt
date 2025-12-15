@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/datarhei/gosrt/packet"
 )
 
 const (
@@ -313,6 +315,15 @@ type Config struct {
 	// When enabled, oldest/most-urgent packets are retransmitted first
 	// Default: false (existing behavior: newest-first)
 	HonorNakOrder bool
+
+	// --- Testing Configuration ---
+
+	// SendFilter is an optional function called before each packet is sent.
+	// If set and returns false, the packet is dropped (not sent).
+	// This is primarily for testing (e.g., simulating packet loss).
+	// Must be set BEFORE Dial()/Accept() - cannot be modified after connection starts.
+	// Default: nil (no filtering)
+	SendFilter func(p packet.Packet) bool
 }
 
 // DefaultConfig is the default configuration for a SRT connection

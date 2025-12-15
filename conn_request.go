@@ -473,7 +473,18 @@ func (req *connRequest) Accept() (Conn, error) {
 		}
 	}
 
-	// Create a new connection
+	// Create metrics FIRST - this allows building onSend closure before connection creation,
+	// eliminating the initialization race condition.
+	connMetrics := createConnectionMetrics(req.ln.addr, req.socketId)
+
+	// Build onSend closure with pre-created metrics.
+	// This is the fallback path used when io_uring is disabled.
+	// (io_uring path replaces onSend with c.send in connection_linux.go)
+	onSend := func(p packet.Packet) {
+		req.ln.sendWithMetrics(p, connMetrics)
+	}
+
+	// Create a new connection with fully initialized onSend and metrics
 	req.ln.connWg.Add(1) // Increment waitgroup before creating connection
 	conn := newSRTConn(srtConnConfig{
 		version:                     req.handshake.Version,
@@ -489,20 +500,15 @@ func (req *connRequest) Accept() (Conn, error) {
 		initialPacketSequenceNumber: req.handshake.InitialPacketSequenceNumber,
 		crypto:                      req.crypto,
 		keyBaseEncryption:           packet.EvenKeyEncrypted,
-		onSend:                      nil, // Will be set below after connection is created
+		onSend:                      onSend,                // Fully initialized - no race!
+		sendFilter:                  req.config.SendFilter, // Optional test filter
 		onShutdown:                  req.ln.handleShutdown,
 		logger:                      req.config.Logger,
 		socketFd:                    socketFd,
 		parentCtx:                   req.ln.ctx,
 		parentWg:                    &req.ln.connWg,
+		metrics:                     connMetrics, // Pre-created - no race!
 	})
-
-	// Set onSend with a closure that captures conn.metrics for proper metrics tracking.
-	// This is the fallback path used when io_uring is disabled.
-	// (io_uring path sets onSend to c.send in connection_linux.go)
-	conn.onSend = func(p packet.Packet) {
-		req.ln.sendWithMetrics(p, conn.metrics)
-	}
 
 	req.ln.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })
 

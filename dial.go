@@ -669,7 +669,11 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			}
 		}
 
-		// Create a new connection
+		// Create metrics FIRST - this allows building onSend closure before connection creation,
+		// eliminating the initialization race condition.
+		connMetrics := createConnectionMetrics(dl.localAddr, dl.socketId)
+
+		// Create a new connection with fully initialized onSend and metrics
 		dl.connWg.Add(1) // Increment waitgroup before creating connection
 		conn := newSRTConn(srtConnConfig{
 			version:                     cif.Version,
@@ -686,12 +690,14 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			initialPacketSequenceNumber: cif.InitialPacketSequenceNumber,
 			crypto:                      dl.crypto,
 			keyBaseEncryption:           packet.EvenKeyEncrypted,
-			onSend:                      dl.send, // Fallback if io_uring disabled
+			onSend:                      dl.send,              // Fallback if io_uring disabled
+			sendFilter:                  dl.config.SendFilter, // Optional test filter
 			onShutdown:                  func(socketId uint32) { dl.Close() },
 			logger:                      dl.config.Logger,
 			socketFd:                    socketFd,
 			parentCtx:                   dl.ctx,
 			parentWg:                    &dl.connWg,
+			metrics:                     connMetrics, // Pre-created - no race!
 		})
 
 		dl.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })

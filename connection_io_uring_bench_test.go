@@ -80,15 +80,20 @@ func createTestConnectionWithIoUring(tb testing.TB, enableIoUring bool) (*srtCon
 	defer cancel()
 	var wg sync.WaitGroup
 
+	// Pre-create metrics (required by newSRTConn)
+	localAddr := udpConn.LocalAddr()
+	socketId := uint32(0x12345678)
+	connMetrics := createConnectionMetrics(localAddr, socketId)
+
 	// Create connection config
 	connConfig := srtConnConfig{
 		version:                     5,
 		isCaller:                    false,
-		localAddr:                   udpConn.LocalAddr(),
+		localAddr:                   localAddr,
 		remoteAddr:                  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
 		config:                      config,
 		start:                       time.Now(),
-		socketId:                    0x12345678,
+		socketId:                    socketId,
 		peerSocketId:                0x87654321,
 		tsbpdTimeBase:               0,
 		tsbpdDelay:                  120000, // 120ms in microseconds
@@ -102,6 +107,7 @@ func createTestConnectionWithIoUring(tb testing.TB, enableIoUring bool) (*srtCon
 		socketFd:                    socketFd,
 		parentCtx:                   ctx,
 		parentWg:                    &wg,
+		metrics:                     connMetrics,
 	}
 
 	wg.Add(1) // Increment waitgroup before creating connection
