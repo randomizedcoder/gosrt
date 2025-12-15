@@ -671,7 +671,7 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 
 		// Create metrics FIRST - this allows building onSend closure before connection creation,
 		// eliminating the initialization race condition.
-		connMetrics := createConnectionMetrics(dl.localAddr, dl.socketId)
+		connMetrics := createConnectionMetrics(dl.localAddr, dl.socketId, dl.config.InstanceName)
 
 		// Create a new connection with fully initialized onSend and metrics
 		dl.connWg.Add(1) // Increment waitgroup before creating connection

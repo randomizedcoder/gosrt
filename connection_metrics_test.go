@@ -134,7 +134,7 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 	require.NotEmpty(t, dataReader.String())
 
 	// Look up metrics by socket ID
-	connections, _ := metrics.GetConnections()
+	connections, _, _ := metrics.GetConnections()
 
 	// Verify writer metrics (sender side)
 	if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
@@ -281,7 +281,7 @@ func TestConnectionMetricsACKFlow(t *testing.T) {
 	<-readerDone
 
 	// Look up metrics
-	connections, _ := metrics.GetConnections()
+	connections, _, _ := metrics.GetConnections()
 
 	// Writer should have received ACKs (and sent ACKACKs)
 	if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
@@ -437,7 +437,7 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 	require.GreaterOrEqual(t, receivedMessages, 18, "Should receive at least 18 of 20 messages via retransmit")
 
 	// Verify NAK/retransmit counters
-	connections, _ := metrics.GetConnections()
+	connections, _, _ := metrics.GetConnections()
 
 	if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
 		recvNAK := writerMetrics.PktRecvNAKSuccess.Load()
@@ -517,7 +517,7 @@ func TestConnectionMetricsControlPackets(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Check control packet metrics
-	connections, _ := metrics.GetConnections()
+	connections, _, _ := metrics.GetConnections()
 
 	// Client metrics
 	if clientMetrics, ok := connections[clientSocketId]; ok && clientMetrics != nil {
@@ -687,7 +687,7 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 
 	// Verify the SERVER (listener) tracked sending NAKs
 	// This is the critical check that would have caught Bug 3!
-	connections, _ := metrics.GetConnections()
+	connections, _, _ := metrics.GetConnections()
 
 	// The server-side receiver should have SENT NAKs (tracked as PktSentNAKSuccess)
 	serverMetricsChecked := false
@@ -821,7 +821,7 @@ func TestListenerSendMetricsACK(t *testing.T) {
 	<-readerDone
 
 	// Verify the SERVER (listener) tracked sending ACKs
-	connections, _ := metrics.GetConnections()
+	connections, _, _ := metrics.GetConnections()
 
 	if serverMetrics, ok := connections[serverReceiverSocketId]; ok && serverMetrics != nil {
 		sentACK := serverMetrics.PktSentACKSuccess.Load()
@@ -1058,7 +1058,7 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 	})
 
 	// ===== CLIENT-SIDE VERIFICATION (these use dialer path, should work) =====
-	connections, _ := metrics.GetConnections()
+	connections, _, _ := metrics.GetConnections()
 
 	t.Run("ClientWriter_ReceivesNAKsFromServer", func(t *testing.T) {
 		// Verify client received the NAKs sent by server
@@ -1196,7 +1196,7 @@ func TestConnectionMetricsPrometheusMatch(t *testing.T) {
 		time.Sleep(1 * time.Second)
 
 		// Get internal metrics
-		connections, _ := metrics.GetConnections()
+		connections, _, _ := metrics.GetConnections()
 		if m, ok := connections[writerSocketId]; ok && m != nil {
 			internalDataSent := m.PktSentDataSuccess.Load()
 			t.Logf("Internal PktSentDataSuccess: %d", internalDataSent)

@@ -211,6 +211,15 @@ run_test "NAK btree full config" "-usenakbtree -nakrecentpercent 0.2 -nakmergega
 # Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
 run_test "All flag types" "-statisticsinterval 10s -keepalivethreshold 0.6 -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"KeepaliveThreshold" *: *0\.6.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 
+# Test 37: InstanceName flag (server)
+run_test "InstanceName flag (server)" "-name TestServer" '"InstanceName" *: *"TestServer"' "$SERVER_BIN"
+
+# Test 38: InstanceName flag (client)
+run_test "InstanceName flag (client)" "-name TestClient" '"InstanceName" *: *"TestClient"' "$CLIENT_BIN"
+
+# Test 39: InstanceName with other flags
+run_test "InstanceName with other flags" "-name MyServer -latency 200" '"InstanceName" *: *"MyServer".*"Latency" *: *200000000' "$SERVER_BIN"
+
 echo ""
 echo "================================"
 echo "Results: $TESTS_PASSED passed, $TESTS_FAILED failed"

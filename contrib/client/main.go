@@ -206,26 +206,33 @@ func main() {
 	clientMetrics := &metrics.ConnectionMetrics{}
 
 	// Start throughput stats display loop (uses shared common function)
-	// Shows receive stats: bytes, packets, gaps, skips (true losses), and retransmits
+	// Shows receive stats: bytes, packets, gaps, NAKs, skips (true losses), and retransmits
 	// Recovery rate = (gaps - skips) / gaps = % of gaps successfully retransmitted
+	// Use instance name from config if set, otherwise default to "SUB"
+	instanceLabel := "SUB"
+	if config.InstanceName != "" {
+		instanceLabel = config.InstanceName
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		common.RunThroughputDisplayWithLabel(ctx, *common.StatsPeriod, "SUB", func() (uint64, uint64, uint64, uint64, uint64) {
-			// Get gaps, skips, and retransmit counts from the actual connection's metrics
-			var gaps, skips, retrans uint64
+		common.RunThroughputDisplayWithLabel(ctx, *common.StatsPeriod, instanceLabel, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
+			// Get gaps, NAKs, skips, and retransmit counts from the actual connection's metrics
+			var gaps, naks, skips, retrans uint64
 			if socketId := connSocketId.Load(); socketId != 0 {
 				// Query the actual connection metrics
-				conns, _ := metrics.GetConnections()
+				conns, _, _ := metrics.GetConnections()
 				if connMetrics, ok := conns[socketId]; ok && connMetrics != nil {
-					gaps = connMetrics.CongestionRecvPktLoss.Load()          // Sequence gaps detected
-					skips = connMetrics.CongestionRecvPktSkippedTSBPD.Load() // TRUE losses (TSBPD expired)
+					gaps = connMetrics.CongestionRecvPktLoss.Load()             // Sequence gaps detected
+					naks = connMetrics.CongestionRecvNAKPktsTotal.Load()        // NAK packets sent
+					skips = connMetrics.CongestionRecvPktSkippedTSBPD.Load()    // TRUE losses (TSBPD expired)
 					retrans = connMetrics.CongestionRecvPktRetrans.Load()
 				}
 			}
 			return clientMetrics.ByteRecvDataSuccess.Load(),
 				clientMetrics.PktRecvDataSuccess.Load(),
 				gaps,
+				naks,
 				skips,
 				retrans
 		})

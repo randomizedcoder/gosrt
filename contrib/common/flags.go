@@ -99,6 +99,9 @@ var (
 	// Local address binding for clients
 	LocalAddr = flag.String("localaddr", "", "Local IP address to bind to when connecting (e.g., 127.0.0.20)")
 
+	// Instance name for labeling in metrics and logs
+	InstanceName = flag.String("name", "", "Instance name for labeling in metrics, logs, and JSON output (e.g., Control, Test, Server1)")
+
 	// io_uring output configuration flag (client-side)
 	// WARNING: This feature uses the 'unsafe' package for direct memory access.
 	IoUringOutput = flag.Bool("iouringoutput", false,
@@ -339,5 +342,8 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["localaddr"] {
 		config.LocalAddr = *LocalAddr
+	}
+	if FlagSet["name"] {
+		config.InstanceName = *InstanceName
 	}
 }

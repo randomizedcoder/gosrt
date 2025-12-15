@@ -165,7 +165,7 @@ func TestConnectionLifecycleCounters(t *testing.T) {
 	socketId := uint32(0x11111111)
 
 	// Register connection - should increment active and established
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 
 	require.Equal(t, origActive+1, lm.ConnectionsActive.Load())
 	require.Equal(t, origEstablished+1, lm.ConnectionsEstablished.Load())
@@ -180,7 +180,7 @@ func TestConnectionLifecycleCounters(t *testing.T) {
 	// Test peer idle timeout close reason
 	socketId2 := uint32(0x22222222)
 	m2 := NewConnectionMetrics()
-	RegisterConnection(socketId2, m2)
+	RegisterConnection(socketId2, m2, "")
 	UnregisterConnection(socketId2, CloseReasonPeerIdle)
 
 	require.Equal(t, origClosedPeerIdle+1, lm.ConnectionsClosedPeerIdle.Load())
@@ -205,7 +205,7 @@ func TestConnectionLifecycleBalance(t *testing.T) {
 	for i, reason := range reasons {
 		socketId := uint32(0x30000000 + i)
 		m := NewConnectionMetrics()
-		RegisterConnection(socketId, m)
+		RegisterConnection(socketId, m, "")
 		UnregisterConnection(socketId, reason)
 	}
 
@@ -230,7 +230,7 @@ func TestConnectionLifecyclePrometheusExport(t *testing.T) {
 	// Register and unregister a connection
 	socketId := uint32(0x44444444)
 	m := NewConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Write to builder

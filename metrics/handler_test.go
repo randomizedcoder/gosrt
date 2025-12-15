@@ -28,7 +28,7 @@ func TestPrometheusOutputFormat(t *testing.T) {
 	// Create a connection with known socket ID
 	socketId := uint32(0x12345678)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set some values
@@ -73,7 +73,7 @@ func TestPrometheusOutputFormat(t *testing.T) {
 func TestPrometheusCounterAccuracy(t *testing.T) {
 	socketId := uint32(0xABCD1234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set specific values
@@ -86,13 +86,13 @@ func TestPrometheusCounterAccuracy(t *testing.T) {
 
 	output := getPrometheusOutput(t)
 
-	// Verify exact values appear in output
-	require.Contains(t, output, `gosrt_connection_packets_received_total{socket_id="0xabcd1234",type="data",status="success"} 12345`)
-	require.Contains(t, output, `gosrt_connection_packets_sent_total{socket_id="0xabcd1234",type="data",status="success"} 67890`)
-	require.Contains(t, output, `gosrt_connection_bytes_received_total{socket_id="0xabcd1234",type="data",status="success"} 1234567890`)
-	require.Contains(t, output, `gosrt_connection_packets_received_total{socket_id="0xabcd1234",type="nak",status="success"} 42`)
-	require.Contains(t, output, `gosrt_connection_packets_sent_total{socket_id="0xabcd1234",type="nak",status="success"} 37`)
-	require.Contains(t, output, `gosrt_connection_retransmissions_from_nak_total{socket_id="0xabcd1234"} 99`)
+	// Verify exact values appear in output (with instance label)
+	require.Contains(t, output, `gosrt_connection_packets_received_total{socket_id="0xabcd1234",instance="default",type="data",status="success"} 12345`)
+	require.Contains(t, output, `gosrt_connection_packets_sent_total{socket_id="0xabcd1234",instance="default",type="data",status="success"} 67890`)
+	require.Contains(t, output, `gosrt_connection_bytes_received_total{socket_id="0xabcd1234",instance="default",type="data",status="success"} 1234567890`)
+	require.Contains(t, output, `gosrt_connection_packets_received_total{socket_id="0xabcd1234",instance="default",type="nak",status="success"} 42`)
+	require.Contains(t, output, `gosrt_connection_packets_sent_total{socket_id="0xabcd1234",instance="default",type="nak",status="success"} 37`)
+	require.Contains(t, output, `gosrt_connection_retransmissions_from_nak_total{socket_id="0xabcd1234",instance="default"} 99`)
 }
 
 // TestPrometheusExportsAllCounters uses reflection to verify every atomic counter
@@ -101,7 +101,7 @@ func TestPrometheusCounterAccuracy(t *testing.T) {
 func TestPrometheusExportsAllCounters(t *testing.T) {
 	socketId := uint32(0xDEADBEEF)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Use reflection to find all atomic.Uint64 and atomic.Int64 fields
@@ -234,7 +234,7 @@ func TestPrometheusExportsAllCounters(t *testing.T) {
 func TestPrometheusLabels(t *testing.T) {
 	socketId := uint32(0x99887766)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set values for different packet types
@@ -285,8 +285,8 @@ func TestPrometheusMultipleConnections(t *testing.T) {
 	m1 := newTestConnectionMetrics()
 	m2 := newTestConnectionMetrics()
 
-	RegisterConnection(socketId1, m1)
-	RegisterConnection(socketId2, m2)
+	RegisterConnection(socketId1, m1, "")
+	RegisterConnection(socketId2, m2, "")
 	defer UnregisterConnection(socketId1, CloseReasonGraceful)
 	defer UnregisterConnection(socketId2, CloseReasonGraceful)
 
@@ -296,11 +296,11 @@ func TestPrometheusMultipleConnections(t *testing.T) {
 
 	output := getPrometheusOutput(t)
 
-	// Verify both connections appear with correct values
+	// Verify both connections appear with correct values (with instance label)
 	require.Contains(t, output, `socket_id="0x11111111"`)
 	require.Contains(t, output, `socket_id="0x22222222"`)
-	require.Contains(t, output, `"0x11111111",type="data",status="success"} 1111`)
-	require.Contains(t, output, `"0x22222222",type="data",status="success"} 2222`)
+	require.Contains(t, output, `"0x11111111",instance="default",type="data",status="success"} 1111`)
+	require.Contains(t, output, `"0x22222222",instance="default",type="data",status="success"} 2222`)
 }
 
 // TestPrometheusRuntimeMetrics verifies Go runtime metrics are included
@@ -325,7 +325,7 @@ func TestPrometheusRuntimeMetrics(t *testing.T) {
 func TestPrometheusZeroFiltering(t *testing.T) {
 	socketId := uint32(0x77777777)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set some counters to non-zero, leave others at zero
@@ -352,7 +352,7 @@ func TestPrometheusZeroFiltering(t *testing.T) {
 func TestPrometheusCongestionMetrics(t *testing.T) {
 	socketId := uint32(0xCCCCCCCC)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set congestion control values
@@ -366,14 +366,14 @@ func TestPrometheusCongestionMetrics(t *testing.T) {
 
 	output := getPrometheusOutput(t)
 
-	// Verify congestion metrics are present
-	require.Contains(t, output, `gosrt_connection_congestion_packets_total{socket_id="0xcccccccc",direction="recv"} 5000`)
-	require.Contains(t, output, `gosrt_connection_congestion_packets_unique_total{socket_id="0xcccccccc",direction="recv"} 4900`)
-	require.Contains(t, output, `gosrt_connection_congestion_packets_lost_total{socket_id="0xcccccccc",direction="recv"} 100`)
-	require.Contains(t, output, `gosrt_connection_congestion_retransmissions_total{socket_id="0xcccccccc",direction="recv"} 50`)
-	require.Contains(t, output, `gosrt_connection_congestion_packets_total{socket_id="0xcccccccc",direction="send"} 6000`)
-	require.Contains(t, output, `gosrt_connection_congestion_packets_unique_total{socket_id="0xcccccccc",direction="send"} 5800`)
-	require.Contains(t, output, `gosrt_connection_congestion_retransmissions_total{socket_id="0xcccccccc",direction="send"} 200`)
+	// Verify congestion metrics are present (with instance label)
+	require.Contains(t, output, `gosrt_connection_congestion_packets_total{socket_id="0xcccccccc",instance="default",direction="recv"} 5000`)
+	require.Contains(t, output, `gosrt_connection_congestion_packets_unique_total{socket_id="0xcccccccc",instance="default",direction="recv"} 4900`)
+	require.Contains(t, output, `gosrt_connection_congestion_packets_lost_total{socket_id="0xcccccccc",instance="default",direction="recv"} 100`)
+	require.Contains(t, output, `gosrt_connection_congestion_retransmissions_total{socket_id="0xcccccccc",instance="default",direction="recv"} 50`)
+	require.Contains(t, output, `gosrt_connection_congestion_packets_total{socket_id="0xcccccccc",instance="default",direction="send"} 6000`)
+	require.Contains(t, output, `gosrt_connection_congestion_packets_unique_total{socket_id="0xcccccccc",instance="default",direction="send"} 5800`)
+	require.Contains(t, output, `gosrt_connection_congestion_retransmissions_total{socket_id="0xcccccccc",instance="default",direction="send"} 200`)
 }
 
 // TestPrometheusNAKDetailMetrics verifies NAK detail counters are exported
@@ -381,7 +381,7 @@ func TestPrometheusCongestionMetrics(t *testing.T) {
 func TestPrometheusNAKDetailMetrics(t *testing.T) {
 	socketId := uint32(0xdddddddd)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set NAK detail values (receiver side - sends NAKs)
@@ -397,19 +397,20 @@ func TestPrometheusNAKDetailMetrics(t *testing.T) {
 	output := getPrometheusOutput(t)
 
 	// Verify receiver-side NAK detail metrics (direction="sent" because receiver SENDS NAKs)
-	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",direction="sent",type="single"} 5`,
+	// With instance label
+	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",instance="default",direction="sent",type="single"} 5`,
 		"NAK single entries (sent by receiver)")
-	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",direction="sent",type="range"} 10`,
+	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",instance="default",direction="sent",type="range"} 10`,
 		"NAK range entries (sent by receiver)")
-	require.Contains(t, output, `gosrt_connection_nak_packets_requested_total{socket_id="0xdddddddd",direction="sent"} 50`,
+	require.Contains(t, output, `gosrt_connection_nak_packets_requested_total{socket_id="0xdddddddd",instance="default",direction="sent"} 50`,
 		"NAK packets requested (sent by receiver)")
 
 	// Verify sender-side NAK detail metrics (direction="recv" because sender RECEIVES NAKs)
-	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",direction="recv",type="single"} 4`,
+	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",instance="default",direction="recv",type="single"} 4`,
 		"NAK single entries (received by sender)")
-	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",direction="recv",type="range"} 8`,
+	require.Contains(t, output, `gosrt_connection_nak_entries_total{socket_id="0xdddddddd",instance="default",direction="recv",type="range"} 8`,
 		"NAK range entries (received by sender)")
-	require.Contains(t, output, `gosrt_connection_nak_packets_requested_total{socket_id="0xdddddddd",direction="recv"} 40`,
+	require.Contains(t, output, `gosrt_connection_nak_packets_requested_total{socket_id="0xdddddddd",instance="default",direction="recv"} 40`,
 		"NAK packets requested (received by sender)")
 }
 
@@ -439,7 +440,7 @@ func TestPrometheusOutputSize(t *testing.T) {
 		for i := 0; i < numConn; i++ {
 			socketId := uint32(0x50000000 + i)
 			m := newTestConnectionMetrics()
-			RegisterConnection(socketId, m)
+			RegisterConnection(socketId, m, "")
 			defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 			// Set realistic values
@@ -483,7 +484,7 @@ func BenchmarkPrometheusHandlerNoConnections(b *testing.B) {
 func BenchmarkPrometheusHandlerSingleConnection(b *testing.B) {
 	socketId := uint32(0x12345678)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m)
+	RegisterConnection(socketId, m, "")
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set realistic counter values
@@ -517,7 +518,7 @@ func BenchmarkPrometheusHandler10Connections(b *testing.B) {
 		socketId := uint32(0x10000000 + i)
 		m := newTestConnectionMetrics()
 		connections[i] = m
-		RegisterConnection(socketId, m)
+		RegisterConnection(socketId, m, "")
 		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		// Set realistic values
@@ -546,7 +547,7 @@ func BenchmarkPrometheusHandler100Connections(b *testing.B) {
 		socketId := uint32(0x20000000 + i)
 		m := newTestConnectionMetrics()
 		connections[i] = m
-		RegisterConnection(socketId, m)
+		RegisterConnection(socketId, m, "")
 		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		m.PktRecvDataSuccess.Store(uint64(1000 * (i + 1)))
@@ -583,7 +584,7 @@ func BenchmarkPrometheusOutputSize(b *testing.B) {
 			for i := 0; i < sc.connections; i++ {
 				socketId := uint32(0x40000000 + i)
 				m := newTestConnectionMetrics()
-				RegisterConnection(socketId, m)
+				RegisterConnection(socketId, m, "")
 				defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 				m.PktRecvDataSuccess.Store(uint64(100000 * (i + 1)))
@@ -616,7 +617,7 @@ func BenchmarkPrometheusHandlerParallel(b *testing.B) {
 	for i := 0; i < 5; i++ {
 		socketId := uint32(0x30000000 + i)
 		m := newTestConnectionMetrics()
-		RegisterConnection(socketId, m)
+		RegisterConnection(socketId, m, "")
 		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		m.PktRecvDataSuccess.Store(uint64(50000 * (i + 1)))

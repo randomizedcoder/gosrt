@@ -48,7 +48,7 @@ type StabilizationMetrics struct {
 // GetStabilizationMetrics extracts stabilization-relevant metrics from a ConnectionMetrics.
 // This aggregates across all connections in the registry.
 func GetStabilizationMetricsFromRegistry() StabilizationMetrics {
-	connections, _ := GetConnections()
+	connections, _, _ := GetConnections()
 
 	var result StabilizationMetrics
 	for _, m := range connections {

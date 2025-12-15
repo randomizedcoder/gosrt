@@ -825,10 +825,10 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		ControlServer: ControlSRTConfig,
 		TestCG:        ControlSRTConfig,
 		TestServer:    ControlSRTConfig.WithIoUringRecv(), // Changed: io_uring recv
-		TestDuration:  10 * time.Second,                   // Shorter for debug logging
+		TestDuration:  30 * time.Second,
 		Bitrate:       5_000_000,
 		StatsPeriod:   10 * time.Second,
-		LogTopics:     "listen:io_uring:completion:seq", // Debug: log sequence numbers
+		// LogTopics:     "listen:io_uring:completion:seq", // Debug: uncomment to log sequence numbers
 	},
 
 	// Test 6: Server btree packet store

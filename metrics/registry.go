@@ -17,12 +17,14 @@ const (
 
 // MetricsRegistry holds all connection metrics
 type MetricsRegistry struct {
-	connections map[uint32]*ConnectionMetrics
-	mu          sync.RWMutex
+	connections   map[uint32]*ConnectionMetrics
+	instanceNames map[uint32]string // socketId -> instance name
+	mu            sync.RWMutex
 }
 
 var globalRegistry = &MetricsRegistry{
-	connections: make(map[uint32]*ConnectionMetrics),
+	connections:   make(map[uint32]*ConnectionMetrics),
+	instanceNames: make(map[uint32]string),
 }
 
 // globalListenerMetrics holds listener-level metrics (not per-connection).
@@ -35,10 +37,12 @@ func GetListenerMetrics() *ListenerMetrics {
 	return globalListenerMetrics
 }
 
-// RegisterConnection registers a connection's metrics
-func RegisterConnection(socketId uint32, metrics *ConnectionMetrics) {
+// RegisterConnection registers a connection's metrics with an optional instance name
+// The instance name is used as a label in Prometheus metrics output
+func RegisterConnection(socketId uint32, metrics *ConnectionMetrics, instanceName string) {
 	globalRegistry.mu.Lock()
 	globalRegistry.connections[socketId] = metrics
+	globalRegistry.instanceNames[socketId] = instanceName
 	globalRegistry.mu.Unlock()
 
 	// Increment lifecycle counters (lock-free atomics)
@@ -51,6 +55,7 @@ func RegisterConnection(socketId uint32, metrics *ConnectionMetrics) {
 func UnregisterConnection(socketId uint32, reason CloseReason) {
 	globalRegistry.mu.Lock()
 	delete(globalRegistry.connections, socketId)
+	delete(globalRegistry.instanceNames, socketId)
 	globalRegistry.mu.Unlock()
 
 	// Decrement active count and increment close counters (lock-free atomics)
@@ -70,18 +75,24 @@ func UnregisterConnection(socketId uint32, reason CloseReason) {
 }
 
 // GetConnections returns a snapshot of all registered connections
+// Returns: connections map, socket IDs list, and instance names map
 // This is safe to call concurrently
-func GetConnections() (map[uint32]*ConnectionMetrics, []uint32) {
+func GetConnections() (map[uint32]*ConnectionMetrics, []uint32, map[uint32]string) {
 	globalRegistry.mu.RLock()
 	defer globalRegistry.mu.RUnlock()
 
 	connections := make(map[uint32]*ConnectionMetrics, len(globalRegistry.connections))
 	socketIds := make([]uint32, 0, len(globalRegistry.connections))
+	instanceNames := make(map[uint32]string, len(globalRegistry.instanceNames))
 
 	for socketId, metrics := range globalRegistry.connections {
 		connections[socketId] = metrics
 		socketIds = append(socketIds, socketId)
 	}
 
-	return connections, socketIds
+	for socketId, name := range globalRegistry.instanceNames {
+		instanceNames[socketId] = name
+	}
+
+	return connections, socketIds, instanceNames
 }

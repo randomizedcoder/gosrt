@@ -83,7 +83,7 @@ func createTestConnectionWithIoUring(tb testing.TB, enableIoUring bool) (*srtCon
 	// Pre-create metrics (required by newSRTConn)
 	localAddr := udpConn.LocalAddr()
 	socketId := uint32(0x12345678)
-	connMetrics := createConnectionMetrics(localAddr, socketId)
+	connMetrics := createConnectionMetrics(localAddr, socketId, "")
 
 	// Create connection config
 	connConfig := srtConnConfig{

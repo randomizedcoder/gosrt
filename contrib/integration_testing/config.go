@@ -777,6 +777,7 @@ func (c SRTConfig) WithNakBtree() SRTConfig {
 	c.FastNakEnabled = true
 	c.FastNakRecentEnabled = true
 	c.HonorNakOrder = true
+	c.NakRecentPercent = 0.10 // Explicit 10% of TSBPD delay for "too recent" window
 	return c
 }
 
@@ -800,12 +801,12 @@ func (c SRTConfig) WithNakRecentPercent(percent float64) SRTConfig {
 func (c *IsolationTestConfig) GetControlCGFlags(testID string) []string {
 	udsPath := fmt.Sprintf("/tmp/srt_cg_control_%s.sock", testID)
 	// Control CG → Control Server on port 6000
-	publisherURL := fmt.Sprintf("srt://10.2.1.2:6000/test-stream-control")
 	flags := []string{
-		"-to", publisherURL,
+		"-to", "srt://10.2.1.2:6000/test-stream-control",
 		"-bitrate", strconv.FormatInt(c.Bitrate, 10),
 		"-localaddr", "10.1.1.2",
 		"-promuds", udsPath,
+		"-name", "control-cg",
 	}
 	if c.StatsPeriod > 0 {
 		flags = append(flags, "-statsperiod", c.StatsPeriod.String())
@@ -818,12 +819,12 @@ func (c *IsolationTestConfig) GetControlCGFlags(testID string) []string {
 func (c *IsolationTestConfig) GetTestCGFlags(testID string) []string {
 	udsPath := fmt.Sprintf("/tmp/srt_cg_test_%s.sock", testID)
 	// Test CG → Test Server on port 6001
-	publisherURL := fmt.Sprintf("srt://10.2.1.3:6001/test-stream-test")
 	flags := []string{
-		"-to", publisherURL,
+		"-to", "srt://10.2.1.3:6001/test-stream-test",
 		"-bitrate", strconv.FormatInt(c.Bitrate, 10),
 		"-localaddr", "10.1.1.3",
 		"-promuds", udsPath,
+		"-name", "test-cg",
 	}
 	if c.StatsPeriod > 0 {
 		flags = append(flags, "-statsperiod", c.StatsPeriod.String())
@@ -838,6 +839,7 @@ func (c *IsolationTestConfig) GetControlServerFlags(testID string) []string {
 	flags := []string{
 		"-addr", "10.2.1.2:6000",
 		"-promuds", udsPath,
+		"-name", "control-server",
 	}
 	flags = append(flags, c.ControlServer.ToCliFlags()...)
 	return flags
@@ -849,6 +851,7 @@ func (c *IsolationTestConfig) GetTestServerFlags(testID string) []string {
 	flags := []string{
 		"-addr", "10.2.1.3:6001",
 		"-promuds", udsPath,
+		"-name", "test-server",
 	}
 	if c.LogTopics != "" {
 		flags = append(flags, "-logtopics", c.LogTopics)

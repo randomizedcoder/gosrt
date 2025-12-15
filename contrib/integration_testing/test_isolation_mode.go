@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -154,6 +158,10 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 	controlMetrics.CollectAllMetrics("final")
 	testMetrics.CollectAllMetrics("final")
 
+	// Print raw Prometheus metrics if PRINT_PROM=true (BEFORE shutdown!)
+	// This must be done before processes exit and remove their UDS sockets
+	printAllPrometheusMetrics(udsPaths)
+
 	// Shutdown
 	fmt.Println("\nShutting down...")
 	_ = signalProcess(controlCG, syscall.SIGINT)
@@ -185,9 +193,9 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 // printIsolationComparison prints a simple comparison table
 func printIsolationComparison(testName string, controlServer, testServer, controlCG, testCG *MetricsSnapshot) {
 	fmt.Println()
-	fmt.Println("╔════════════════════════════════════════════════════════════════════╗")
-	fmt.Printf("║ %-66s ║\n", "ISOLATION TEST RESULTS: "+testName)
-	fmt.Println("╠════════════════════════════════════════════════════════════════════╣")
+	fmt.Println("╔═════════════════════════════════════════════════════════════════════╗")
+	fmt.Printf("║ %-67s ║\n", "ISOLATION TEST RESULTS: "+testName)
+	fmt.Println("╠═════════════════════════════════════════════════════════════════════╣")
 
 	// Extract key metrics
 	type MetricRow struct {
@@ -220,22 +228,22 @@ func printIsolationComparison(testName string, controlServer, testServer, contro
 			getMetricSum(testCG, "gosrt_connection_packets_received_total", "type=\"nak\"")},
 	}
 
-	fmt.Printf("║ %-30s %12s %12s %10s ║\n", "SERVER METRICS", "Control", "Test", "Diff")
-	fmt.Printf("║ %-30s %12s %12s %10s ║\n", "──────────────────────────────", "────────────", "────────────", "──────────")
+	fmt.Printf("║ %-28s %12s %12s %12s ║\n", "SERVER METRICS", "Control", "Test", "Diff")
+	fmt.Printf("║ %-28s %12s %12s %12s ║\n", "────────────────────────────", "────────────", "────────────", "────────────")
 	for _, row := range serverRows {
 		diff := formatDiff(row.Control, row.Test)
-		fmt.Printf("║ %-30s %12.0f %12.0f %10s ║\n", row.Name, row.Control, row.Test, diff)
+		fmt.Printf("║ %-28s %12.0f %12.0f %12s ║\n", row.Name, row.Control, row.Test, diff)
 	}
 
-	fmt.Printf("║ %-66s ║\n", "")
-	fmt.Printf("║ %-30s %12s %12s %10s ║\n", "CLIENT-GENERATOR METRICS", "Control", "Test", "Diff")
-	fmt.Printf("║ %-30s %12s %12s %10s ║\n", "──────────────────────────────", "────────────", "────────────", "──────────")
+	fmt.Printf("║ %-67s ║\n", "")
+	fmt.Printf("║ %-28s %12s %12s %12s ║\n", "CLIENT-GENERATOR METRICS", "Control", "Test", "Diff")
+	fmt.Printf("║ %-28s %12s %12s %12s ║\n", "────────────────────────────", "────────────", "────────────", "────────────")
 	for _, row := range cgRows {
 		diff := formatDiff(row.Control, row.Test)
-		fmt.Printf("║ %-30s %12.0f %12.0f %10s ║\n", row.Name, row.Control, row.Test, diff)
+		fmt.Printf("║ %-28s %12.0f %12.0f %12s ║\n", row.Name, row.Control, row.Test, diff)
 	}
 
-	fmt.Println("╚════════════════════════════════════════════════════════════════════╝")
+	fmt.Println("╚═════════════════════════════════════════════════════════════════════╝")
 
 	// Highlight if there's a significant gap difference
 	controlGaps := getMetricSum(controlServer, "gosrt_connection_congestion_packets_lost_total", "direction=\"recv\"")
@@ -334,3 +342,99 @@ func testIsolationModeAllConfigs() {
 
 // Note: ensureBinaries is defined in test_graceful_shutdown.go
 
+// printPrometheusMetrics fetches and prints metrics from a UDS path
+func printPrometheusMetrics(label string, udsPath string) {
+	if udsPath == "" {
+		fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
+		fmt.Println("(no UDS path configured)")
+		return
+	}
+
+	// Check if socket exists
+	if _, err := os.Stat(udsPath); os.IsNotExist(err) {
+		fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
+		fmt.Printf("(socket not found: %s)\n", udsPath)
+		return
+	}
+
+	// Create HTTP client using Unix socket
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", udsPath)
+			},
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	// Fetch metrics
+	resp, err := client.Get("http://localhost/metrics")
+	if err != nil {
+		fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
+		fmt.Printf("(error fetching metrics: %v)\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
+		fmt.Printf("(error reading response: %v)\n", err)
+		return
+	}
+
+	// Parse and filter metrics
+	lines := strings.Split(string(body), "\n")
+	var filtered []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Filter: show gosrt_* and go_* (runtime) metrics, skip comments
+		if strings.HasPrefix(line, "#") {
+			continue // Skip Prometheus comment/HELP/TYPE lines
+		}
+		if strings.HasPrefix(line, "gosrt_") || strings.HasPrefix(line, "go_") {
+			filtered = append(filtered, line)
+		}
+	}
+
+	// Sort for consistent output
+	sort.Strings(filtered)
+
+	fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
+	if len(filtered) == 0 {
+		fmt.Println("(no connection metrics found)")
+	} else {
+		for _, line := range filtered {
+			fmt.Println(line)
+		}
+	}
+}
+
+// printAllPrometheusMetrics prints metrics from all UDS paths if PRINT_PROM=true
+func printAllPrometheusMetrics(udsPaths map[string]string) {
+	if os.Getenv("PRINT_PROM") != "true" {
+		return
+	}
+
+	fmt.Println("\n" + strings.Repeat("=", 70))
+	fmt.Println("PROMETHEUS METRICS DUMP (PRINT_PROM=true)")
+	fmt.Println(strings.Repeat("=", 70))
+
+	// Print in consistent order
+	orderedKeys := []string{"server_control", "server_test", "cg_control", "cg_test"}
+	labels := map[string]string{
+		"server_control": "Control Server",
+		"server_test":    "Test Server",
+		"cg_control":     "Control CG",
+		"cg_test":        "Test CG",
+	}
+
+	for _, key := range orderedKeys {
+		if path, ok := udsPaths[key]; ok {
+			printPrometheusMetrics(labels[key], path)
+		}
+	}
+}

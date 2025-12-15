@@ -181,7 +181,7 @@ func createMinimalTestConnection(t *testing.T, config Config) *srtConn {
 	// Pre-create metrics
 	localAddr := udpConn.LocalAddr()
 	socketId := uint32(0x12345678)
-	connMetrics := createConnectionMetrics(localAddr, socketId)
+	connMetrics := createConnectionMetrics(localAddr, socketId, "")
 
 	// Create connection config
 	connConfig := srtConnConfig{

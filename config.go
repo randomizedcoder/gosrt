@@ -164,6 +164,11 @@ type Config struct {
 	// SRTO_STREAMID
 	StreamId string
 
+	// InstanceName is a user-defined label for this connection/server instance
+	// Used in logging, metrics labels, and JSON statistics output
+	// Default: "" (empty = not set)
+	InstanceName string
+
 	// Drop too late packets.
 	// SRTO_TLPKTDROP
 	TooLatePacketDrop bool

@@ -89,9 +89,20 @@ func writeGauge(b *strings.Builder, name string, value float64, labels ...string
 	b.WriteByte(' ')
 
 	// Use scratch buffer from pool for number formatting
+	// Format cleanly for Prometheus:
+	// - Whole numbers: 1873920 (not 1873920.000000000)
+	// - Floats with decimals: 0.000233966 (minimal precision needed)
 	scratchPtr := scratchPool.Get().(*[]byte)
 	scratch := (*scratchPtr)[:0]
-	scratch = strconv.AppendFloat(scratch, value, 'f', 9, 64)
+
+	// Check if value is a whole number (no fractional part)
+	if value == float64(int64(value)) && value >= -9007199254740992 && value <= 9007199254740992 {
+		// Format as integer for clean output
+		scratch = strconv.AppendInt(scratch, int64(value), 10)
+	} else {
+		// Format as float with minimal precision (-1 = smallest representation)
+		scratch = strconv.AppendFloat(scratch, value, 'f', -1, 64)
+	}
 	b.Write(scratch)
 	*scratchPtr = scratch
 	scratchPool.Put(scratchPtr)

@@ -295,7 +295,8 @@ type srtConnConfig struct {
 // createConnectionMetrics creates a ConnectionMetrics instance for a connection.
 // This should be called BEFORE newSRTConn() so that onSend closures can capture
 // the metrics reference, avoiding initialization race conditions.
-func createConnectionMetrics(localAddr net.Addr, socketId uint32) *metrics.ConnectionMetrics {
+// The instanceName parameter is used for Prometheus metrics labeling.
+func createConnectionMetrics(localAddr net.Addr, socketId uint32, instanceName string) *metrics.ConnectionMetrics {
 	// Calculate header size (needed for metrics initialization)
 	headerSize := uint64(8 + 16) // 8 bytes UDP + 16 bytes SRT
 	if strings.Count(localAddr.String(), ":") < 2 {
@@ -312,7 +313,8 @@ func createConnectionMetrics(localAddr net.Addr, socketId uint32) *metrics.Conne
 	m.HeaderSize.Store(headerSize)
 
 	// Register with metrics registry
-	metrics.RegisterConnection(socketId, m)
+	// Pass instance name for Prometheus labeling
+	metrics.RegisterConnection(socketId, m, instanceName)
 
 	return m
 }
@@ -2051,6 +2053,7 @@ func (c *srtConn) printCloseStatistics() {
 	output := map[string]interface{}{
 		"timestamp":                           time.Now().Format(time.RFC3339Nano),
 		"event":                               "connection_closed",
+		"instance":                            c.config.InstanceName,
 		"socket_id":                           fmt.Sprintf("0x%08x", c.socketId),
 		"remote_addr":                         remoteAddr,
 		"connection_duration":                 time.Since(c.start).String(),

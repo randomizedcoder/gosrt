@@ -475,7 +475,7 @@ func (req *connRequest) Accept() (Conn, error) {
 
 	// Create metrics FIRST - this allows building onSend closure before connection creation,
 	// eliminating the initialization race condition.
-	connMetrics := createConnectionMetrics(req.ln.addr, req.socketId)
+	connMetrics := createConnectionMetrics(req.ln.addr, req.socketId, req.config.InstanceName)
 
 	// Build onSend closure with pre-created metrics.
 	// This is the fallback path used when io_uring is disabled.
