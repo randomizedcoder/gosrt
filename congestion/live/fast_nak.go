@@ -43,11 +43,9 @@ func (r *receiver) checkFastNak(now time.Time) {
 // triggerFastNak runs the NAK generation and sends immediately.
 // Used after detecting a silent period (potential network outage recovery).
 func (r *receiver) triggerFastNak(now time.Time) {
-	nowMicro := uint64(now.UnixMicro())
-
 	// Acquire lock and generate NAK list
 	r.lock.Lock()
-	list := r.buildNakListLocked(nowMicro)
+	list := r.buildNakListLocked()
 	r.lock.Unlock()
 
 	if len(list) == 0 {
@@ -165,7 +163,7 @@ func (at *AtomicTime) Store(t time.Time) {
 // buildNakListLocked generates the NAK list from the NAK btree.
 // This is a helper used by both periodicNakBtree and triggerFastNak.
 // Must be called with r.lock held.
-func (r *receiver) buildNakListLocked(now uint64) []circular.Number {
+func (r *receiver) buildNakListLocked() []circular.Number {
 	if r.nakBtree == nil {
 		// This should never happen when called (ISSUE-001)
 		if r.metrics != nil {

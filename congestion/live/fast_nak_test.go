@@ -244,7 +244,7 @@ func TestPacketsPerSecondEstimate(t *testing.T) {
 func TestBuildNakListLocked_Empty(t *testing.T) {
 	r := createTestReceiverForFastNak(t)
 
-	list := r.buildNakListLocked(uint64(time.Now().UnixMicro()))
+	list := r.buildNakListLocked()
 
 	if len(list) != 0 {
 		t.Errorf("Expected empty list for empty NAK btree, got %d entries", len(list))
@@ -255,7 +255,7 @@ func TestBuildNakListLocked_NoNakBtree(t *testing.T) {
 	r := createTestReceiverForFastNak(t)
 	r.nakBtree = nil
 
-	list := r.buildNakListLocked(uint64(time.Now().UnixMicro()))
+	list := r.buildNakListLocked()
 
 	if list != nil {
 		t.Error("Expected nil for nil NAK btree")
@@ -269,7 +269,7 @@ func TestBuildNakListLocked_WithEntries(t *testing.T) {
 	r.nakBtree.Insert(101)
 	r.nakBtree.Insert(102)
 
-	list := r.buildNakListLocked(uint64(time.Now().UnixMicro()))
+	list := r.buildNakListLocked()
 
 	if len(list) != 2 { // Should consolidate to single range
 		t.Errorf("Expected 2 entries (one range), got %d", len(list))
