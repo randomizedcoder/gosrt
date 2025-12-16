@@ -399,6 +399,9 @@ func buildNetworkModeServerFlags(config TestConfig, nc *NetworkController) []str
 	// Add UDS metrics endpoint (accessible from host for collection)
 	flags = append(flags, "-promuds", fmt.Sprintf("/tmp/srt_server_%s.sock", nc.TestID))
 
+	// Add instance name for metrics and logs
+	flags = append(flags, "-name", "server")
+
 	// Apply shared SRT config
 	if config.SharedSRT != nil {
 		flags = append(flags, config.SharedSRT.ToCliFlags()...)
@@ -422,6 +425,9 @@ func buildNetworkModeClientGenFlags(config TestConfig, nc *NetworkController) []
 	// Add UDS metrics endpoint
 	flags = append(flags, "-promuds", fmt.Sprintf("/tmp/srt_clientgen_%s.sock", nc.TestID))
 
+	// Add instance name for metrics and logs
+	flags = append(flags, "-name", "cg")
+
 	// Apply shared SRT config
 	if config.SharedSRT != nil {
 		flags = append(flags, config.SharedSRT.ToCliFlags()...)
@@ -444,6 +450,9 @@ func buildNetworkModeClientFlags(config TestConfig, nc *NetworkController) []str
 
 	// Add UDS metrics endpoint
 	flags = append(flags, "-promuds", fmt.Sprintf("/tmp/srt_client_%s.sock", nc.TestID))
+
+	// Add instance name for metrics and logs
+	flags = append(flags, "-name", "client")
 
 	// Add io_uring output if configured
 	if config.Client.IoUringOutput {

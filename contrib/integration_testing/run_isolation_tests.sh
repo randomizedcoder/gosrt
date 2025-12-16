@@ -3,11 +3,12 @@
 #
 # Usage: sudo ./run_isolation_tests.sh
 #
-# This script runs all 11 isolation tests sequentially, capturing output
+# This script runs all 17 isolation tests sequentially, capturing output
 # to temporary files for later review.
 #
 # Tests 0-6: Original io_uring and packet store btree isolation
 # Tests 7-10: NAK btree isolation tests
+# Tests 11-16: NAK btree permutation tests (different feature combinations)
 
 # Don't use set -e as tee can cause false failures
 
@@ -17,6 +18,70 @@ if [[ $EUID -ne 0 ]]; then
     echo "Usage: sudo $0"
     exit 1
 fi
+
+# Get the directory of this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/../.." || exit 1  # Go to project root
+
+#=============================================================================
+# PRE-FLIGHT CHECKS: Ensure no stale namespaces
+#=============================================================================
+
+# Function to count SRT namespaces
+count_srt_namespaces() {
+    local count
+    count=$(ip netns list 2>/dev/null | awk '{print $1}' | grep -cE '^ns_' 2>/dev/null) || count=0
+    echo "$count"
+}
+
+echo "═══════════════════════════════════════════════════════════════"
+echo " Pre-flight Check: Network Namespaces"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+
+STALE_COUNT=$(count_srt_namespaces)
+if [ "$STALE_COUNT" -gt 0 ]; then
+    echo "⚠ WARNING: Found $STALE_COUNT stale SRT network namespaces"
+    echo ""
+    echo "Stale namespaces (first 10):"
+    ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^ns_' | head -10 | while read -r ns; do
+        echo "  - $ns"
+    done
+    echo ""
+    echo "Cleaning up stale namespaces automatically..."
+    echo ""
+
+    DELETED=0
+    for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^ns_'); do
+        if ip netns del "$ns" 2>/dev/null; then
+            echo "  ✓ Deleted: $ns"
+            DELETED=$((DELETED + 1))
+        else
+            echo "  ✗ Failed to delete: $ns"
+        fi
+    done
+
+    # Verify cleanup
+    REMAINING=$(count_srt_namespaces)
+    if [ "$REMAINING" -gt 0 ]; then
+        echo ""
+        echo "✗ ERROR: $REMAINING namespaces could not be cleaned up"
+        echo "  Please manually remove them or reboot to clear network state"
+        echo "  Run: sudo $SCRIPT_DIR/cleanup_all_namespaces.sh"
+        exit 1
+    fi
+
+    echo ""
+    echo "✓ Cleaned up $DELETED stale namespaces"
+else
+    echo "✓ No stale namespaces detected"
+fi
+
+echo ""
+
+#=============================================================================
+# TEST CONFIGURATION
+#=============================================================================
 
 # Test configurations in order
 TESTS=(
@@ -33,6 +98,13 @@ TESTS=(
     "Isolation-Server-NakBtree-IoUringRecv"
     "Isolation-CG-HonorNakOrder"
     "Isolation-FullNakBtree"
+    # NAK btree permutation tests (11-16)
+    "Isolation-NakBtree-Only"
+    "Isolation-NakBtree-FastNak"
+    "Isolation-NakBtree-FastNakRecent"
+    "Isolation-NakBtree-HonorNakOrder"
+    "Isolation-NakBtree-FastNak-HonorNakOrder"
+    "Isolation-FullHighPerf-NakBtree"
 )
 
 # Create output directory with timestamp
@@ -46,10 +118,6 @@ echo " Estimated time: ~$((${#TESTS[@]} * 35)) seconds"
 echo "═══════════════════════════════════════════════════════════════"
 echo ""
 
-# Get the directory of this script
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR/../.."  # Go to project root
-
 echo ""
 
 # Results tracking
@@ -57,7 +125,10 @@ declare -a RESULTS
 PASSED=0
 FAILED=0
 
-# Run all tests sequentially
+#=============================================================================
+# RUN TESTS
+#=============================================================================
+
 for i in "${!TESTS[@]}"; do
     TEST="${TESTS[$i]}"
     TEST_NUM=$((i))
@@ -78,19 +149,55 @@ for i in "${!TESTS[@]}"; do
         ELAPSED=$((END_TIME - START_TIME))
         echo ""
         echo "✓ Test $TEST_NUM ($TEST) completed in ${ELAPSED}s"
-        RESULTS[$i]="PASS"
+        RESULTS[i]="PASS"
         ((PASSED++))
     else
         END_TIME=$(date +%s)
         ELAPSED=$((END_TIME - START_TIME))
         echo ""
         echo "✗ Test $TEST_NUM ($TEST) failed after ${ELAPSED}s"
-        RESULTS[$i]="FAIL"
+        RESULTS[i]="FAIL"
         ((FAILED++))
+
+        # On failure, check for and clean any leaked namespaces
+        LEAKED=$(count_srt_namespaces)
+        if [ "$LEAKED" -gt 0 ]; then
+            echo "  ⚠ Cleaning up $LEAKED leaked namespaces..."
+            for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^ns_'); do
+                ip netns del "$ns" 2>/dev/null || true
+            done
+        fi
     fi
+
+    # Brief pause between tests to ensure resources are released
+    sleep 1
 done
 
-# Generate summary
+#=============================================================================
+# POST-TEST CLEANUP CHECK
+#=============================================================================
+
+echo ""
+echo "═══════════════════════════════════════════════════════════════"
+echo " Post-Test Cleanup Verification"
+echo "═══════════════════════════════════════════════════════════════"
+
+FINAL_COUNT=$(count_srt_namespaces)
+if [ "$FINAL_COUNT" -gt 0 ]; then
+    echo "⚠ WARNING: Found $FINAL_COUNT namespaces after tests"
+    echo "  Cleaning up..."
+    for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^ns_'); do
+        ip netns del "$ns" 2>/dev/null || true
+    done
+    echo "  Done"
+else
+    echo "✓ No leaked namespaces"
+fi
+
+#=============================================================================
+# SUMMARY
+#=============================================================================
+
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo " SUMMARY"
@@ -137,4 +244,3 @@ echo "════════════════════════�
 if [[ $FAILED -gt 0 ]]; then
     exit 1
 fi
-

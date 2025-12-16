@@ -570,6 +570,57 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &LargeBuffersSRTConfig,
 	},
 
+	// ========== NAK btree Network Tests ==========
+	// These tests validate NAK btree loss recovery behavior
+	// Key metrics to verify: FastNakTriggers, NakBtreeInserts, NakBtreeDeletes
+	{
+		Name:        "Network-Loss2pct-5Mbps-NakBtree",
+		Description: "2% loss with NAK btree - verify loss recovery with all NAK btree features",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			LossRate:       0.02, // 2% loss
+			LatencyProfile: "none",
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &HighPerfSRTConfig, // Full NAK btree + io_uring + btree
+	},
+	{
+		Name:        "Network-Starlink-5Mbps-NakBtree",
+		Description: "Starlink pattern with NAK btree - tests FastNAK triggers during outages",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second, // 1.5 minutes for multiple Starlink events
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &HighPerfSRTConfig, // Full NAK btree + io_uring + btree
+	},
+	{
+		Name:        "Network-Starlink-20Mbps-NakBtree",
+		Description: "Starlink pattern at 20 Mb/s with NAK btree - high throughput stress test",
+		Mode:        TestModeNetwork,
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &HighPerfSRTConfig, // Full NAK btree + io_uring + btree
+	},
+
 	// ========== Stress Tests ==========
 	{
 		Name:        "Network-Stress-HighLatencyHighLoss",
@@ -722,6 +773,112 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		},
 		Bitrate:         5_000_000,
 		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// ========================================================================
+	// NAK BTREE PERMUTATION PARALLEL TESTS (Starlink Pattern)
+	// ========================================================================
+	// These tests compare feature permutations under Starlink outage pattern.
+	// FastNAK features should show improvement in outage recovery.
+	// See nak_btree_integration_testing.md for details.
+
+	// Compare: NAK btree only vs NAK btree + FastNAK
+	// Expected: FastNAK shows faster recovery after 60ms outages
+	{
+		Name:        "Parallel-Starlink-FastNak-Impact",
+		Description: "Starlink: NAK btree only vs NAK btree + FastNAK (measure FastNAK impact)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          ControlSRTConfig.WithNakBtreeOnly().WithIoUringRecv(), // NAK btree only
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          ControlSRTConfig.WithNakBtreeOnly().WithFastNak().WithIoUringRecv(), // + FastNAK
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Compare: NAK btree + FastNAK vs NAK btree + FastNAK + FastNAKRecent
+	// Expected: FastNAKRecent detects sequence jumps after outages
+	{
+		Name:        "Parallel-Starlink-FastNakRecent-Impact",
+		Description: "Starlink: FastNAK vs FastNAK + FastNAKRecent (measure sequence jump detection)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          ControlSRTConfig.WithNakBtreeOnly().WithFastNak().WithIoUringRecv(), // FastNAK only
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          ControlSRTConfig.WithNakBtreeOnly().WithFastNak().WithFastNakRecent().WithIoUringRecv(), // + FastNAKRecent
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Compare: Baseline (list, no optimizations) vs Full NAK btree stack
+	// Expected: Full NAK btree outperforms Baseline in outage recovery
+	{
+		Name:        "Parallel-Starlink-Full-NakBtree",
+		Description: "Starlink: Baseline (list) vs Full NAK btree (all features)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig, // Original: list, no io_uring
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          HighPerfSRTConfig, // Full: io_uring + btree + NAK btree + all features
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
 		ConnectionWait:  3 * time.Second,
 		CollectInterval: 2 * time.Second,
 		ProfileDuration: 5 * time.Minute,
@@ -913,6 +1070,91 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		ControlServer: ControlSRTConfig,
 		TestCG:        ControlSRTConfig.WithHonorNakOrder(), // Sender honors NAK order
 		TestServer:    ControlSRTConfig.WithNakBtree(),      // Receiver uses NAK btree
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ========================================================================
+	// NAK BTREE PERMUTATION TESTS
+	// ========================================================================
+	// These tests isolate the impact of each NAK btree sub-feature.
+	// Run on clean network to observe feature behavior without loss.
+	// See nak_btree_integration_testing.md for the permutation matrix.
+
+	// Permutation #1: NAK btree only (no FastNAK, no HonorNakOrder)
+	{
+		Name:          "Isolation-NakBtree-Only",
+		Description:   "NAK btree only, no FastNAK, no HonorNakOrder (permutation #1)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithNakBtreeOnly().WithIoUringRecv(),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Permutation #2: NAK btree + FastNAK only
+	{
+		Name:          "Isolation-NakBtree-FastNak",
+		Description:   "NAK btree + FastNAK, no FastNAKRecent, no HonorNakOrder (permutation #2)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithNakBtreeOnly().WithFastNak().WithIoUringRecv(),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Permutation #3: NAK btree + FastNAK + FastNAKRecent
+	{
+		Name:          "Isolation-NakBtree-FastNakRecent",
+		Description:   "NAK btree + FastNAK + FastNAKRecent, no HonorNakOrder (permutation #3)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithNakBtreeOnly().WithFastNak().WithFastNakRecent().WithIoUringRecv(),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Permutation #4: NAK btree + HonorNakOrder (no FastNAK)
+	{
+		Name:          "Isolation-NakBtree-HonorNakOrder",
+		Description:   "NAK btree + HonorNakOrder, no FastNAK (permutation #4)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithHonorNakOrder(),                  // Sender honors NAK order
+		TestServer:    ControlSRTConfig.WithNakBtreeOnly().WithIoUringRecv(), // Receiver: NAK btree only
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Permutation #5: NAK btree + FastNAK + HonorNakOrder (no FastNAKRecent)
+	{
+		Name:          "Isolation-NakBtree-FastNak-HonorNakOrder",
+		Description:   "NAK btree + FastNAK + HonorNakOrder, no FastNAKRecent (permutation #5)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithHonorNakOrder(),                                // Sender honors NAK order
+		TestServer:    ControlSRTConfig.WithNakBtreeOnly().WithFastNak().WithIoUringRecv(), // Receiver: NAK btree + FastNAK
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test 11: Full HighPerf with NAK btree (io_uring + btree + NAK btree + HonorNakOrder)
+	{
+		Name:          "Isolation-FullHighPerf-NakBtree",
+		Description:   "Full HighPerf: io_uring send/recv + btree + NAK btree + HonorNakOrder",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithIoUringSend().WithIoUringRecv().WithBtree(32).WithHonorNakOrder(),
+		TestServer:    ControlSRTConfig.WithIoUringSend().WithIoUringRecv().WithBtree(32).WithNakBtree(),
 		TestDuration:  30 * time.Second,
 		Bitrate:       5_000_000,
 		StatsPeriod:   10 * time.Second,

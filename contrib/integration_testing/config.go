@@ -15,7 +15,184 @@ const (
 
 	// TestModeNetwork runs in isolated namespaces with network impairment
 	TestModeNetwork TestMode = "network"
+
+	// TestModeParallel runs two pipelines in parallel with network impairment
+	TestModeParallel TestMode = "parallel"
+
+	// TestModeIsolation runs simplified CG→Server tests to isolate variables
+	TestModeIsolation TestMode = "isolation"
 )
+
+// ============================================================================
+// CONFIG VARIANT - Feature configuration presets
+// ============================================================================
+
+// ConfigVariant represents a feature configuration preset for test matrix generation.
+// These presets enable consistent naming and programmatic test generation.
+type ConfigVariant string
+
+const (
+	// ConfigBase is the baseline: list packet store, no io_uring, no NAK btree
+	ConfigBase ConfigVariant = "Base"
+
+	// ConfigBtree enables btree packet store only (no io_uring, no NAK btree)
+	ConfigBtree ConfigVariant = "Btree"
+
+	// ConfigIoUr enables io_uring only (list packet store, no NAK btree)
+	ConfigIoUr ConfigVariant = "IoUr"
+
+	// ConfigNakBtree enables NAK btree only (no FastNAK, no FastNAKRecent)
+	ConfigNakBtree ConfigVariant = "NakBtree"
+
+	// ConfigNakBtreeF enables NAK btree + FastNAK (no FastNAKRecent)
+	ConfigNakBtreeF ConfigVariant = "NakBtreeF"
+
+	// ConfigNakBtreeFr enables NAK btree + FastNAK + FastNAKRecent
+	ConfigNakBtreeFr ConfigVariant = "NakBtreeFr"
+
+	// ConfigFull enables everything: btree + io_uring + NAK btree + FastNAK + FastNAKRecent + HonorNakOrder
+	ConfigFull ConfigVariant = "Full"
+)
+
+// GetSRTConfig returns an SRTConfig for a given ConfigVariant.
+// This centralizes configuration presets for test matrix generation.
+func GetSRTConfig(variant ConfigVariant) SRTConfig {
+	switch variant {
+	case ConfigBase:
+		return BaselineSRTConfig
+	case ConfigBtree:
+		return ControlSRTConfig.WithBtree(32)
+	case ConfigIoUr:
+		return ControlSRTConfig.WithIoUringSend().WithIoUringRecv()
+	case ConfigNakBtree:
+		return ControlSRTConfig.WithIoUringRecv().WithNakBtreeOnly()
+	case ConfigNakBtreeF:
+		return ControlSRTConfig.WithIoUringRecv().WithNakBtreeOnly().WithFastNak()
+	case ConfigNakBtreeFr:
+		return ControlSRTConfig.WithIoUringRecv().WithNakBtreeOnly().WithFastNak().WithFastNakRecent()
+	case ConfigFull:
+		return HighPerfSRTConfig
+	default:
+		return BaselineSRTConfig
+	}
+}
+
+// GetSRTConfigWithLatency returns an SRTConfig for a given variant with custom latency.
+func GetSRTConfigWithLatency(variant ConfigVariant, latency time.Duration) SRTConfig {
+	return GetSRTConfig(variant).WithLatency(latency)
+}
+
+// ============================================================================
+// RTT PROFILE - Network round-trip time presets
+// ============================================================================
+
+// RTTProfile represents a network round-trip time profile.
+// These match the RTT links defined in packet_loss_injection_design.md.
+type RTTProfile string
+
+const (
+	// RTT0 is 0ms RTT - baseline/local testing
+	RTT0 RTTProfile = "R0"
+
+	// RTT10 is 10ms RTT - regional datacenter
+	RTT10 RTTProfile = "R10"
+
+	// RTT60 is 60ms RTT - cross-continental
+	RTT60 RTTProfile = "R60"
+
+	// RTT130 is 130ms RTT - intercontinental
+	RTT130 RTTProfile = "R130"
+
+	// RTT300 is 300ms RTT - GEO satellite
+	RTT300 RTTProfile = "R300"
+)
+
+// GetRTTMs returns the RTT in milliseconds for a profile.
+func GetRTTMs(profile RTTProfile) int {
+	switch profile {
+	case RTT0:
+		return 0
+	case RTT10:
+		return 10
+	case RTT60:
+		return 60
+	case RTT130:
+		return 130
+	case RTT300:
+		return 300
+	default:
+		return 60 // Default to cross-continental
+	}
+}
+
+// GetLatencyProfile returns the network latency profile string for netem configuration.
+// This maps RTTProfile to the latency profile names used in network setup scripts.
+func GetLatencyProfile(profile RTTProfile) string {
+	switch profile {
+	case RTT0:
+		return "none"
+	case RTT10:
+		return "regional"
+	case RTT60:
+		return "continental"
+	case RTT130:
+		return "intercontinental"
+	case RTT300:
+		return "geo_satellite"
+	default:
+		return "continental"
+	}
+}
+
+// ============================================================================
+// TIMER PROFILE - Timer interval presets
+// ============================================================================
+
+// TimerProfile represents a timer interval preset for testing different
+// tick/NAK/ACK frequencies.
+type TimerProfile string
+
+const (
+	// TimerDefault uses default intervals: 10ms tick, 20ms NAK, 10ms ACK
+	TimerDefault TimerProfile = "T-Default"
+
+	// TimerFast uses aggressive intervals: 5ms tick, 10ms NAK, 5ms ACK
+	TimerFast TimerProfile = "T-Fast"
+
+	// TimerSlow uses conservative intervals: 20ms tick, 40ms NAK, 20ms ACK
+	TimerSlow TimerProfile = "T-Slow"
+
+	// TimerFastNak uses fast NAK only: 10ms tick, 5ms NAK, 10ms ACK
+	TimerFastNak TimerProfile = "T-FastNak"
+
+	// TimerSlowNak uses slow NAK (stress test): 10ms tick, 50ms NAK, 10ms ACK
+	TimerSlowNak TimerProfile = "T-SlowNak"
+)
+
+// TimerIntervals holds timer interval values in milliseconds.
+type TimerIntervals struct {
+	TickMs uint64 // TSBPD delivery tick interval
+	NakMs  uint64 // Periodic NAK timer interval
+	AckMs  uint64 // Periodic ACK timer interval
+}
+
+// GetTimerIntervals returns the timer intervals for a profile.
+func GetTimerIntervals(profile TimerProfile) TimerIntervals {
+	switch profile {
+	case TimerFast:
+		return TimerIntervals{TickMs: 5, NakMs: 10, AckMs: 5}
+	case TimerSlow:
+		return TimerIntervals{TickMs: 20, NakMs: 40, AckMs: 20}
+	case TimerFastNak:
+		return TimerIntervals{TickMs: 10, NakMs: 5, AckMs: 10}
+	case TimerSlowNak:
+		return TimerIntervals{TickMs: 10, NakMs: 50, AckMs: 10}
+	case TimerDefault:
+		fallthrough
+	default:
+		return TimerIntervals{TickMs: 10, NakMs: 20, AckMs: 10}
+	}
+}
 
 // NetworkImpairment defines network impairment parameters for network mode tests
 type NetworkImpairment struct {
@@ -188,6 +365,11 @@ type SRTConfig struct {
 	FastNakRecentEnabled bool    // -fastnakrecentenabled
 	HonorNakOrder        bool    // -honornakorder
 	NakRecentPercent     float64 // -nakrecentpercent (default: 0.10, 10% of TSBPD delay)
+
+	// Timer interval configuration
+	TickIntervalMs        uint64 // -tickintervalms (TSBPD delivery tick, default: 10)
+	PeriodicNakIntervalMs uint64 // -periodicnakintervalms (periodic NAK timer, default: 20)
+	PeriodicAckIntervalMs uint64 // -periodicackintervalms (periodic ACK timer, default: 10)
 }
 
 // ToCliFlags converts SRTConfig to CLI flag arguments
@@ -304,6 +486,17 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 	if c.NakRecentPercent > 0 {
 		flags = append(flags, "-nakrecentpercent", strconv.FormatFloat(c.NakRecentPercent, 'f', 2, 64))
+	}
+
+	// Timer interval flags
+	if c.TickIntervalMs > 0 {
+		flags = append(flags, "-tickintervalms", strconv.FormatUint(c.TickIntervalMs, 10))
+	}
+	if c.PeriodicNakIntervalMs > 0 {
+		flags = append(flags, "-periodicnakintervalms", strconv.FormatUint(c.PeriodicNakIntervalMs, 10))
+	}
+	if c.PeriodicAckIntervalMs > 0 {
+		flags = append(flags, "-periodicackintervalms", strconv.FormatUint(c.PeriodicAckIntervalMs, 10))
 	}
 
 	return flags
@@ -641,6 +834,7 @@ func (c *ParallelTestConfig) getServerFlags(p PipelineConfig, label, testID stri
 	flags := []string{
 		"-addr", p.GetServerAddr(),
 		"-promuds", udsPath,
+		"-name", label + "-server",
 	}
 	flags = append(flags, p.SRT.ToCliFlags()...)
 	return flags
@@ -664,6 +858,7 @@ func (c *ParallelTestConfig) getClientGeneratorFlags(p PipelineConfig, label, te
 		"-bitrate", strconv.FormatInt(c.Bitrate, 10),
 		"-localaddr", p.PublisherIP,
 		"-promuds", udsPath,
+		"-name", label + "-cg",
 	}
 	flags = append(flags, p.SRT.ToCliFlags()...)
 	return flags
@@ -687,6 +882,7 @@ func (c *ParallelTestConfig) getClientFlags(p PipelineConfig, label, testID stri
 		"-to", "null",
 		"-localaddr", p.SubscriberIP,
 		"-promuds", udsPath,
+		"-name", label + "-client",
 	}
 	if ioUringOutput {
 		flags = append(flags, "-iouringoutput")
@@ -794,6 +990,90 @@ func (c SRTConfig) WithHonorNakOrder() SRTConfig {
 // a higher value like 0.50 (50%) may be needed.
 func (c SRTConfig) WithNakRecentPercent(percent float64) SRTConfig {
 	c.NakRecentPercent = percent
+	return c
+}
+
+// ============================================================================
+// NAK btree Permutation Helpers
+// ============================================================================
+// These helpers enable granular control over NAK btree features for permutation testing.
+// See nak_btree_integration_testing.md for the permutation matrix.
+
+// WithNakBtreeOnly enables NAK btree without FastNAK or HonorNakOrder.
+// Use for baseline NAK btree testing (permutation #1).
+// This is useful to isolate NAK btree behavior from FastNAK optimizations.
+func (c SRTConfig) WithNakBtreeOnly() SRTConfig {
+	c.UseNakBtree = true
+	c.FastNakEnabled = false
+	c.FastNakRecentEnabled = false
+	c.HonorNakOrder = false
+	c.NakRecentPercent = 0.10
+	return c
+}
+
+// WithFastNak enables FastNAK optimization.
+// FastNAK triggers immediate NAK after silence period (outage recovery).
+// Requires NAK btree to be enabled.
+func (c SRTConfig) WithFastNak() SRTConfig {
+	c.FastNakEnabled = true
+	return c
+}
+
+// WithFastNakRecent enables FastNAKRecent optimization.
+// FastNAKRecent detects sequence jumps after network outages.
+// Requires FastNAK to be enabled (no-op without it).
+func (c SRTConfig) WithFastNakRecent() SRTConfig {
+	c.FastNakRecentEnabled = true
+	return c
+}
+
+// WithoutFastNak disables FastNAK while keeping NAK btree enabled.
+// Also disables FastNAKRecent since it depends on FastNAK.
+func (c SRTConfig) WithoutFastNak() SRTConfig {
+	c.FastNakEnabled = false
+	c.FastNakRecentEnabled = false
+	return c
+}
+
+// WithoutHonorNakOrder disables HonorNakOrder.
+// Use to test NAK btree without sender-side optimization.
+func (c SRTConfig) WithoutHonorNakOrder() SRTConfig {
+	c.HonorNakOrder = false
+	return c
+}
+
+// WithoutFastNakRecent disables FastNAKRecent while keeping FastNAK enabled.
+// Use for permutation testing to isolate FastNAKRecent effects.
+func (c SRTConfig) WithoutFastNakRecent() SRTConfig {
+	c.FastNakRecentEnabled = false
+	return c
+}
+
+// WithLatency returns a copy with all latency settings adjusted.
+// This sets Latency, RecvLatency, and PeerLatency to the same value.
+func (c SRTConfig) WithLatency(d time.Duration) SRTConfig {
+	c.Latency = d
+	c.RecvLatency = d
+	c.PeerLatency = d
+	return c
+}
+
+// WithTimerProfile applies a timer interval preset to the config.
+// Note: Timer intervals are applied via CLI flags, not SRTConfig fields.
+// This helper is for documentation/consistency - actual application happens in ToCliFlags extensions.
+func (c SRTConfig) WithTimerProfile(profile TimerProfile) SRTConfig {
+	intervals := GetTimerIntervals(profile)
+	c.TickIntervalMs = intervals.TickMs
+	c.PeriodicNakIntervalMs = intervals.NakMs
+	c.PeriodicAckIntervalMs = intervals.AckMs
+	return c
+}
+
+// WithTimerIntervals applies custom timer intervals to the config.
+func (c SRTConfig) WithTimerIntervals(tick, nak, ack uint64) SRTConfig {
+	c.TickIntervalMs = tick
+	c.PeriodicNakIntervalMs = nak
+	c.PeriodicAckIntervalMs = ack
 	return c
 }
 
