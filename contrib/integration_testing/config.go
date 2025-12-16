@@ -554,7 +554,8 @@ func (c *ComponentConfig) ToCliFlags() []string {
 // TestConfig represents a complete test configuration
 type TestConfig struct {
 	// Test identification
-	Name        string // Human-readable name (e.g., "SmallBuffers-1Mbps")
+	Name        string // Primary test name using standardized format
+	LegacyName  string // Old test name for backward compatibility (optional)
 	Description string // Detailed description of what this test validates
 
 	// Test mode (clean network vs network impairment)
@@ -760,7 +761,8 @@ func (p *PipelineConfig) GetServerAddr() string {
 // ParallelTestConfig defines a parallel comparison test with two pipelines
 type ParallelTestConfig struct {
 	// Test identification
-	Name        string
+	Name        string // Primary test name using standardized format
+	LegacyName  string // Old test name for backward compatibility (optional)
 	Description string
 
 	// Network impairment (shared by both pipelines)
@@ -913,7 +915,8 @@ func (c *ParallelTestConfig) GetAllUDSPaths(testID string) map[string]string {
 // IsolationTestConfig defines a simplified CG→Server test for variable isolation
 type IsolationTestConfig struct {
 	// Test identification
-	Name        string
+	Name        string // Primary test name using standardized format
+	LegacyName  string // Old test name for backward compatibility (optional)
 	Description string
 
 	// Control pipeline (reference): list, no io_uring

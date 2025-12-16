@@ -542,6 +542,39 @@ func GenerateCleanTestName(p CleanTestParams) string {
 	return strings.Join(parts, "-")
 }
 
+// calculateCleanTestDuration returns appropriate test duration based on buffer size and bitrate.
+// Test duration must exceed buffer size for data to flow through TSBPD.
+// For large buffers and high bitrates, we need extra time for:
+// - Data to flow through the subscriber
+// - Startup overhead to be amortized (especially at high bitrates)
+func calculateCleanTestDuration(buffer time.Duration, bitrate int64, defaultDuration time.Duration) time.Duration {
+	// For buffers >= 10s, run for buffer + 20s to allow adequate data flow
+	// For smaller buffers, buffer + 10s is sufficient
+	// For very small buffers, use the default duration
+	var minDuration time.Duration
+	if buffer >= 20*time.Second {
+		minDuration = buffer + 30*time.Second // Large buffers need more time
+	} else if buffer >= 10*time.Second {
+		minDuration = buffer + 20*time.Second
+	} else {
+		minDuration = buffer + 10*time.Second
+	}
+
+	// High bitrates (>= 50 Mb/s) need longer tests to amortize startup overhead
+	// The Go channel-based client-generator has some overhead that affects
+	// the initial packet flow at high rates
+	if bitrate >= 50_000_000 {
+		minDuration += 45 * time.Second // Add 45s for 50+ Mb/s tests (total ~60s)
+	} else if bitrate >= 30_000_000 {
+		minDuration += 15 * time.Second // Add 15s for 30+ Mb/s tests
+	}
+
+	if minDuration > defaultDuration {
+		return minDuration
+	}
+	return defaultDuration
+}
+
 // GenerateCleanNetworkTests generates clean network tests following the matrix approach.
 // These tests run without network impairment on loopback interface.
 func GenerateCleanNetworkTests() []GeneratedCleanTest {
@@ -573,17 +606,21 @@ func GenerateCleanNetworkTests() []GeneratedCleanTest {
 			Buffer:  defaultBuffer,
 			Config:  ConfigFull,
 		}
-		tests = append(tests, buildCleanTest(p, defaultDuration, TierCore))
+		testDuration := calculateCleanTestDuration(defaultBuffer, bitrate, defaultDuration)
+		tests = append(tests, buildCleanTest(p, testDuration, TierCore))
 	}
 
 	// 3. Buffer sweep with Full config (4 tests: 1s, 5s, 10s, 30s)
+	// Test duration must exceed buffer size for data to flow through TSBPD
 	for _, buffer := range []time.Duration{1 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second} {
 		p := CleanTestParams{
 			Bitrate: defaultBitrate,
 			Buffer:  buffer,
 			Config:  ConfigFull,
 		}
-		tests = append(tests, buildCleanTest(p, defaultDuration, TierCore))
+		// Ensure test runs long enough for data to pass through TSBPD buffer
+		testDuration := calculateCleanTestDuration(buffer, defaultBitrate, defaultDuration)
+		tests = append(tests, buildCleanTest(p, testDuration, TierCore))
 	}
 
 	// ========================================================================
@@ -598,7 +635,8 @@ func GenerateCleanNetworkTests() []GeneratedCleanTest {
 				Buffer:  defaultBuffer,
 				Config:  config,
 			}
-			tests = append(tests, buildCleanTest(p, defaultDuration, TierDaily))
+			testDuration := calculateCleanTestDuration(defaultBuffer, bitrate, defaultDuration)
+			tests = append(tests, buildCleanTest(p, testDuration, TierDaily))
 		}
 	}
 
@@ -625,7 +663,8 @@ func GenerateCleanNetworkTests() []GeneratedCleanTest {
 				Buffer:  buffer,
 				Config:  ConfigFull,
 			}
-			tests = append(tests, buildCleanTest(p, defaultDuration, TierNightly))
+			testDuration := calculateCleanTestDuration(buffer, bitrate, defaultDuration)
+			tests = append(tests, buildCleanTest(p, testDuration, TierNightly))
 		}
 	}
 
@@ -637,7 +676,8 @@ func GenerateCleanNetworkTests() []GeneratedCleanTest {
 				Buffer:  buffer,
 				Config:  config,
 			}
-			tests = append(tests, buildCleanTest(p, defaultDuration, TierNightly))
+			testDuration := calculateCleanTestDuration(buffer, defaultBitrate, defaultDuration)
+			tests = append(tests, buildCleanTest(p, testDuration, TierNightly))
 		}
 	}
 

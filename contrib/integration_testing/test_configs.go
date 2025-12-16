@@ -6,7 +6,8 @@ import "time"
 var TestConfigs = []TestConfig{
 	// ========== Basic Bandwidth Tests ==========
 	{
-		Name:            "Default-1Mbps",
+		Name:            "Int-Clean-1M-5s-Base",
+		LegacyName:      "Default-1Mbps",
 		Description:     "Default configuration at 1 Mb/s",
 		Bitrate:         1_000_000,
 		TestDuration:    10 * time.Second,
@@ -15,7 +16,8 @@ var TestConfigs = []TestConfig{
 		CollectInterval: 2 * time.Second,
 	},
 	{
-		Name:            "Default-2Mbps",
+		Name:            "Int-Clean-2M-5s-Base",
+		LegacyName:      "Default-2Mbps",
 		Description:     "Default configuration at 2 Mb/s",
 		Bitrate:         2_000_000,
 		TestDuration:    10 * time.Second,
@@ -24,7 +26,8 @@ var TestConfigs = []TestConfig{
 		CollectInterval: 2 * time.Second,
 	},
 	{
-		Name:            "Default-5Mbps",
+		Name:            "Int-Clean-5M-5s-Base",
+		LegacyName:      "Default-5Mbps",
 		Description:     "Default configuration at 5 Mb/s",
 		Bitrate:         5_000_000,
 		TestDuration:    10 * time.Second,
@@ -33,7 +36,8 @@ var TestConfigs = []TestConfig{
 		CollectInterval: 2 * time.Second,
 	},
 	{
-		Name:            "Default-10Mbps",
+		Name:            "Int-Clean-10M-5s-Base",
+		LegacyName:      "Default-10Mbps",
 		Description:     "Default configuration at 10 Mb/s",
 		Bitrate:         10_000_000,
 		TestDuration:    10 * time.Second,
@@ -44,7 +48,8 @@ var TestConfigs = []TestConfig{
 
 	// ========== Buffer Size Tests ==========
 	{
-		Name:            "SmallBuffers-2Mbps",
+		Name:            "Int-Clean-2M-120ms-Base",
+		LegacyName:      "SmallBuffers-2Mbps",
 		Description:     "Small buffers (120ms latency) at 2 Mb/s - tests minimal latency",
 		Bitrate:         2_000_000,
 		TestDuration:    10 * time.Second,
@@ -54,7 +59,8 @@ var TestConfigs = []TestConfig{
 		SharedSRT:       &SmallBuffersSRTConfig,
 	},
 	{
-		Name:            "LargeBuffers-2Mbps",
+		Name:            "Int-Clean-2M-3s-Base",
+		LegacyName:      "LargeBuffers-2Mbps",
 		Description:     "Large buffers (3s latency) at 2 Mb/s - tests high-loss resilience",
 		Bitrate:         2_000_000,
 		TestDuration:    15 * time.Second, // Longer duration for larger buffers
@@ -66,7 +72,8 @@ var TestConfigs = []TestConfig{
 
 	// ========== Packet Reordering Algorithm Tests ==========
 	{
-		Name:            "BTree-2Mbps",
+		Name:            "Int-Clean-2M-5s-Btree",
+		LegacyName:      "BTree-2Mbps",
 		Description:     "B-tree packet reordering at 2 Mb/s",
 		Bitrate:         2_000_000,
 		TestDuration:    10 * time.Second,
@@ -76,7 +83,8 @@ var TestConfigs = []TestConfig{
 		SharedSRT:       &BTreeSRTConfig,
 	},
 	{
-		Name:            "List-2Mbps",
+		Name:            "Int-Clean-2M-5s-List",
+		LegacyName:      "List-2Mbps",
 		Description:     "List-based packet reordering at 2 Mb/s",
 		Bitrate:         2_000_000,
 		TestDuration:    10 * time.Second,
@@ -88,7 +96,8 @@ var TestConfigs = []TestConfig{
 
 	// ========== io_uring Tests ==========
 	{
-		Name:            "IoUring-2Mbps",
+		Name:            "Int-Clean-2M-5s-IoUr",
+		LegacyName:      "IoUring-2Mbps",
 		Description:     "io_uring enabled at 2 Mb/s",
 		Bitrate:         2_000_000,
 		TestDuration:    10 * time.Second,
@@ -98,7 +107,8 @@ var TestConfigs = []TestConfig{
 		SharedSRT:       &IoUringSRTConfig,
 	},
 	{
-		Name:            "IoUring-10Mbps",
+		Name:            "Int-Clean-10M-5s-IoUr",
+		LegacyName:      "IoUring-10Mbps",
 		Description:     "io_uring enabled at 10 Mb/s - tests high throughput",
 		Bitrate:         10_000_000,
 		TestDuration:    10 * time.Second,
@@ -110,7 +120,8 @@ var TestConfigs = []TestConfig{
 
 	// ========== Combined Configuration Tests ==========
 	{
-		Name:            "IoUring-LargeBuffers-BTree-10Mbps",
+		Name:            "Int-Clean-10M-3s-IoUrBtree",
+		LegacyName:      "IoUring-LargeBuffers-BTree-10Mbps",
 		Description:     "io_uring + large buffers + B-tree at 10 Mb/s - high performance config",
 		Bitrate:         10_000_000,
 		TestDuration:    15 * time.Second,
@@ -131,7 +142,8 @@ var TestConfigs = []TestConfig{
 
 	// ========== Component-Specific Configuration Tests ==========
 	{
-		Name:            "AsymmetricLatency-2Mbps",
+		Name:            "Int-Clean-2M-Asymmetric",
+		LegacyName:      "AsymmetricLatency-2Mbps",
 		Description:     "Server and client with different latency settings",
 		Bitrate:         2_000_000,
 		TestDuration:    10 * time.Second,
@@ -165,7 +177,8 @@ var TestConfigs = []TestConfig{
 	// These tests validate the client's io_uring output writer
 	// (uses unsafe package for zero-copy writes to stdout/file)
 	{
-		Name:            "IoUringOutput-2Mbps",
+		Name:            "Int-Clean-2M-5s-IoUrOut",
+		LegacyName:      "IoUringOutput-2Mbps",
 		Description:     "Client with io_uring output enabled at 2 Mb/s",
 		Bitrate:         2_000_000,
 		TestDuration:    10 * time.Second,
@@ -177,7 +190,8 @@ var TestConfigs = []TestConfig{
 		},
 	},
 	{
-		Name:            "IoUringOutput-10Mbps",
+		Name:            "Int-Clean-10M-5s-IoUrOut",
+		LegacyName:      "IoUringOutput-10Mbps",
 		Description:     "Client with io_uring output enabled at 10 Mb/s - high throughput",
 		Bitrate:         10_000_000,
 		TestDuration:    10 * time.Second,
@@ -192,7 +206,8 @@ var TestConfigs = []TestConfig{
 	// ========== Full io_uring Path Tests ==========
 	// These test io_uring for both SRT send/recv AND client output
 	{
-		Name:            "FullIoUring-2Mbps",
+		Name:            "Int-Clean-2M-5s-FullIoUr",
+		LegacyName:      "FullIoUring-2Mbps",
 		Description:     "Full io_uring path: SRT send/recv + client output at 2 Mb/s",
 		Bitrate:         2_000_000,
 		TestDuration:    10 * time.Second,
@@ -205,7 +220,8 @@ var TestConfigs = []TestConfig{
 		},
 	},
 	{
-		Name:            "FullIoUring-10Mbps",
+		Name:            "Int-Clean-10M-5s-FullIoUr",
+		LegacyName:      "FullIoUring-10Mbps",
 		Description:     "Full io_uring path: SRT send/recv + client output at 10 Mb/s",
 		Bitrate:         10_000_000,
 		TestDuration:    10 * time.Second,
@@ -220,7 +236,8 @@ var TestConfigs = []TestConfig{
 
 	// ========== High Performance Config ==========
 	{
-		Name:            "HighPerf-10Mbps",
+		Name:            "Int-Clean-10M-3s-Full",
+		LegacyName:      "HighPerf-10Mbps",
 		Description:     "Maximum performance: io_uring everywhere + B-tree + large buffers at 10 Mb/s",
 		Bitrate:         10_000_000,
 		TestDuration:    15 * time.Second,
@@ -257,7 +274,8 @@ var TestConfigs = []TestConfig{
 var NetworkTestConfigs = []TestConfig{
 	// ========== Basic Loss Tests (No Latency) ==========
 	{
-		Name:        "Network-Loss2pct-5Mbps",
+		Name:        "Network-Loss-2pct-5M-Base",
+		LegacyName:  "Network-Loss2pct-5Mbps",
 		Description: "2% packet loss at 5 Mb/s - basic ARQ validation",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -272,7 +290,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &LargeBuffersSRTConfig, // Large buffers for loss recovery
 	},
 	{
-		Name:        "Network-Loss5pct-5Mbps",
+		Name:        "Network-Loss-5pct-5M-Base",
+		LegacyName:  "Network-Loss5pct-5Mbps",
 		Description: "5% packet loss at 5 Mb/s - moderate loss recovery",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -287,7 +306,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &LargeBuffersSRTConfig,
 	},
 	{
-		Name:        "Network-Loss10pct-5Mbps",
+		Name:        "Network-Loss-10pct-5M-Base",
+		LegacyName:  "Network-Loss10pct-5Mbps",
 		Description: "10% packet loss at 5 Mb/s - heavy loss recovery",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -305,7 +325,8 @@ var NetworkTestConfigs = []TestConfig{
 	// ========== High Performance Loss Tests (io_uring + btree) ==========
 	// These tests use maximum performance paths to investigate NAK handling issues
 	{
-		Name:        "Network-Loss2pct-1Mbps-HighPerf",
+		Name:        "Network-Loss-2pct-1M-Full",
+		LegacyName:  "Network-Loss2pct-1Mbps-HighPerf",
 		Description: "2% loss with io_uring + btree - Defect 8 investigation",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -334,7 +355,8 @@ var NetworkTestConfigs = []TestConfig{
 		},
 	},
 	{
-		Name:        "Network-Loss2pct-1Mbps-NoIoUring",
+		Name:        "Network-Loss-2pct-1M-NoIoUr",
+		LegacyName:  "Network-Loss2pct-1Mbps-NoIoUring",
 		Description: "2% loss WITHOUT io_uring - verify fix works for traditional path",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -365,7 +387,8 @@ var NetworkTestConfigs = []TestConfig{
 	// ========== High Performance Loss Tests (io_uring + btree) ==========
 	// These tests use maximum performance paths to investigate NAK handling issues
 	{
-		Name:        "Network-Loss2pct-5Mbps-HighPerf",
+		Name:        "Network-Loss-2pct-5M-Full",
+		LegacyName:  "Network-Loss2pct-5Mbps-HighPerf",
 		Description: "2% loss with io_uring + btree - Defect 8 investigation",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -396,7 +419,8 @@ var NetworkTestConfigs = []TestConfig{
 
 	// ========== Latency + Loss Tests ==========
 	{
-		Name:        "Network-Regional-Loss2pct-5Mbps",
+		Name:        "Network-Regional-2pct-5M-R10-Base",
+		LegacyName:  "Network-Regional-Loss2pct-5Mbps",
 		Description: "10ms RTT + 2% loss at 5 Mb/s - regional network with light loss",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -411,7 +435,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &LargeBuffersSRTConfig,
 	},
 	{
-		Name:        "Network-Continental-Loss2pct-5Mbps",
+		Name:        "Network-Continental-2pct-5M-R60-Base",
+		LegacyName:  "Network-Continental-Loss2pct-5Mbps",
 		Description: "60ms RTT + 2% loss at 5 Mb/s - continental network with light loss",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -426,7 +451,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &LargeBuffersSRTConfig,
 	},
 	{
-		Name:        "Network-Intercontinental-Loss5pct-5Mbps",
+		Name:        "Network-Intercont-5pct-5M-R130-Base",
+		LegacyName:  "Network-Intercontinental-Loss5pct-5Mbps",
 		Description: "130ms RTT + 5% loss at 5 Mb/s - intercontinental with moderate loss",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -442,7 +468,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &ExtraLargeBuffersSRTConfig, // Need extra large buffers
 	},
 	{
-		Name:        "Network-GeoSatellite-Loss2pct-2Mbps",
+		Name:        "Network-GeoSat-2pct-2M-R300-Base",
+		LegacyName:  "Network-GeoSatellite-Loss2pct-2Mbps",
 		Description: "300ms RTT + 2% loss at 2 Mb/s - GEO satellite simulation",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -462,7 +489,8 @@ var NetworkTestConfigs = []TestConfig{
 	// Starlink simulates LEO satellite reconvergence events: 60ms total outages
 	// occurring 4 times per minute at 12s, 27s, 42s, 57s
 	{
-		Name:        "Network-Starlink-5Mbps",
+		Name:        "Network-Starlink-5M-Base",
+		LegacyName:  "Network-Starlink-5Mbps",
 		Description: "Starlink reconvergence pattern (60ms 100% loss at 12,27,42,57s) at 5 Mb/s",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -478,7 +506,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &LargeBuffersSRTConfig,
 	},
 	{
-		Name:        "Network-Starlink-20Mbps",
+		Name:        "Network-Starlink-20M-Base",
+		LegacyName:  "Network-Starlink-20Mbps",
 		Description: "Starlink reconvergence pattern at 20 Mb/s - higher throughput stress",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -494,7 +523,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &LargeBuffersSRTConfig,
 	},
 	{
-		Name:        "Network-Starlink-5Mbps-HighPerf",
+		Name:        "Network-Starlink-5M-Full",
+		LegacyName:  "Network-Starlink-5Mbps-HighPerf",
 		Description: "Starlink pattern at 5 Mb/s with io_uring + btree optimizations",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -524,7 +554,8 @@ var NetworkTestConfigs = []TestConfig{
 		},
 	},
 	{
-		Name:        "Network-Starlink-20Mbps-HighPerf",
+		Name:        "Network-Starlink-20M-Full",
+		LegacyName:  "Network-Starlink-20Mbps-HighPerf",
 		Description: "Starlink pattern at 20 Mb/s with io_uring + btree - max stress",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -554,7 +585,8 @@ var NetworkTestConfigs = []TestConfig{
 		},
 	},
 	{
-		Name:        "Network-HighLossBurst-5Mbps",
+		Name:        "Network-HighLoss-5M-Base",
+		LegacyName:  "Network-HighLossBurst-5Mbps",
 		Description: "High loss burst pattern (85% loss for 1s every minute) at 5 Mb/s",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -574,7 +606,8 @@ var NetworkTestConfigs = []TestConfig{
 	// These tests validate NAK btree loss recovery behavior
 	// Key metrics to verify: FastNakTriggers, NakBtreeInserts, NakBtreeDeletes
 	{
-		Name:        "Network-Loss2pct-5Mbps-NakBtree",
+		Name:        "Network-Loss-2pct-5M-NakBtree",
+		LegacyName:  "Network-Loss2pct-5Mbps-NakBtree",
 		Description: "2% loss with NAK btree - verify loss recovery with all NAK btree features",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -589,7 +622,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &HighPerfSRTConfig, // Full NAK btree + io_uring + btree
 	},
 	{
-		Name:        "Network-Starlink-5Mbps-NakBtree",
+		Name:        "Network-Starlink-5M-NakBtree",
+		LegacyName:  "Network-Starlink-5Mbps-NakBtree",
 		Description: "Starlink pattern with NAK btree - tests FastNAK triggers during outages",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -605,7 +639,8 @@ var NetworkTestConfigs = []TestConfig{
 		SharedSRT:       &HighPerfSRTConfig, // Full NAK btree + io_uring + btree
 	},
 	{
-		Name:        "Network-Starlink-20Mbps-NakBtree",
+		Name:        "Network-Starlink-20M-NakBtree",
+		LegacyName:  "Network-Starlink-20Mbps-NakBtree",
 		Description: "Starlink pattern at 20 Mb/s with NAK btree - high throughput stress test",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -623,7 +658,8 @@ var NetworkTestConfigs = []TestConfig{
 
 	// ========== Stress Tests ==========
 	{
-		Name:        "Network-Stress-HighLatencyHighLoss",
+		Name:        "Network-Stress-10pct-10M-R130",
+		LegacyName:  "Network-Stress-HighLatencyHighLoss",
 		Description: "130ms RTT + 10% loss at 10 Mb/s - extreme stress test",
 		Mode:        TestModeNetwork,
 		Impairment: NetworkImpairment{
@@ -659,8 +695,15 @@ var ExtraLargeBuffersSRTConfig = SRTConfig{
 
 // GetTestConfigByName finds a test configuration by name
 func GetTestConfigByName(name string) *TestConfig {
+	// First try to match by Name (new standardized name)
 	for i := range TestConfigs {
 		if TestConfigs[i].Name == name {
+			return &TestConfigs[i]
+		}
+	}
+	// Fall back to LegacyName for backward compatibility
+	for i := range TestConfigs {
+		if TestConfigs[i].LegacyName == name {
 			return &TestConfigs[i]
 		}
 	}
@@ -669,8 +712,15 @@ func GetTestConfigByName(name string) *TestConfig {
 
 // GetNetworkTestConfigByName finds a network test configuration by name
 func GetNetworkTestConfigByName(name string) *TestConfig {
+	// First try to match by Name (new standardized name)
 	for i := range NetworkTestConfigs {
 		if NetworkTestConfigs[i].Name == name {
+			return &NetworkTestConfigs[i]
+		}
+	}
+	// Fall back to LegacyName for backward compatibility
+	for i := range NetworkTestConfigs {
+		if NetworkTestConfigs[i].LegacyName == name {
 			return &NetworkTestConfigs[i]
 		}
 	}
@@ -689,7 +739,8 @@ func GetNetworkTestConfigByName(name string) *TestConfig {
 // ParallelTestConfigs contains parallel comparison test configurations
 var ParallelTestConfigs = []ParallelTestConfig{
 	{
-		Name:        "Parallel-Starlink-5Mbps",
+		Name:        "Parallel-Starlink-5M-Base-vs-Full",
+		LegacyName:  "Parallel-Starlink-5Mbps",
 		Description: "Parallel comparison: Starlink pattern at 5 Mb/s (Baseline vs HighPerf)",
 		Impairment: NetworkImpairment{
 			Pattern:        "starlink",
@@ -719,7 +770,8 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		ProfileDuration: 5 * time.Minute,
 	},
 	{
-		Name:        "Parallel-Starlink-20Mbps",
+		Name:        "Parallel-Starlink-20M-Base-vs-Full",
+		LegacyName:  "Parallel-Starlink-20Mbps",
 		Description: "Parallel comparison: Starlink pattern at 20 Mb/s (Baseline vs HighPerf)",
 		Impairment: NetworkImpairment{
 			Pattern:        "starlink",
@@ -749,7 +801,8 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		ProfileDuration: 5 * time.Minute,
 	},
 	{
-		Name:        "Parallel-Loss2pct-5Mbps",
+		Name:        "Parallel-Loss-2pct-5M-Base-vs-Full",
+		LegacyName:  "Parallel-Loss2pct-5Mbps",
 		Description: "Parallel comparison: 2% probabilistic loss at 5 Mb/s",
 		Impairment: NetworkImpairment{
 			LossRate:       0.02,
@@ -788,7 +841,8 @@ var ParallelTestConfigs = []ParallelTestConfig{
 	// Compare: NAK btree only vs NAK btree + FastNAK
 	// Expected: FastNAK shows faster recovery after 60ms outages
 	{
-		Name:        "Parallel-Starlink-FastNak-Impact",
+		Name:        "Parallel-Starlink-5M-NakBtree-vs-NakBtreeF",
+		LegacyName:  "Parallel-Starlink-FastNak-Impact",
 		Description: "Starlink: NAK btree only vs NAK btree + FastNAK (measure FastNAK impact)",
 		Impairment: NetworkImpairment{
 			Pattern:        "starlink",
@@ -821,7 +875,8 @@ var ParallelTestConfigs = []ParallelTestConfig{
 	// Compare: NAK btree + FastNAK vs NAK btree + FastNAK + FastNAKRecent
 	// Expected: FastNAKRecent detects sequence jumps after outages
 	{
-		Name:        "Parallel-Starlink-FastNakRecent-Impact",
+		Name:        "Parallel-Starlink-5M-NakBtreeF-vs-NakBtreeFr",
+		LegacyName:  "Parallel-Starlink-FastNakRecent-Impact",
 		Description: "Starlink: FastNAK vs FastNAK + FastNAKRecent (measure sequence jump detection)",
 		Impairment: NetworkImpairment{
 			Pattern:        "starlink",
@@ -854,7 +909,8 @@ var ParallelTestConfigs = []ParallelTestConfig{
 	// Compare: Baseline (list, no optimizations) vs Full NAK btree stack
 	// Expected: Full NAK btree outperforms Baseline in outage recovery
 	{
-		Name:        "Parallel-Starlink-Full-NakBtree",
+		Name:        "Parallel-Starlink-5M-Base-vs-NakBtreeFr",
+		LegacyName:  "Parallel-Starlink-Full-NakBtree",
 		Description: "Starlink: Baseline (list) vs Full NAK btree (all features)",
 		Impairment: NetworkImpairment{
 			Pattern:        "starlink",
@@ -887,8 +943,15 @@ var ParallelTestConfigs = []ParallelTestConfig{
 
 // GetParallelTestConfigByName finds a parallel test configuration by name
 func GetParallelTestConfigByName(name string) *ParallelTestConfig {
+	// First try to match by Name (new standardized name)
 	for i := range ParallelTestConfigs {
 		if ParallelTestConfigs[i].Name == name {
+			return &ParallelTestConfigs[i]
+		}
+	}
+	// Fall back to LegacyName for backward compatibility
+	for i := range ParallelTestConfigs {
+		if ParallelTestConfigs[i].LegacyName == name {
 			return &ParallelTestConfigs[i]
 		}
 	}
@@ -911,7 +974,8 @@ func GetParallelTestConfigByName(name string) *ParallelTestConfig {
 var IsolationTestConfigs = []IsolationTestConfig{
 	// Test 0: Control-Control (sanity check - both identical)
 	{
-		Name:          "Isolation-Control",
+		Name:          "Isolation-5M-Control",
+		LegacyName:    "Isolation-Control",
 		Description:   "Sanity check: both pipelines identical (should show 0 difference)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -924,7 +988,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 1: CG io_uring send only
 	{
-		Name:          "Isolation-CG-IoUringSend",
+		Name:          "Isolation-5M-CG-IoUrSend",
+		LegacyName:    "Isolation-CG-IoUringSend",
 		Description:   "Client-Generator: io_uring send path only",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -937,7 +1002,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 2: CG io_uring recv only
 	{
-		Name:          "Isolation-CG-IoUringRecv",
+		Name:          "Isolation-5M-CG-IoUrRecv",
+		LegacyName:    "Isolation-CG-IoUringRecv",
 		Description:   "Client-Generator: io_uring recv path only (for ACKs/NAKs)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -950,7 +1016,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 3: CG btree packet store
 	{
-		Name:          "Isolation-CG-Btree",
+		Name:          "Isolation-5M-CG-Btree",
+		LegacyName:    "Isolation-CG-Btree",
 		Description:   "Client-Generator: btree packet store (instead of list)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -963,7 +1030,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 4: Server io_uring send only
 	{
-		Name:          "Isolation-Server-IoUringSend",
+		Name:          "Isolation-5M-Server-IoUrSend",
+		LegacyName:    "Isolation-Server-IoUringSend",
 		Description:   "Server: io_uring send path only",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -976,7 +1044,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 5: Server io_uring recv only
 	{
-		Name:          "Isolation-Server-IoUringRecv",
+		Name:          "Isolation-5M-Server-IoUrRecv",
+		LegacyName:    "Isolation-Server-IoUringRecv",
 		Description:   "Server: io_uring recv path only",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -990,7 +1059,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 6: Server btree packet store
 	{
-		Name:          "Isolation-Server-Btree",
+		Name:          "Isolation-5M-Server-Btree",
+		LegacyName:    "Isolation-Server-Btree",
 		Description:   "Server: btree packet store (instead of list)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1010,7 +1080,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 7: Server NAK btree (receiver side - core feature)
 	{
-		Name:          "Isolation-Server-NakBtree",
+		Name:          "Isolation-5M-Server-NakBtree",
+		LegacyName:    "Isolation-Server-NakBtree",
 		Description:   "Server: NAK btree for gap detection (replaces lossList scan)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1023,7 +1094,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 8: Server NAK btree + io_uring recv (realistic high-perf receiver)
 	{
-		Name:          "Isolation-Server-NakBtree-IoUringRecv",
+		Name:          "Isolation-5M-Server-NakBtree-IoUr",
+		LegacyName:    "Isolation-Server-NakBtree-IoUringRecv",
 		Description:   "Server: NAK btree + io_uring recv (combined receiver path)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1038,7 +1110,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 	// This tests whether a larger "too recent" window fixes false gap detection
 	// caused by io_uring's out-of-order packet delivery
 	{
-		Name:          "Isolation-Server-NakBtree-IoUringRecv-LargeWindow",
+		Name:          "Isolation-5M-Server-NakBtree-IoUr-50pct",
+		LegacyName:    "Isolation-Server-NakBtree-IoUringRecv-LargeWindow",
 		Description:   "Server: NAK btree + io_uring recv + 50% recent window (debug test)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1051,7 +1124,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 9: CG HonorNakOrder (sender side - processes NAKs in order)
 	{
-		Name:          "Isolation-CG-HonorNakOrder",
+		Name:          "Isolation-5M-CG-HonorNakOrder",
+		LegacyName:    "Isolation-CG-HonorNakOrder",
 		Description:   "Client-Generator: HonorNakOrder (retransmits in NAK packet order)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1064,7 +1138,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 10: Full NAK btree pipeline (Server NAK btree + CG HonorNakOrder)
 	{
-		Name:          "Isolation-FullNakBtree",
+		Name:          "Isolation-5M-FullNakBtree",
+		LegacyName:    "Isolation-FullNakBtree",
 		Description:   "Full NAK btree: Server(NAK btree) + CG(HonorNakOrder)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1084,7 +1159,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Permutation #1: NAK btree only (no FastNAK, no HonorNakOrder)
 	{
-		Name:          "Isolation-NakBtree-Only",
+		Name:          "Isolation-5M-NakBtree-Only",
+		LegacyName:    "Isolation-NakBtree-Only",
 		Description:   "NAK btree only, no FastNAK, no HonorNakOrder (permutation #1)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1097,7 +1173,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Permutation #2: NAK btree + FastNAK only
 	{
-		Name:          "Isolation-NakBtree-FastNak",
+		Name:          "Isolation-5M-NakBtreeF",
+		LegacyName:    "Isolation-NakBtree-FastNak",
 		Description:   "NAK btree + FastNAK, no FastNAKRecent, no HonorNakOrder (permutation #2)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1110,7 +1187,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Permutation #3: NAK btree + FastNAK + FastNAKRecent
 	{
-		Name:          "Isolation-NakBtree-FastNakRecent",
+		Name:          "Isolation-5M-NakBtreeFr",
+		LegacyName:    "Isolation-NakBtree-FastNakRecent",
 		Description:   "NAK btree + FastNAK + FastNAKRecent, no HonorNakOrder (permutation #3)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1123,7 +1201,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Permutation #4: NAK btree + HonorNakOrder (no FastNAK)
 	{
-		Name:          "Isolation-NakBtree-HonorNakOrder",
+		Name:          "Isolation-5M-NakBtree-HonorNak",
+		LegacyName:    "Isolation-NakBtree-HonorNakOrder",
 		Description:   "NAK btree + HonorNakOrder, no FastNAK (permutation #4)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1136,7 +1215,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Permutation #5: NAK btree + FastNAK + HonorNakOrder (no FastNAKRecent)
 	{
-		Name:          "Isolation-NakBtree-FastNak-HonorNakOrder",
+		Name:          "Isolation-5M-NakBtreeF-HonorNak",
+		LegacyName:    "Isolation-NakBtree-FastNak-HonorNakOrder",
 		Description:   "NAK btree + FastNAK + HonorNakOrder, no FastNAKRecent (permutation #5)",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1149,7 +1229,8 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// Test 11: Full HighPerf with NAK btree (io_uring + btree + NAK btree + HonorNakOrder)
 	{
-		Name:          "Isolation-FullHighPerf-NakBtree",
+		Name:          "Isolation-5M-Full",
+		LegacyName:    "Isolation-FullHighPerf-NakBtree",
 		Description:   "Full HighPerf: io_uring send/recv + btree + NAK btree + HonorNakOrder",
 		ControlCG:     ControlSRTConfig,
 		ControlServer: ControlSRTConfig,
@@ -1163,8 +1244,15 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 // GetIsolationTestConfigByName finds an isolation test configuration by name
 func GetIsolationTestConfigByName(name string) *IsolationTestConfig {
+	// First try to match by Name (new standardized name)
 	for i := range IsolationTestConfigs {
 		if IsolationTestConfigs[i].Name == name {
+			return &IsolationTestConfigs[i]
+		}
+	}
+	// Fall back to LegacyName for backward compatibility
+	for i := range IsolationTestConfigs {
+		if IsolationTestConfigs[i].LegacyName == name {
 			return &IsolationTestConfigs[i]
 		}
 	}

@@ -1064,8 +1064,27 @@ func computeExpectedSignals(config *TestConfig) PositiveSignals {
 	// Allow 10% variance for timing and connection setup/teardown
 	minPackets := int64(float64(packetsExpected) * 0.90)
 
-	// For received packets, expect at least 85% (allows for some startup delay)
-	minRecv := int64(float64(packetsExpected) * 0.85)
+	// For received packets, account for TSBPD buffer delay
+	// With large buffers, subscriber won't receive data until after the buffer delay
+	// Effective receive time = test_duration - buffer_delay
+	latency := getEffectiveLatency(config)
+	effectiveRecvDuration := config.TestDuration - latency
+	if effectiveRecvDuration < 0 {
+		effectiveRecvDuration = 0
+	}
+
+	// Calculate what percentage of data the subscriber will have received
+	recvRatio := effectiveRecvDuration.Seconds() / config.TestDuration.Seconds()
+	if recvRatio > 1.0 {
+		recvRatio = 1.0
+	}
+
+	// For received packets, expect at least 80% of the effective receive ratio
+	// (allows for startup delay and buffer timing)
+	minRecv := int64(float64(packetsExpected) * recvRatio * 0.80)
+	if minRecv < 100 {
+		minRecv = 100 // Minimum sanity check
+	}
 
 	// Throughput should be close to configured bitrate
 	targetMbps := float64(config.Bitrate) / 1_000_000
@@ -1080,6 +1099,26 @@ func computeExpectedSignals(config *TestConfig) PositiveSignals {
 		RequireACKs:       true,
 		RequireNAKsOnLoss: false, // Only for network impairment tests
 	}
+}
+
+// getEffectiveLatency returns the effective TSBPD latency from config
+func getEffectiveLatency(config *TestConfig) time.Duration {
+	// Check SharedSRT first
+	if config.SharedSRT != nil && config.SharedSRT.Latency > 0 {
+		return config.SharedSRT.Latency
+	}
+	// Then check component configs
+	if config.Server.SRT.Latency > 0 {
+		return config.Server.SRT.Latency
+	}
+	if config.ClientGenerator.SRT.Latency > 0 {
+		return config.ClientGenerator.SRT.Latency
+	}
+	if config.Client.SRT.Latency > 0 {
+		return config.Client.SRT.Latency
+	}
+	// Default SRT latency is 120ms
+	return 120 * time.Millisecond
 }
 
 // AnalysisResult aggregates all analysis components
@@ -1134,15 +1173,17 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	result.ClientMetrics = ComputeDerivedMetrics(ts.Client)
 
 	// Pipeline balance verification for clean network tests
-	// Uses a small tolerance for timing differences (5 packets)
+	// Uses a tolerance for timing differences during shutdown when packets
+	// may still be in the TSBPD buffer waiting for delivery.
 	// Note: Mode defaults to "" (empty), treat "" and "clean" as clean network
 	pipelineBalanceRequired := false
 	if config == nil || config.Mode == TestModeClean || config.Mode == "" {
 		pipelineBalanceRequired = true
-		// Allow small tolerance for timing: ~0.1% or 5 packets, whichever is larger
-		tolerance := int64(5)
-		if result.ServerMetrics.TotalPacketsSent > 5000 {
-			tolerance = result.ServerMetrics.TotalPacketsSent / 1000 // 0.1%
+		// Allow tolerance for timing: ~0.5% or 10 packets, whichever is larger
+		// This accounts for packets still in TSBPD buffer at shutdown time
+		tolerance := int64(10)
+		if result.ServerMetrics.TotalPacketsSent > 2000 {
+			tolerance = result.ServerMetrics.TotalPacketsSent / 200 // 0.5%
 		}
 		result.PipelineBalance = VerifyPipelineBalance(
 			result.ServerMetrics, result.ClientGenMetrics, result.ClientMetrics, tolerance)

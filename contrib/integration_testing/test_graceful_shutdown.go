@@ -247,6 +247,11 @@ func main() {
 		runCleanMatrixTestsByTier(TierNightly)
 
 	default:
+		// Check if it's a specific clean matrix test name
+		if strings.HasPrefix(testName, "Int-Clean-") {
+			runSpecificCleanMatrixTest(testName)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "Unknown test: %s\n", testName)
 		printUsage()
 		os.Exit(1)
@@ -288,6 +293,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  clean-matrix-run-tier1                Run Tier 1 clean tests (~4 min)\n")
 	fmt.Fprintf(os.Stderr, "  clean-matrix-run-tier2                Run Tier 1+2 clean tests (~6 min)\n")
 	fmt.Fprintf(os.Stderr, "  clean-matrix-run-all                  Run all clean tests (~10 min)\n")
+	fmt.Fprintf(os.Stderr, "  Int-Clean-<name>                      Run specific clean test by name\n")
 }
 
 // testGracefulShutdownSIGINTAllConfigs runs the graceful shutdown test with all configurations
@@ -1115,6 +1121,49 @@ func runCleanMatrixTestsByTier(maxTier TestTier) {
 		for _, name := range failedTests {
 			fmt.Printf("  - %s\n", name)
 		}
+		os.Exit(1)
+	}
+}
+
+// runSpecificCleanMatrixTest runs a single clean matrix test by name
+func runSpecificCleanMatrixTest(testName string) {
+	allTests := GenerateCleanNetworkTests()
+
+	// Find the test by name
+	var foundTest *GeneratedCleanTest
+	for _, t := range allTests {
+		if t.Name == testName {
+			foundTest = &t
+			break
+		}
+	}
+
+	if foundTest == nil {
+		fmt.Fprintf(os.Stderr, "Error: Test '%s' not found\n", testName)
+		fmt.Fprintf(os.Stderr, "\nAvailable tests:\n")
+		for _, t := range allTests {
+			fmt.Fprintf(os.Stderr, "  %s\n", t.Name)
+		}
+		os.Exit(1)
+	}
+
+	fmt.Printf("╔═══════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  Running Single Clean Network Test                                    ║\n")
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+
+	fmt.Printf("Test: %s\n", foundTest.Name)
+	fmt.Printf("Description: %s\n", foundTest.Description)
+	fmt.Printf("Duration: %s\n", foundTest.Duration)
+	fmt.Printf("Tier: %v\n\n", foundTest.Tier)
+
+	startTime := time.Now()
+	err := runTestWithConfig(foundTest.Config)
+	elapsed := time.Since(startTime)
+
+	if err == nil {
+		fmt.Printf("\n✓ PASSED: %s (elapsed: %s)\n", foundTest.Name, elapsed.Round(time.Second))
+	} else {
+		fmt.Printf("\n✗ FAILED: %s - %v (elapsed: %s)\n", foundTest.Name, err, elapsed.Round(time.Second))
 		os.Exit(1)
 	}
 }

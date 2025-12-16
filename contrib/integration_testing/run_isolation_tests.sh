@@ -83,28 +83,28 @@ echo ""
 # TEST CONFIGURATION
 #=============================================================================
 
-# Test configurations in order
+# Test configurations in order (using new standardized naming)
 TESTS=(
     # Original isolation tests (0-6)
-    "Isolation-Control"
-    "Isolation-CG-IoUringSend"
-    "Isolation-CG-IoUringRecv"
-    "Isolation-CG-Btree"
-    "Isolation-Server-IoUringSend"
-    "Isolation-Server-IoUringRecv"
-    "Isolation-Server-Btree"
+    "Isolation-5M-Control"
+    "Isolation-5M-CG-IoUrSend"
+    "Isolation-5M-CG-IoUrRecv"
+    "Isolation-5M-CG-Btree"
+    "Isolation-5M-Server-IoUrSend"
+    "Isolation-5M-Server-IoUrRecv"
+    "Isolation-5M-Server-Btree"
     # NAK btree isolation tests (7-10)
-    "Isolation-Server-NakBtree"
-    "Isolation-Server-NakBtree-IoUringRecv"
-    "Isolation-CG-HonorNakOrder"
-    "Isolation-FullNakBtree"
+    "Isolation-5M-Server-NakBtree"
+    "Isolation-5M-Server-NakBtree-IoUr"
+    "Isolation-5M-CG-HonorNakOrder"
+    "Isolation-5M-FullNakBtree"
     # NAK btree permutation tests (11-16)
-    "Isolation-NakBtree-Only"
-    "Isolation-NakBtree-FastNak"
-    "Isolation-NakBtree-FastNakRecent"
-    "Isolation-NakBtree-HonorNakOrder"
-    "Isolation-NakBtree-FastNak-HonorNakOrder"
-    "Isolation-FullHighPerf-NakBtree"
+    "Isolation-5M-NakBtree-Only"
+    "Isolation-5M-NakBtreeF"
+    "Isolation-5M-NakBtreeFr"
+    "Isolation-5M-NakBtree-HonorNak"
+    "Isolation-5M-NakBtreeF-HonorNak"
+    "Isolation-5M-Full"
 )
 
 # Create output directory with timestamp
