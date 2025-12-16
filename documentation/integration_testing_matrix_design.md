@@ -1126,7 +1126,7 @@ type TestConfig struct {
 | Phase 2: Timer Interval Support | ✅ Complete | 2025-12-16 | 2025-12-16 | Merged with Phase 1 |
 | Phase 3: Test Matrix Generator | ✅ Complete | 2025-12-16 | 2025-12-16 | 64 tests generated, 8 unit tests passing |
 | Phase 4: CLI Integration | ✅ Complete | 2025-12-16 | 2025-12-16 | 7 new Makefile targets |
-| Phase 5: Clean Network Tests | ⏳ Pending | - | - | |
+| Phase 5: Clean Network Tests | ✅ Complete | 2025-12-16 | 2025-12-16 | 37 tests, 7 new Makefile targets |
 | Phase 6: Tier 1 Tests | ⏳ Pending | - | - | |
 | Phase 7: Tier 2 & 3 Tests | ⏳ Pending | - | - | |
 | Phase 8: Migration | ⏳ Pending | - | - | |
@@ -1218,6 +1218,57 @@ By RTT:
 
 **Files Modified:**
 - `contrib/integration_testing/test_graceful_shutdown.go` - Added 7 CLI commands + implementations
+- `Makefile` - Added 7 new targets
+
+#### 2025-12-16: Phase 5 Complete - Clean Network Tests ✅
+- [x] Add `GeneratedCleanTest` type and `CleanTestParams` struct
+- [x] Implement `GenerateCleanTestName()` following naming convention: `Int-Clean-{Bitrate}-{Buffer}-{Config}[-{Timer}]`
+- [x] Implement `GenerateCleanNetworkTests()` with tiered test generation:
+  - Tier 1 (Core): Config variant sweep, bitrate sweep, buffer sweep (12 tests)
+  - Tier 2 (Daily): NAK btree at different bitrates, timer profiles (10 tests)
+  - Tier 3 (Nightly): Bitrate × Buffer, NAK btree × Buffer cross-products (15 tests)
+- [x] Add helper functions: `FilterCleanTestsByTier()`, `CountCleanByTier()`, `PrintCleanTestMatrix()`, `PrintCleanTestSummary()`
+- [x] Add CLI commands to `test_graceful_shutdown.go`:
+  - `clean-matrix-list` - List all 37 tests with tier and duration
+  - `clean-matrix-summary` - Show summary by tier with estimated runtime
+  - `clean-matrix-tier1-list` - List Tier 1 tests
+  - `clean-matrix-tier2-list` - List Tier 1+2 tests
+  - `clean-matrix-run-tier1` - Run Tier 1 tests (~3 min)
+  - `clean-matrix-run-tier2` - Run Tier 1+2 tests (~6 min)
+  - `clean-matrix-run-all` - Run all tests (~9 min)
+- [x] Add Makefile targets (7 new targets, no root required)
+- [x] Verified build and CLI output
+
+**Generated Clean Network Test Counts:**
+- Tier 1 (Core):    12 tests
+- Tier 2 (Daily):   10 tests
+- Tier 3 (Nightly): 15 tests
+- Total unique:     37 tests
+
+**Example Output:**
+```
+$ make test-clean-matrix-tier1-list
+Tier 1 (Core) Clean Network Tests (12 tests):
+
+    1. Int-Clean-20M-5s-Base                         15s
+    2. Int-Clean-20M-5s-Btree                        15s
+    3. Int-Clean-20M-5s-IoUr                         15s
+    4. Int-Clean-20M-5s-NakBtree                     15s
+    5. Int-Clean-20M-5s-NakBtreeF                    15s
+    6. Int-Clean-20M-5s-NakBtreeFr                   15s
+    7. Int-Clean-20M-5s-Full                         15s
+    8. Int-Clean-5M-5s-Full                          15s
+    9. Int-Clean-50M-5s-Full                         15s
+   10. Int-Clean-20M-1s-Full                         15s
+   11. Int-Clean-20M-10s-Full                        15s
+   12. Int-Clean-20M-30s-Full                        15s
+
+Estimated total runtime: 3m0s
+```
+
+**Files Modified:**
+- `contrib/integration_testing/test_matrix.go` - Added clean network test generation (~200 lines)
+- `contrib/integration_testing/test_graceful_shutdown.go` - Added CLI commands (~100 lines)
 - `Makefile` - Added 7 new targets
 
 ---

@@ -127,6 +127,37 @@ test-matrix-all: client server client-generator
 	@echo "NOTE: Matrix tests require root privileges for network namespace creation"
 	@cd contrib/integration_testing && go run . matrix-run-all
 
+## test-clean-matrix-list: List all clean network matrix tests (~42 tests)
+test-clean-matrix-list:
+	@cd contrib/integration_testing && go run . clean-matrix-list
+
+## test-clean-matrix-summary: Show clean network test summary by tier
+test-clean-matrix-summary:
+	@cd contrib/integration_testing && go run . clean-matrix-summary
+
+## test-clean-matrix-tier1-list: List Tier 1 clean network tests (~14 tests)
+test-clean-matrix-tier1-list:
+	@cd contrib/integration_testing && go run . clean-matrix-tier1-list
+
+## test-clean-matrix-tier2-list: List Tier 1+2 clean network tests (~24 tests)
+test-clean-matrix-tier2-list:
+	@cd contrib/integration_testing && go run . clean-matrix-tier2-list
+
+## test-clean-matrix-tier1: Run Tier 1 clean network tests (no root, ~4 min)
+## make test-clean-matrix-tier1
+test-clean-matrix-tier1: client server client-generator
+	@cd contrib/integration_testing && go run . clean-matrix-run-tier1
+
+## test-clean-matrix-tier2: Run Tier 1+2 clean network tests (no root, ~6 min)
+## make test-clean-matrix-tier2
+test-clean-matrix-tier2: client server client-generator
+	@cd contrib/integration_testing && go run . clean-matrix-run-tier2
+
+## test-clean-matrix-all: Run all clean network tests (no root, ~10 min)
+## make test-clean-matrix-all
+test-clean-matrix-all: client server client-generator
+	@cd contrib/integration_testing && go run . clean-matrix-run-all
+
 ## test-shutdown: Quick test for graceful shutdown of each component (no root needed)
 test-shutdown: client server client-generator
 	@cd contrib/integration_testing && ./test_shutdown.sh $(TEST)
@@ -282,9 +313,13 @@ nixshell:
 .PHONY: test-parallel-list test-parallel test-parallel-all
 # Isolation testing targets (require root)
 .PHONY: test-isolation-list test-isolation test-isolation-all
-# Matrix-generated testing targets
+# Matrix-generated testing targets (parallel, require root)
 .PHONY: test-matrix-list test-matrix-summary test-matrix-tier1-list test-matrix-tier2-list
 .PHONY: test-matrix-tier1 test-matrix-tier2 test-matrix-all
+# Matrix-generated clean network testing targets (no root needed)
+.PHONY: test-clean-matrix-list test-clean-matrix-summary
+.PHONY: test-clean-matrix-tier1-list test-clean-matrix-tier2-list
+.PHONY: test-clean-matrix-tier1 test-clean-matrix-tier2 test-clean-matrix-all
 # Benchmark targets
 .PHONY: bench-packet bench-packet-all bench-packet-pool bench-circular
 # Code quality targets

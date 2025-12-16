@@ -217,6 +217,35 @@ func main() {
 		// Run all matrix tests (requires root)
 		runMatrixTestsByTier(TierNightly)
 
+	// Clean network matrix commands
+	case "clean-matrix-list":
+		// List all clean network matrix tests
+		listCleanMatrixTests()
+
+	case "clean-matrix-summary":
+		// Show summary of clean network tests
+		showCleanMatrixSummary()
+
+	case "clean-matrix-tier1-list":
+		// List Tier 1 clean network tests
+		listCleanMatrixTestsByTier(TierCore)
+
+	case "clean-matrix-tier2-list":
+		// List Tier 1+2 clean network tests
+		listCleanMatrixTestsByTier(TierDaily)
+
+	case "clean-matrix-run-tier1":
+		// Run Tier 1 clean network tests (no root needed)
+		runCleanMatrixTestsByTier(TierCore)
+
+	case "clean-matrix-run-tier2":
+		// Run Tier 1+2 clean network tests (no root needed)
+		runCleanMatrixTestsByTier(TierDaily)
+
+	case "clean-matrix-run-all":
+		// Run all clean network tests (no root needed)
+		runCleanMatrixTestsByTier(TierNightly)
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown test: %s\n", testName)
 		printUsage()
@@ -243,7 +272,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  isolation-test NAME                   Run CG→Server isolation test (single variable change)\n")
 	fmt.Fprintf(os.Stderr, "  isolation-test-all                    Run all isolation tests (~3.5 min total)\n")
 	fmt.Fprintf(os.Stderr, "  list-isolation-configs                List all isolation test configurations\n")
-	fmt.Fprintf(os.Stderr, "\nMatrix-Generated Tests (programmatic test generation):\n")
+	fmt.Fprintf(os.Stderr, "\nMatrix-Generated Parallel Tests (require root):\n")
 	fmt.Fprintf(os.Stderr, "  matrix-list                           List all matrix-generated tests (64 tests)\n")
 	fmt.Fprintf(os.Stderr, "  matrix-summary                        Show test summary by tier and category\n")
 	fmt.Fprintf(os.Stderr, "  matrix-list-tier1                     List Tier 1 (Core) tests (~25 tests)\n")
@@ -251,6 +280,14 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  matrix-run-tier1                      Run Tier 1 tests (require root, ~40 min)\n")
 	fmt.Fprintf(os.Stderr, "  matrix-run-tier2                      Run Tier 1+2 tests (require root, ~70 min)\n")
 	fmt.Fprintf(os.Stderr, "  matrix-run-all                        Run all matrix tests (require root, ~100 min)\n")
+	fmt.Fprintf(os.Stderr, "\nMatrix-Generated Clean Network Tests (no root needed):\n")
+	fmt.Fprintf(os.Stderr, "  clean-matrix-list                     List all clean network tests (~42 tests)\n")
+	fmt.Fprintf(os.Stderr, "  clean-matrix-summary                  Show clean test summary by tier\n")
+	fmt.Fprintf(os.Stderr, "  clean-matrix-tier1-list               List Tier 1 clean tests (~14 tests)\n")
+	fmt.Fprintf(os.Stderr, "  clean-matrix-tier2-list               List Tier 1+2 clean tests (~24 tests)\n")
+	fmt.Fprintf(os.Stderr, "  clean-matrix-run-tier1                Run Tier 1 clean tests (~4 min)\n")
+	fmt.Fprintf(os.Stderr, "  clean-matrix-run-tier2                Run Tier 1+2 clean tests (~6 min)\n")
+	fmt.Fprintf(os.Stderr, "  clean-matrix-run-all                  Run all clean tests (~10 min)\n")
 }
 
 // testGracefulShutdownSIGINTAllConfigs runs the graceful shutdown test with all configurations
@@ -949,6 +986,123 @@ func runMatrixTestsByTier(maxTier TestTier) {
 	// Print summary
 	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════════════╗\n")
 	fmt.Printf("║  MATRIX TEST SUMMARY                                                  ║\n")
+	fmt.Printf("╠═══════════════════════════════════════════════════════════════════════╣\n")
+	fmt.Printf("║  Tests Run:  %-5d                                                    ║\n", len(tests))
+	fmt.Printf("║  Passed:     %-5d                                                    ║\n", passed)
+	fmt.Printf("║  Failed:     %-5d                                                    ║\n", failed)
+	fmt.Printf("║  Duration:   %-10s                                               ║\n", elapsed.Round(time.Second))
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════╝\n")
+
+	if failed > 0 {
+		fmt.Println("\nFailed tests:")
+		for _, name := range failedTests {
+			fmt.Printf("  - %s\n", name)
+		}
+		os.Exit(1)
+	}
+}
+
+// ============================================================================
+// CLEAN NETWORK MATRIX TEST COMMANDS
+// ============================================================================
+
+// listCleanMatrixTests lists all clean network matrix tests.
+func listCleanMatrixTests() {
+	tests := GenerateCleanNetworkTests()
+	PrintCleanTestMatrix(tests)
+	fmt.Println()
+	fmt.Println("Use 'clean-matrix-summary' to see counts by tier.")
+	fmt.Println("Use 'clean-matrix-run-tier1' to run Tier 1 tests (no root needed).")
+}
+
+// showCleanMatrixSummary shows a summary of clean network tests.
+func showCleanMatrixSummary() {
+	tests := GenerateCleanNetworkTests()
+	PrintCleanTestSummary(tests)
+}
+
+// listCleanMatrixTestsByTier lists clean tests up to and including the specified tier.
+func listCleanMatrixTestsByTier(maxTier TestTier) {
+	allTests := GenerateCleanNetworkTests()
+	tests := FilterCleanTestsByTier(allTests, maxTier)
+
+	tierNames := map[TestTier]string{
+		TierCore:    "Tier 1 (Core)",
+		TierDaily:   "Tier 1+2 (Daily)",
+		TierNightly: "All Tiers (Nightly)",
+	}
+
+	fmt.Printf("%s Clean Network Tests (%d tests):\n\n", tierNames[maxTier], len(tests))
+	for i, t := range tests {
+		fmt.Printf("  %3d. %-45s %s\n", i+1, t.Name, t.Duration)
+	}
+
+	// Calculate total estimated time
+	var totalDuration time.Duration
+	for _, t := range tests {
+		totalDuration += t.Duration
+	}
+	fmt.Printf("\nEstimated total runtime: %s\n", totalDuration.Round(time.Minute))
+}
+
+// runCleanMatrixTestsByTier runs all clean network tests up to and including the specified tier.
+func runCleanMatrixTestsByTier(maxTier TestTier) {
+	allTests := GenerateCleanNetworkTests()
+	tests := FilterCleanTestsByTier(allTests, maxTier)
+
+	tierNames := map[TestTier]string{
+		TierCore:    "Tier 1 (Core)",
+		TierDaily:   "Tier 1+2 (Daily)",
+		TierNightly: "All Tiers (Nightly)",
+	}
+
+	fmt.Printf("╔═══════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  Clean Network Matrix Test Runner: %-20s             ║\n", tierNames[maxTier])
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+
+	fmt.Printf("Running %d clean network tests...\n\n", len(tests))
+
+	// Calculate total estimated time
+	var totalDuration time.Duration
+	for _, t := range tests {
+		totalDuration += t.Duration
+	}
+	fmt.Printf("Estimated total runtime: %s\n\n", totalDuration.Round(time.Minute))
+
+	passed := 0
+	failed := 0
+	var failedTests []string
+
+	startTime := time.Now()
+
+	for i, t := range tests {
+		fmt.Printf("━━━ Test %d/%d: %s ━━━\n", i+1, len(tests), t.Name)
+		fmt.Printf("    %s\n", t.Description)
+		fmt.Printf("    Duration: %s\n\n", t.Duration)
+
+		// Run the clean network test
+		err := runTestWithConfig(t.Config)
+
+		if err == nil {
+			passed++
+			fmt.Printf("✓ PASSED: %s\n\n", t.Name)
+		} else {
+			failed++
+			failedTests = append(failedTests, t.Name)
+			fmt.Printf("✗ FAILED: %s - %v\n\n", t.Name, err)
+		}
+
+		// Brief pause between tests
+		if i < len(tests)-1 {
+			time.Sleep(1 * time.Second)
+		}
+	}
+
+	elapsed := time.Since(startTime)
+
+	// Print summary
+	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  CLEAN NETWORK TEST SUMMARY                                           ║\n")
 	fmt.Printf("╠═══════════════════════════════════════════════════════════════════════╣\n")
 	fmt.Printf("║  Tests Run:  %-5d                                                    ║\n", len(tests))
 	fmt.Printf("║  Passed:     %-5d                                                    ║\n", passed)

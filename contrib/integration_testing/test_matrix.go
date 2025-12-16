@@ -498,3 +498,261 @@ func PrintTestSummary(tests []GeneratedParallelTest) {
 		fmt.Printf("  %s: %d tests\n", rtt, len(filtered))
 	}
 }
+
+// ============================================================================
+// CLEAN NETWORK TEST GENERATION
+// ============================================================================
+
+// GeneratedCleanTest represents a matrix-generated clean network test.
+type GeneratedCleanTest struct {
+	Name        string        // Generated name following convention
+	Description string        // Human-readable description
+	Tier        TestTier      // Which tier this test belongs to
+	Duration    time.Duration // Test duration
+	Config      TestConfig    // The actual test configuration
+}
+
+// CleanTestParams represents parameters for a clean network test.
+type CleanTestParams struct {
+	Bitrate int64         // Bits per second
+	Buffer  time.Duration // SRT latency buffer
+	Config  ConfigVariant // Configuration variant
+	Timer   TimerProfile  // Timer profile (optional)
+}
+
+// GenerateCleanTestName creates a standardized name for a clean network test.
+// Format: Int-Clean-{Bitrate}-{Buffer}-{Config}[-{Timer}]
+//
+// Examples:
+//   - Int-Clean-20M-5s-Base
+//   - Int-Clean-50M-10s-NakBtree
+//   - Int-Clean-20M-5s-Full-T-FastNak
+func GenerateCleanTestName(p CleanTestParams) string {
+	var parts []string
+
+	parts = append(parts, "Int-Clean")
+	parts = append(parts, fmt.Sprintf("%dM", p.Bitrate/1_000_000))
+	parts = append(parts, fmt.Sprintf("%ds", int(p.Buffer.Seconds())))
+	parts = append(parts, string(p.Config))
+
+	if p.Timer != "" && p.Timer != TimerDefault {
+		parts = append(parts, string(p.Timer))
+	}
+
+	return strings.Join(parts, "-")
+}
+
+// GenerateCleanNetworkTests generates clean network tests following the matrix approach.
+// These tests run without network impairment on loopback interface.
+func GenerateCleanNetworkTests() []GeneratedCleanTest {
+	var tests []GeneratedCleanTest
+
+	// Default parameters
+	defaultBitrate := int64(20_000_000)
+	defaultBuffer := 5 * time.Second
+	defaultDuration := 15 * time.Second
+
+	// ========================================================================
+	// TIER 1: Core Clean Network Tests
+	// ========================================================================
+
+	// 1. Config variant sweep at default bitrate/buffer (7 tests)
+	for _, config := range []ConfigVariant{ConfigBase, ConfigBtree, ConfigIoUr, ConfigNakBtree, ConfigNakBtreeF, ConfigNakBtreeFr, ConfigFull} {
+		p := CleanTestParams{
+			Bitrate: defaultBitrate,
+			Buffer:  defaultBuffer,
+			Config:  config,
+		}
+		tests = append(tests, buildCleanTest(p, defaultDuration, TierCore))
+	}
+
+	// 2. Bitrate sweep with Full config (3 tests: 5M, 20M, 50M)
+	for _, bitrate := range []int64{5_000_000, 20_000_000, 50_000_000} {
+		p := CleanTestParams{
+			Bitrate: bitrate,
+			Buffer:  defaultBuffer,
+			Config:  ConfigFull,
+		}
+		tests = append(tests, buildCleanTest(p, defaultDuration, TierCore))
+	}
+
+	// 3. Buffer sweep with Full config (4 tests: 1s, 5s, 10s, 30s)
+	for _, buffer := range []time.Duration{1 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second} {
+		p := CleanTestParams{
+			Bitrate: defaultBitrate,
+			Buffer:  buffer,
+			Config:  ConfigFull,
+		}
+		tests = append(tests, buildCleanTest(p, defaultDuration, TierCore))
+	}
+
+	// ========================================================================
+	// TIER 2: Extended Clean Network Tests
+	// ========================================================================
+
+	// NAK btree variants at different bitrates (6 tests)
+	for _, bitrate := range []int64{5_000_000, 50_000_000} {
+		for _, config := range []ConfigVariant{ConfigNakBtree, ConfigNakBtreeF, ConfigNakBtreeFr} {
+			p := CleanTestParams{
+				Bitrate: bitrate,
+				Buffer:  defaultBuffer,
+				Config:  config,
+			}
+			tests = append(tests, buildCleanTest(p, defaultDuration, TierDaily))
+		}
+	}
+
+	// Timer profile tests (4 tests)
+	for _, timer := range []TimerProfile{TimerFast, TimerSlow, TimerFastNak, TimerSlowNak} {
+		p := CleanTestParams{
+			Bitrate: defaultBitrate,
+			Buffer:  defaultBuffer,
+			Config:  ConfigFull,
+			Timer:   timer,
+		}
+		tests = append(tests, buildCleanTest(p, defaultDuration, TierDaily))
+	}
+
+	// ========================================================================
+	// TIER 3: Comprehensive Clean Network Tests
+	// ========================================================================
+
+	// Bitrate × Buffer cross-product with Full config (12 tests)
+	for _, bitrate := range []int64{5_000_000, 20_000_000, 50_000_000} {
+		for _, buffer := range []time.Duration{1 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second} {
+			p := CleanTestParams{
+				Bitrate: bitrate,
+				Buffer:  buffer,
+				Config:  ConfigFull,
+			}
+			tests = append(tests, buildCleanTest(p, defaultDuration, TierNightly))
+		}
+	}
+
+	// NAK btree × Buffer cross-product (12 tests)
+	for _, config := range []ConfigVariant{ConfigNakBtree, ConfigNakBtreeF, ConfigNakBtreeFr} {
+		for _, buffer := range []time.Duration{1 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second} {
+			p := CleanTestParams{
+				Bitrate: defaultBitrate,
+				Buffer:  buffer,
+				Config:  config,
+			}
+			tests = append(tests, buildCleanTest(p, defaultDuration, TierNightly))
+		}
+	}
+
+	return deduplicateCleanTests(tests)
+}
+
+// buildCleanTest creates a GeneratedCleanTest from CleanTestParams.
+func buildCleanTest(p CleanTestParams, duration time.Duration, tier TestTier) GeneratedCleanTest {
+	// Build SRT config
+	srtConfig := GetSRTConfig(p.Config).WithLatency(p.Buffer)
+
+	// Apply timer profile if non-default
+	if p.Timer != "" && p.Timer != TimerDefault {
+		srtConfig = srtConfig.WithTimerProfile(p.Timer)
+	}
+
+	name := GenerateCleanTestName(p)
+
+	// Build description
+	var descParts []string
+	descParts = append(descParts, fmt.Sprintf("%d Mb/s", p.Bitrate/1_000_000))
+	descParts = append(descParts, fmt.Sprintf("%s buffer", p.Buffer))
+	descParts = append(descParts, fmt.Sprintf("%s config", p.Config))
+	if p.Timer != "" && p.Timer != TimerDefault {
+		descParts = append(descParts, fmt.Sprintf("%s timers", p.Timer))
+	}
+	description := "Clean network: " + strings.Join(descParts, ", ")
+
+	// Build TestConfig
+	config := TestConfig{
+		Name:            name,
+		Description:     description,
+		Mode:            TestModeClean,
+		Bitrate:         p.Bitrate,
+		TestDuration:    duration,
+		ConnectionWait:  2 * time.Second,
+		MetricsEnabled:  true,
+		CollectInterval: 2 * time.Second,
+		SharedSRT:       &srtConfig, // Apply to all components
+	}
+
+	return GeneratedCleanTest{
+		Name:        name,
+		Description: description,
+		Tier:        tier,
+		Duration:    duration,
+		Config:      config,
+	}
+}
+
+// deduplicateCleanTests removes duplicate tests based on name.
+func deduplicateCleanTests(tests []GeneratedCleanTest) []GeneratedCleanTest {
+	seen := make(map[string]bool)
+	var result []GeneratedCleanTest
+
+	for _, t := range tests {
+		if !seen[t.Name] {
+			seen[t.Name] = true
+			result = append(result, t)
+		}
+	}
+
+	return result
+}
+
+// FilterCleanTestsByTier returns tests up to and including the specified tier.
+func FilterCleanTestsByTier(tests []GeneratedCleanTest, maxTier TestTier) []GeneratedCleanTest {
+	var result []GeneratedCleanTest
+	for _, t := range tests {
+		if t.Tier <= maxTier {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// CountCleanByTier counts clean tests by tier.
+func CountCleanByTier(tests []GeneratedCleanTest) map[TestTier]int {
+	counts := make(map[TestTier]int)
+	for _, t := range tests {
+		counts[t.Tier]++
+	}
+	return counts
+}
+
+// PrintCleanTestMatrix prints the generated clean test matrix.
+func PrintCleanTestMatrix(tests []GeneratedCleanTest) {
+	tierNames := map[TestTier]string{
+		TierCore:    "Core",
+		TierDaily:   "Daily",
+		TierNightly: "Nightly",
+	}
+
+	fmt.Printf("Matrix-Generated Clean Network Tests (%d total):\n\n", len(tests))
+	for i, t := range tests {
+		fmt.Printf("  %3d. [%-8s] %-45s %s\n", i+1, tierNames[t.Tier], t.Name, t.Duration)
+	}
+}
+
+// PrintCleanTestSummary prints a summary of clean test counts.
+func PrintCleanTestSummary(tests []GeneratedCleanTest) {
+	counts := CountCleanByTier(tests)
+
+	fmt.Println("Clean Network Test Matrix Summary")
+	fmt.Println("==================================")
+	fmt.Printf("Total tests: %d\n\n", len(tests))
+	fmt.Printf("By Tier:\n")
+	fmt.Printf("  Tier 1 (Core):    %d tests\n", counts[TierCore])
+	fmt.Printf("  Tier 2 (Daily):   %d tests\n", counts[TierDaily])
+	fmt.Printf("  Tier 3 (Nightly): %d tests\n", counts[TierNightly])
+
+	// Calculate total duration
+	var totalDuration time.Duration
+	for _, t := range tests {
+		totalDuration += t.Duration
+	}
+	fmt.Printf("\nEstimated total runtime: %s\n", totalDuration.Round(time.Minute))
+}
