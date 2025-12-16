@@ -238,19 +238,28 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 			// Print summary
 			PrintAnalysisSummary(analyses)
 
-			// Generate comparison between control and test if we have matching profiles
+			// Generate comparison between control and test pipelines
+			// Match by component (server, cg) and profile type
 			var comparisons []*ComparisonResult
 			for _, controlAnalysis := range analyses {
-				if !strings.HasPrefix(controlAnalysis.Component, "control_") {
+				// Look for control pipeline profiles
+				if controlAnalysis.Pipeline != "control" {
 					continue
 				}
-				// Find matching test analysis
-				testComponent := strings.Replace(controlAnalysis.Component, "control_", "test_", 1)
+				// Find matching test pipeline analysis (same component, same profile type)
 				for _, testAnalysis := range analyses {
-					if testAnalysis.Component == testComponent &&
+					if testAnalysis.Pipeline == "test" &&
+						testAnalysis.Component == controlAnalysis.Component &&
 						testAnalysis.ProfileType == controlAnalysis.ProfileType {
 						comparison := CompareProfiles(controlAnalysis, testAnalysis)
 						comparisons = append(comparisons, comparison)
+
+						// Print comparison header with component name
+						fmt.Printf("\n╔═══════════════════════════════════════════════════════════════╗\n")
+						fmt.Printf("║  %s %s: Control vs Test                               \n",
+							strings.ToUpper(controlAnalysis.Component),
+							strings.ToUpper(string(controlAnalysis.ProfileType)))
+						fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
 						fmt.Print(comparison.FormatComparison())
 					}
 				}

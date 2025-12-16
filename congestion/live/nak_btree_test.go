@@ -222,3 +222,165 @@ func TestNakBtree_ConcurrentAccess(t *testing.T) {
 	require.Equal(t, 50, nb.Len())
 }
 
+func TestNakBtree_InsertBatch(t *testing.T) {
+	nb := newNakBtree(32)
+
+	// Insert batch
+	seqs := []uint32{10, 20, 30, 40, 50}
+	count := nb.InsertBatch(seqs)
+
+	require.Equal(t, 5, count, "Expected 5 inserts")
+	require.Equal(t, 5, nb.Len())
+
+	// Verify all are present
+	for _, seq := range seqs {
+		require.True(t, nb.Has(seq), "Expected seq %d to be present", seq)
+	}
+
+	// Insert overlapping batch (should not double-count existing)
+	seqs2 := []uint32{30, 40, 60, 70}
+	count2 := nb.InsertBatch(seqs2)
+
+	require.Equal(t, 2, count2, "Expected 2 new inserts (60, 70)")
+	require.Equal(t, 7, nb.Len())
+
+	// Empty batch
+	count3 := nb.InsertBatch([]uint32{})
+	require.Equal(t, 0, count3)
+	require.Equal(t, 7, nb.Len())
+
+	// Nil batch
+	count4 := nb.InsertBatch(nil)
+	require.Equal(t, 0, count4)
+	require.Equal(t, 7, nb.Len())
+}
+
+// Benchmarks for Insert performance comparison
+
+// BenchmarkNakBtree_InsertIndividual benchmarks inserting N sequences one at a time
+// This simulates the CURRENT behavior where each Insert() acquires/releases the lock
+func BenchmarkNakBtree_InsertIndividual(b *testing.B) {
+	for _, n := range []int{10, 50, 100, 500} {
+		b.Run(formatBenchName("n", n), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				nb := newNakBtree(32)
+				for j := 0; j < n; j++ {
+					nb.Insert(uint32(j))
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkNakBtree_InsertBatch benchmarks inserting N sequences in one batch
+// This simulates the NEW behavior where InsertBatch() acquires the lock once
+func BenchmarkNakBtree_InsertBatch(b *testing.B) {
+	for _, n := range []int{10, 50, 100, 500} {
+		b.Run(formatBenchName("n", n), func(b *testing.B) {
+			seqs := make([]uint32, n)
+			for j := 0; j < n; j++ {
+				seqs[j] = uint32(j)
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				nb := newNakBtree(32)
+				nb.InsertBatch(seqs)
+			}
+		})
+	}
+}
+
+// BenchmarkNakBtree_InsertIndividual_Parallel benchmarks concurrent individual inserts
+// This shows lock contention impact with individual Insert() calls
+func BenchmarkNakBtree_InsertIndividual_Parallel(b *testing.B) {
+	for _, n := range []int{10, 50, 100} {
+		b.Run(formatBenchName("n", n), func(b *testing.B) {
+			nb := newNakBtree(32)
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				seq := uint32(0)
+				for pb.Next() {
+					for j := 0; j < n; j++ {
+						nb.Insert(seq)
+						seq++
+					}
+				}
+			})
+		})
+	}
+}
+
+// BenchmarkNakBtree_InsertBatch_Parallel benchmarks concurrent batch inserts
+// This shows reduced lock contention with InsertBatch()
+func BenchmarkNakBtree_InsertBatch_Parallel(b *testing.B) {
+	for _, n := range []int{10, 50, 100} {
+		b.Run(formatBenchName("n", n), func(b *testing.B) {
+			nb := newNakBtree(32)
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				seq := uint32(0)
+				seqs := make([]uint32, n)
+				for pb.Next() {
+					for j := 0; j < n; j++ {
+						seqs[j] = seq
+						seq++
+					}
+					nb.InsertBatch(seqs)
+				}
+			})
+		})
+	}
+}
+
+func formatBenchName(prefix string, value int) string {
+	return prefix + "=" + formatInt(value)
+}
+
+func formatInt(n int) string {
+	if n >= 1000 {
+		return formatInt(n/1000) + "k"
+	}
+	return string(rune('0'+n/100)) + string(rune('0'+(n%100)/10)) + string(rune('0'+n%10))
+}
+
+// BenchmarkNakBtree_RealisticGapPattern benchmarks a realistic periodic NAK scan
+// Simulates: scan finds 5-20 gaps, inserts them, then later deletes as packets arrive
+func BenchmarkNakBtree_RealisticGapPattern(b *testing.B) {
+	for _, gapSize := range []int{5, 10, 20, 50} {
+		b.Run(formatBenchName("gap", gapSize)+"_individual", func(b *testing.B) {
+			nb := newNakBtree(32)
+			baseSeq := uint32(1000)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				// Simulate periodicNakBtree finding gaps
+				for j := 0; j < gapSize; j++ {
+					nb.Insert(baseSeq + uint32(j))
+				}
+				// Simulate packets arriving and being deleted
+				for j := 0; j < gapSize; j++ {
+					nb.Delete(baseSeq + uint32(j))
+				}
+				baseSeq += uint32(gapSize)
+			}
+		})
+
+		b.Run(formatBenchName("gap", gapSize)+"_batch", func(b *testing.B) {
+			nb := newNakBtree(32)
+			baseSeq := uint32(1000)
+			seqs := make([]uint32, gapSize)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				// Simulate periodicNakBtree finding gaps - BATCHED
+				for j := 0; j < gapSize; j++ {
+					seqs[j] = baseSeq + uint32(j)
+				}
+				nb.InsertBatch(seqs)
+				// Simulate packets arriving and being deleted (still individual)
+				for j := 0; j < gapSize; j++ {
+					nb.Delete(baseSeq + uint32(j))
+				}
+				baseSeq += uint32(gapSize)
+			}
+		})
+	}
+}

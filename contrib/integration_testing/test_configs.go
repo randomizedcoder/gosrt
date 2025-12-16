@@ -1240,6 +1240,34 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		Bitrate:       5_000_000,
 		StatsPeriod:   10 * time.Second,
 	},
+
+	// ========================================================================
+	// HIGH BITRATE DEBUG TESTS (50 Mb/s)
+	// ========================================================================
+	// These tests are for debugging the 50 Mb/s performance issue documented
+	// in integration_testing_50mbps_defect.md
+	{
+		Name:          "Isolation-50M-Full",
+		Description:   "50 Mb/s Full HighPerf: io_uring send/recv + btree + NAK btree + HonorNakOrder (DEBUGGING)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithIoUringSend().WithIoUringRecv().WithBtree(32).WithHonorNakOrder(),
+		TestServer:    ControlSRTConfig.WithIoUringSend().WithIoUringRecv().WithBtree(32).WithNakBtree(),
+		TestDuration:  60 * time.Second, // Longer for profiling
+		Bitrate:       50_000_000,       // 50 Mb/s
+		StatsPeriod:   10 * time.Second,
+	},
+	{
+		Name:          "Isolation-50M-NakBtree",
+		Description:   "50 Mb/s NAK btree only (no io_uring send) for comparison (DEBUGGING)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,                                  // No io_uring on CG
+		TestServer:    ControlSRTConfig.WithNakBtree().WithIoUringRecv(), // NAK btree + io_uring recv
+		TestDuration:  60 * time.Second,
+		Bitrate:       50_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
 }
 
 // GetIsolationTestConfigByName finds an isolation test configuration by name

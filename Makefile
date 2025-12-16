@@ -64,9 +64,13 @@ test-parallel-list:
 ## test-parallel: Run parallel comparison test (root, CONFIG=Parallel-Starlink-5Mbps)
 ## sudo make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo make test-parallel CONFIG=Parallel-Starlink-5Mbps VERBOSE=1
+## Add PROFILES=<type> to enable profiling with Baseline vs HighPerf comparison:
+## sudo PROFILES=cpu make test-parallel CONFIG=Parallel-Starlink-5Mbps
+## sudo PROFILES=cpu,mutex make test-parallel CONFIG=Parallel-Starlink-5Mbps
+## sudo PROFILES=all make test-parallel CONFIG=Parallel-Starlink-5Mbps
 test-parallel: client server client-generator
 	@echo "NOTE: Parallel tests require root privileges for network namespace creation"
-	@cd contrib/integration_testing && go run . parallel-test $(CONFIG) $(if $(VERBOSE),--verbose,)
+	@cd contrib/integration_testing && PROFILES=$(PROFILES) go run . parallel-test $(CONFIG) $(if $(VERBOSE),--verbose,)
 
 ## test-parallel-all: Run all parallel comparison tests (requires root)
 test-parallel-all: client server client-generator

@@ -30,6 +30,7 @@ type ParallelTestResult struct {
 
 // runParallelModeTest runs a parallel comparison test with two pipelines.
 // Both pipelines run simultaneously under identical network conditions.
+// Supports profiling via PROFILES environment variable (e.g., PROFILES=cpu,mutex)
 func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 	result := ParallelTestResult{
 		StartTime: time.Now(),
@@ -42,6 +43,21 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 		fmt.Fprintf(os.Stderr, "Run with: sudo %s ...\n", os.Args[0])
 		result.EndTime = time.Now()
 		return result
+	}
+
+	// Check for profiling mode
+	var profileConfig *ProfileConfig
+	if ProfilingEnabled() {
+		var err error
+		profileConfig, err = NewProfileConfig(config.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating profile config: %v\n", err)
+			result.EndTime = time.Now()
+			return result
+		}
+		if profileConfig != nil {
+			profileConfig.PrintProfilingInfo()
+		}
 	}
 
 	// Create network controller
@@ -129,6 +145,34 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 	highperfServerFlags := config.GetHighPerfServerFlags(nc.TestID)
 	highperfClientGenFlags := config.GetHighPerfClientGeneratorFlags(nc.TestID)
 	highperfClientFlags := config.GetHighPerfClientFlags(nc.TestID)
+
+	// Add profiling flags if enabled
+	if profileConfig != nil && len(profileConfig.Profiles) > 0 {
+		profileType := profileConfig.Profiles[0]
+		fmt.Printf("Enabling %s profiling for all 6 components\n\n", profileType)
+
+		// Baseline pipeline profiling
+		if args, err := profileConfig.GetProfileArgs("baseline_server", profileType); err == nil && args != nil {
+			baselineServerFlags = append(baselineServerFlags, args...)
+		}
+		if args, err := profileConfig.GetProfileArgs("baseline_cg", profileType); err == nil && args != nil {
+			baselineClientGenFlags = append(baselineClientGenFlags, args...)
+		}
+		if args, err := profileConfig.GetProfileArgs("baseline_client", profileType); err == nil && args != nil {
+			baselineClientFlags = append(baselineClientFlags, args...)
+		}
+
+		// HighPerf pipeline profiling
+		if args, err := profileConfig.GetProfileArgs("highperf_server", profileType); err == nil && args != nil {
+			highperfServerFlags = append(highperfServerFlags, args...)
+		}
+		if args, err := profileConfig.GetProfileArgs("highperf_cg", profileType); err == nil && args != nil {
+			highperfClientGenFlags = append(highperfClientGenFlags, args...)
+		}
+		if args, err := profileConfig.GetProfileArgs("highperf_client", profileType); err == nil && args != nil {
+			highperfClientFlags = append(highperfClientFlags, args...)
+		}
+	}
 
 	// Print CLI flags for debugging
 	fmt.Println("CLI Flags (Baseline):")
@@ -355,9 +399,152 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 	result.BaselineMetrics.CollectAllMetrics("final")
 	result.HighPerfMetrics.CollectAllMetrics("final")
 
+	// Generate profile comparison report if profiling was enabled
+	if profileConfig != nil {
+		generateParallelProfileReport(config.Name, profileConfig, config.TestDuration)
+	}
+
 	result.Passed = allPassed
 	result.EndTime = time.Now()
 	return result
+}
+
+// generateParallelProfileReport analyzes and compares profiles from baseline and highperf pipelines
+func generateParallelProfileReport(testName string, profileConfig *ProfileConfig, testDuration time.Duration) {
+	fmt.Println("\n=== Analyzing Parallel Test Profiles ===")
+
+	// Analyze all collected profiles
+	analyses, err := AnalyzeAllProfiles(profileConfig.OutputDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to analyze profiles: %v\n", err)
+		return
+	}
+
+	if len(analyses) == 0 {
+		fmt.Println("No profile files found to analyze")
+		return
+	}
+
+	// Print summary of all profiles
+	PrintAnalysisSummary(analyses)
+
+	// Separate analyses by pipeline using the Pipeline field
+	var baselineAnalyses, highperfAnalyses []*ProfileAnalysis
+	for _, a := range analyses {
+		switch a.Pipeline {
+		case "baseline":
+			baselineAnalyses = append(baselineAnalyses, a)
+		case "highperf":
+			highperfAnalyses = append(highperfAnalyses, a)
+		}
+	}
+
+	fmt.Printf("\nFound %d baseline profiles and %d highperf profiles\n",
+		len(baselineAnalyses), len(highperfAnalyses))
+
+	// Generate comparisons between matching components
+	// Match by component name (server, cg, client) and profile type
+	var comparisons []*ComparisonResult
+	componentNames := []string{"server", "cg", "client"}
+
+	for _, compName := range componentNames {
+		// Find baseline and highperf profiles for this component
+		for _, baseAnalysis := range baselineAnalyses {
+			if baseAnalysis.Component != compName {
+				continue
+			}
+			for _, hpAnalysis := range highperfAnalyses {
+				// Match by component name and profile type
+				if hpAnalysis.Component != compName {
+					continue
+				}
+				if baseAnalysis.ProfileType != hpAnalysis.ProfileType {
+					continue
+				}
+
+				// Generate and print comparison
+				comparison := CompareProfiles(baseAnalysis, hpAnalysis)
+				comparisons = append(comparisons, comparison)
+
+				fmt.Printf("\n╔═══════════════════════════════════════════════════════════════╗\n")
+				fmt.Printf("║  %s %s: Baseline vs HighPerf                    \n",
+					strings.ToUpper(compName), strings.ToUpper(string(baseAnalysis.ProfileType)))
+				fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
+				fmt.Print(comparison.FormatComparison())
+			}
+		}
+	}
+
+	// Print overall summary
+	if len(comparisons) > 0 {
+		printParallelProfileSummary(comparisons)
+	}
+
+	// Generate HTML report
+	report := NewProfileReport(testName+" (Parallel Comparison)", "parallel", profileConfig.OutputDir, testDuration)
+	report.IsComparison = true
+	report.BaselineAnalyses = baselineAnalyses
+	report.HighPerfAnalyses = highperfAnalyses
+
+	for _, a := range analyses {
+		report.AddAnalysis(a)
+	}
+	for _, c := range comparisons {
+		report.AddComparison(c)
+	}
+	report.CalculateOverallSummary()
+
+	if err := GenerateHTMLReport(report); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to generate report: %v\n", err)
+	}
+}
+
+// printParallelProfileSummary prints an overall summary of the parallel comparison
+func printParallelProfileSummary(comparisons []*ComparisonResult) {
+	fmt.Println("\n╔═══════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║  OVERALL PERFORMANCE COMPARISON: Baseline vs HighPerf            ║")
+	fmt.Println("╠═══════════════════════════════════════════════════════════════════╣")
+
+	// Aggregate improvements across all comparisons
+	totalImprovements := 0
+	totalRegressions := 0
+	var allRecommendations []string
+
+	for _, comp := range comparisons {
+		for _, fc := range comp.FuncComparisons {
+			if fc.Delta < -1 { // More than 1% improvement
+				totalImprovements++
+			} else if fc.Delta > 1 { // More than 1% regression
+				totalRegressions++
+			}
+		}
+		allRecommendations = append(allRecommendations, comp.Recommendations...)
+	}
+
+	fmt.Printf("║  Total Improvements: %-46d ║\n", totalImprovements)
+	fmt.Printf("║  Total Regressions:  %-46d ║\n", totalRegressions)
+	fmt.Println("╠═══════════════════════════════════════════════════════════════════╣")
+
+	if len(allRecommendations) > 0 {
+		fmt.Println("║  TOP RECOMMENDATIONS:                                             ║")
+		// Deduplicate and show top 5
+		seen := make(map[string]bool)
+		count := 0
+		for _, rec := range allRecommendations {
+			if seen[rec] || count >= 5 {
+				continue
+			}
+			seen[rec] = true
+			count++
+			// Truncate to fit
+			if len(rec) > 60 {
+				rec = rec[:57] + "..."
+			}
+			fmt.Printf("║  • %-63s ║\n", rec)
+		}
+	}
+
+	fmt.Println("╚═══════════════════════════════════════════════════════════════════╝")
 }
 
 // shutdownParallelPipelines shuts down both pipelines gracefully

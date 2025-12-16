@@ -70,25 +70,41 @@ func AnalyzeProfile(profilePath string, outputDir string) (*ProfileAnalysis, err
 		return nil, fmt.Errorf("profile file not found: %s", profilePath)
 	}
 
-	base := filepath.Base(profilePath)
-	parts := strings.Split(strings.TrimSuffix(base, ".pprof"), "_")
-
 	analysis := &ProfileAnalysis{
 		FilePath: profilePath,
 	}
 
-	// Parse filename: {pipeline}_{component}_{profile}.pprof
-	// e.g., baseline_server_cpu.pprof or server_cpu.pprof
-	if len(parts) >= 3 {
-		analysis.Pipeline = parts[0]
-		analysis.Component = parts[1]
-		analysis.ProfileType = ProfileType(parts[2])
-	} else if len(parts) >= 2 {
-		analysis.Component = parts[0]
-		analysis.ProfileType = ProfileType(parts[1])
-	} else if len(parts) == 1 {
-		// Just the profile type (e.g., cpu.pprof)
-		analysis.ProfileType = ProfileType(parts[0])
+	// Parse profile path structure:
+	// Path format: /tmp/profile_TestName_timestamp/component_name/profiletype.pprof
+	// Example: /tmp/profile_Isolation-50M-Full_20251216_103448/control_server/cpu.pprof
+	//
+	// Component is in the parent directory name, profile type is the filename
+
+	// Get the filename (e.g., "cpu.pprof")
+	base := filepath.Base(profilePath)
+	profileType := strings.TrimSuffix(base, ".pprof")
+	analysis.ProfileType = ProfileType(profileType)
+
+	// Get the parent directory name (e.g., "control_server")
+	parentDir := filepath.Base(filepath.Dir(profilePath))
+
+	// Parse component from parent directory
+	// Formats: "control_server", "test_cg", "baseline_client", "highperf_server"
+	if strings.HasPrefix(parentDir, "control_") {
+		analysis.Pipeline = "control"
+		analysis.Component = strings.TrimPrefix(parentDir, "control_")
+	} else if strings.HasPrefix(parentDir, "test_") {
+		analysis.Pipeline = "test"
+		analysis.Component = strings.TrimPrefix(parentDir, "test_")
+	} else if strings.HasPrefix(parentDir, "baseline_") {
+		analysis.Pipeline = "baseline"
+		analysis.Component = strings.TrimPrefix(parentDir, "baseline_")
+	} else if strings.HasPrefix(parentDir, "highperf_") {
+		analysis.Pipeline = "highperf"
+		analysis.Component = strings.TrimPrefix(parentDir, "highperf_")
+	} else {
+		// Fallback: use entire parent dir as component
+		analysis.Component = parentDir
 	}
 
 	// Generate top output with different flags based on profile type
@@ -309,7 +325,7 @@ func (r *ComparisonResult) generateSummary() {
 	for _, c := range r.FuncComparisons {
 		if c.Delta < 0 && count < 3 {
 			fmt.Fprintf(&buf, "  • %s: %.1f%% → %.1f%% (%.1f%% reduction)\n",
-				truncateStr(c.FuncName, 30), c.BaselineValue, c.HighPerfValue, -c.DeltaPercent)
+				truncateStr(c.FuncName, 60), c.BaselineValue, c.HighPerfValue, -c.DeltaPercent)
 			count++
 		}
 	}
@@ -367,17 +383,18 @@ func truncateStr(s string, maxLen int) string {
 func (r *ComparisonResult) FormatComparison() string {
 	var buf bytes.Buffer
 
-	fmt.Fprintf(&buf, "\n╔═══════════════════════════════════════════════════════════════════╗\n")
-	fmt.Fprintf(&buf, "║ %s %s COMPARISON                                          \n",
+	// Use 110-char wide box for better function name visibility
+	fmt.Fprintf(&buf, "\n╔══════════════════════════════════════════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Fprintf(&buf, "║ %s %s COMPARISON                                                                                  \n",
 		strings.ToUpper(r.Component), strings.ToUpper(string(r.ProfileType)))
-	fmt.Fprintf(&buf, "╠═══════════════════════════════════════════════════════════════════╣\n")
+	fmt.Fprintf(&buf, "╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣\n")
 
-	fmt.Fprintf(&buf, "║ %-35s %10s %10s %10s ║\n", "Function", "Baseline", "HighPerf", "Delta")
-	fmt.Fprintf(&buf, "║ %s ║\n", strings.Repeat("─", 65))
+	fmt.Fprintf(&buf, "║ %-70s %10s %10s %12s ║\n", "Function", "Baseline", "HighPerf", "Delta")
+	fmt.Fprintf(&buf, "║ %s ║\n", strings.Repeat("─", 104))
 
-	// Show top 5 comparisons
+	// Show top 10 comparisons (increased from 5)
 	for i, c := range r.FuncComparisons {
-		if i >= 5 {
+		if i >= 10 {
 			break
 		}
 
@@ -394,22 +411,22 @@ func (r *ComparisonResult) FormatComparison() string {
 			deltaStr = "(gone)"
 		}
 
-		fmt.Fprintf(&buf, "║ %-35s %9.1f%% %9.1f%% %9s%s ║\n",
-			truncateStr(c.FuncName, 35), c.BaselineValue, c.HighPerfValue, deltaStr, indicator)
+		fmt.Fprintf(&buf, "║ %-70s %9.1f%% %9.1f%% %10s%s ║\n",
+			truncateStr(c.FuncName, 70), c.BaselineValue, c.HighPerfValue, deltaStr, indicator)
 	}
 
-	fmt.Fprintf(&buf, "╠═══════════════════════════════════════════════════════════════════╣\n")
+	fmt.Fprintf(&buf, "╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣\n")
 	fmt.Fprintf(&buf, "║ SUMMARY: %s", r.Summary)
 
 	if len(r.Recommendations) > 0 {
-		fmt.Fprintf(&buf, "╠═══════════════════════════════════════════════════════════════════╣\n")
-		fmt.Fprintf(&buf, "║ RECOMMENDATIONS:                                                  ║\n")
+		fmt.Fprintf(&buf, "╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣\n")
+		fmt.Fprintf(&buf, "║ RECOMMENDATIONS:                                                                                        ║\n")
 		for _, rec := range r.Recommendations {
-			fmt.Fprintf(&buf, "║ • %-63s ║\n", truncateStr(rec, 63))
+			fmt.Fprintf(&buf, "║ • %-101s ║\n", truncateStr(rec, 101))
 		}
 	}
 
-	fmt.Fprintf(&buf, "╚═══════════════════════════════════════════════════════════════════╝\n")
+	fmt.Fprintf(&buf, "╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝\n")
 
 	return buf.String()
 }
@@ -446,27 +463,27 @@ func PrintAnalysisSummary(analyses []*ProfileAnalysis) {
 		return
 	}
 
-	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  PROFILE ANALYSIS SUMMARY                                             ║\n")
-	fmt.Printf("╠═══════════════════════════════════════════════════════════════════════╣\n")
-	fmt.Printf("║ %-15s %-10s %-10s %-35s ║\n", "Component", "Pipeline", "Type", "Top Function")
-	fmt.Printf("║ %s ║\n", strings.Repeat("─", 69))
+	fmt.Printf("\n╔══════════════════════════════════════════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  PROFILE ANALYSIS SUMMARY                                                                                ║\n")
+	fmt.Printf("╠══════════════════════════════════════════════════════════════════════════════════════════════════════════╣\n")
+	fmt.Printf("║ %-12s %-10s %-8s %-70s ║\n", "Component", "Pipeline", "Type", "Top Function")
+	fmt.Printf("║ %s ║\n", strings.Repeat("─", 104))
 
 	for _, a := range analyses {
 		topFunc := "(none)"
 		if len(a.TopFuncs) > 0 {
-			topFunc = truncateStr(a.TopFuncs[0].Name, 35)
+			topFunc = truncateStr(a.TopFuncs[0].Name, 70)
 		}
 		pipeline := a.Pipeline
 		if pipeline == "" {
 			pipeline = "-"
 		}
-		fmt.Printf("║ %-15s %-10s %-10s %-35s ║\n",
-			truncateStr(a.Component, 15),
+		fmt.Printf("║ %-12s %-10s %-8s %-70s ║\n",
+			truncateStr(a.Component, 12),
 			truncateStr(pipeline, 10),
 			string(a.ProfileType),
 			topFunc)
 	}
 
-	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════╝\n")
+	fmt.Printf("╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝\n")
 }

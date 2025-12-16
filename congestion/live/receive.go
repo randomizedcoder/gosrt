@@ -733,8 +733,10 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	}
 
 	// Step 3: Scan packet btree from startSeq to find gaps
+	// Collect gaps locally first, then batch insert (reduces lock contention)
 	expectedSeq := circular.New(startSeq, packet.MAX_SEQUENCENUMBER)
 	var lastScannedSeq uint32
+	var gapsToInsert []uint32
 
 	r.packetStore.Iterate(func(pkt packet.Packet) bool {
 		h := pkt.Header()
@@ -756,13 +758,11 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 
 		// Detect gaps: expected vs actual
 		if actualSeqNum.Gt(expectedSeq) {
-			// There's a gap - add missing sequences to NAK btree
+			// There's a gap - collect missing sequences for batch insert
 			seq := expectedSeq.Val()
 			endSeq := actualSeqNum.Dec().Val()
 			for circular.SeqLess(seq, endSeq) || seq == endSeq {
-				r.nakBtree.Insert(seq)
-				m.NakBtreeInserts.Add(1)
-				m.NakBtreeScanGaps.Add(1)
+				gapsToInsert = append(gapsToInsert, seq)
 				seq = circular.SeqAdd(seq, 1)
 			}
 		}
@@ -773,6 +773,13 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 		expectedSeq = actualSeqNum.Inc()
 		return true // Continue
 	})
+
+	// Batch insert all gaps with single lock acquisition
+	if len(gapsToInsert) > 0 {
+		inserted := r.nakBtree.InsertBatch(gapsToInsert)
+		m.NakBtreeInserts.Add(uint64(inserted))
+		m.NakBtreeScanGaps.Add(uint64(len(gapsToInsert)))
+	}
 
 	// Step 4: Update scan start point for next iteration
 	// Only move forward to where we actually scanned (not where ACK is)

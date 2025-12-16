@@ -34,6 +34,28 @@ func (nb *nakBtree) Insert(seq uint32) {
 	nb.tree.ReplaceOrInsert(seq)
 }
 
+// InsertBatch adds multiple missing sequence numbers in a single lock acquisition.
+// Returns the count of newly inserted sequences (excludes duplicates).
+// This is more efficient than calling Insert() multiple times when adding
+// multiple gaps discovered during a periodic NAK scan.
+func (nb *nakBtree) InsertBatch(seqs []uint32) int {
+	if len(seqs) == 0 {
+		return 0
+	}
+	nb.mu.Lock()
+	defer nb.mu.Unlock()
+
+	count := 0
+	for _, seq := range seqs {
+		// ReplaceOrInsert returns (oldItem, replaced)
+		// If replaced is false, this was a new insert
+		if _, replaced := nb.tree.ReplaceOrInsert(seq); !replaced {
+			count++
+		}
+	}
+	return count
+}
+
 // Delete removes a sequence number (packet arrived or expired).
 func (nb *nakBtree) Delete(seq uint32) bool {
 	nb.mu.Lock()
@@ -121,4 +143,3 @@ func (nb *nakBtree) Clear() {
 	defer nb.mu.Unlock()
 	nb.tree.Clear(false)
 }
-

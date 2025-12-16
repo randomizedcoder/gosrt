@@ -3,7 +3,8 @@
 **Document:** `integration_testing_profiling_design_implementation.md`
 **Design Document:** [`integration_testing_profiling_design.md`](./integration_testing_profiling_design.md)
 **Created:** 2025-12-16
-**Status:** 🔄 In Progress
+**Completed:** 2025-12-16
+**Status:** ✅ Complete
 
 ---
 
@@ -31,7 +32,7 @@ The 50 Mb/s performance defect ([`integration_testing_50mbps_defect.md`](./integ
 | **4** | Create profile analyzer | `profile_analyzer.go`, `profile_analyzer_test.go` | ✅ Complete |
 | **5** | Create HTML report generator | `profile_report.go`, `profile_report_test.go` | ✅ Complete |
 | **6** | Integrate with isolation tests | `test_isolation_mode.go`, `Makefile` | ✅ Complete |
-| **7** | Integrate with parallel tests + comparison | `test_parallel_mode.go` | ⏳ Pending |
+| **7** | Integrate with parallel tests + comparison | `test_parallel_mode.go`, `Makefile` | ✅ Complete |
 
 ---
 
@@ -779,42 +780,330 @@ Text Summary: /tmp/profile_.../summary.txt
 
 ---
 
-## 10. Phase 7 Preview: Integrate with Parallel Tests
+## 10. Phase 7: Integrate with Parallel Tests ✅ Complete
 
 ### 10.1 Objective
 
-Add profiling with comparison mode for parallel tests, where we compare baseline and highperf pipelines.
+Add profiling with comparison mode for parallel tests, where we compare baseline and highperf pipelines running simultaneously.
 
-### 10.2 Key Changes
+### 10.2 Files Modified
 
-Modify `runParallelModeTest()` in `test_parallel_mode.go` to:
-1. Check for `PROFILES` environment variable
-2. Create separate profile directories for baseline and highperf pipelines
-3. Add profiling flags to all components
-4. After test completion:
-   - Analyze profiles from both pipelines
-   - Generate comparison between baseline and highperf
-   - Generate comprehensive comparison report
+| File | Changes |
+|------|---------|
+| `contrib/integration_testing/test_parallel_mode.go` | Added profiling integration with comparison |
+| `Makefile` | Added PROFILES documentation and pass-through |
 
-### 10.3 Proposed Usage
+### 10.3 Key Features
+
+1. **Profiling Check** - Checks `PROFILES` env var at function start
+2. **Profile Config** - Creates unified output directory for all 6 components
+3. **CLI Flags** - Adds `-profile` and `-profilepath` to all 6 processes:
+   - `baseline_server`, `baseline_cg`, `baseline_client`
+   - `highperf_server`, `highperf_cg`, `highperf_client`
+4. **Post-Test Analysis**:
+   - Separates profiles by pipeline (baseline vs highperf)
+   - Generates component-level comparisons (server vs server, cg vs cg, client vs client)
+   - Prints formatted comparison tables with delta %
+   - Calculates overall improvements/regressions
+   - Provides optimization recommendations
+   - Generates comprehensive HTML report
+
+### 10.4 New Functions
+
+| Function | Description |
+|----------|-------------|
+| `generateParallelProfileReport()` | Main comparison logic - analyzes profiles, generates comparisons, creates report |
+| `printParallelProfileSummary()` | Prints overall summary with total improvements/regressions and top recommendations |
+
+### 10.5 Usage
 
 ```bash
 # Run parallel test with CPU profiling
 sudo PROFILES=cpu make test-parallel CONFIG=Parallel-Starlink-5Mbps
 
+# Run with multiple profile types
+sudo PROFILES=cpu,mutex make test-parallel CONFIG=Parallel-Starlink-5Mbps
+
 # Run with all profiles
 sudo PROFILES=all make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ```
 
-### 10.4 Expected Report
+### 10.6 Expected Output
 
-The parallel test profiling will produce:
-- Side-by-side comparison of baseline vs highperf
-- Per-component CPU, memory, lock analysis
-- Delta calculations showing performance differences
-- Recommendations for further optimization
+When profiling is enabled, the test will produce detailed comparison output:
+
+```
+╔═══════════════════════════════════════════════════════════════════════╗
+║  PROFILING ENABLED                                                    ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║ Test Name:     Parallel-Starlink-5Mbps                                ║
+║ Output Dir:    /tmp/profile_Parallel-Starlink-5Mbps_...               ║
+║ Profiles:      cpu                                                    ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+... test execution ...
+
+=== Analyzing Parallel Test Profiles ===
+Found 6 baseline profiles and 6 highperf profiles
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  SERVER CPU: Baseline vs HighPerf                                 ║
+╚═══════════════════════════════════════════════════════════════════╝
+║ Function                     Baseline  HighPerf  Delta            ║
+║ runtime.chanrecv            25.0%      5.0%     -20.0% ⬇         ║
+║ syscall.write               15.0%      3.0%     -12.0% ⬇         ║
+...
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  OVERALL PERFORMANCE COMPARISON: Baseline vs HighPerf             ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  Total Improvements: 12                                           ║
+║  Total Regressions:  2                                            ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  TOP RECOMMENDATIONS:                                             ║
+║  • Channel overhead (X%): Consider buffered channels or io_uring  ║
+║  • Syscall overhead (X%): Batch operations, use io_uring          ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+=== Profile Report Generated ===
+HTML Report:  /tmp/profile_.../report.html
+JSON Data:    /tmp/profile_.../report.json
+Text Summary: /tmp/profile_.../summary.txt
+```
+
+### 10.7 Comparison Logic
+
+The parallel test profiling performs intelligent matching:
+
+1. **Component Matching** - Compares:
+   - `baseline_server` ↔ `highperf_server`
+   - `baseline_cg` ↔ `highperf_cg`
+   - `baseline_client` ↔ `highperf_client`
+
+2. **Profile Type Matching** - Only compares same profile types (CPU vs CPU, mutex vs mutex)
+
+3. **Delta Calculation** - For each function:
+   - Positive delta = regression (function uses more CPU in highperf)
+   - Negative delta = improvement (function uses less CPU in highperf)
+
+4. **Aggregation** - Totals across all comparisons to show overall impact
+
+### 10.8 Progress Log
+
+| Date | Action | Status |
+|------|--------|--------|
+| 2025-12-16 | Added profiling check at function start | ✅ |
+| 2025-12-16 | Added profiling flags to all 6 CLI commands | ✅ |
+| 2025-12-16 | Created generateParallelProfileReport() | ✅ |
+| 2025-12-16 | Created printParallelProfileSummary() | ✅ |
+| 2025-12-16 | Added component-level comparisons | ✅ |
+| 2025-12-16 | Added overall summary with recommendations | ✅ |
+| 2025-12-16 | Updated Makefile with PROFILES docs | ✅ |
+| 2025-12-16 | **Phase 7 Complete** | ✅ |
 
 ---
 
-*Document will be updated as implementation progresses.*
+## 11. Implementation Complete 🎉
+
+All 7 phases of the profiling feature have been implemented:
+
+### Summary of Files Created/Modified
+
+| File | Type | Description |
+|------|------|-------------|
+| `contrib/client-generator/main.go` | Modified | Added `-profile` and `-profilepath` flags |
+| `contrib/client/main.go` | Modified | Added `-profilepath` flag |
+| `contrib/server/main.go` | Modified | Added `-profilepath` flag |
+| `contrib/integration_testing/profiling.go` | **New** | Profile configuration and utilities |
+| `contrib/integration_testing/profiling_test.go` | **New** | Unit tests for profiling |
+| `contrib/integration_testing/profile_analyzer.go` | **New** | Profile analysis with pprof |
+| `contrib/integration_testing/profile_analyzer_test.go` | **New** | Unit tests for analyzer |
+| `contrib/integration_testing/profile_report.go` | **New** | HTML report generation |
+| `contrib/integration_testing/profile_report_test.go` | **New** | Unit tests for report |
+| `contrib/integration_testing/test_isolation_mode.go` | Modified | Added profiling integration |
+| `contrib/integration_testing/test_parallel_mode.go` | Modified | Added profiling with comparison |
+| `Makefile` | Modified | Added PROFILES documentation |
+
+### Quick Reference
+
+```bash
+# Isolation test with CPU profiling
+sudo PROFILES=cpu make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
+
+# Parallel test with full comparison
+sudo PROFILES=cpu make test-parallel CONFIG=Parallel-Starlink-5Mbps
+
+# Multiple profile types
+sudo PROFILES=cpu,mutex,block make test-parallel CONFIG=Parallel-Starlink-5Mbps
+
+# All profiles
+sudo PROFILES=all make test-parallel CONFIG=Parallel-Starlink-5Mbps
+```
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `report.html` | Interactive HTML report with dark theme, flame graphs, comparisons |
+| `report.json` | Machine-readable JSON for CI/CD integration |
+| `summary.txt` | Quick text summary for terminal review |
+| `*/*.pprof` | Raw profile files for manual analysis |
+
+---
+
+## 12. Implementation Complete - Summary ✅
+
+**Status:** 🟢 COMPLETE
+**Completed:** 2025-12-16
+
+The profiling feature has been successfully implemented and verified. All 7 phases are complete and the infrastructure is working correctly:
+
+- ✅ Component names correctly parsed from directory structure
+- ✅ Pipeline identification (control/test, baseline/highperf)
+- ✅ Comparison tables generated with delta analysis
+- ✅ Recommendations provided based on profile patterns
+- ✅ HTML, JSON, and text reports generated
+- ✅ Output formatting widened to ~110 chars to prevent truncation
+
+### Usage
+
+```bash
+# Isolation test with CPU profiling
+sudo PROFILES=cpu make test-isolation CONFIG=Isolation-50M-Full
+
+# Isolation test with multiple profiles
+sudo PROFILES=cpu,mutex,block make test-isolation CONFIG=Isolation-50M-Full
+
+# Parallel test with profiling
+sudo PROFILES=cpu make test-parallel CONFIG=Parallel-Starlink-5Mbps
+
+# All profiles
+sudo PROFILES=all make test-isolation CONFIG=<test-name>
+```
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `report.html` | Interactive HTML report with dark theme |
+| `report.json` | Machine-readable JSON for CI/CD |
+| `summary.txt` | Quick text summary |
+| `*/*.pprof` | Raw profile files for `go tool pprof` |
+
+---
+
+## 13. Potential Future Enhancements
+
+The following enhancements are documented for future consideration but are **not blocking** the current profiling implementation.
+
+### 13.1 Aggregate Summary per Component
+
+**Current:** Each function compared individually with delta percentages.
+
+**Enhancement:** Add overall CPU/memory improvement per component:
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║ AGGREGATE SUMMARY                                                         ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║ Component    CPU Change    Memory Change    Lock Contention              ║
+║ ─────────────────────────────────────────────────────────────────────── ║
+║ server       +15.3%        -8.2%            Reduced (futex down)         ║
+║ cg           -2.1%         +1.0%            Increased (lock2 up)         ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Effort:** Medium
+**Value:** Provides quick at-a-glance assessment
+
+### 13.2 Automatic Bottleneck Identification
+
+**Current:** User must interpret function deltas to find key issues.
+
+**Enhancement:** Automatically highlight the biggest performance concern:
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║ ⚠️ TOP BOTTLENECK IDENTIFIED                                             ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║ Function:  runtime.futex                                                  ║
+║ Component: test_server                                                    ║
+║ CPU Time:  43.4%                                                          ║
+║ Delta:     +1104.7% vs control                                            ║
+║                                                                           ║
+║ Analysis:  The test server is spending 43% of CPU waiting on kernel       ║
+║            synchronization. This indicates either:                        ║
+║            • io_uring completion polling overhead                         ║
+║            • Lock contention in btree/NAK btree operations                ║
+║                                                                           ║
+║ Suggested: Run with PROFILES=mutex,block for detailed contention data    ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Effort:** Medium
+**Value:** Accelerates diagnosis by surfacing the key issue
+
+### 13.3 Cross-Component Comparison View
+
+**Current:** Compares same component across pipelines (CG control vs CG test).
+
+**Enhancement:** Add option to compare across components for connection debugging:
+
+```
+# Compare client-generator send path with server receive path
+--compare-mode=cross-component
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║ CROSS-COMPONENT: CG Send Path vs Server Receive Path                     ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║ CG (Sender):                                                              ║
+║   • syscall.Syscall6: 4.4% (io_uring submit)                             ║
+║   • runtime.selectgo: 17.5% (channel operations)                          ║
+║                                                                           ║
+║ Server (Receiver):                                                        ║
+║   • runtime.futex: 43.4% (kernel wait)                                   ║
+║   • syscall.Syscall6: 32.8% (io_uring complete)                          ║
+║                                                                           ║
+║ Observation: Server receive path has 7.5x more syscall overhead           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Effort:** High
+**Value:** Useful for debugging SRT connection path issues
+
+### 13.4 Historical Comparison
+
+**Enhancement:** Compare current run against a baseline from a previous test:
+
+```bash
+PROFILES=cpu BASELINE=/tmp/profile_previous/ make test-isolation CONFIG=...
+```
+
+**Effort:** Medium
+**Value:** Track performance regression over time
+
+### 13.5 CI/CD Integration Thresholds
+
+**Enhancement:** Define pass/fail thresholds for CI:
+
+```yaml
+# .github/workflows/perf.yml
+- name: Run performance test
+  run: PROFILES=cpu make test-isolation CONFIG=Isolation-50M-Full
+  env:
+    PERF_MAX_REGRESSION: 10%  # Fail if any function regresses >10%
+```
+
+**Effort:** Medium
+**Value:** Automated performance regression detection
+
+---
+
+## 14. Analysis Moved to Defect Document
+
+The detailed profiling analysis from the 50 Mb/s test runs has been moved to [`integration_testing_50mbps_defect.md`](./integration_testing_50mbps_defect.md) Section 12, where the investigation continues.
+
+---
+
+*Implementation complete. Future enhancements documented for reference.*
 
