@@ -16,6 +16,7 @@ import (
 
 // runIsolationModeTest runs a simplified CG→Server isolation test
 // No Client (subscriber), no network impairment, 30 second tests.
+// Supports profiling via PROFILES environment variable (e.g., PROFILES=cpu,mutex)
 func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 	startTime := time.Now()
 
@@ -23,6 +24,20 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 		fmt.Fprintf(os.Stderr, "Error: Isolation tests require root privileges\n")
 		fmt.Fprintf(os.Stderr, "Run with: sudo %s isolation-test <config-name>\n", os.Args[0])
 		return false
+	}
+
+	// Check for profiling mode
+	var profileConfig *ProfileConfig
+	if ProfilingEnabled() {
+		var err error
+		profileConfig, err = NewProfileConfig(config.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating profile config: %v\n", err)
+			return false
+		}
+		if profileConfig != nil {
+			profileConfig.PrintProfilingInfo()
+		}
 	}
 
 	fmt.Printf("\n=== Isolation Test: %s ===\n", config.Name)
@@ -80,6 +95,33 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 	testServerFlags := config.GetTestServerFlags(testID)
 	controlCGFlags := config.GetControlCGFlags(testID)
 	testCGFlags := config.GetTestCGFlags(testID)
+
+	// Add profiling flags if enabled
+	if profileConfig != nil && len(profileConfig.Profiles) > 0 {
+		// Use first profile type for this run
+		profileType := profileConfig.Profiles[0]
+		fmt.Printf("Enabling %s profiling for all components\n\n", profileType)
+
+		// Add profiling to control server
+		if controlServerProfileArgs, err := profileConfig.GetProfileArgs("control_server", profileType); err == nil && controlServerProfileArgs != nil {
+			controlServerFlags = append(controlServerFlags, controlServerProfileArgs...)
+		}
+
+		// Add profiling to test server
+		if testServerProfileArgs, err := profileConfig.GetProfileArgs("test_server", profileType); err == nil && testServerProfileArgs != nil {
+			testServerFlags = append(testServerFlags, testServerProfileArgs...)
+		}
+
+		// Add profiling to control CG
+		if controlCGProfileArgs, err := profileConfig.GetProfileArgs("control_cg", profileType); err == nil && controlCGProfileArgs != nil {
+			controlCGFlags = append(controlCGFlags, controlCGProfileArgs...)
+		}
+
+		// Add profiling to test CG
+		if testCGProfileArgs, err := profileConfig.GetProfileArgs("test_cg", profileType); err == nil && testCGProfileArgs != nil {
+			testCGFlags = append(testCGFlags, testCGProfileArgs...)
+		}
+	}
 
 	// Print CLI differences
 	fmt.Println("CLI Flags:")
@@ -183,6 +225,54 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 		controlMetrics.GetSnapshotByLabel("client-generator", "final"),
 		testMetrics.GetSnapshotByLabel("client-generator", "final"),
 	)
+
+	// Generate profile report if profiling was enabled
+	if profileConfig != nil {
+		fmt.Println("\n=== Analyzing Profiles ===")
+
+		// Analyze all collected profiles
+		analyses, err := AnalyzeAllProfiles(profileConfig.OutputDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to analyze profiles: %v\n", err)
+		} else if len(analyses) > 0 {
+			// Print summary
+			PrintAnalysisSummary(analyses)
+
+			// Generate comparison between control and test if we have matching profiles
+			var comparisons []*ComparisonResult
+			for _, controlAnalysis := range analyses {
+				if !strings.HasPrefix(controlAnalysis.Component, "control_") {
+					continue
+				}
+				// Find matching test analysis
+				testComponent := strings.Replace(controlAnalysis.Component, "control_", "test_", 1)
+				for _, testAnalysis := range analyses {
+					if testAnalysis.Component == testComponent &&
+						testAnalysis.ProfileType == controlAnalysis.ProfileType {
+						comparison := CompareProfiles(controlAnalysis, testAnalysis)
+						comparisons = append(comparisons, comparison)
+						fmt.Print(comparison.FormatComparison())
+					}
+				}
+			}
+
+			// Generate HTML report
+			report := NewProfileReport(config.Name, "isolation", profileConfig.OutputDir, config.TestDuration)
+			for _, a := range analyses {
+				report.AddAnalysis(a)
+			}
+			for _, c := range comparisons {
+				report.AddComparison(c)
+			}
+			report.CalculateOverallSummary()
+
+			if err := GenerateHTMLReport(report); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to generate report: %v\n", err)
+			}
+		} else {
+			fmt.Println("No profile files found to analyze")
+		}
+	}
 
 	elapsed := time.Since(startTime)
 	fmt.Printf("\n=== Isolation Test Complete (%v) ===\n", elapsed.Round(time.Second))

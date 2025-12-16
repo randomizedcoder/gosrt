@@ -82,9 +82,13 @@ test-isolation-list:
 ## Add PRINT_PROM=true to see all Prometheus metrics:
 ## sudo make test-isolation CONFIG=Isolation-5M-CG-IoUrSend PRINT_PROM=true
 ## sudo make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr PRINT_PROM=true
+## Add PROFILES=<type> to enable profiling (generates HTML report):
+## sudo PROFILES=cpu make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
+## sudo PROFILES=cpu,mutex make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
+## sudo PROFILES=all make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
 test-isolation: server client-generator
 	@echo "NOTE: Isolation tests require root privileges for network namespace creation"
-	@cd contrib/integration_testing && PRINT_PROM=$(PRINT_PROM) go run . isolation-test $(CONFIG)
+	@cd contrib/integration_testing && PRINT_PROM=$(PRINT_PROM) PROFILES=$(PROFILES) go run . isolation-test $(CONFIG)
 
 ## test-isolation-all: Run all 7 isolation tests (~3.5 min, captures output to temp dir)
 ## sudo make test-isolation-all

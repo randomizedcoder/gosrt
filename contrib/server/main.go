@@ -62,6 +62,7 @@ var (
 	passphrase  = flag.String("passphrase", "", "passphrase for de- and enrcypting the data")
 	logtopics   = flag.String("logtopics", "", "topics for the log output")
 	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	profilePath = flag.String("profilepath", ".", "directory to write profile files to")
 	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
 	printConfig = flag.Bool("printconfig", false, "Print config")
 )
@@ -129,7 +130,7 @@ func main() {
 	}
 
 	if p != nil {
-		defer profile.Start(profile.ProfilePath("."), profile.NoShutdownHook, p).Stop()
+		defer profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p).Stop()
 	}
 
 	config := srt.DefaultConfig()

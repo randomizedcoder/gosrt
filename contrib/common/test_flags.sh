@@ -4,6 +4,7 @@
 
 CLIENT_BIN="./contrib/client/client"
 SERVER_BIN="./contrib/server/server"
+CLIENTGEN_BIN="./contrib/client-generator/client-generator"
 
 # Colors for output
 RED='\033[0;31m'
@@ -76,6 +77,27 @@ run_test() {
 	return 1
 }
 
+# Function to test help output for a flag
+test_help_flag() {
+	local name="$1"
+	local flag_name="$2"
+	local binary="$3"
+
+	echo -n "Testing: $name ... "
+
+	# Run help and check for flag (use -- to prevent grep treating flag_name as option)
+	if $binary -h 2>&1 | grep -q -- "$flag_name"; then
+		echo -e "${GREEN}PASSED${NC}"
+		((TESTS_PASSED++))
+		return 0
+	else
+		echo -e "${RED}FAILED${NC}"
+		echo "  Expected flag '$flag_name' not found in help output"
+		((TESTS_FAILED++))
+		return 1
+	fi
+}
+
 # Check if binaries exist
 if [ ! -f "$CLIENT_BIN" ]; then
 	echo -e "${YELLOW}Warning: $CLIENT_BIN not found. Building...${NC}"
@@ -85,6 +107,11 @@ fi
 if [ ! -f "$SERVER_BIN" ]; then
 	echo -e "${YELLOW}Warning: $SERVER_BIN not found. Building...${NC}"
 	cd "$(dirname "$SERVER_BIN")" && make server && cd - > /dev/null
+fi
+
+if [ ! -f "$CLIENTGEN_BIN" ]; then
+	echo -e "${YELLOW}Warning: $CLIENTGEN_BIN not found. Building...${NC}"
+	cd "$(dirname "$CLIENTGEN_BIN")" && make client-generator && cd - > /dev/null
 fi
 
 echo "Testing CLI flags functionality"
@@ -219,6 +246,40 @@ run_test "InstanceName flag (client)" "-name TestClient" '"InstanceName" *: *"Te
 
 # Test 39: InstanceName with other flags
 run_test "InstanceName with other flags" "-name MyServer -latency 200" '"InstanceName" *: *"MyServer".*"Latency" *: *200000000' "$SERVER_BIN"
+
+echo ""
+echo "--- Client-Generator Tests ---"
+echo ""
+
+# Test 40: Client-generator config flags
+run_test "Client-generator latency flag" "-latency 200" '"Latency" *: *200000000' "$CLIENTGEN_BIN"
+
+# Test 41: Client-generator InstanceName
+run_test "Client-generator InstanceName" "-name TestCG" '"InstanceName" *: *"TestCG"' "$CLIENTGEN_BIN"
+
+# Test 42: Client-generator NAK btree config
+run_test "Client-generator NAK btree" "-usenakbtree -fastnakenabled" '"UseNakBtree" *: *true.*"FastNakEnabled" *: *true' "$CLIENTGEN_BIN"
+
+echo ""
+echo "--- Component-Specific Flags (Help Output) ---"
+echo ""
+
+# Test 43-51: Profile-related flags (these don't affect config, so we check help output)
+# These flags are defined in each main.go, not in common/flags.go
+
+test_help_flag "Server -profile flag exists" "-profile" "$SERVER_BIN"
+test_help_flag "Server -profilepath flag exists" "-profilepath" "$SERVER_BIN"
+
+test_help_flag "Client -profile flag exists" "-profile" "$CLIENT_BIN"
+test_help_flag "Client -profilepath flag exists" "-profilepath" "$CLIENT_BIN"
+
+test_help_flag "Client-generator -profile flag exists" "-profile" "$CLIENTGEN_BIN"
+test_help_flag "Client-generator -profilepath flag exists" "-profilepath" "$CLIENTGEN_BIN"
+
+# Test component-specific flags
+test_help_flag "Client-generator -bitrate flag exists" "-bitrate" "$CLIENTGEN_BIN"
+test_help_flag "Server -addr flag exists" "-addr" "$SERVER_BIN"
+test_help_flag "Client -from flag exists" "-from" "$CLIENT_BIN"
 
 echo ""
 echo "================================"

@@ -34,6 +34,7 @@ var (
 	to          = flag.String("to", "", "Address to write to, targets: srt://, udp://, file://, - (stdout), null (discard output, useful for profiling)")
 	logtopics   = flag.String("logtopics", "", "topics for the log output")
 	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	profilePath = flag.String("profilepath", ".", "directory to write profile files to")
 	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
 )
 
@@ -82,7 +83,7 @@ func main() {
 	// Store profile so we can stop it explicitly on signal
 	var prof interface{ Stop() }
 	if p != nil {
-		prof = profile.Start(profile.ProfilePath("."), profile.NoShutdownHook, p)
+		prof = profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p)
 		defer prof.Stop()
 	}
 
@@ -223,9 +224,9 @@ func main() {
 				// Query the actual connection metrics
 				conns, _, _ := metrics.GetConnections()
 				if connMetrics, ok := conns[socketId]; ok && connMetrics != nil {
-					gaps = connMetrics.CongestionRecvPktLoss.Load()             // Sequence gaps detected
-					naks = connMetrics.CongestionRecvNAKPktsTotal.Load()        // NAK packets sent
-					skips = connMetrics.CongestionRecvPktSkippedTSBPD.Load()    // TRUE losses (TSBPD expired)
+					gaps = connMetrics.CongestionRecvPktLoss.Load()          // Sequence gaps detected
+					naks = connMetrics.CongestionRecvNAKPktsTotal.Load()     // NAK packets sent
+					skips = connMetrics.CongestionRecvPktSkippedTSBPD.Load() // TRUE losses (TSBPD expired)
 					retrans = connMetrics.CongestionRecvPktRetrans.Load()
 				}
 			}
