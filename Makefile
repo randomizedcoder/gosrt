@@ -93,6 +93,40 @@ test-isolation-all: server client-generator
 	@chmod +x contrib/integration_testing/run_isolation_tests.sh
 	@contrib/integration_testing/run_isolation_tests.sh
 
+## test-matrix-list: List all matrix-generated tests (64 tests)
+test-matrix-list:
+	@cd contrib/integration_testing && go run . matrix-list
+
+## test-matrix-summary: Show matrix test summary by tier and category
+test-matrix-summary:
+	@cd contrib/integration_testing && go run . matrix-summary
+
+## test-matrix-tier1-list: List Tier 1 (Core) tests (~25 tests)
+test-matrix-tier1-list:
+	@cd contrib/integration_testing && go run . matrix-list-tier1
+
+## test-matrix-tier2-list: List Tier 1+2 (Daily) tests (~42 tests)
+test-matrix-tier2-list:
+	@cd contrib/integration_testing && go run . matrix-list-tier2
+
+## test-matrix-tier1: Run Tier 1 (Core) tests (require root, ~40 min)
+## sudo make test-matrix-tier1
+test-matrix-tier1: client server client-generator
+	@echo "NOTE: Matrix tests require root privileges for network namespace creation"
+	@cd contrib/integration_testing && go run . matrix-run-tier1
+
+## test-matrix-tier2: Run Tier 1+2 (Daily) tests (require root, ~70 min)
+## sudo make test-matrix-tier2
+test-matrix-tier2: client server client-generator
+	@echo "NOTE: Matrix tests require root privileges for network namespace creation"
+	@cd contrib/integration_testing && go run . matrix-run-tier2
+
+## test-matrix-all: Run all matrix tests (require root, ~100 min)
+## sudo make test-matrix-all
+test-matrix-all: client server client-generator
+	@echo "NOTE: Matrix tests require root privileges for network namespace creation"
+	@cd contrib/integration_testing && go run . matrix-run-all
+
 ## test-shutdown: Quick test for graceful shutdown of each component (no root needed)
 test-shutdown: client server client-generator
 	@cd contrib/integration_testing && ./test_shutdown.sh $(TEST)
@@ -248,6 +282,9 @@ nixshell:
 .PHONY: test-parallel-list test-parallel test-parallel-all
 # Isolation testing targets (require root)
 .PHONY: test-isolation-list test-isolation test-isolation-all
+# Matrix-generated testing targets
+.PHONY: test-matrix-list test-matrix-summary test-matrix-tier1-list test-matrix-tier2-list
+.PHONY: test-matrix-tier1 test-matrix-tier2 test-matrix-all
 # Benchmark targets
 .PHONY: bench-packet bench-packet-all bench-packet-pool bench-circular
 # Code quality targets

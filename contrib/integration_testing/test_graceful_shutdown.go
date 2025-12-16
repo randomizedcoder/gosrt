@@ -188,6 +188,35 @@ func main() {
 		// Run all isolation tests
 		testIsolationModeAllConfigs()
 
+	// Matrix-generated test commands
+	case "matrix-list":
+		// List all matrix-generated tests
+		listMatrixTests()
+
+	case "matrix-summary":
+		// Show summary of matrix tests by tier
+		showMatrixSummary()
+
+	case "matrix-list-tier1":
+		// List Tier 1 (Core) tests only
+		listMatrixTestsByTier(TierCore)
+
+	case "matrix-list-tier2":
+		// List Tier 1+2 (Daily) tests
+		listMatrixTestsByTier(TierDaily)
+
+	case "matrix-run-tier1":
+		// Run all Tier 1 tests (requires root)
+		runMatrixTestsByTier(TierCore)
+
+	case "matrix-run-tier2":
+		// Run Tier 1+2 tests (requires root)
+		runMatrixTestsByTier(TierDaily)
+
+	case "matrix-run-all":
+		// Run all matrix tests (requires root)
+		runMatrixTestsByTier(TierNightly)
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown test: %s\n", testName)
 		printUsage()
@@ -214,6 +243,14 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  isolation-test NAME                   Run CG→Server isolation test (single variable change)\n")
 	fmt.Fprintf(os.Stderr, "  isolation-test-all                    Run all isolation tests (~3.5 min total)\n")
 	fmt.Fprintf(os.Stderr, "  list-isolation-configs                List all isolation test configurations\n")
+	fmt.Fprintf(os.Stderr, "\nMatrix-Generated Tests (programmatic test generation):\n")
+	fmt.Fprintf(os.Stderr, "  matrix-list                           List all matrix-generated tests (64 tests)\n")
+	fmt.Fprintf(os.Stderr, "  matrix-summary                        Show test summary by tier and category\n")
+	fmt.Fprintf(os.Stderr, "  matrix-list-tier1                     List Tier 1 (Core) tests (~25 tests)\n")
+	fmt.Fprintf(os.Stderr, "  matrix-list-tier2                     List Tier 1+2 (Daily) tests (~42 tests)\n")
+	fmt.Fprintf(os.Stderr, "  matrix-run-tier1                      Run Tier 1 tests (require root, ~40 min)\n")
+	fmt.Fprintf(os.Stderr, "  matrix-run-tier2                      Run Tier 1+2 tests (require root, ~70 min)\n")
+	fmt.Fprintf(os.Stderr, "  matrix-run-all                        Run all matrix tests (require root, ~100 min)\n")
 }
 
 // testGracefulShutdownSIGINTAllConfigs runs the graceful shutdown test with all configurations
@@ -788,4 +825,142 @@ func ensureBinaries(baseDir string, serverBin, clientGenBin, clientBin string) e
 	}
 
 	return nil
+}
+
+// ============================================================================
+// MATRIX-GENERATED TEST COMMANDS
+// ============================================================================
+
+// listMatrixTests lists all matrix-generated tests with their tier and description.
+func listMatrixTests() {
+	cfg := DefaultParallelMatrixConfig()
+	tests := GenerateParallelTests(cfg)
+
+	tierNames := map[TestTier]string{
+		TierCore:    "Core",
+		TierDaily:   "Daily",
+		TierNightly: "Nightly",
+	}
+
+	fmt.Printf("Matrix-Generated Parallel Tests (%d total):\n\n", len(tests))
+	for i, t := range tests {
+		fmt.Printf("  %3d. [%-8s] %-55s %s\n", i+1, tierNames[t.Tier], t.Name, t.Duration)
+	}
+	fmt.Println()
+	fmt.Println("Use 'matrix-summary' to see counts by tier and category.")
+	fmt.Println("Use 'matrix-run-tier1' to run Tier 1 (Core) tests only.")
+}
+
+// showMatrixSummary shows a summary of matrix tests by tier and category.
+func showMatrixSummary() {
+	cfg := DefaultParallelMatrixConfig()
+	tests := GenerateParallelTests(cfg)
+
+	PrintTestSummary(tests)
+}
+
+// listMatrixTestsByTier lists tests up to and including the specified tier.
+func listMatrixTestsByTier(maxTier TestTier) {
+	cfg := DefaultParallelMatrixConfig()
+	allTests := GenerateParallelTests(cfg)
+	tests := FilterTestsByTier(allTests, maxTier)
+
+	tierNames := map[TestTier]string{
+		TierCore:    "Tier 1 (Core)",
+		TierDaily:   "Tier 1+2 (Daily)",
+		TierNightly: "All Tiers (Nightly)",
+	}
+
+	fmt.Printf("%s Matrix Tests (%d tests):\n\n", tierNames[maxTier], len(tests))
+	for i, t := range tests {
+		fmt.Printf("  %3d. %-55s %s\n", i+1, t.Name, t.Duration)
+	}
+
+	// Calculate total estimated time
+	var totalDuration time.Duration
+	for _, t := range tests {
+		totalDuration += t.Duration
+	}
+	fmt.Printf("\nEstimated total runtime: %s\n", totalDuration.Round(time.Minute))
+}
+
+// runMatrixTestsByTier runs all tests up to and including the specified tier.
+func runMatrixTestsByTier(maxTier TestTier) {
+	cfg := DefaultParallelMatrixConfig()
+	allTests := GenerateParallelTests(cfg)
+	tests := FilterTestsByTier(allTests, maxTier)
+
+	tierNames := map[TestTier]string{
+		TierCore:    "Tier 1 (Core)",
+		TierDaily:   "Tier 1+2 (Daily)",
+		TierNightly: "All Tiers (Nightly)",
+	}
+
+	fmt.Printf("╔═══════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  Matrix Test Runner: %-20s                           ║\n", tierNames[maxTier])
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+
+	fmt.Printf("Running %d parallel tests...\n\n", len(tests))
+
+	// Calculate total estimated time
+	var totalDuration time.Duration
+	for _, t := range tests {
+		totalDuration += t.Duration
+	}
+	fmt.Printf("Estimated total runtime: %s\n\n", totalDuration.Round(time.Minute))
+
+	passed := 0
+	failed := 0
+	var failedTests []string
+
+	startTime := time.Now()
+
+	for i, t := range tests {
+		fmt.Printf("━━━ Test %d/%d: %s ━━━\n", i+1, len(tests), t.Name)
+		fmt.Printf("    %s\n", t.Description)
+		fmt.Printf("    Duration: %s\n\n", t.Duration)
+
+		// Run the parallel test using the generated config
+		printParallelTestHeader(t.Config)
+		result := runParallelModeTest(t.Config)
+
+		if result.Passed {
+			// Print detailed comparison
+			if result.BaselineMetrics != nil && result.HighPerfMetrics != nil {
+				comparisons := CompareParallelPipelines(result.BaselineMetrics, result.HighPerfMetrics)
+				PrintDetailedComparison(comparisons)
+			}
+			passed++
+			fmt.Printf("✓ PASSED: %s\n\n", t.Name)
+		} else {
+			failed++
+			failedTests = append(failedTests, t.Name)
+			fmt.Printf("✗ FAILED: %s\n\n", t.Name)
+		}
+
+		// Wait between tests for cleanup
+		if i < len(tests)-1 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	elapsed := time.Since(startTime)
+
+	// Print summary
+	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  MATRIX TEST SUMMARY                                                  ║\n")
+	fmt.Printf("╠═══════════════════════════════════════════════════════════════════════╣\n")
+	fmt.Printf("║  Tests Run:  %-5d                                                    ║\n", len(tests))
+	fmt.Printf("║  Passed:     %-5d                                                    ║\n", passed)
+	fmt.Printf("║  Failed:     %-5d                                                    ║\n", failed)
+	fmt.Printf("║  Duration:   %-10s                                               ║\n", elapsed.Round(time.Second))
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════╝\n")
+
+	if failed > 0 {
+		fmt.Println("\nFailed tests:")
+		for _, name := range failedTests {
+			fmt.Printf("  - %s\n", name)
+		}
+		os.Exit(1)
+	}
 }

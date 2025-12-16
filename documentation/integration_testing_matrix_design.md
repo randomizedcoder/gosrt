@@ -1125,7 +1125,7 @@ type TestConfig struct {
 | Phase 1: Foundation | ✅ Complete | 2025-12-16 | 2025-12-16 | Types and helpers in config.go |
 | Phase 2: Timer Interval Support | ✅ Complete | 2025-12-16 | 2025-12-16 | Merged with Phase 1 |
 | Phase 3: Test Matrix Generator | ✅ Complete | 2025-12-16 | 2025-12-16 | 64 tests generated, 8 unit tests passing |
-| Phase 4: CLI Integration | ⏳ Pending | - | - | Can add `make test-matrix` when needed |
+| Phase 4: CLI Integration | ✅ Complete | 2025-12-16 | 2025-12-16 | 7 new Makefile targets |
 | Phase 5: Clean Network Tests | ⏳ Pending | - | - | |
 | Phase 6: Tier 1 Tests | ⏳ Pending | - | - | |
 | Phase 7: Tier 2 & 3 Tests | ⏳ Pending | - | - | |
@@ -1167,6 +1167,58 @@ type TestConfig struct {
 **Files Modified:**
 - `contrib/integration_testing/test_matrix.go` - ~450 lines of generator code
 - `contrib/integration_testing/test_matrix_test.go` - Fixed to match new API
+
+#### 2025-12-16: Phase 4 Complete - CLI Integration ✅
+- [x] Add CLI commands to `test_graceful_shutdown.go`:
+  - `matrix-list` - List all 64 tests with tier and duration
+  - `matrix-summary` - Show counts by tier, config, and RTT
+  - `matrix-list-tier1` - List Tier 1 (Core) tests with estimated runtime
+  - `matrix-list-tier2` - List Tier 1+2 (Daily) tests with estimated runtime
+  - `matrix-run-tier1` - Run Tier 1 tests (~39 min)
+  - `matrix-run-tier2` - Run Tier 1+2 tests (~65 min)
+  - `matrix-run-all` - Run all matrix tests (~95 min)
+- [x] Update `printUsage()` with new commands
+- [x] Implement `runMatrixTestsByTier()` with proper test execution
+- [x] Add Makefile targets:
+  - `make test-matrix-list` - List all tests
+  - `make test-matrix-summary` - Show summary
+  - `make test-matrix-tier1-list` - List Tier 1 tests
+  - `make test-matrix-tier2-list` - List Tier 1+2 tests
+  - `sudo make test-matrix-tier1` - Run Tier 1 tests
+  - `sudo make test-matrix-tier2` - Run Tier 1+2 tests
+  - `sudo make test-matrix-all` - Run all tests
+- [x] Add .PHONY targets for all new targets
+- [x] Verified build and CLI output
+
+**Example Output:**
+```
+$ make test-matrix-summary
+Test Matrix Summary
+===================
+Total tests: 64
+
+By Tier:
+  Tier 1 (Core):    25 tests
+  Tier 2 (Daily):   17 tests
+  Tier 3 (Nightly): 22 tests
+
+By Config:
+  NakBtree: 7 tests
+  NakBtreeF: 7 tests
+  NakBtreeFr: 7 tests
+  Full: 43 tests
+
+By RTT:
+  R0: 4 tests
+  R10: 13 tests
+  R60: 26 tests
+  R130: 13 tests
+  R300: 8 tests
+```
+
+**Files Modified:**
+- `contrib/integration_testing/test_graceful_shutdown.go` - Added 7 CLI commands + implementations
+- `Makefile` - Added 7 new targets
 
 ---
 
