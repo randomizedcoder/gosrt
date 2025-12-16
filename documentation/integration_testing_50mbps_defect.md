@@ -241,7 +241,225 @@ Before proceeding, please choose:
 
 ---
 
-## 9. Appendix: Raw Test Output
+## 9. Proposed Enhancement: Automated Profiling Mode
+
+### 9.1 Motivation
+
+This defect highlights the need for **automated performance profiling** integrated into the test framework. Currently, diagnosing performance issues requires:
+
+1. Manually adding profiling code
+2. Running tests multiple times with different profile types
+3. Manually analyzing each profile output
+4. Correlating findings across profile types
+
+This is time-consuming and error-prone. A better approach would be a **built-in profiling mode** that can be enabled on demand.
+
+### 9.2 Design Concept
+
+#### Usage
+
+```bash
+# Run a specific test with all profiling enabled
+PROFILES=all make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
+
+# Run clean network test with profiling
+PROFILES=all go run ./contrib/integration_testing Int-Clean-50M-5s-NakBtree
+
+# Run parallel test with specific profiles only
+PROFILES=cpu,mutex make test-parallel CONFIG=Parallel-Starlink-5M-Base-vs-Full
+```
+
+#### Profile Types (from `contrib/server/main.go`)
+
+| Profile Type | Flag Value | What It Measures |
+|--------------|------------|------------------|
+| CPU | `cpu` | CPU time distribution across functions |
+| Memory | `mem` | Memory allocation by function |
+| Allocations | `allocs` | Number of allocations (not size) |
+| Heap | `heap` | Heap memory in use |
+| Mutex | `mutex` | Lock contention and wait time |
+| Block | `block` | Goroutine blocking (I/O, channels, etc.) |
+| Thread | `thread` | Thread creation |
+| Trace | `trace` | Execution trace for `go tool trace` |
+
+### 9.3 Proposed Workflow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PROFILES=all go run ./integration_testing Int-Clean-50M-...   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  1. Create temp directory: /tmp/profile_50M_20251216_143022/    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  2. Run test iterations with each profile type:                 │
+│                                                                 │
+│     Iteration 1: -profile=cpu    → cpu.pprof    (120s)          │
+│     Iteration 2: -profile=mutex  → mutex.pprof  (120s)          │
+│     Iteration 3: -profile=block  → block.pprof  (120s)          │
+│     Iteration 4: -profile=heap   → heap.pprof   (120s)          │
+│     Iteration 5: -profile=allocs → allocs.pprof (120s)          │
+│     Iteration 6: -profile=trace  → trace.out    (60s)           │
+│                                                                 │
+│     Total time: ~10 minutes                                     │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  3. Analyze each profile automatically:                         │
+│                                                                 │
+│     go tool pprof -top cpu.pprof > cpu_top.txt                  │
+│     go tool pprof -svg cpu.pprof > cpu_flamegraph.svg           │
+│     go tool pprof -top mutex.pprof > mutex_top.txt              │
+│     ... etc                                                     │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  4. Generate summary report: report.html                        │
+│                                                                 │
+│     ┌─────────────────────────────────────────────────────┐     │
+│     │  Performance Profile Report                         │     │
+│     │  Test: Int-Clean-50M-5s-NakBtree                    │     │
+│     │  Date: 2025-12-16 14:30:22                          │     │
+│     ├─────────────────────────────────────────────────────┤     │
+│     │  CPU Hot Spots:                                     │     │
+│     │    1. runtime.chanrecv (23%)                        │     │
+│     │    2. syscall.write (18%)                           │     │
+│     │    3. crypto/aes.gcmAesEnc (12%)                    │     │
+│     ├─────────────────────────────────────────────────────┤     │
+│     │  Mutex Contention:                                  │     │
+│     │    1. sync.(*Mutex).Lock - 45ms wait                │     │
+│     │    2. runtime.chansend - 23ms wait                  │     │
+│     ├─────────────────────────────────────────────────────┤     │
+│     │  Memory Allocations:                                │     │
+│     │    1. bytes.makeSlice - 1.2GB total                 │     │
+│     │    2. packet.NewPacket - 800MB total                │     │
+│     ├─────────────────────────────────────────────────────┤     │
+│     │  [Embedded Flame Graphs]                            │     │
+│     │  [Link to trace viewer]                             │     │
+│     └─────────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  5. Output summary:                                             │
+│                                                                 │
+│     Profile results saved to:                                   │
+│       /tmp/profile_50M_20251216_143022/                         │
+│                                                                 │
+│     Files:                                                      │
+│       cpu.pprof, cpu_top.txt, cpu_flamegraph.svg                │
+│       mutex.pprof, mutex_top.txt                                │
+│       block.pprof, block_top.txt                                │
+│       heap.pprof, heap_top.txt                                  │
+│       allocs.pprof, allocs_top.txt                              │
+│       trace.out                                                 │
+│       report.html  ← Open this in browser                       │
+│                                                                 │
+│     Top Issue: runtime.chanrecv (23% CPU)                       │
+│     Recommendation: Consider buffered channels or io_uring      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 9.4 Implementation Considerations
+
+#### Where to Add Profiling
+
+| Component | Profiling Value | Notes |
+|-----------|-----------------|-------|
+| `server` | High | Already has `-profile` flag |
+| `client-generator` | High | Sender path - likely bottleneck |
+| `client` | Medium | Receiver path |
+
+#### Profile Duration
+
+| Profile Type | Duration | Rationale |
+|--------------|----------|-----------|
+| CPU | 120s | Need sustained load for accurate sampling |
+| Mutex | 120s | Need lock contention to accumulate |
+| Block | 120s | Need blocking events to occur |
+| Heap | 60s | Snapshot at end is sufficient |
+| Allocs | 60s | Cumulative, shorter OK |
+| Trace | 30s | Files get large quickly |
+
+#### Integration Points
+
+1. **Isolation Tests** (`test_isolation_mode.go`)
+   - Add `PROFILES` environment variable check
+   - Run multiple iterations if profiling enabled
+   - Collect profiles from both Control and Test pipelines
+
+2. **Parallel Tests** (`test_parallel_mode.go`)
+   - Profile both Baseline and HighPerf pipelines
+   - Compare profiles between pipelines
+   - Highlight differences in contention/allocation patterns
+
+3. **Clean Network Tests** (`test_graceful_shutdown.go`)
+   - Add profile collection for matrix-generated tests
+   - Useful for characterizing performance limits
+
+### 9.5 Report Generation
+
+The report could be generated using:
+
+1. **`go tool pprof`** - Extract top functions, generate SVG flame graphs
+2. **`go tool trace`** - Generate trace viewer link
+3. **HTML template** - Combine all outputs into single navigable report
+
+Example automated analysis:
+
+```bash
+# Extract top 20 CPU consumers
+go tool pprof -top -nodecount=20 cpu.pprof
+
+# Generate flame graph SVG
+go tool pprof -svg cpu.pprof > cpu_flamegraph.svg
+
+# Check for lock contention
+go tool pprof -top mutex.pprof | grep -E "(Mutex|Lock|chan)"
+
+# Memory hotspots
+go tool pprof -top -alloc_space heap.pprof
+```
+
+### 9.6 Benefits for This Defect
+
+If this profiling mode existed, we could run:
+
+```bash
+PROFILES=cpu,mutex,block go run ./contrib/integration_testing Int-Clean-50M-5s-NakBtree
+```
+
+And immediately get:
+- CPU flame graph showing where time is spent
+- Mutex contention report (likely channels)
+- Block profile showing goroutine waits
+
+This would confirm or refute our hypotheses within minutes instead of hours of manual investigation.
+
+### 9.7 Related Documentation
+
+- [`integration_testing_design.md`](./integration_testing_design.md) - Section on profiling integration
+- [`parallel_comparison_test_design.md`](./parallel_comparison_test_design.md) - Parallel test profiling
+
+### 9.8 Implementation Priority
+
+| Priority | Item | Effort |
+|----------|------|--------|
+| P1 | Add `-profile` flag passthrough to integration tests | Low |
+| P2 | Collect profiles from all components | Medium |
+| P3 | Auto-generate text summary (top functions) | Medium |
+| P4 | Generate HTML report with flame graphs | High |
+| P5 | Add comparison mode (before/after) | High |
+
+---
+
+## 10. Appendix: Raw Test Output
 
 ```
 Test: Int-Clean-50M-5s-NakBtree
@@ -257,6 +475,15 @@ NAKs sent: 160,565+
 Retransmissions: 12,928 (4.2%)
 Client drops: 9,576
 ```
+
+---
+
+## 11. Decision Log
+
+| Date | Decision | Rationale |
+|------|----------|-----------|
+| 2025-12-16 | Document created | Capture 50M performance issue |
+| | | |
 
 ---
 
