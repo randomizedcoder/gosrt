@@ -61,6 +61,21 @@ func (s *btreePacketStore) Iterate(fn func(pkt packet.Packet) bool) bool {
 	return !stopped // Return true if completed
 }
 
+// IterateFrom iterates packets starting from startSeq (inclusive) using AscendGreaterOrEqual.
+// This provides O(log n) seek to start position vs O(n) for Iterate with manual skip.
+func (s *btreePacketStore) IterateFrom(startSeq circular.Number, fn func(pkt packet.Packet) bool) bool {
+	pivot := &packetItem{seqNum: startSeq}
+	stopped := false
+	s.tree.AscendGreaterOrEqual(pivot, func(item *packetItem) bool {
+		if !fn(item.packet) {
+			stopped = true
+			return false // Stop iteration
+		}
+		return true // Continue
+	})
+	return !stopped // Return true if completed
+}
+
 func (s *btreePacketStore) Remove(seqNum circular.Number) packet.Packet {
 	item := &packetItem{
 		seqNum: seqNum,

@@ -3352,5 +3352,305 @@ This is a clear optimization opportunity.
 *Phase 1 validation: 50 Mb/s test - ✅ PASSED*
 *Phase 2 investigation: Server futex contention - ✅ ROOT CAUSE FOUND*
 *Phase 2.1: Mutex profile analysis - ✅ COMPLETE (36.7% RUnlock contention)*
-*Phase 2.2: Fix 1 - Batch NAK btree insertions - ⏳ READY TO IMPLEMENT*
+*Phase 2.2: Fix 1 - Batch NAK btree insertions - ✅ COMPLETE*
+*Phase 2.3: periodicNakBtree optimization - ✅ COMPLETE*
+
+### Phase 2.3 Implementation Summary
+
+The following optimizations were implemented in `periodicNakBtree()`:
+
+| Optimization | Status | Impact |
+|--------------|--------|--------|
+| `IterateFrom()` with `AscendGreaterOrEqual` | ✅ | 2.3x faster (O(log n) vs O(n) seek) |
+| Minimal lock scope | ✅ | Lock held only for packetStore iteration |
+| `gapSlicePool` sync.Pool | ✅ | Zero allocs per 20ms cycle |
+| Move `expireNakEntries()` after NAK send | ✅ | Removed from hot path |
+| Batch metrics updates | ✅ | 95 atomic ops → 1 per cycle |
+
+**Files changed:**
+- `congestion/live/packet_store.go` - Added `IterateFrom()` to interface
+- `congestion/live/packet_store_btree.go` - Implemented using `AscendGreaterOrEqual`
+- `congestion/live/receive.go` - Refactored `periodicNakBtree()`, added `gapSlicePool`
+- `congestion/live/packet_store_test.go` - Added unit tests and benchmarks
+
+**Benchmark results:**
+```
+BenchmarkPacketStore_IterateFrom_vs_Iterate/Iterate_with_skip-24            6394 ns/op
+BenchmarkPacketStore_IterateFrom_vs_Iterate/IterateFrom_AscendGreaterOrEqual-24  2754 ns/op
+```
+
+### Phase 2.4: Profiling Infrastructure Improvement
+
+When `PROFILES=<type>` is set, the test infrastructure now automatically uses debug builds
+(`server-debug`, `client-generator-debug`, `client-debug`) which include debug symbols.
+This produces meaningful function names in profile output instead of `(inline)` or `(partial-inline)`.
+
+**Files changed:**
+- `Makefile` - Conditional dependency on debug builds when PROFILES is set
+- `contrib/integration_testing/test_isolation_mode.go` - Use debug binaries when profiling
+- `contrib/integration_testing/test_parallel_mode.go` - Use debug binaries when profiling
+- `contrib/integration_testing/profile_analyzer.go` - Pass binary path to `go tool pprof` for symbol resolution
+
+**Key fix:** The `go tool pprof` command now receives the binary path for symbol resolution:
+```go
+// Before (symbols not resolved):
+go tool pprof -top profile.pprof
+
+// After (symbols resolved correctly):
+go tool pprof -top /path/to/server-debug profile.pprof
+```
+
+The `deriveBinaryPath()` function automatically maps component names to their debug binaries:
+- `control_server`, `test_server` → `contrib/server/server-debug`
+- `control_cg`, `test_cg` → `contrib/client-generator/client-generator-debug`
+- `baseline_client`, `highperf_client` → `contrib/client/client-debug`
+
+**Usage:**
+```bash
+# Profiling now uses debug builds automatically
+sudo PROFILES=mutex make test-isolation CONFIG=Isolation-50M-Full
+# → Builds server-debug, client-generator-debug
+# → Profile output shows real function names like:
+#   - sync.(*RWMutex).RUnlock
+#   - github.com/datarhei/gosrt/congestion/live.(*receiver).periodicNakBtree
+```
+
+---
+
+## 24. Phase 2.5 Analysis: periodicACK Optimization (IDENTIFIED)
+
+### 24.1 Profiling Results (Isolation-5M-Full with debug builds)
+
+**Test Configuration:** `PROFILES=mutex`, `-gcflags="all=-N -l"` (no inlining)
+
+#### Server Mutex Comparison (Control vs Test)
+
+| Function | Baseline (list) | HighPerf (btree+io_uring) | Change |
+|----------|-----------------|---------------------------|--------|
+| `sync.(*Mutex).Unlock` | 60.4% | 45.1% | **-25.3%** ✅ |
+| `sync.(*RWMutex).RUnlock` | 24.3% | **34.4%** | +41.6% ⚠️ |
+| `runtime.unlock` | 8.3% | 13.3% | +60.9% |
+| `sync.(*RWMutex).Unlock` | 6.5% | 6.2% | -4.9% |
+
+### 24.2 Flame Graph Analysis
+
+The pprof flame graph reveals the call path:
+
+```
+sync.(*RWMutex).RUnlock - 7.85ms (60.64%)  ← MAIN CONTENTION
+├── live.(*receiver).periodicACK - 7.81ms (60.3%)  ← PRIMARY SOURCE!
+│   └── live.(*receiver).Tick - 9.44ms (72.95%)
+│       └── gosrt.(*srtConn).ticker - 9.44ms
+│           └── gosrt.newSRTConn.func4 - 9.44ms
+│
+└── live.(*receiver).Push - 0.85ms (6.54%)  ← Secondary
+    └── metrics.WithWLockTiming - 1.37ms (10.55%)
+```
+
+**Key Finding:** The main source of `RWMutex.RUnlock` contention (99%) is `periodicACK`, NOT `periodicNakBtree`.
+
+### 24.3 Current periodicACK Implementation Analysis
+
+The function already uses a two-phase locking approach:
+
+```go
+func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
+    // Phase 1: Read-only work with read lock
+    r.lock.RLock()
+
+    // ... early return check ...
+
+    // ISSUE: Iterates ALL packets from beginning
+    r.packetStore.Iterate(func(p packet.Packet) bool {
+        h := p.Header()
+        if h.PacketSequenceNumber.Lte(ackSequenceNumber) {
+            return true // Skip already ACK'd packets - INEFFICIENT!
+        }
+        // ... ACK logic ...
+    })
+
+    r.lock.RUnlock()
+
+    // Phase 2: Write updates with write lock (brief)
+    // ... field updates via periodicACKWriteLocked ...
+}
+```
+
+### 24.4 Identified Issues
+
+| Issue | Description | Impact |
+|-------|-------------|--------|
+| **A: Iterate from beginning** | Uses `Iterate()` instead of `IterateFrom(lastACKSequenceNumber)` | O(n) skip cost |
+| **B: Metrics under lock** | `m.CongestionRecvPktSkippedTSBPD.Add()` called under RLock | Unnecessary atomic ops under lock |
+| **C: No early termination** | Continues iteration even after finding contiguous end | Scans more packets than needed |
+
+### 24.5 Proposed Optimizations
+
+#### Fix A: Use IterateFrom with lastACKSequenceNumber
+
+**Current:**
+```go
+r.packetStore.Iterate(func(p packet.Packet) bool {
+    h := p.Header()
+    if h.PacketSequenceNumber.Lte(ackSequenceNumber) {
+        return true // Skip - O(n) wasted iterations
+    }
+    // ...
+})
+```
+
+**Optimized:**
+```go
+// Start iteration from lastACKSequenceNumber using AscendGreaterOrEqual
+startSeq := r.lastACKSequenceNumber
+r.packetStore.IterateFrom(startSeq, func(p packet.Packet) bool {
+    // No need to skip - already starting at the right point
+    // ...
+})
+```
+
+**Expected improvement:** O(log n) seek instead of O(n) skip
+
+#### Fix B: Batch Metrics Outside Lock
+
+**Current:**
+```go
+r.lock.RLock()
+r.packetStore.Iterate(func(p packet.Packet) bool {
+    if m != nil && skippedCount > 1 {
+        m.CongestionRecvPktSkippedTSBPD.Add(actualSkipped)  // Atomic under lock!
+    }
+    // ...
+})
+r.lock.RUnlock()
+```
+
+**Optimized:**
+```go
+var totalSkipped uint64  // Local counter
+
+r.lock.RLock()
+r.packetStore.IterateFrom(startSeq, func(p packet.Packet) bool {
+    if skippedCount > 1 {
+        totalSkipped += actualSkipped  // Simple addition, no atomic
+    }
+    // ...
+})
+r.lock.RUnlock()
+
+// Update metrics once, outside lock
+if m != nil && totalSkipped > 0 {
+    m.CongestionRecvPktSkippedTSBPD.Add(totalSkipped)
+}
+```
+
+### 24.6 Implementation Priority
+
+| Priority | Fix | Effort | Expected Impact |
+|----------|-----|--------|-----------------|
+| **P1** | Use `IterateFrom()` in periodicACK | 30 min | High - O(log n) vs O(n) |
+| **P1** | Batch metrics outside lock | 15 min | Medium - reduce atomic ops |
+| **P2** | Rate metrics atomics (from 23.7) | 3 hours | High - remove 4300 lock ops/sec |
+
+### 24.7 Combined Optimization Status
+
+| Function | Phase 2.3 Status | Additional Work |
+|----------|------------------|-----------------|
+| `periodicNakBtree` | ✅ Optimized | - |
+| `periodicACK` | ⚠️ **NEEDS WORK** | Use `IterateFrom`, batch metrics |
+| Rate calculations | ⏳ Pending | Migrate to atomics |
+
+---
+
+## 25. Comprehensive Optimization Roadmap
+
+### 25.1 Summary of Completed Work
+
+| Phase | Description | Status | Impact |
+|-------|-------------|--------|--------|
+| **1.0** | Client-Generator byte→packet | ✅ Complete | Fixed 50 Mb/s throughput |
+| **2.1** | Mutex profile analysis | ✅ Complete | Identified contention sources |
+| **2.2** | InsertBatch for NAK btree | ✅ Complete | 15-42% faster gap insertion |
+| **2.3** | periodicNakBtree optimization | ✅ Complete | O(log n) seek, pooled slices |
+| **2.4** | Profiling infrastructure | ✅ Complete | Real function names in profiles |
+
+### 25.2 Outstanding Work
+
+#### Phase 2.5: periodicACK Optimization (HIGH PRIORITY)
+
+From flame graph analysis: **60.64% of contention** comes from `periodicACK`.
+
+| Task | Effort | Expected Impact |
+|------|--------|-----------------|
+| Use `IterateFrom(lastACKSequenceNumber)` | 30 min | O(log n) vs O(n) seek |
+| Batch metrics outside RLock | 15 min | Reduce atomic ops under lock |
+| Minimize early-return lock scope | 15 min | Faster path for no-ACK case |
+
+**Files:** `congestion/live/receive.go`
+
+#### Phase 2.6: Rate Metrics Atomics (MEDIUM PRIORITY)
+
+From `rate_metrics_performance_design.md`: **20 fields** need migration to atomics.
+
+| Category | Fields | Effort | Hot Path? |
+|----------|--------|--------|-----------|
+| Counters (`rate.packets`, `rate.bytes`) | 6 | 2 hours | ✅ Every packet |
+| Running averages (`avgPayloadSize`) | 4 | 2 hours | ✅ Every packet |
+| Computed values (`rate.packetsPerSecond`) | 10 | 1 hour | No (1/sec) |
+
+**Current contention:**
+```go
+// In Push() - holds write lock for entire packet processing
+r.lock.Lock()
+defer r.lock.Unlock()
+r.rate.packets++              // ← Under lock - 4750 ops/sec at 50 Mb/s!
+r.rate.bytes += pktLen        // ← Under lock
+r.avgPayloadSize = 0.875*r.avgPayloadSize + 0.125*float64(pktLen)  // ← Under lock
+```
+
+**Files:** `congestion/live/receive.go`, `congestion/live/send.go`, new `rate_atomic.go`
+
+#### Phase 2.7: Additional Receiver Lock Optimizations (LOW PRIORITY)
+
+| Task | Description | Effort |
+|------|-------------|--------|
+| Separate nakBtree.Delete from receiver lock | Already has own lock | 1 hour |
+| Push() lock scope reduction | After rate atomics done | 2 hours |
+
+### 25.3 Implementation Order
+
+```
+Phase 2.5: periodicACK Optimization (~1 hour)
+├── Use IterateFrom in periodicACK
+├── Batch metrics outside RLock
+└── Validate with Isolation-5M-Full
+
+Phase 2.6: Rate Metrics Atomics (~5 hours)
+├── Category 1: Counter migration (rate.packets, rate.bytes)
+├── Category 2: Running averages (avgPayloadSize with CAS)
+├── Category 3: Computed values (packetsPerSecond via atomic.Value)
+└── Validate at 50+ Mb/s
+
+Phase 2.7: Final Lock Cleanup (~3 hours)
+├── Separate nakBtree operations
+├── Reduce Push() lock scope
+└── Performance validation at 75/100 Mb/s
+```
+
+### 25.4 Success Criteria
+
+| Metric | Current | After 2.5 | After 2.6 | Target |
+|--------|---------|-----------|-----------|--------|
+| `RWMutex.RUnlock` CPU | 34.4% | <20% | <10% | <5% |
+| `Mutex.Unlock` CPU | 45.1% | ~45% | <20% | <10% |
+| 50 Mb/s stability | ✅ | ✅ | ✅ | ✅ |
+| 75 Mb/s stability | Unknown | Unknown | Test | ✅ |
+| 100 Mb/s stability | Unknown | Unknown | Test | ✅ |
+
+---
+
+*Phase 1: Client-Generator - ✅ COMPLETE*
+*Phase 2.1-2.4: Server optimizations - ✅ COMPLETE*
+*Phase 2.5: periodicACK optimization - ⏳ READY TO IMPLEMENT*
+*Phase 2.6: Rate metrics atomics - ⏳ PLANNED*
 

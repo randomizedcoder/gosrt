@@ -18,6 +18,11 @@ type packetStore interface {
 	// fn receives (packet) and returns whether to continue
 	Iterate(fn func(pkt packet.Packet) bool) bool
 
+	// IterateFrom calls fn for each packet starting from startSeq (inclusive) in order
+	// until fn returns false. Uses AscendGreaterOrEqual for O(log n) start in btree.
+	// fn receives (packet) and returns whether to continue
+	IterateFrom(startSeq circular.Number, fn func(pkt packet.Packet) bool) bool
+
 	// Remove removes a specific packet (by sequence number)
 	// Returns the removed packet, or nil if not found
 	Remove(seqNum circular.Number) packet.Packet
@@ -79,6 +84,23 @@ func (s *listPacketStore) Insert(pkt packet.Packet) bool {
 func (s *listPacketStore) Iterate(fn func(pkt packet.Packet) bool) bool {
 	for e := s.list.Front(); e != nil; e = e.Next() {
 		p := e.Value.(packet.Packet)
+		if !fn(p) {
+			return false // Stop iteration
+		}
+	}
+	return true // Completed
+}
+
+func (s *listPacketStore) IterateFrom(startSeq circular.Number, fn func(pkt packet.Packet) bool) bool {
+	// For list-based store, we must scan from beginning (O(n))
+	// This is a fallback - btree implementation uses AscendGreaterOrEqual for O(log n)
+	for e := s.list.Front(); e != nil; e = e.Next() {
+		p := e.Value.(packet.Packet)
+		h := p.Header()
+		// Skip packets before startSeq (handles wraparound via circular comparison)
+		if h.PacketSequenceNumber.Lt(startSeq) {
+			continue
+		}
 		if !fn(p) {
 			return false // Stop iteration
 		}

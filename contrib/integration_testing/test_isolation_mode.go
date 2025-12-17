@@ -132,9 +132,16 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 	fmt.Println()
 
 	// Get base directory and binaries
+	// Use debug binaries when profiling is enabled (they have debug symbols for better profile output)
 	baseDir := getBaseDir()
-	serverBin := filepath.Join(baseDir, "contrib", "server", "server")
-	clientGenBin := filepath.Join(baseDir, "contrib", "client-generator", "client-generator")
+	var serverBin, clientGenBin string
+	if profileConfig != nil {
+		serverBin = filepath.Join(baseDir, "contrib", "server", "server-debug")
+		clientGenBin = filepath.Join(baseDir, "contrib", "client-generator", "client-generator-debug")
+	} else {
+		serverBin = filepath.Join(baseDir, "contrib", "server", "server")
+		clientGenBin = filepath.Join(baseDir, "contrib", "client-generator", "client-generator")
+	}
 
 	// Build binaries if needed
 	if err := ensureBinaries(baseDir, serverBin, clientGenBin, ""); err != nil {

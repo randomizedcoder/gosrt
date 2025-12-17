@@ -125,10 +125,18 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 	}
 
 	// Get the base directory and build paths to binaries
+	// Use debug binaries when profiling is enabled (they have debug symbols for better profile output)
 	baseDir := getBaseDir()
-	serverBin := filepath.Join(baseDir, "contrib", "server", "server")
-	clientGenBin := filepath.Join(baseDir, "contrib", "client-generator", "client-generator")
-	clientBin := filepath.Join(baseDir, "contrib", "client", "client")
+	var serverBin, clientGenBin, clientBin string
+	if profileConfig != nil {
+		serverBin = filepath.Join(baseDir, "contrib", "server", "server-debug")
+		clientGenBin = filepath.Join(baseDir, "contrib", "client-generator", "client-generator-debug")
+		clientBin = filepath.Join(baseDir, "contrib", "client", "client-debug")
+	} else {
+		serverBin = filepath.Join(baseDir, "contrib", "server", "server")
+		clientGenBin = filepath.Join(baseDir, "contrib", "client-generator", "client-generator")
+		clientBin = filepath.Join(baseDir, "contrib", "client", "client")
+	}
 
 	// Check if binaries exist
 	if err := ensureBinaries(baseDir, serverBin, clientGenBin, clientBin); err != nil {
@@ -642,4 +650,3 @@ func printParallelTestHeader(config ParallelTestConfig) {
 	fmt.Println("  HighPerf: btree + io_uring")
 	fmt.Println()
 }
-

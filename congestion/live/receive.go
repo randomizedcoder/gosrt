@@ -13,6 +13,16 @@ import (
 	"github.com/datarhei/gosrt/packet"
 )
 
+// gapSlicePool reuses []uint32 slices for collecting gaps in periodicNakBtree.
+// This avoids allocation on every 20ms cycle.
+// Slices are returned with len=0 (reset before Put), capacity preserved.
+var gapSlicePool = sync.Pool{
+	New: func() interface{} {
+		s := make([]uint32, 0, 128) // Pre-allocate typical capacity
+		return &s
+	},
+}
+
 // ReceiveConfig is the configuration for the liveRecv congestion control
 type ReceiveConfig struct {
 	InitialSequenceNumber  circular.Number
@@ -681,9 +691,15 @@ func (r *receiver) periodicNakOriginalLocked(now uint64) []circular.Number {
 // 2. For each gap in the sequence, add missing seqs to NAK btree
 // 3. Skip packets that are "too recent" (might still be in flight)
 // 4. Consolidate NAK btree into ranges and return
+//
+// Performance optimizations (see integration_testing_50mbps_defect.md Section 23.8):
+// - Uses IterateFrom with AscendGreaterOrEqual for O(log n) seek
+// - Minimizes lock scope to only packetStore iteration
+// - Uses sync.Pool for gap slice reuse (zero allocs per cycle)
+// - Batches metrics updates (single atomic op instead of per-packet)
+// - expireNakEntries moved to Tick() after sendNAK (not in hot path)
 func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
+	// === PRE-WORK: No lock needed ===
 
 	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
 		if r.metrics != nil {
@@ -707,25 +723,36 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 		return nil
 	}
 
-	// Step 0: Expire old NAK entries before scanning
-	// Removes entries for sequences already released via TSBPD
-	r.expireNakEntries()
+	// Note: expireNakEntries() moved to Tick() after sendNAK - not in hot path
 
-	// Step 1: Calculate "too recent" threshold
+	// Step 1: Calculate "too recent" threshold (no lock needed)
 	// Packets with TSBPD beyond this are too new to NAK (might be reordered, not lost)
 	tooRecentThreshold := now
 	if r.nakRecentPercent > 0 && r.tsbpdDelay > 0 {
 		tooRecentThreshold = now + uint64(float64(r.tsbpdDelay)*r.nakRecentPercent)
 	}
 
-	// Step 2: Get starting point - independent of ACK to avoid TSBPD skip issues
-	// This is critical: if ACK jumps forward (TSBPD skip), we don't want to skip scanning
-	// Initialize lazily from oldest packet in store (more efficient than CompareAndSwap on every Push)
+	// Get gap slice from pool (zero allocs per cycle)
+	gapsPtr := gapSlicePool.Get().(*[]uint32)
+	defer func() {
+		*gapsPtr = (*gapsPtr)[:0] // Reset length, preserve capacity
+		gapSlicePool.Put(gapsPtr)
+	}()
+
+	// Track metrics locally, update once after loop (reduces atomic ops ~95x)
+	var packetsScanned uint64
+	var lastScannedSeq uint32
+
+	// === MINIMAL LOCK SCOPE: Only for packetStore access ===
+	r.lock.RLock()
+
+	// Step 2: Get starting point (under lock for packetStore.Min access)
+	// Initialize lazily from oldest packet in store
 	startSeq := r.nakScanStartPoint.Load()
 	if startSeq == 0 {
-		// First run: Initialize from oldest packet in store
 		minPkt := r.packetStore.Min()
 		if minPkt == nil {
+			r.lock.RUnlock()
 			return nil // No packets yet
 		}
 		startSeq = minPkt.Header().PacketSequenceNumber.Val()
@@ -733,23 +760,13 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	}
 
 	// Step 3: Scan packet btree from startSeq to find gaps
-	// Collect gaps locally first, then batch insert (reduces lock contention)
+	// Uses IterateFrom with AscendGreaterOrEqual for O(log n) seek to start
 	expectedSeq := circular.New(startSeq, packet.MAX_SEQUENCENUMBER)
-	var lastScannedSeq uint32
-	var gapsToInsert []uint32
+	startSeqNum := circular.New(startSeq, packet.MAX_SEQUENCENUMBER)
 
-	r.packetStore.Iterate(func(pkt packet.Packet) bool {
+	r.packetStore.IterateFrom(startSeqNum, func(pkt packet.Packet) bool {
 		h := pkt.Header()
 		actualSeqNum := h.PacketSequenceNumber
-
-		// Skip packets before our scan start point
-		if actualSeqNum.Val() < startSeq && !circular.SeqLess(actualSeqNum.Val(), startSeq) {
-			// Handle wraparound: if actualSeq appears less but isn't due to wrap, skip
-			return true
-		}
-		if circular.SeqLess(actualSeqNum.Val(), startSeq) {
-			return true // Continue - this packet is before our scan window
-		}
 
 		// Stop if this packet is "too recent" (might still be reordered)
 		if h.PktTsbpdTime > tooRecentThreshold {
@@ -762,33 +779,42 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 			seq := expectedSeq.Val()
 			endSeq := actualSeqNum.Dec().Val()
 			for circular.SeqLess(seq, endSeq) || seq == endSeq {
-				gapsToInsert = append(gapsToInsert, seq)
+				*gapsPtr = append(*gapsPtr, seq)
 				seq = circular.SeqAdd(seq, 1)
 			}
 		}
 
-		m.NakBtreeScanPackets.Add(1)
-
+		packetsScanned++ // Local counter, not atomic
 		lastScannedSeq = actualSeqNum.Val()
 		expectedSeq = actualSeqNum.Inc()
 		return true // Continue
 	})
 
+	r.lock.RUnlock()
+	// === END LOCK SCOPE ===
+
+	// === POST-WORK: No lock needed (nakBtree has its own lock) ===
+
+	// Update metrics once (single atomic op instead of per-packet)
+	if m != nil && packetsScanned > 0 {
+		m.NakBtreeScanPackets.Add(packetsScanned)
+	}
+
 	// Batch insert all gaps with single lock acquisition
-	if len(gapsToInsert) > 0 {
-		inserted := r.nakBtree.InsertBatch(gapsToInsert)
-		m.NakBtreeInserts.Add(uint64(inserted))
-		m.NakBtreeScanGaps.Add(uint64(len(gapsToInsert)))
+	if len(*gapsPtr) > 0 {
+		inserted := r.nakBtree.InsertBatch(*gapsPtr)
+		if m != nil {
+			m.NakBtreeInserts.Add(uint64(inserted))
+			m.NakBtreeScanGaps.Add(uint64(len(*gapsPtr)))
+		}
 	}
 
 	// Step 4: Update scan start point for next iteration
-	// Only move forward to where we actually scanned (not where ACK is)
 	if lastScannedSeq > 0 {
 		r.nakScanStartPoint.Store(lastScannedSeq)
 	}
 
-	// Step 3: Consolidate NAK btree into ranges using optimized function
-	// (uses sync.Pool and time budget)
+	// Step 5: Consolidate NAK btree into ranges (has its own lock)
 	list := r.consolidateNakBtree()
 
 	// Update NAK btree size gauge
@@ -803,10 +829,8 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 
 // expireNakEntries removes entries from the NAK btree that are too old to be useful.
 // An entry is expired if its sequence is less than the oldest packet in the packet btree.
-// This is called at the start of periodicNakBtree to ensure we don't NAK for packets
-// that have already been released via TSBPD.
-//
-// Must be called with r.lock held (at least RLock).
+// This is called in Tick() AFTER sendNAK to keep it out of the hot path.
+// The NAK btree has its own lock, so this only needs brief RLock for packetStore.Min().
 func (r *receiver) expireNakEntries() int {
 	if r.nakBtree == nil {
 		// This should never happen when useNakBtree=true (ISSUE-001)
@@ -816,16 +840,22 @@ func (r *receiver) expireNakEntries() int {
 		return 0
 	}
 
-	// Find the oldest packet in the packet btree
+	// Find the oldest packet in the packet btree (brief lock)
+	r.lock.RLock()
 	minPkt := r.packetStore.Min()
+	var cutoff uint32
+	if minPkt != nil {
+		cutoff = minPkt.Header().PacketSequenceNumber.Val()
+	}
+	r.lock.RUnlock()
+
 	if minPkt == nil {
 		return 0 // Empty packet store, nothing to expire
 	}
 
 	// Any NAK entry older than the oldest packet's sequence is expired
 	// (the packet btree has already released those packets via TSBPD)
-	cutoff := minPkt.Header().PacketSequenceNumber.Val()
-
+	// nakBtree.DeleteBefore has its own lock
 	expired := r.nakBtree.DeleteBefore(cutoff)
 	if expired > 0 && r.metrics != nil {
 		r.metrics.NakBtreeExpired.Add(uint64(expired))
@@ -847,6 +877,13 @@ func (r *receiver) Tick(now uint64) {
 		//   - Figure 22: Range (start != end) - 8 bytes on wire
 		metrics.CountNAKEntries(r.metrics, list, metrics.NAKCounterSend)
 		r.sendNAK(list)
+	}
+
+	// Expire NAK btree entries AFTER NAK is sent - not time-critical
+	// This was moved from periodicNakBtree() to keep it out of the hot path.
+	// We have 10-20ms until next Tick/periodicNAK cycle.
+	if r.useNakBtree && r.nakBtree != nil {
+		r.expireNakEntries()
 	}
 
 	// Deliver packets whose PktTsbpdTime is ripe

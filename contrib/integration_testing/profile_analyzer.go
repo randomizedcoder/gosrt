@@ -65,7 +65,13 @@ type FuncComparison struct {
 }
 
 // AnalyzeProfile runs go tool pprof to analyze a profile
+// If binaryPath is provided, it will be used to resolve symbols (important for debug builds)
 func AnalyzeProfile(profilePath string, outputDir string) (*ProfileAnalysis, error) {
+	return AnalyzeProfileWithBinary(profilePath, outputDir, "")
+}
+
+// AnalyzeProfileWithBinary runs go tool pprof with a specified binary for symbol resolution
+func AnalyzeProfileWithBinary(profilePath string, outputDir string, binaryPath string) (*ProfileAnalysis, error) {
 	if _, err := os.Stat(profilePath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("profile file not found: %s", profilePath)
 	}
@@ -107,10 +113,26 @@ func AnalyzeProfile(profilePath string, outputDir string) (*ProfileAnalysis, err
 		analysis.Component = parentDir
 	}
 
+	// If no binary path specified, try to derive it from component name
+	if binaryPath == "" {
+		binaryPath = deriveBinaryPath(analysis.Component, analysis.Pipeline)
+	}
+
 	// Generate top output with different flags based on profile type
 	topArgs := getTopArgs(analysis.ProfileType)
 	topPath := strings.TrimSuffix(profilePath, ".pprof") + "_top.txt"
-	topCmd := exec.Command("go", append([]string{"tool", "pprof"}, append(topArgs, profilePath)...)...)
+
+	// Build pprof command: go tool pprof [flags] [binary] profile
+	// If binary is provided, symbols will be resolved correctly
+	var cmdArgs []string
+	cmdArgs = append(cmdArgs, "tool", "pprof")
+	cmdArgs = append(cmdArgs, topArgs...)
+	if binaryPath != "" {
+		cmdArgs = append(cmdArgs, binaryPath)
+	}
+	cmdArgs = append(cmdArgs, profilePath)
+
+	topCmd := exec.Command("go", cmdArgs...)
 	topOutput, err := topCmd.Output()
 	if err != nil {
 		// Try to get stderr for debugging
@@ -127,7 +149,13 @@ func AnalyzeProfile(profilePath string, outputDir string) (*ProfileAnalysis, err
 
 	// Generate flame graph SVG (optional - may fail if graphviz not installed)
 	svgPath := strings.TrimSuffix(profilePath, ".pprof") + "_flame.svg"
-	svgCmd := exec.Command("go", "tool", "pprof", "-svg", profilePath)
+	var svgArgs []string
+	svgArgs = append(svgArgs, "tool", "pprof", "-svg")
+	if binaryPath != "" {
+		svgArgs = append(svgArgs, binaryPath)
+	}
+	svgArgs = append(svgArgs, profilePath)
+	svgCmd := exec.Command("go", svgArgs...)
 	svgOutput, err := svgCmd.Output()
 	if err == nil {
 		if err := os.WriteFile(svgPath, svgOutput, 0644); err == nil {
@@ -142,6 +170,49 @@ func AnalyzeProfile(profilePath string, outputDir string) (*ProfileAnalysis, err
 	analysis.extractAggregates()
 
 	return analysis, nil
+}
+
+// deriveBinaryPath attempts to find the debug binary for a given component
+// Component names like "control_server", "test_cg", "baseline_client" map to binaries
+func deriveBinaryPath(component, pipeline string) string {
+	baseDir := getBaseDir()
+
+	// Determine binary name from component
+	var binaryName string
+	switch {
+	case strings.Contains(component, "server"):
+		binaryName = "server-debug"
+	case strings.Contains(component, "cg") || strings.Contains(component, "client-generator"):
+		binaryName = "client-generator-debug"
+	case strings.Contains(component, "client"):
+		binaryName = "client-debug"
+	default:
+		return "" // Unknown component
+	}
+
+	// Construct path based on binary type
+	var binaryPath string
+	switch {
+	case strings.Contains(binaryName, "server"):
+		binaryPath = filepath.Join(baseDir, "contrib", "server", binaryName)
+	case strings.Contains(binaryName, "client-generator"):
+		binaryPath = filepath.Join(baseDir, "contrib", "client-generator", binaryName)
+	case strings.Contains(binaryName, "client"):
+		binaryPath = filepath.Join(baseDir, "contrib", "client", binaryName)
+	}
+
+	// Check if debug binary exists
+	if _, err := os.Stat(binaryPath); err == nil {
+		return binaryPath
+	}
+
+	// Fall back to non-debug binary
+	nonDebugPath := strings.TrimSuffix(binaryPath, "-debug")
+	if _, err := os.Stat(nonDebugPath); err == nil {
+		return nonDebugPath
+	}
+
+	return "" // No binary found
 }
 
 // getTopArgs returns pprof args appropriate for the profile type

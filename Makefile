@@ -64,11 +64,12 @@ test-parallel-list:
 ## test-parallel: Run parallel comparison test (root, CONFIG=Parallel-Starlink-5Mbps)
 ## sudo make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo make test-parallel CONFIG=Parallel-Starlink-5Mbps VERBOSE=1
-## Add PROFILES=<type> to enable profiling with Baseline vs HighPerf comparison:
+## Add PROFILES=<type> to enable profiling with Baseline vs HighPerf comparison (uses debug builds):
 ## sudo PROFILES=cpu make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo PROFILES=cpu,mutex make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo PROFILES=all make test-parallel CONFIG=Parallel-Starlink-5Mbps
-test-parallel: client server client-generator
+# When PROFILES is set, use debug builds (with symbols) for better profile output
+test-parallel: $(if $(PROFILES),client-debug server-debug client-generator-debug,client server client-generator)
 	@echo "NOTE: Parallel tests require root privileges for network namespace creation"
 	@cd contrib/integration_testing && PROFILES=$(PROFILES) go run . parallel-test $(CONFIG) $(if $(VERBOSE),--verbose,)
 
@@ -86,11 +87,12 @@ test-isolation-list:
 ## Add PRINT_PROM=true to see all Prometheus metrics:
 ## sudo make test-isolation CONFIG=Isolation-5M-CG-IoUrSend PRINT_PROM=true
 ## sudo make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr PRINT_PROM=true
-## Add PROFILES=<type> to enable profiling (generates HTML report):
+## Add PROFILES=<type> to enable profiling (generates HTML report, uses debug builds):
 ## sudo PROFILES=cpu make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
 ## sudo PROFILES=cpu,mutex make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
 ## sudo PROFILES=all make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
-test-isolation: server client-generator
+# When PROFILES is set, use debug builds (with symbols) for better profile output
+test-isolation: $(if $(PROFILES),server-debug client-generator-debug,server client-generator)
 	@echo "NOTE: Isolation tests require root privileges for network namespace creation"
 	@cd contrib/integration_testing && PRINT_PROM=$(PRINT_PROM) PROFILES=$(PROFILES) go run . isolation-test $(CONFIG)
 
@@ -249,9 +251,9 @@ lint:
 client:
 	cd contrib/client && CGO_ENABLED=0 go build -o client -ldflags="-s -w" -a
 
-## client-debug: Build client binary with debug symbols
+## client-debug: Build client binary with debug symbols and no inlining (for profiling)
 client-debug:
-	cd contrib/client && CGO_ENABLED=0 go build -o client-debug -a
+	cd contrib/client && CGO_ENABLED=0 go build -o client-debug -gcflags="all=-N -l" -a
 
 client-all: client client-debug
 
@@ -259,17 +261,17 @@ client-all: client client-debug
 server:
 	cd contrib/server && CGO_ENABLED=0 go build -o server -ldflags="-s -w" -a
 
-## server-debug: Build server binary with debug symbols
+## server-debug: Build server binary with debug symbols and no inlining (for profiling)
 server-debug:
-	cd contrib/server && CGO_ENABLED=0 go build -o server-debug -a
+	cd contrib/server && CGO_ENABLED=0 go build -o server-debug -gcflags="all=-N -l" -a
 
 ## client-generator: Build client-generator binary
 client-generator:
 	cd contrib/client-generator && CGO_ENABLED=0 go build -o client-generator -ldflags="-s -w" -a
 
-## client-generator-debug: Build client-generator binary with debug symbols
+## client-generator-debug: Build client-generator binary with debug symbols and no inlining (for profiling)
 client-generator-debug:
-	cd contrib/client-generator && CGO_ENABLED=0 go build -o client-generator-debug -a
+	cd contrib/client-generator && CGO_ENABLED=0 go build -o client-generator-debug -gcflags="all=-N -l" -a
 
 server-profile:
 	go tool pprof -http=0.0.0.0:8080 ./contrib/server/server-debug cpu.pprof
