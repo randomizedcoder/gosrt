@@ -293,8 +293,8 @@ var defaultConfig Config = Config{
     // ... existing defaults ...
 
     // Lock-free ring defaults
-    PacketRingSize:            1000,                      // 1000 packets total capacity
-    PacketRingShards:          4,                         // 4 shards (250 packets per shard)
+    PacketRingSize:            1024,                      // 1024 packets total capacity (power of 2)
+    PacketRingShards:          4,                         // 4 shards (256 packets per shard)
     PacketRingMaxRetries:      10,                        // 10 attempts before sleeping
     PacketRingBackoffDuration: 100 * time.Microsecond,   // 100µs sleep between retries
     PacketRingMaxBackoffs:     0,                         // Unlimited backoffs (never drop)
@@ -338,9 +338,9 @@ if c.PacketRingMaxBackoffs < 0 || c.PacketRingMaxBackoffs > 1000 {
 
 | Parameter | Default | Range | Rationale |
 |-----------|---------|-------|-----------|
-| PacketRingSize | 1000 | 64-8192 | Sufficient for 10ms at 100 Mb/s |
-| PacketRingShards | 4 | 1-16 | Balance contention vs memory |
-| Per-Shard | 250 | (calculated) | PacketRingSize / PacketRingShards |
+| PacketRingSize | 1024 | 64-8192 | Power of 2, sufficient for 10ms at 100 Mb/s |
+| PacketRingShards | 4 | 1-16 | Balance contention vs memory (power of 2) |
+| Per-Shard | 256 | (calculated) | PacketRingSize / PacketRingShards |
 | PacketRingMaxRetries | 10 | 1-100 | Library default, balances latency/CPU |
 | PacketRingBackoffDuration | 100µs | 10µs-10ms | Library default, allows consumer catchup |
 | PacketRingMaxBackoffs | 0 | 0-1000 | Unlimited by default (never drop) |
@@ -416,8 +416,10 @@ type ReceiverConfig struct {
     PacketRingBackoffDuration time.Duration
     PacketRingMaxBackoffs     int
 
-    // Tick interval for legacy tick loop (only used when UseEventLoop=false)
-    TickInterval time.Duration
+    // Timer intervals (all time.Duration for consistency)
+    ACKInterval  time.Duration  // Periodic ACK interval (default: 10ms)
+    NAKInterval  time.Duration  // Periodic NAK interval (default: 20ms)
+    TickInterval time.Duration  // Tick loop interval (only when UseEventLoop=false)
 
     // ... other config fields ...
 }
@@ -1151,27 +1153,25 @@ The `recvBufferPool` reference is stored in the receiver struct, not in each pac
 
 #### Packet Structure (`packet/packet.go`)
 
-**Optimization insight**: Since `HeaderSize` is constant (16 bytes) and we know `n` (bytes received), we don't need to store a separate `Payload` slice. We can compute the payload on-demand:
+**Key insight**: Since `HeaderSize` is constant (16 bytes) and we know `n` (bytes received), the payload can be computed on-demand via `GetPayload()`:
 
 ```go
 payload = (*p.recvBuffer)[HeaderSize:p.dataLen]
 ```
 
-This is more efficient:
-- **No Payload slice storage** - just store `dataLen` (an int)
-- **Simpler struct** - one pointer + one int instead of two pointers
-- **Faster UnmarshalZeroCopy** - no need to create/store a sub-slice
-
-**Solution**: Store `recvBuffer` (original pool buffer) and `dataLen` (bytes received):
+**Solution**: Add `recvBuffer` and `dataLen` for zero-copy, keep `Payload` for backwards compatibility:
 
 ```go
 type Packet struct {
     Header     Header
-    recvBuffer *[]byte  // ORIGINAL buffer from recvBufferPool (for return)
-    dataLen    int      // Total bytes received (n from ReadFromUDP/io_uring)
+    Payload    *[]byte  // LEGACY: points to copied data (nil in zero-copy path)
+    recvBuffer *[]byte  // ZERO-COPY: original buffer from recvBufferPool (for return)
+    dataLen    int      // ZERO-COPY: total bytes received (n from ReadFromUDP/io_uring)
 }
 
-// Memory layout:
+// IMPORTANT: Use GetPayload() for all payload access - it handles both paths!
+
+// Memory layout (zero-copy path):
 //
 // recvBuffer ──► ┌──────────────────┬──────────────────────────┬─────────┐
 //                │ Header (16 bytes)│ Payload Data             │ Unused  │
@@ -1180,13 +1180,19 @@ type Packet struct {
 //
 // GetPayload() computes: (*recvBuffer)[HeaderSize:dataLen]
 
-// GetPayload returns the payload portion of the buffer (computed on-demand)
-// This is more efficient than storing a separate Payload slice
+// GetPayload returns payload data, handling BOTH zero-copy and legacy paths
+// - Zero-copy (recvBuffer set): computes slice from recvBuffer
+// - Legacy (Payload set): returns *Payload directly
 func (p *Packet) GetPayload() []byte {
-    if p.recvBuffer == nil {
-        return nil
+    // Zero-copy path: compute from recvBuffer
+    if p.recvBuffer != nil {
+        return (*p.recvBuffer)[HeaderSize:p.dataLen]
     }
-    return (*p.recvBuffer)[HeaderSize:p.dataLen]
+    // Legacy path: return stored Payload
+    if p.Payload != nil {
+        return *p.Payload
+    }
+    return nil
 }
 
 // GetPayloadLen returns the payload length (dataLen - HeaderSize)
@@ -1218,11 +1224,18 @@ func (p *Packet) HasRecvBuffer() bool {
 // This is cleaner and ensures buffer is always tracked if parsing fails.
 ```
 
-**Why this is better than storing a Payload slice:**
+**Backwards Compatibility Note:**
+
+The `Payload *[]byte` field is KEPT for backwards compatibility with legacy code paths. The zero-copy path uses `recvBuffer` + `dataLen` instead, but both work through the unified `GetPayload()` interface.
+
+**Future optimization** (after migration complete): Once ALL code uses `GetPayload()`, the `Payload` field can be removed to save 16-24 bytes per packet. This requires an audit to ensure no direct `p.Payload` access remains.
+
+**Comparison of approaches:**
 
 | Approach | Storage | GetPayload() | UnmarshalZeroCopy |
 |----------|---------|--------------|-------------------|
-| Store `Payload *[]byte` | 24 bytes (slice header) | Direct return | Must create sub-slice |
+| Keep `Payload` (current) | +24 bytes | Check both paths | Sets recvBuffer+dataLen |
+| Remove `Payload` (future) | +8 bytes | Zero-copy only | Sets recvBuffer+dataLen |
 | Store `dataLen int` | 8 bytes (int) | Compute slice | Just store n |
 | `Payload` | `data[HeaderSize:]` sub-slice | Application access to payload data |
 
@@ -1924,8 +1937,10 @@ func (r *receiver) drainPacketRing() {
         }
     }
 
-    // === Update tracking ONCE after batch ===
-    // This reduces atomic store overhead vs per-packet updates
+    // === Update tracking after batch ===
+    // NOTE: Batching is a MICRO-OPTIMIZATION. Per-packet updates (as in Event Loop)
+    // are equally acceptable. At 100Mb/s (~8,600 pkt/s), atomic store overhead is
+    // negligible (~0.1µs per store). See Section 5.6.6 for comparison.
     r.lastPacketArrivalTime.Store(uint64(time.Now().UnixMicro()))
     r.lastDataPacketSeq.Store(maxSeq)  // Highest sequence in batch
 
@@ -1948,10 +1963,21 @@ func (r *receiver) releasePacketFully(p *packet.Packet) {
 ```
 
 **Key improvements from detailed implementation:**
-1. **Batch tracking updates** - `lastPacketArrivalTime` and `lastDataPacketSeq` updated once per batch
+1. **Batch tracking updates** - `lastPacketArrivalTime` and `lastDataPacketSeq` updated once per batch (micro-optimization)
 2. **Track max sequence** - Stores highest sequence seen for meaningful FastNAK tracking
 3. **Proper cleanup** - Single `releasePacketFully()` call handles both buffer and packet
 4. **Config-based batch size** - Uses `PacketRingSize` from config
+
+**Note on tracking update frequency:**
+
+The batch update in `drainPacketRing()` is a **micro-optimization**, not a requirement. Both approaches are valid:
+
+| Approach | When Used | Overhead at 100Mb/s | Pros |
+|----------|-----------|---------------------|------|
+| Per-packet update | Event Loop (5.6.6) | ~8,600 stores/sec (~0.8ms total) | Consistent, simpler |
+| Batch update | Tick Loop (7.4) | ~100 stores/sec | Slightly lower overhead |
+
+**Recommendation**: Per-packet updates are preferred for consistency. The overhead difference is negligible unless you're processing millions of packets per second.
 
 ---
 
@@ -2159,8 +2185,10 @@ Stagger the ticker start times to spread work evenly:
 ```go
 // Per-connection event loop (replaces Tick())
 func (r *receiver) eventLoop(ctx context.Context) {
-    ackInterval := time.Duration(r.config.PeriodicAckIntervalMs) * time.Millisecond
-    nakInterval := time.Duration(r.config.PeriodicNakIntervalMs) * time.Millisecond
+    // Config uses time.Duration (not *Ms suffix)
+    // See Section 5.3 for ReceiverConfig struct
+    ackInterval := r.config.ACKInterval   // Default: 10ms
+    nakInterval := r.config.NAKInterval   // Default: 20ms
 
     // Create ACK ticker immediately
     ackTicker := time.NewTicker(ackInterval)
@@ -2208,11 +2236,11 @@ Even simpler - use one ticker and track iterations:
 ```go
 func (r *receiver) eventLoop(ctx context.Context) {
     // Single ticker at the GCD interval (10ms)
-    ticker := time.NewTicker(time.Duration(r.config.PeriodicAckIntervalMs) * time.Millisecond)
+    ticker := time.NewTicker(r.config.ACKInterval)  // Config uses time.Duration
     defer ticker.Stop()
 
     tickCount := uint64(0)
-    nakEveryN := r.config.PeriodicNakIntervalMs / r.config.PeriodicAckIntervalMs // e.g., 20/10 = 2
+    nakEveryN := r.config.NAKInterval / r.config.ACKInterval // e.g., 20ms/10ms = 2
 
     for {
         select {
@@ -2248,29 +2276,27 @@ func (r *receiver) eventLoop(ctx context.Context) {
 - ACK and NAK run in same tick (small burst)
 - Less flexible if intervals aren't multiples
 
-#### Recommended: Offset Tickers with Idle Handling
+#### Recommended: Inline Offset with Idle Handling
 
-The cleanest solution combines offset tickers with intelligent idle handling:
+The cleanest solution uses an inline sleep during startup. The 5ms delay is negligible for a connection that runs for seconds/minutes:
 
 ```go
 func (r *receiver) eventLoop(ctx context.Context) {
-    ackInterval := time.Duration(r.config.PeriodicAckIntervalMs) * time.Millisecond
-    nakInterval := time.Duration(r.config.PeriodicNakIntervalMs) * time.Millisecond
+    ackInterval := r.config.ACKInterval
+    nakInterval := r.config.NAKInterval
 
-    // Offset NAK by half ACK interval
+    // Create ACK ticker first
     ackTicker := time.NewTicker(ackInterval)
     defer ackTicker.Stop()
 
-    // Small delay before starting NAK ticker
-    nakTicker := time.NewTicker(nakInterval)
-    nakTicker.Stop() // Stop immediately, we'll restart with offset
+    // Brief offset before NAK ticker (5ms at default 10ms ACK interval)
+    // This is a ONE-TIME startup delay, acceptable for long-running connections
+    time.Sleep(ackInterval / 2)
 
-    // Start NAK ticker with offset
-    go func() {
-        time.Sleep(ackInterval / 2)
-        nakTicker.Reset(nakInterval)
-    }()
+    nakTicker := time.NewTicker(nakInterval)
     defer nakTicker.Stop()
+
+    backoff := newAdaptiveBackoff(r.config)
 
     for {
         select {
@@ -2278,32 +2304,38 @@ func (r *receiver) eventLoop(ctx context.Context) {
             return
 
         case <-ackTicker.C:
-            r.periodicACK(time.Now())
+            r.periodicACKNoLock(time.Now())
 
         case <-nakTicker.C:
-            r.periodicNAK(time.Now())
+            r.periodicNAKNoLock(time.Now())
 
         default:
             // Process packets and deliver
             processed := r.processOnePacket()
             delivered := r.deliverReadyPackets()
 
-            // If idle (nothing to do), yield briefly to avoid spinning
+            // Adaptive backoff when idle (see Section 9.7)
             if !processed && delivered == 0 {
-                // Check if any ticker is about to fire
-                // If not, sleep briefly
-                time.Sleep(100 * time.Microsecond)
+                time.Sleep(backoff.getSleepDuration())
+            } else {
+                backoff.recordActivity()
             }
         }
     }
 }
 ```
 
-**Why the idle sleep helps with spinning:**
-- When no packets arriving and no deliveries pending, the `default` case would spin
-- The 100µs sleep yields CPU while still being responsive
-- When packets ARE arriving, the sleep is skipped (processed=true)
-- Tickers still fire promptly via their channels
+**Why inline sleep is acceptable:**
+- The 5ms delay happens ONCE at connection startup
+- Connections typically run for seconds/minutes, making 5ms negligible
+- Simpler code than stop/reset/goroutine approach
+- No race conditions or missed first ticks
+
+**Why NOT use goroutine for offset:**
+- Adds complexity (stop/reset ticker pattern)
+- Potential for missed first NAK tick during reset
+- Goroutine coordination overhead
+- Not worth the complexity to save 5ms at startup
 
 // processOnePacket consumes one packet from the ring and inserts into btree
 // Returns true if a packet was processed, false if ring was empty
@@ -2477,8 +2509,8 @@ For very high packet rates, processing one packet at a time may not keep up. A h
 
 ```go
 func (r *receiver) eventLoop(ctx context.Context) {
-    ackTicker := time.NewTicker(time.Duration(r.config.PeriodicAckIntervalMs) * time.Millisecond)
-    nakTicker := time.NewTicker(time.Duration(r.config.PeriodicNakIntervalMs) * time.Millisecond)
+    ackTicker := time.NewTicker(r.config.ACKInterval)   // Config uses time.Duration
+    nakTicker := time.NewTicker(r.config.NAKInterval)   // Config uses time.Duration
     defer ackTicker.Stop()
     defer nakTicker.Stop()
 
@@ -2963,11 +2995,26 @@ r.packetsReceived.Add(1)
 
 #### 11.3.2 Packet Structure Changes
 
-**Rationale**: Changing `Payload` from `[]byte` to `*[]byte` in the packet struct is backwards compatible:
-- Old code that copies data simply sets `Payload` to a new slice (not pooled)
-- New zero-copy code sets `Payload` to the pooled buffer directly
-- No behavioral change unless buffer lifetime extension is enabled
-- Zero overhead when not used (Payload still works the same way)
+**Rationale**: The packet struct changes are backwards compatible because:
+
+1. **New fields added** (no removal of existing fields):
+   - `recvBuffer *[]byte` - tracks original pool buffer (nil in legacy path)
+   - `dataLen int` - tracks received bytes (0 in legacy path)
+
+2. **`Payload` field behavior** (see Section 6.6):
+   - Legacy path: `Payload *[]byte` is set to a NEW copied slice
+   - Zero-copy path: `Payload` is NOT used; use `GetPayload()` instead
+
+3. **`GetPayload()` works for both paths**:
+   - If `recvBuffer != nil`: returns computed slice `(*recvBuffer)[HeaderSize:dataLen]`
+   - If `recvBuffer == nil` and `Payload != nil`: returns `*Payload` (legacy)
+
+4. **Memory optimization** (optional, future):
+   - Once all code uses `GetPayload()`, the `Payload` field can be removed
+   - Saves 16-24 bytes per packet
+   - Requires audit of all direct `Payload` access
+
+**Current design (Section 6.6)**: Keeps `Payload` for backwards compatibility, adds `recvBuffer` + `dataLen` for zero-copy. The `GetPayload()` function abstracts the difference.
 
 ### 11.4 Features WITH Flags
 
@@ -2975,51 +3022,59 @@ r.packetsReceived.Add(1)
 
 **Config Field**: `UsePacketRing bool`
 
-**Branch Points**:
+**Implementation**: Use **function dispatch** (not if/else) for hot paths. This avoids a branch on every packet. See Section 5.5.1 for the pattern.
+
+**Branch Points (using function dispatch)**:
 
 1. **receiver.Push()** - Packet arrival path:
 
 ```go
-func (r *receiver) Push(pkt *packet.Packet) {
-    // Update rate metrics (always atomic)
-    r.metrics.packetsReceived.Add(1)
+// Function dispatch is set up in NewReceiver() (see Section 5.4):
+//   r.pushFn = r.pushToRing   (when UsePacketRing=true)
+//   r.pushFn = r.pushWithLock (when UsePacketRing=false)
 
-    if r.config.UsePacketRing {
-        // NEW: Write to lock-free ring
-        r.packetRing.Write(producerID, pkt)
-    } else {
-        // LEGACY: Lock and insert to btree directly
-        r.mu.Lock()
-        r.packetStore.ReplaceOrInsert(pkt)
-        r.nakBtree.Delete(pkt.Header.PacketSequenceNumber)
-        r.mu.Unlock()
+func (r *receiver) Push(pkt *packet.Packet) {
+    // Update rate metrics (always atomic - Phase 1)
+    r.packetsReceived.Add(1)
+    r.bytesReceived.Add(uint64(pkt.Len()))
+
+    // Function dispatch - NO if/else check per packet!
+    r.pushFn(pkt)
+}
+
+// LEGACY path (selected when UsePacketRing=false)
+func (r *receiver) pushWithLock(pkt *packet.Packet) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.packetStore.ReplaceOrInsert(pkt)
+    r.nakBtree.Delete(pkt.Header.PacketSequenceNumber)
+}
+
+// NEW path (selected when UsePacketRing=true)
+func (r *receiver) pushToRing(pkt *packet.Packet) {
+    producerID := uint64(pkt.Header().PacketSequenceNumber.Val())
+    if !r.packetRing.WriteWithBackoff(producerID, pkt, r.writeConfig) {
+        r.droppedPackets.Add(1)
+        r.releasePacketFully(pkt)
     }
 }
 ```
 
-2. **receiver.Tick()** - Processing path:
+2. **Consumer loop** - Processing path:
 
 ```go
-func (r *receiver) Tick(now time.Time) {
-    if r.config.UsePacketRing {
-        // NEW: Drain ring into btree (no lock needed)
-        r.drainPacketRing()
-    }
-    // Rest of tick() proceeds identically
-    // (periodicACK, periodicNAK, delivery)
+// Function dispatch is set up in startReceiver() (see Section 5.6.1):
+//   go r.eventLoop(ctx)  (when UseEventLoop=true, requires UsePacketRing=true)
+//   go r.tickLoop(ctx)   (when UseEventLoop=false)
 
-    if r.config.UsePacketRing {
-        // No locks needed - we own the btrees
-        r.periodicACKNoLock(now)
-        r.periodicNAKNoLock(now)
-        r.deliverPacketsNoLock()
-    } else {
-        // LEGACY: Use existing locked versions
-        r.periodicACK(now)
-        r.periodicNAK(now)
-        r.deliverPackets()
-    }
-}
+// The loop selection happens ONCE at startup, not per-iteration!
+```
+
+**Why function dispatch over if/else?**
+- Hot path (Push) is called for EVERY packet (~8,600/sec at 100Mb/s)
+- Function dispatch: indirect call overhead (~1ns)
+- If/else: branch + possible misprediction (~2-5ns)
+- At scale, these small differences matter
 ```
 
 **Config**:
@@ -3030,8 +3085,8 @@ type Config struct {
 
     // Lock-Free Ring Configuration
     UsePacketRing    bool  // Enable lock-free ring buffer (default: false)
-    PacketRingSize   int   // Ring capacity (default: 1000)
-    PacketRingShards int   // Number of shards (default: 4)
+    PacketRingSize   int   // Ring capacity (default: 1024, must be power of 2)
+    PacketRingShards int   // Number of shards (default: 4, must be power of 2)
 }
 ```
 
@@ -3297,8 +3352,8 @@ func DefaultConfig() Config {
 
         // Lockless features default to OFF for backwards compatibility
         UsePacketRing:           false,
-        PacketRingSize:          1000,
-        PacketRingShards:        4,
+        PacketRingSize:          1024,  // Must be power of 2
+        PacketRingShards:        4,     // Must be power of 2
         UseEventLoop:            false,
         UseZeroCopyBuffers:      false,
         BackoffColdStartPackets: 1000,
@@ -3316,10 +3371,13 @@ func (c *Config) Validate() error {
         return errors.New("UseEventLoop requires UsePacketRing=true")
     }
 
-    // Ring configuration validation
+    // Ring configuration validation (must match Section 5.2)
     if c.UsePacketRing {
-        if c.PacketRingSize < 100 {
-            return errors.New("PacketRingSize must be >= 100")
+        if c.PacketRingSize < 64 || c.PacketRingSize > 8192 {
+            return errors.New("PacketRingSize must be between 64 and 8192")
+        }
+        if c.PacketRingSize&(c.PacketRingSize-1) != 0 {
+            return errors.New("PacketRingSize must be a power of 2")
         }
         if c.PacketRingShards < 1 || (c.PacketRingShards&(c.PacketRingShards-1)) != 0 {
             return errors.New("PacketRingShards must be a power of 2")
@@ -3398,111 +3456,918 @@ Recommended rollout sequence (universal improvements FIRST):
 
 ## 12. Implementation Plan
 
-The implementation is organized so that **universal improvements** (benefits ALL paths) come first, followed by lockless-specific changes.
+The implementation is organized so that **universal improvements** (benefits ALL paths) come first, followed by lockless-specific changes. Each phase includes a **validation checkpoint** where we run integration tests before proceeding.
 
-### Phase 1: Rate Metrics Atomics (2-3 hours) [NO FLAG - Universal]
+### Implementation Strategy
 
-1. Convert counter fields to atomic.Uint64
-2. Implement CAS-based running averages
-3. Convert computed fields to atomic.Value
-4. Update all read/write sites
-5. Run race detector tests
-6. **Parallel tests**: Compare metrics accuracy old vs new
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         IMPLEMENTATION APPROACH                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. UNIVERSAL IMPROVEMENTS FIRST                                             │
+│     - Rate atomics + zero-copy benefit ALL existing code                     │
+│     - Lower risk - isolated changes                                          │
+│     - Immediate production value                                             │
+│     - Validates approach before complex changes                              │
+│                                                                              │
+│  2. VALIDATE BETWEEN PHASES                                                  │
+│     - Run integration tests after each phase                                 │
+│     - Compare metrics old vs new                                             │
+│     - Ensure no regressions                                                  │
+│                                                                              │
+│  3. LOCKLESS CHANGES LAST                                                    │
+│     - More complex, higher risk                                              │
+│     - Built on validated foundation                                          │
+│     - Feature-flagged for safe rollout                                       │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-**Note**: Benefits ALL implementations (legacy, lockless, io_uring, standard recv).
+---
 
-### Phase 2: Buffer Lifetime Extension (2-3 hours) [UseZeroCopyBuffers FLAG - Universal]
+### Phase 1: Rate Metrics Atomics (2-3 hours) [NO FLAG - Always On]
 
-1. Add `UseZeroCopyBuffers` to Config
-2. Change `Payload` from `[]byte` to `*[]byte` in packet struct
-3. Add `releasePacketFully()` to receiver and `DecommissionWithBuffer()` to packet
-4. Add `UnmarshalZeroCopy()` for zero-copy deserialization (keep `UnmarshalCopy()` for legacy)
-5. Add branch in **both** io_uring AND standard receive paths
-6. Add branch in delivery: release buffer when flag enabled
-7. Test for memory leaks extensively
-8. **Parallel tests**: Compare legacy vs legacy+zero-copy (immediate win!)
+**Goal**: Eliminate lock contention in rate calculations. Benefits ALL paths.
 
-**Note**: Benefits ALL implementations. Can be deployed immediately before any lockless changes.
+**Reference**: `rate_metrics_performance_design.md`
 
-**Why Phase 2?** Zero-copy provides immediate performance benefit on the existing legacy implementation. By implementing it early:
-- Immediate production value
-- Validates buffer management approach before lockless changes
-- Reduces risk - smaller, isolated change
+#### 1.1 Files to Modify
 
-### Phase 3: Lock-Free Ring Integration (3-4 hours) [UsePacketRing FLAG]
+| File | Changes |
+|------|---------|
+| `congestion/live/receive.go` | Convert counter fields to `atomic.Uint64` |
+| `congestion/live/sender.go` | Same atomic conversions |
+| `srt/statistics.go` | Update stats collection to use atomics |
+| `config.go` | No changes needed (always on) |
 
-1. Add `go-lock-free-ring` dependency to `go.mod`
-2. Add `UsePacketRing`, `PacketRingSize`, `PacketRingShards` to Config
-3. Add ring buffer to receiver struct
-4. Implement `drainPacketRing()` function
-5. Add branch in `Push()`: ring write vs locked btree insert
-6. Add branch in `Tick()`: call `drainPacketRing()` when flag enabled
-7. Create locked/unlocked variants of periodic functions
-8. **Parallel tests**: Run with flag=false (legacy) and flag=true (new)
+#### 1.2 Detailed Steps
 
-### Phase 4: Event Loop (3-4 hours) [UseEventLoop FLAG]
+```go
+// Step 1: Convert counter fields in receiver struct
+// File: congestion/live/receive.go
 
-1. Add `UseEventLoop` to Config with validation (requires UsePacketRing)
-2. Implement `eventLoop()` function (section 9.3)
-3. Implement adaptive backoff (section 9.7)
-4. Add branch in connection setup: eventLoop vs tickLoop
-5. Add offset ticker initialization
-6. **Parallel tests**: Compare latency/throughput: tick vs event loop
+// BEFORE:
+type receiver struct {
+    mu               sync.RWMutex
+    packetsReceived  uint64
+    bytesReceived    uint64
+    // ...
+}
 
-### Phase 5: Integration Testing (2-3 hours)
+// AFTER:
+type receiver struct {
+    mu               sync.RWMutex  // Keep for non-atomic fields
+    packetsReceived  atomic.Uint64
+    bytesReceived    atomic.Uint64
+    // ...
+}
+```
 
-1. Unit tests for each new component
-2. Run all flag combinations from section 11.5
-3. Parallel comparison tests (section 11.7)
-4. Stress tests with packet loss at various bitrates
-5. Performance comparison benchmarks
-6. Memory leak testing with `-race` flag
-7. Update `integration_testing_matrix_design.md` with new dimensions
+```go
+// Step 2: Update all write sites
+// BEFORE:
+r.mu.Lock()
+r.packetsReceived++
+r.mu.Unlock()
 
-**Total Estimated Effort**: 13-17 hours
+// AFTER:
+r.packetsReceived.Add(1)
+```
+
+```go
+// Step 3: Implement CAS-based running averages
+// For rate calculations that need compare-and-swap
+func (r *receiver) updateRate(newValue float64) {
+    for {
+        old := math.Float64frombits(r.rate.Load())
+        new := old*0.9 + newValue*0.1  // Exponential moving average
+        if r.rate.CompareAndSwap(
+            math.Float64bits(old),
+            math.Float64bits(new),
+        ) {
+            return
+        }
+    }
+}
+```
+
+#### 1.3 Validation Checkpoint
+
+```bash
+# Run BEFORE making changes (baseline)
+go test -v ./... -run TestIntegration > baseline_phase0.log
+go test -bench=. ./congestion/live/... > bench_phase0.log
+
+# After Phase 1 changes
+go test -race -v ./...                    # Race detector
+go test -v ./... -run TestIntegration     # Integration tests
+go test -bench=. ./congestion/live/...    # Performance comparison
+
+# Compare: metrics should be identical, performance same or better
+diff baseline_phase0.log phase1.log       # Behavior unchanged
+```
+
+#### 1.4 Acceptance Criteria
+
+- [ ] All tests pass with `-race` flag
+- [ ] Rate metrics values match legacy implementation (< 0.1% difference)
+- [ ] No performance regression in benchmarks
+- [ ] Lock contention reduced (verify with `pprof` mutex profile)
+
+---
+
+### Phase 2: Zero-Copy Buffer Lifetime Extension (3-4 hours) [UseZeroCopyBuffers FLAG]
+
+**Goal**: Eliminate buffer copying in packet receive path. Benefits ALL paths.
+
+**Reference**: Section 6 (Component 2: Buffer Lifetime Management)
+
+#### 2.1 Files to Modify
+
+| File | Changes |
+|------|---------|
+| `config.go` | Add `UseZeroCopyBuffers bool` |
+| `packet/packet.go` | Add `recvBuffer`, `dataLen`, new methods |
+| `congestion/live/receive.go` | Add `releasePacketFully()`, `bufferPool` field |
+| `srt/listener.go` | Add branch in io_uring completion |
+| `srt/conn.go` | Add branch in standard receive loop |
+
+#### 2.2 Detailed Steps
+
+**Step 1: Update config.go**
+
+```go
+// File: config.go
+
+type Config struct {
+    // ... existing fields ...
+
+    // Zero-Copy Buffer Management
+    // When true, packet buffers are not copied during deserialization.
+    // The buffer lifetime is extended until packet delivery.
+    // NOTE: Applications must NOT hold references to packet data after
+    // the delivery callback returns.
+    UseZeroCopyBuffers bool `json:"use_zero_copy_buffers"`
+}
+
+func (c *Config) Validate() error {
+    // ... existing validation ...
+
+    // No special validation for UseZeroCopyBuffers
+    // It's safe to enable/disable independently
+    return nil
+}
+```
+
+**Step 2: Update packet/packet.go**
+
+```go
+// File: packet/packet.go
+
+type Packet struct {
+    Header     Header
+    Payload    *[]byte   // For legacy path: points to copied data
+
+    // Zero-copy fields (only used when UseZeroCopyBuffers=true)
+    recvBuffer *[]byte   // Original pool buffer (for return)
+    dataLen    int       // Bytes received
+
+    Addr       net.Addr
+}
+
+// GetPayload returns payload data
+// For zero-copy: computes (*recvBuffer)[HeaderSize:dataLen]
+// For legacy: returns *Payload directly
+func (p *Packet) GetPayload() []byte {
+    if p.recvBuffer != nil {
+        // Zero-copy path
+        return (*p.recvBuffer)[HeaderSize:p.dataLen]
+    }
+    if p.Payload != nil {
+        // Legacy path
+        return *p.Payload
+    }
+    return nil
+}
+
+// UnmarshalZeroCopy - new function for zero-copy path
+func (p *Packet) UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error {
+    p.recvBuffer = buf
+    p.dataLen = n
+
+    if n < HeaderSize {
+        return ErrPacketTooShort
+    }
+
+    if err := p.Header.Unmarshal((*p.recvBuffer)[:HeaderSize]); err != nil {
+        return err
+    }
+
+    p.Addr = addr
+    return nil
+}
+
+// DecommissionWithBuffer - returns buffer to pool, then decommissions packet
+func (p *Packet) DecommissionWithBuffer(bufferPool *sync.Pool) {
+    if p.recvBuffer != nil && bufferPool != nil {
+        *p.recvBuffer = (*p.recvBuffer)[:0]
+        bufferPool.Put(p.recvBuffer)
+        p.recvBuffer = nil
+        p.dataLen = 0
+    }
+    p.Decommission()
+}
+
+// GetRecvBuffer returns original pool buffer reference
+func (p *Packet) GetRecvBuffer() *[]byte {
+    return p.recvBuffer
+}
+
+// ClearRecvBuffer clears zero-copy buffer reference
+func (p *Packet) ClearRecvBuffer() {
+    p.recvBuffer = nil
+    p.dataLen = 0
+}
+
+// HasRecvBuffer returns true if packet has tracked pool buffer
+func (p *Packet) HasRecvBuffer() bool {
+    return p.recvBuffer != nil
+}
+```
+
+**Step 3: Update congestion/live/receive.go**
+
+```go
+// File: congestion/live/receive.go
+
+type receiver struct {
+    // ... existing fields ...
+
+    // Buffer pool reference (for zero-copy buffer return)
+    bufferPool *sync.Pool
+
+    // Config
+    useZeroCopy bool
+}
+
+// NewReceiver - add bufferPool parameter
+func NewReceiver(config ReceiverConfig, bufferPool *sync.Pool, /* ... */) *receiver {
+    return &receiver{
+        // ... existing initialization ...
+        bufferPool:  bufferPool,
+        useZeroCopy: config.UseZeroCopyBuffers,
+    }
+}
+
+// releasePacketFully - handles both zero-copy and legacy paths
+func (r *receiver) releasePacketFully(p *packet.Packet) {
+    if r.useZeroCopy {
+        if buf := p.GetRecvBuffer(); buf != nil {
+            *buf = (*buf)[:0]
+            r.bufferPool.Put(buf)
+            p.ClearRecvBuffer()
+        }
+    }
+    p.Decommission()
+}
+```
+
+**Step 4: Update srt/listener.go (io_uring path)**
+
+```go
+// File: srt/listener.go
+
+func (ln *listener) processRecvCompletion(buffer *[]byte, n int, addr net.Addr) {
+    p := packetPool.Get().(*packet.Packet)
+
+    if ln.config.UseZeroCopyBuffers {
+        // Zero-copy path
+        err := p.UnmarshalZeroCopy(buffer, n, addr)
+        if err != nil {
+            p.DecommissionWithBuffer(ln.recvBufferPool)
+            return
+        }
+        // Buffer stays with packet
+    } else {
+        // Legacy path - copy and return immediately
+        err := p.UnmarshalCopy(addr, (*buffer)[:n])
+        *buffer = (*buffer)[:0]
+        ln.recvBufferPool.Put(buffer)
+        if err != nil {
+            p.Decommission()
+            return
+        }
+    }
+
+    // Route packet...
+}
+```
+
+**Step 5: Update srt/conn.go (standard receive path)**
+
+```go
+// File: srt/conn.go
+
+func (c *connection) readLoop() {
+    for {
+        buf := c.recvBufferPool.Get().(*[]byte)
+
+        n, addr, err := c.conn.ReadFromUDP(*buf)
+        if err != nil {
+            returnBufferToPool(c.recvBufferPool, buf)
+            continue
+        }
+
+        pkt := packetPool.Get().(*packet.Packet)
+
+        if c.config.UseZeroCopyBuffers {
+            // Zero-copy path
+            err = pkt.UnmarshalZeroCopy(buf, n, addr)
+            if err != nil {
+                pkt.DecommissionWithBuffer(c.recvBufferPool)
+                continue
+            }
+        } else {
+            // Legacy path
+            err = pkt.UnmarshalCopy(addr, (*buf)[:n])
+            *buf = (*buf)[:0]
+            c.recvBufferPool.Put(buf)
+            if err != nil {
+                pkt.Decommission()
+                continue
+            }
+        }
+
+        c.handlePacket(pkt)
+    }
+}
+```
+
+#### 2.3 Validation Checkpoint
+
+```bash
+# Run with flag DISABLED (legacy behavior)
+USE_ZERO_COPY=false go test -race -v ./... -run TestIntegration
+
+# Run with flag ENABLED (new behavior)
+USE_ZERO_COPY=true go test -race -v ./... -run TestIntegration
+
+# Memory leak test
+USE_ZERO_COPY=true go test -v ./... -run TestMemoryLeak -count=10
+
+# Performance comparison
+go test -bench=BenchmarkReceive ./... -benchmem
+# Compare allocations: zero-copy should show FEWER allocations
+
+# Parallel comparison test (both paths simultaneously)
+go test -v ./... -run TestParallelComparison
+```
+
+#### 2.4 Acceptance Criteria
+
+- [ ] All tests pass with `UseZeroCopyBuffers=false` (legacy unchanged)
+- [ ] All tests pass with `UseZeroCopyBuffers=true` (new path)
+- [ ] Race detector passes for both configurations
+- [ ] Memory allocations reduced when zero-copy enabled
+- [ ] No buffer pool exhaustion under sustained load
+- [ ] Benchmark shows improved throughput with zero-copy
+
+---
+
+### Phase 3: Lock-Free Ring Integration (4-5 hours) [UsePacketRing FLAG]
+
+**Goal**: Eliminate lock contention between packet arrival and processing.
+
+**Reference**: Section 5 (Component 1: Lock-Free Ring Buffer)
+
+**Prerequisite**: Phase 1 and Phase 2 completed and validated
+
+#### 3.1 Files to Modify
+
+| File | Changes |
+|------|---------|
+| `go.mod` | Add `github.com/randomizedcoder/go-lock-free-ring` |
+| `config.go` | Add `UsePacketRing`, ring config fields |
+| `congestion/live/receive.go` | Add ring buffer, function dispatch |
+
+#### 3.2 Detailed Steps
+
+**Step 1: Add dependency**
+
+```bash
+go get github.com/randomizedcoder/go-lock-free-ring
+```
+
+**Step 2: Update config.go**
+
+```go
+// File: config.go
+
+type Config struct {
+    // ... existing fields ...
+
+    // Lock-Free Ring Buffer
+    UsePacketRing           bool          `json:"use_packet_ring"`
+    PacketRingSize          int           `json:"packet_ring_size"`           // Default: 1024 (power of 2)
+    PacketRingShards        int           `json:"packet_ring_shards"`         // Default: 4 (power of 2)
+    PacketRingMaxRetries    int           `json:"packet_ring_max_retries"`    // Default: 10
+    PacketRingBackoffDuration time.Duration `json:"packet_ring_backoff_duration"` // Default: 100µs
+    PacketRingMaxBackoffs   int           `json:"packet_ring_max_backoffs"`   // Default: 0 (unlimited)
+}
+
+func (c *Config) Validate() error {
+    // ... existing validation ...
+
+    if c.UsePacketRing {
+        if c.PacketRingSize <= 0 {
+            c.PacketRingSize = 1024  // Default: power of 2
+        }
+        if c.PacketRingShards <= 0 {
+            c.PacketRingShards = 4
+        }
+        // Shards must be power of 2
+        if c.PacketRingShards & (c.PacketRingShards-1) != 0 {
+            return errors.New("PacketRingShards must be power of 2")
+        }
+    }
+    return nil
+}
+```
+
+**Step 3: Update congestion/live/receive.go with function dispatch**
+
+```go
+// File: congestion/live/receive.go
+
+import ring "github.com/randomizedcoder/go-lock-free-ring"
+
+type receiver struct {
+    // ... existing fields ...
+
+    // Lock-free ring (only when UsePacketRing=true)
+    packetRing  *ring.ShardedRing
+    writeConfig ring.WriteConfig
+
+    // Function dispatch
+    pushFn func(pkt *packet.Packet)
+}
+
+func NewReceiver(config ReceiverConfig, /* ... */) *receiver {
+    r := &receiver{
+        // ... existing initialization ...
+    }
+
+    // Initialize ring if enabled
+    if config.UsePacketRing {
+        var err error
+        r.packetRing, err = ring.NewShardedRing(
+            uint64(config.PacketRingSize),
+            uint64(config.PacketRingShards),
+        )
+        if err != nil {
+            panic(fmt.Sprintf("failed to create packet ring: %v", err))
+        }
+
+        r.writeConfig = ring.WriteConfig{
+            MaxRetries:      config.PacketRingMaxRetries,
+            BackoffDuration: config.PacketRingBackoffDuration,
+            MaxBackoffs:     config.PacketRingMaxBackoffs,
+        }
+
+        r.pushFn = r.pushToRing
+    } else {
+        r.pushFn = r.pushWithLock
+    }
+
+    return r
+}
+
+// Push dispatches to configured implementation
+func (r *receiver) Push(pkt *packet.Packet) {
+    // Rate metrics (always atomic - Phase 1)
+    r.packetsReceived.Add(1)
+    r.bytesReceived.Add(uint64(pkt.Len()))
+
+    r.pushFn(pkt)
+}
+
+// pushWithLock - LEGACY path (UsePacketRing=false)
+func (r *receiver) pushWithLock(pkt *packet.Packet) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+
+    // ... existing locked insert logic ...
+}
+
+// pushToRing - NEW path (UsePacketRing=true)
+func (r *receiver) pushToRing(pkt *packet.Packet) {
+    producerID := uint64(pkt.Header().PacketSequenceNumber.Val())
+
+    if !r.packetRing.WriteWithBackoff(producerID, pkt, r.writeConfig) {
+        r.droppedPackets.Add(1)
+        r.releasePacketFully(pkt)
+    }
+}
+
+// Tick dispatches to configured implementation
+func (r *receiver) Tick(now time.Time) {
+    if r.config.UsePacketRing {
+        r.drainPacketRing()
+        // No locks needed - we own the btrees
+        r.periodicACKNoLock(now)
+        r.periodicNAKNoLock(now)
+        r.deliverPacketsNoLock(now)
+    } else {
+        // Legacy path with locks
+        r.periodicACK(now)
+        r.periodicNAK(now)
+        r.deliverPackets(now)
+    }
+}
+
+// drainPacketRing consumes all packets from ring into btree
+func (r *receiver) drainPacketRing() {
+    for {
+        item, ok := r.packetRing.TryRead()
+        if !ok {
+            return
+        }
+
+        pkt := item.(*packet.Packet)
+        seq := pkt.Header().PacketSequenceNumber
+
+        // Duplicate/old packet check
+        if r.packetStore.Has(seq) || seq.Lt(r.deliveryBase) {
+            r.releasePacketFully(pkt)
+            continue
+        }
+
+        // Insert into btree (NO LOCK)
+        r.packetStore.Insert(pkt)
+
+        // Delete from NAK btree (NO LOCK)
+        if r.nakBtree != nil {
+            r.nakBtree.Delete(seq)
+        }
+    }
+}
+```
+
+#### 3.3 Validation Checkpoint
+
+```bash
+# Legacy path (ring disabled)
+USE_PACKET_RING=false go test -race -v ./... -run TestIntegration
+
+# New path (ring enabled)
+USE_PACKET_RING=true go test -race -v ./... -run TestIntegration
+
+# Parallel comparison
+go test -v ./... -run TestParallelComparison -legacy=true -new=true
+
+# Performance benchmark
+go test -bench=BenchmarkThroughput ./...
+
+# Stress test with packet loss
+go test -v ./... -run TestStressWithLoss -packet-loss=5
+```
+
+#### 3.4 Acceptance Criteria
+
+- [ ] All tests pass with `UsePacketRing=false`
+- [ ] All tests pass with `UsePacketRing=true`
+- [ ] Packet delivery order identical between paths
+- [ ] No dropped packets under normal load
+- [ ] Lock contention reduced (verify with pprof)
+- [ ] Ring buffer metrics show expected behavior
+
+---
+
+### Phase 4: Event Loop Architecture (3-4 hours) [UseEventLoop FLAG]
+
+**Goal**: Replace timer-driven Tick() with continuous event loop.
+
+**Reference**: Section 9 (Event Loop Architecture)
+
+**Prerequisite**: Phase 3 completed and validated
+
+#### 4.1 Files to Modify
+
+| File | Changes |
+|------|---------|
+| `config.go` | Add `UseEventLoop`, adaptive backoff config |
+| `congestion/live/receive.go` | Add `eventLoop()`, adaptive backoff |
+| `srt/conn.go` | Add branch in `startReceiver()` |
+
+#### 4.2 Detailed Steps
+
+**Step 1: Update config.go**
+
+```go
+// File: config.go
+
+type Config struct {
+    // ... existing fields ...
+
+    // Event Loop (requires UsePacketRing=true)
+    UseEventLoop         bool          `json:"use_event_loop"`
+    BackoffColdStartPkts int           `json:"backoff_cold_start_packets"` // Default: 1000
+    BackoffMinSleep      time.Duration `json:"backoff_min_sleep"`          // Default: 10µs
+    BackoffMaxSleep      time.Duration `json:"backoff_max_sleep"`          // Default: 1ms
+}
+
+func (c *Config) Validate() error {
+    // ... existing validation ...
+
+    if c.UseEventLoop && !c.UsePacketRing {
+        return errors.New("UseEventLoop requires UsePacketRing=true")
+    }
+    return nil
+}
+```
+
+**Step 2: Implement event loop in congestion/live/receive.go**
+
+```go
+// File: congestion/live/receive.go
+
+// eventLoop is the NEW continuous processing loop
+func (r *receiver) eventLoop(ctx context.Context) {
+    // Offset tickers to spread work
+    ackTicker := time.NewTicker(r.config.ACKInterval)
+    time.Sleep(r.config.ACKInterval / 2)
+    nakTicker := time.NewTicker(r.config.NAKInterval)
+    defer ackTicker.Stop()
+    defer nakTicker.Stop()
+
+    backoff := newAdaptiveBackoff(r.config)
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ackTicker.C:
+            r.periodicACKNoLock(time.Now())
+        case <-nakTicker.C:
+            r.periodicNAKNoLock(time.Now())
+        default:
+            processed := r.processOnePacket()
+            delivered := r.deliverReadyPackets()
+
+            if !processed && delivered == 0 {
+                time.Sleep(backoff.getSleepDuration())
+            } else {
+                backoff.recordActivity()
+            }
+        }
+    }
+}
+
+// tickLoop is the LEGACY timer-driven loop
+func (r *receiver) tickLoop(ctx context.Context) {
+    ticker := time.NewTicker(r.config.TickInterval)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            r.Tick(time.Now())
+        }
+    }
+}
+```
+
+**Step 3: Update srt/conn.go**
+
+```go
+// File: srt/conn.go
+
+func (c *connection) startReceiver() {
+    if c.config.UseEventLoop {
+        go c.receiver.eventLoop(c.ctx)
+    } else {
+        go c.receiver.tickLoop(c.ctx)
+    }
+}
+```
+
+#### 4.3 Validation Checkpoint
+
+```bash
+# Tick loop (event loop disabled)
+USE_EVENT_LOOP=false go test -race -v ./... -run TestIntegration
+
+# Event loop enabled
+USE_EVENT_LOOP=true go test -race -v ./... -run TestIntegration
+
+# Latency comparison
+go test -v ./... -run TestLatencyComparison -tick=true -eventloop=true
+
+# CPU profile comparison
+go test -bench=BenchmarkEventLoop ./... -cpuprofile=eventloop.prof
+go test -bench=BenchmarkTickLoop ./... -cpuprofile=tickloop.prof
+```
+
+#### 4.4 Acceptance Criteria
+
+- [ ] All tests pass with `UseEventLoop=false`
+- [ ] All tests pass with `UseEventLoop=true`
+- [ ] Event loop shows lower latency than tick loop
+- [ ] CPU usage smooth (not bursty) with event loop
+- [ ] Adaptive backoff prevents busy-waiting when idle
+
+---
+
+### Phase 5: Integration Testing & Validation (2-3 hours)
+
+**Goal**: Comprehensive validation of all flag combinations.
+
+#### 5.1 Test Matrix
+
+Run all combinations from Section 11.6:
+
+```go
+var testConfigs = []struct {
+    Name               string
+    UseZeroCopyBuffers bool
+    UsePacketRing      bool
+    UseEventLoop       bool
+}{
+    {"Legacy",                    false, false, false},
+    {"ZeroCopy Only",             true,  false, false},
+    {"Ring Only",                 false, true,  false},
+    {"Ring + ZeroCopy",           true,  true,  false},
+    {"Full Lockless",             true,  true,  true},
+}
+```
+
+#### 5.2 Test Categories
+
+```bash
+# 1. Correctness tests (all configs)
+for config in "${configs[@]}"; do
+    go test -race -v ./... -run TestIntegration -config=$config
+done
+
+# 2. Packet delivery verification
+go test -v ./... -run TestPacketDeliveryOrder
+
+# 3. NAK/ACK timing tests
+go test -v ./... -run TestNAKGeneration
+go test -v ./... -run TestACKTiming
+
+# 4. Memory leak tests
+go test -v ./... -run TestBufferPoolExhaustion -duration=60s
+
+# 5. Stress tests
+go test -v ./... -run TestHighBitrate -bitrate=100Mbps
+go test -v ./... -run TestPacketLoss -loss=10%
+
+# 6. Performance benchmarks
+go test -bench=. ./... -benchmem > benchmark_results.txt
+```
+
+#### 5.3 Parallel Comparison Test
+
+```go
+// TestParallelComparison runs same traffic through legacy and new paths
+func TestParallelComparison(t *testing.T) {
+    legacyConn := newConnection(Config{UsePacketRing: false})
+    newConn := newConnection(Config{UsePacketRing: true, UseEventLoop: true})
+
+    // Send identical traffic to both
+    traffic := generateTestTraffic(10000)
+
+    legacyResults := runThrough(legacyConn, traffic)
+    newResults := runThrough(newConn, traffic)
+
+    // Compare results
+    assert.Equal(t, legacyResults.PacketsDelivered, newResults.PacketsDelivered)
+    assert.Equal(t, legacyResults.DeliveryOrder, newResults.DeliveryOrder)
+
+    // New should be faster
+    assert.Less(t, newResults.P99Latency, legacyResults.P99Latency)
+}
+```
+
+---
+
+### Total Estimated Effort
+
+| Phase | Effort | Risk | Value |
+|-------|--------|------|-------|
+| Phase 1: Rate Atomics | 2-3 hours | Low | Medium (foundation) |
+| Phase 2: Zero-Copy | 3-4 hours | Low | **High** (immediate perf) |
+| Phase 3: Packet Ring | 4-5 hours | Medium | High (lockless) |
+| Phase 4: Event Loop | 3-4 hours | Medium | High (latency) |
+| Phase 5: Testing | 2-3 hours | Low | Critical (validation) |
+| **Total** | **14-19 hours** | | |
+
+---
+
+### Recommended Implementation Order
+
+```
+Week 1: Universal Improvements
+├── Day 1-2: Phase 1 (Rate Atomics)
+│   └── Validate: integration tests pass
+├── Day 3-4: Phase 2 (Zero-Copy)
+│   └── Validate: integration tests pass
+│   └── DEPLOY TO PRODUCTION (UseZeroCopyBuffers=true)
+│
+Week 2: Lockless Architecture
+├── Day 5-6: Phase 3 (Packet Ring)
+│   └── Validate: parallel comparison tests
+├── Day 7-8: Phase 4 (Event Loop)
+│   └── Validate: latency benchmarks
+│
+Week 3: Production Rollout
+├── Day 9: Phase 5 (Full Testing)
+├── Day 10: Enable UsePacketRing in staging
+└── Day 11+: Gradual production rollout
+```
 
 ### Phase Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    UNIVERSAL IMPROVEMENTS                                │
-│                (Benefits ALL implementations)                            │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  Phase 1: Rate Atomics           [NO FLAG - Always On]                  │
-│      │                                                                   │
-│      ▼                                                                   │
-│  Phase 2: Zero-Copy Buffers      [UseZeroCopyBuffers flag]              │
-│      │                           ← Can deploy to production NOW!         │
-│      │                                                                   │
-└──────┼──────────────────────────────────────────────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    LOCKLESS ARCHITECTURE                                 │
-│                (Optional - for maximum performance)                      │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  Phase 3: Packet Ring            [UsePacketRing flag]                   │
-│      │                                                                   │
-│      ▼                                                                   │
-│  Phase 4: Event Loop             [UseEventLoop flag]                    │
-│                                  (requires UsePacketRing)                │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-       │
-       ▼
-  Phase 5: Integration Testing
-       │
-       ▼
-  Production Rollout (incremental by flag)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      IMPLEMENTATION PHASES                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 1: Rate Atomics                                    [NO FLAG]      │
+  │ ├── Convert counters to atomic.Uint64                                   │
+  │ ├── CAS-based running averages                                          │
+  │ └── VALIDATE: integration tests, race detector                          │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       │
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 2: Zero-Copy Buffers                    [UseZeroCopyBuffers flag] │
+  │ ├── Add recvBuffer, dataLen to Packet struct                            │
+  │ ├── Implement UnmarshalZeroCopy(), releasePacketFully()                 │
+  │ ├── Branch in io_uring + standard receive paths                         │
+  │ ├── VALIDATE: integration tests, memory leak tests                      │
+  │ └── ★ DEPLOY TO PRODUCTION ★ (immediate perf win!)                      │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       │
+  ══════════════════════════════════════════════════════════════════════════
+                    Universal improvements complete!
+                    Can stop here with significant gains.
+  ══════════════════════════════════════════════════════════════════════════
+                                       │
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 3: Packet Ring                              [UsePacketRing flag]  │
+  │ ├── Add go-lock-free-ring dependency                                    │
+  │ ├── Function dispatch: pushWithLock vs pushToRing                       │
+  │ ├── Implement drainPacketRing(), *NoLock() variants                     │
+  │ ├── VALIDATE: parallel comparison tests (legacy vs ring)                │
+  │ └── Enable in staging, compare metrics                                  │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       │
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 4: Event Loop                                [UseEventLoop flag]  │
+  │ ├── Implement eventLoop() with offset tickers                           │
+  │ ├── Implement adaptive backoff                                          │
+  │ ├── Function dispatch: tickLoop vs eventLoop                            │
+  │ ├── VALIDATE: latency comparison tests                                  │
+  │ └── Enable for latency-sensitive use cases                              │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       │
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 5: Integration Testing                                            │
+  │ ├── Run all flag combinations (5 configs)                               │
+  │ ├── Parallel comparison: legacy vs full-lockless                        │
+  │ ├── Stress tests: high bitrate, packet loss                             │
+  │ └── Performance benchmarks: CPU, latency, throughput                    │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       │
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PRODUCTION ROLLOUT (incremental)                                        │
+  │ ├── Enable UseZeroCopyBuffers=true (after Phase 2)                      │
+  │ ├── Enable UsePacketRing=true in staging (after Phase 3)                │
+  │ ├── Enable UseEventLoop=true for select connections (after Phase 4)    │
+  │ └── Monitor and expand rollout                                          │
+  └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Deployment Strategy**:
-1. Deploy Phase 1+2 immediately (universal improvements, low risk)
-2. Enable `UseZeroCopyBuffers=true` in production (instant perf gain)
-3. Deploy Phase 3+4 behind feature flags
-4. Gradually enable `UsePacketRing` then `UseEventLoop` per connection/use-case
+### Deployment Strategy
+
+| After Phase | Action | Risk | Value |
+|-------------|--------|------|-------|
+| Phase 1 | Ship atomics (always on) | Very Low | Foundation |
+| Phase 2 | Enable `UseZeroCopyBuffers=true` | Low | **Immediate perf!** |
+| Phase 3 | Enable `UsePacketRing=true` in staging | Medium | Lockless |
+| Phase 4 | Enable `UseEventLoop=true` selectively | Medium | Low latency |
+
+**Key Insight**: You can deploy after Phase 2 and get significant performance improvements without any lockless changes. Phases 3-4 are optional optimizations for maximum performance.
 
 ---
 
