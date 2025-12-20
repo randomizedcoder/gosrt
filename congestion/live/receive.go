@@ -114,6 +114,11 @@ type receiver struct {
 	// NAK scan tracking - independent of ACK to avoid TSBPD skip issues
 	// This ensures we never skip scanning a region even if ACK jumps forward
 	nakScanStartPoint atomic.Uint32 // Starting sequence for next NAK btree scan
+
+	// ACK scan optimization: remembers the highest verified contiguous sequence.
+	// This allows periodicACK to only scan NEW packets, not re-verify entire buffer.
+	// Similar pattern to nakScanStartPoint. Protected by r.lock.
+	ackScanHighWaterMark circular.Number
 }
 
 // NewReceiver takes a ReceiveConfig and returns a new Receiver
@@ -483,6 +488,13 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 	r.packetStore.Insert(pkt)
 }
 
+// periodicACK calculates the ACK sequence number by scanning contiguous packets.
+//
+// Performance optimizations (see integration_testing_50mbps_defect.md Section 24 & 26):
+// - Uses IterateFrom with AscendGreaterOrEqual for O(log n) seek
+// - ACK Scan High Water Mark: only scans NEW packets, not entire buffer (96.7% reduction)
+// - Batches metrics updates with stack counters (single atomic update after loop)
+// - Minimizes operations under RLock
 func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
 	// Phase 1: Read-only work with read lock (allows concurrent Push() operations)
 	r.lock.RLock()
@@ -502,25 +514,58 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	minPktTsbpdTime, maxPktTsbpdTime := uint64(0), uint64(0)
 	ackSequenceNumber := r.lastACKSequenceNumber
 
-	// Get first packet for initial timestamps
+	// Get first packet - needed for buffer time calculation AND scan start validation
 	minPkt := r.packetStore.Min()
-	if minPkt != nil {
-		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
-		minH := minPkt.Header()
-		minPktTsbpdTime = minH.PktTsbpdTime
-		maxPktTsbpdTime = minH.PktTsbpdTime
+	if minPkt == nil {
+		r.lock.RUnlock()
+		return // No packets to scan
 	}
+	minH := minPkt.Header()
+	minPktTsbpdTime = minH.PktTsbpdTime
+	maxPktTsbpdTime = minH.PktTsbpdTime
+	minPktSeq := minH.PacketSequenceNumber
+
+	// ACK Scan High Water Mark optimization (Section 26):
+	// Instead of scanning from lastACKSequenceNumber every time, remember where we
+	// verified contiguous packets up to. Only scan NEW packets since last check.
+	// This reduces iterations by ~96.7% at steady state.
+	scanStartPoint := r.ackScanHighWaterMark
+
+	// Determine valid scan start point (must handle four cases):
+	// 1. Not initialized (Val() == 0): start from lastACKSequenceNumber
+	// 2. Behind lastACKSequenceNumber: start from lastACKSequenceNumber
+	// 3. Behind minPkt (packets expired from btree): start from minPkt
+	// 4. Valid (ahead of both): use high water mark
+	if scanStartPoint.Val() == 0 || scanStartPoint.Lt(ackSequenceNumber) {
+		// Case 1 & 2: Not initialized or behind ACK point
+		scanStartPoint = ackSequenceNumber
+	}
+
+	// Case 3: High water mark points to expired packet
+	// Tick() released packets, minPkt advanced past our remembered position
+	if minPktSeq.Gt(scanStartPoint) {
+		scanStartPoint = minPktSeq.Dec() // Start just before minPkt to include it
+	}
+
+	// Case 4: Valid - use high water mark
+	// We know packets from lastACKSequenceNumber to scanStartPoint are contiguous
+	if scanStartPoint.Gt(ackSequenceNumber) {
+		ackSequenceNumber = scanStartPoint
+	}
+
+	// Stack counter for skipped packets - batched update after loop (avoids atomic ops under lock)
+	var totalSkippedPkts uint64
+	var lastContiguousSeq circular.Number // Track highest verified contiguous sequence
 
 	// Find the sequence number up until we have all in a row.
 	// Where the first gap is (or at the end of the list) is where we can ACK to.
-	// Track packets skipped due to TSBPD timeout (never arrived, gap in sequence)
-	m := r.metrics
-	r.packetStore.Iterate(func(p packet.Packet) bool {
+	// Uses IterateFrom for O(log n) seek to scanStartPoint (not lastACKSequenceNumber!)
+	r.packetStore.IterateFrom(scanStartPoint, func(p packet.Packet) bool {
 		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 		h := p.Header()
 
-		// Skip packets that we already ACK'd.
-		if h.PacketSequenceNumber.Lte(ackSequenceNumber) {
+		// Skip packets at or before scan start point (handles btree edge case)
+		if h.PacketSequenceNumber.Lte(scanStartPoint) {
 			return true // Continue
 		}
 
@@ -530,31 +575,39 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 			// Count packets skipped: gap between current ACK and this packet
 			// e.g., if ackSequenceNumber=10 and h.PacketSequenceNumber=15,
 			// then packets 11,12,13,14 are being skipped (4 packets)
-			if m != nil {
-				skippedCount := uint64(h.PacketSequenceNumber.Distance(ackSequenceNumber))
-				if skippedCount > 1 {
-					// skippedCount-1 because Distance(10,15)=5, but we skip 11,12,13,14 (4 packets)
-					actualSkipped := skippedCount - 1
-					m.CongestionRecvPktSkippedTSBPD.Add(actualSkipped)
-					m.CongestionRecvByteSkippedTSBPD.Add(actualSkipped * uint64(r.avgPayloadSize))
-				}
+			skippedCount := uint64(h.PacketSequenceNumber.Distance(ackSequenceNumber))
+			if skippedCount > 1 {
+				// skippedCount-1 because Distance(10,15)=5, but we skip 11,12,13,14 (4 packets)
+				totalSkippedPkts += skippedCount - 1 // Stack counter, no atomic
 			}
 			ackSequenceNumber = h.PacketSequenceNumber
+			lastContiguousSeq = ackSequenceNumber
 			return true // Continue
 		}
 
 		// Check if the packet is the next in the row.
 		if h.PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
 			ackSequenceNumber = h.PacketSequenceNumber
+			lastContiguousSeq = ackSequenceNumber
 			maxPktTsbpdTime = h.PktTsbpdTime
 			return true // Continue
 		}
 
-		return false // Stop iteration
+		return false // Stop iteration (gap found)
 	})
+
+	// Capture high water mark update for write phase
+	newHighWaterMark := lastContiguousSeq
 
 	// Release read lock before acquiring write lock (optimization: minimize lock contention)
 	r.lock.RUnlock()
+
+	// Update metrics ONCE after lock released (batched from stack counters)
+	m := r.metrics
+	if m != nil && totalSkippedPkts > 0 {
+		m.CongestionRecvPktSkippedTSBPD.Add(totalSkippedPkts)
+		m.CongestionRecvByteSkippedTSBPD.Add(totalSkippedPkts * uint64(r.avgPayloadSize))
+	}
 
 	// Phase 2: Write updates with write lock (brief - only for field updates)
 	// Measure lock timing for the write lock (critical section)
@@ -563,16 +616,16 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 		var seqResult circular.Number
 		var liteResult bool
 		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
-			okResult, seqResult, liteResult = r.periodicACKWriteLocked(now, needLiteACK, ackSequenceNumber, minPktTsbpdTime, maxPktTsbpdTime)
+			okResult, seqResult, liteResult = r.periodicACKWriteLocked(now, needLiteACK, ackSequenceNumber, minPktTsbpdTime, maxPktTsbpdTime, newHighWaterMark)
 		})
 		return okResult, seqResult, liteResult
 	}
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	return r.periodicACKWriteLocked(now, needLiteACK, ackSequenceNumber, minPktTsbpdTime, maxPktTsbpdTime)
+	return r.periodicACKWriteLocked(now, needLiteACK, ackSequenceNumber, minPktTsbpdTime, maxPktTsbpdTime, newHighWaterMark)
 }
 
-func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSequenceNumber circular.Number, minPktTsbpdTime, maxPktTsbpdTime uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
+func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSequenceNumber circular.Number, minPktTsbpdTime, maxPktTsbpdTime uint64, newHighWaterMark circular.Number) (ok bool, sequenceNumber circular.Number, lite bool) {
 	// Check metrics once at the beginning of the function
 	m := r.metrics
 
@@ -599,6 +652,12 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 	// Keep track of the last ACK's sequence number. With this we can faster ignore
 	// packets that come in late that have a lower sequence number.
 	r.lastACKSequenceNumber = ackSequenceNumber
+
+	// Update ACK scan high water mark for next periodicACK call
+	// This allows us to skip re-verifying contiguous packets we've already checked
+	if newHighWaterMark.Val() > 0 && newHighWaterMark.Gt(r.ackScanHighWaterMark) {
+		r.ackScanHighWaterMark = newHighWaterMark
+	}
 
 	r.lastPeriodicACK = now
 	r.nPackets = 0

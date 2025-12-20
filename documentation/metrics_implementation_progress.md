@@ -346,9 +346,34 @@ The implementation is divided into phases:
 - Receiver: `rate.packets`, `rate.bytes`, `rate.bytesRetrans`, `nPackets`, `avgPayloadSize`, `avgLinkCapacity` (6 hot path fields)
 - Sender: `rate.bytes`, `rate.bytesSent`, `rate.bytesRetrans`, `avgPayloadSize` (4 hot path fields)
 
-**See**: [`rate_metrics_performance_design.md`](./rate_metrics_performance_design.md) for full analysis and migration plan.
+**See**:
+- [`rate_metrics_performance_design.md`](./rate_metrics_performance_design.md) for full analysis and migration plan.
+- [`receive_lock_contention_analysis.md`](./receive_lock_contention_analysis.md) for detailed lock contention analysis of `receive.go` and `WithWLockTiming` usage.
 
 **Status**: Deferred until NAK btree implementation is complete.
+
+---
+
+## Future Work: Metrics Under Lock Extraction
+
+**Identified Issue**: Despite using atomic counters (`atomic.Uint64`), metrics are still being incremented **inside** locked critical sections. This negates the lock-free benefit and extends lock hold times.
+
+**Impact**:
+- At 50 Mb/s (~4300 packets/sec), 15+ atomic ops per packet under lock
+- Adds ~1.3-3.2ms total lock time per second
+- Contributes to the 36.7% RUnlock contention seen in profiling
+
+**Solution**: Move atomic operations **outside** locks using stack-local variables:
+1. Capture values/conditions inside lock
+2. Release lock
+3. Update metrics atomically after lock released
+
+**See**: [`metrics_lock_analysis_design.md`](./metrics_lock_analysis_design.md) for:
+- Tool design to analyze lock/metric call flows
+- Transformation patterns for extracting metrics
+- Implementation plan for `metrics-lock-audit` tool
+
+**Status**: Design complete, implementation pending.
 
 ---
 
@@ -359,4 +384,5 @@ The implementation is divided into phases:
 - Lock-free ring buffer for lock timing (10 samples)
 - `sync.Pool` for `strings.Builder` reuse
 - Go runtime metrics included for process health monitoring
+- **Key Issue**: Atomic metrics are still called under locks - see `metrics_lock_analysis_design.md`
 
