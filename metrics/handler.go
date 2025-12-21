@@ -494,6 +494,32 @@ func MetricsHandler() http.Handler {
 				float64(metrics.CongestionSendMbpsInputBandwidth.Load()),
 				"socket_id", socketIdStr, "instance", instanceName, "direction", "send", "type", "input")
 
+			// ========== Rate Metrics (Phase 1: Lockless Design) ==========
+			// Float values stored as uint64 using math.Float64bits/Float64frombits
+			// These are instantaneous rates calculated from atomic counters
+
+			// Receiver rate metrics
+			writeGauge(b, "gosrt_recv_rate_packets_per_sec",
+				metrics.GetRecvRatePacketsPerSec(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGauge(b, "gosrt_recv_rate_bytes_per_sec",
+				metrics.GetRecvRateBytesPerSec(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGauge(b, "gosrt_recv_rate_retrans_percent",
+				metrics.GetRecvRateRetransPercent(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// Sender rate metrics
+			writeGauge(b, "gosrt_send_rate_input_bandwidth_bps",
+				metrics.GetSendRateEstInputBW(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGauge(b, "gosrt_send_rate_sent_bandwidth_bps",
+				metrics.GetSendRateEstSentBW(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGauge(b, "gosrt_send_rate_retrans_percent",
+				metrics.GetSendRateRetransPercent(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
 			// ========== Congestion Control Byte-Level Detail ==========
 			writeCounterIfNonZero(b, "gosrt_connection_congestion_bytes_unique_total",
 				metrics.CongestionRecvByteUnique.Load(),

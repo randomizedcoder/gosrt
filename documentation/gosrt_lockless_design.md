@@ -3579,6 +3579,8 @@ Each phase includes a **Validation Checkpoint** that uses the existing integrati
 
 **Reference**: `rate_metrics_performance_design.md`
 
+**Implementation Tracking**: [`lockless_phase1_implementation.md`](./lockless_phase1_implementation.md)
+
 #### 1.1 Architecture Decision: Move Rate Metrics to ConnectionMetrics
 
 **Rationale**: The `metrics_and_statistics_design.md` established a unified metrics architecture using `ConnectionMetrics` in `metrics/metrics.go`. Moving rate metrics to this struct:

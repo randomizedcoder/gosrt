@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -172,6 +173,27 @@ func TestPrometheusExportsAllCounters(t *testing.T) {
 		// These are calculated rates updated periodically, not monotonically increasing
 		"CongestionRecvPktRetransRate": true,
 		"CongestionSendPktRetransRate": true,
+
+		// ========== Phase 1: Rate Metrics (float64 stored as uint64 bits) ==========
+		// These are gauge values exported separately via writeGauge() in handler.go
+		// Not included in the counter export loop - tested in TestRateMetricsExported
+		"RecvRatePeriodUs":       true, // Internal timing, not exported
+		"RecvRateLastUs":         true, // Internal timing, not exported
+		"RecvRatePackets":        true, // Raw counter for calculation, not exported
+		"RecvRateBytes":          true, // Raw counter for calculation, not exported
+		"RecvRateBytesRetrans":   true, // Raw counter for calculation, not exported
+		"RecvRatePacketsPerSec":  true, // Exported as gauge (tested separately)
+		"RecvRateBytesPerSec":    true, // Exported as gauge (tested separately)
+		"RecvRatePktRetransRate": true, // Exported as gauge (tested separately)
+		"SendRatePeriodUs":       true, // Internal timing, not exported
+		"SendRateLastUs":         true, // Internal timing, not exported
+		"SendRateBytes":          true, // Raw counter for calculation, not exported
+		"SendRateBytesSent":      true, // Raw counter for calculation, not exported
+		"SendRateBytesRetrans":   true, // Raw counter for calculation, not exported
+		"SendRateEstInputBW":     true, // Exported as gauge (tested separately)
+		"SendRateEstSentBW":      true, // Exported as gauge (tested separately)
+		"SendRatePktRetransRate": true, // Exported as gauge (tested separately)
+		"RecvLightACKCounter":    true, // Internal counter, not exported
 	}
 
 	uniqueValue := uint64(1000000) // Start with a large unique base
@@ -303,6 +325,104 @@ func TestPrometheusMultipleConnections(t *testing.T) {
 	require.Contains(t, output, `"0x22222222",instance="default",type="data",status="success"} 2222`)
 }
 
+// ========== Phase 1: Rate Metrics Tests ==========
+
+// TestRateMetricsExported verifies rate metrics are correctly exported to Prometheus
+func TestRateMetricsExported(t *testing.T) {
+	socketId := uint32(0xBA7E1234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "test-rate")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set known rate values (stored as float64 bits)
+	// Receiver rates
+	m.RecvRatePacketsPerSec.Store(math.Float64bits(1000.5))  // 1000.5 pkt/s
+	m.RecvRateBytesPerSec.Store(math.Float64bits(1250000.0)) // 1.25 MB/s (~10 Mbps)
+	m.RecvRatePktRetransRate.Store(math.Float64bits(2.5))    // 2.5% retrans
+
+	// Sender rates
+	m.SendRateEstInputBW.Store(math.Float64bits(1500000.0)) // 1.5 MB/s input
+	m.SendRateEstSentBW.Store(math.Float64bits(1450000.0))  // 1.45 MB/s sent
+	m.SendRatePktRetransRate.Store(math.Float64bits(1.8))   // 1.8% retrans
+
+	output := getPrometheusOutput(t)
+
+	// Verify receiver rate metrics present
+	require.Contains(t, output, "gosrt_recv_rate_packets_per_sec")
+	require.Contains(t, output, "gosrt_recv_rate_bytes_per_sec")
+	require.Contains(t, output, "gosrt_recv_rate_retrans_percent")
+
+	// Verify sender rate metrics present
+	require.Contains(t, output, "gosrt_send_rate_input_bandwidth_bps")
+	require.Contains(t, output, "gosrt_send_rate_sent_bandwidth_bps")
+	require.Contains(t, output, "gosrt_send_rate_retrans_percent")
+
+	// Verify socket_id label (hex lowercase)
+	require.Contains(t, output, `socket_id="0xba7e1234"`)
+}
+
+// TestRateMetricsAccuracy verifies rate metric values are correctly encoded/decoded
+func TestRateMetricsAccuracy(t *testing.T) {
+	socketId := uint32(0xACC01234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set precise rate values
+	expectedPPS := 8642.75
+	expectedBPS := 12500000.0 // 12.5 MB/s = 100 Mbps
+
+	m.RecvRatePacketsPerSec.Store(math.Float64bits(expectedPPS))
+	m.RecvRateBytesPerSec.Store(math.Float64bits(expectedBPS))
+
+	output := getPrometheusOutput(t)
+
+	// Parse the output to verify values
+	// Rate metrics are floats, so look for the value in scientific or decimal notation
+	// gosrt_recv_rate_packets_per_sec{socket_id="0xaccu1234"} 8642.75
+	require.Contains(t, output, "8642.75", "Expected packets per sec value")
+	require.Contains(t, output, "12500000", "Expected bytes per sec value")
+}
+
+// TestRateMetricsZeroValues verifies zero rates are exported correctly
+func TestRateMetricsZeroValues(t *testing.T) {
+	socketId := uint32(0xEE001234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Rate fields default to 0 (math.Float64bits(0) = 0)
+	// Verify zero values are still exported (not omitted)
+	output := getPrometheusOutput(t)
+
+	// Should see the metric with socket_id (value will be 0)
+	// We use writeGauge not writeGaugeIfNonZero for rate metrics
+	require.Contains(t, output, "gosrt_recv_rate_packets_per_sec")
+	require.Contains(t, output, "gosrt_recv_rate_bytes_per_sec")
+	require.Contains(t, output, `socket_id="0xee001234"`)
+}
+
+// TestGetterHelpers verifies the float64 getter helpers work correctly
+func TestGetterHelpers(t *testing.T) {
+	m := newTestConnectionMetrics()
+
+	// Set values using raw atomic
+	m.RecvRatePacketsPerSec.Store(math.Float64bits(1234.5))
+	m.RecvRateBytesPerSec.Store(math.Float64bits(1310720.0)) // 1.25 MB/s
+
+	// Verify getters decode correctly
+	require.InDelta(t, 1234.5, m.GetRecvRatePacketsPerSec(), 0.001)
+	require.InDelta(t, 1310720.0, m.GetRecvRateBytesPerSec(), 0.001)
+
+	// Verify Mbps conversion (1310720 bytes/s * 8 / 1024 / 1024 = 10 Mbps)
+	require.InDelta(t, 10.0, m.GetRecvRateMbps(), 0.001)
+
+	// Test sender getters
+	m.SendRateEstSentBW.Store(math.Float64bits(2621440.0)) // 2.5 MB/s
+	require.InDelta(t, 2621440.0, m.GetSendRateEstSentBW(), 0.001)
+	require.InDelta(t, 20.0, m.GetSendRateMbps(), 0.001) // 20 Mbps
+}
+
 // TestPrometheusRuntimeMetrics verifies Go runtime metrics are included
 func TestPrometheusRuntimeMetrics(t *testing.T) {
 	output := getPrometheusOutput(t)
@@ -345,7 +465,9 @@ func TestPrometheusZeroFiltering(t *testing.T) {
 	t.Logf("Found %d metrics for socket 0x77777777 (zero values filtered)", socketIdCount)
 
 	// Should have much fewer than the ~65 possible metrics because most are zero
-	require.Less(t, socketIdCount, 20, "Should have fewer metrics when most are zero (zero filtering)")
+	// Note: 6 rate metrics are always exported (even when zero) via writeGauge()
+	// plus lock timing metrics, so allow up to 30
+	require.Less(t, socketIdCount, 30, "Should have fewer metrics when most are zero (zero filtering)")
 }
 
 // TestPrometheusCongestionMetrics verifies congestion control metrics are exported

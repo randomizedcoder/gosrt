@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"math"
 	"sync/atomic"
 	"time"
 )
@@ -277,6 +278,89 @@ type ConnectionMetrics struct {
 	PktSentControlErrorSubmit  atomic.Uint64 // Control packet submit errors
 	PktSentDataErrorIoUring    atomic.Uint64 // DATA packet io_uring completion errors
 	PktSentControlErrorIoUring atomic.Uint64 // Control packet io_uring completion errors
+
+	// ========================================================================
+	// Rate Calculation Fields (Phase 1: Lockless Design)
+	// ========================================================================
+	// These replace the embedded `rate struct` in congestion/live/receive.go and send.go
+	// All values use atomic operations for lock-free access.
+	// Float64 values are stored as uint64 using math.Float64bits/Float64frombits.
+
+	// Receiver rate counters - accumulate between rate calculations
+	RecvRatePeriodUs     atomic.Uint64 // Rate calculation period (microseconds), default 1s
+	RecvRateLastUs       atomic.Uint64 // Last rate calculation time (microseconds since epoch)
+	RecvRatePackets      atomic.Uint64 // Packets received in current period
+	RecvRateBytes        atomic.Uint64 // Bytes received in current period
+	RecvRateBytesRetrans atomic.Uint64 // Retransmitted bytes in current period
+
+	// Receiver computed rates - updated atomically during rate calculation
+	// Stored as uint64 using math.Float64bits(), read with math.Float64frombits()
+	RecvRatePacketsPerSec  atomic.Uint64 // Packets per second (float64 bits)
+	RecvRateBytesPerSec    atomic.Uint64 // Bytes per second (float64 bits)
+	RecvRatePktRetransRate atomic.Uint64 // Retransmission rate percentage (float64 bits)
+
+	// Sender rate counters - accumulate between rate calculations
+	SendRatePeriodUs     atomic.Uint64 // Rate calculation period (microseconds), default 1s
+	SendRateLastUs       atomic.Uint64 // Last rate calculation time (microseconds since epoch)
+	SendRateBytes        atomic.Uint64 // Bytes input in current period
+	SendRateBytesSent    atomic.Uint64 // Bytes actually sent in current period
+	SendRateBytesRetrans atomic.Uint64 // Retransmitted bytes in current period
+
+	// Sender computed rates - updated atomically during rate calculation
+	// Stored as uint64 using math.Float64bits(), read with math.Float64frombits()
+	SendRateEstInputBW     atomic.Uint64 // Estimated input bandwidth bytes/sec (float64 bits)
+	SendRateEstSentBW      atomic.Uint64 // Estimated sent bandwidth bytes/sec (float64 bits)
+	SendRatePktRetransRate atomic.Uint64 // Retransmission rate percentage (float64 bits)
+
+	// Light ACK threshold counter - replaces nPackets in receiver
+	// Used to determine when to send a "light" ACK vs full ACK
+	RecvLightACKCounter atomic.Uint64 // Packets since last ACK (for light ACK threshold)
+}
+
+// ============================================================================
+// Rate Metric Getter Helpers (Phase 1: Lockless Design)
+// ============================================================================
+// These encapsulate the math.Float64frombits() conversion for cleaner code.
+// Use these in receiver.Stats(), sender.Stats(), and adaptive backoff.
+
+// GetRecvRatePacketsPerSec returns packets per second as float64
+func (m *ConnectionMetrics) GetRecvRatePacketsPerSec() float64 {
+	return math.Float64frombits(m.RecvRatePacketsPerSec.Load())
+}
+
+// GetRecvRateBytesPerSec returns bytes per second as float64
+func (m *ConnectionMetrics) GetRecvRateBytesPerSec() float64 {
+	return math.Float64frombits(m.RecvRateBytesPerSec.Load())
+}
+
+// GetRecvRateMbps returns receive rate in megabits per second
+func (m *ConnectionMetrics) GetRecvRateMbps() float64 {
+	return m.GetRecvRateBytesPerSec() * 8 / 1024 / 1024
+}
+
+// GetRecvRateRetransPercent returns retransmission percentage
+func (m *ConnectionMetrics) GetRecvRateRetransPercent() float64 {
+	return math.Float64frombits(m.RecvRatePktRetransRate.Load())
+}
+
+// GetSendRateEstInputBW returns estimated input bandwidth in bytes/sec
+func (m *ConnectionMetrics) GetSendRateEstInputBW() float64 {
+	return math.Float64frombits(m.SendRateEstInputBW.Load())
+}
+
+// GetSendRateEstSentBW returns estimated sent bandwidth in bytes/sec
+func (m *ConnectionMetrics) GetSendRateEstSentBW() float64 {
+	return math.Float64frombits(m.SendRateEstSentBW.Load())
+}
+
+// GetSendRateMbps returns sent rate in megabits per second
+func (m *ConnectionMetrics) GetSendRateMbps() float64 {
+	return m.GetSendRateEstSentBW() * 8 / 1024 / 1024
+}
+
+// GetSendRateRetransPercent returns sender retransmission percentage
+func (m *ConnectionMetrics) GetSendRateRetransPercent() float64 {
+	return math.Float64frombits(m.SendRatePktRetransRate.Load())
 }
 
 // LockTimingMetrics tracks lock hold and wait times
