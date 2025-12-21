@@ -1228,18 +1228,29 @@ func VerifyRateMetrics(ts *TestMetricsTimeSeries, config *TestConfig) RateMetric
 	}
 
 	// Check against configured bitrate if available
-	if result.ConfiguredBitrateMbps > 0 {
+	if result.ConfiguredBitrateMbps > 0 && config != nil && config.TestDuration > 0 {
+		// Re-compute rates using TestDuration (active transmission period) instead of
+		// snapshot duration (which includes the quiesce phase where rate is 0).
+		// This fixes rate validation for tests with a quiesce phase.
+		activeSeconds := config.TestDuration.Seconds()
+
 		// Client-generator should be sending at configured rate
-		if clientGenMetrics.AvgSendRateMbps > 0 {
+		if clientGenMetrics.TotalBytesSent > 0 {
+			// Compute rate using active transmission duration
+			activeSendRateMbps := float64(clientGenMetrics.TotalBytesSent*8) / activeSeconds / 1_000_000
+			result.ClientGenSendRateMbps = activeSendRateMbps // Update stored rate
 			checkRate("ClientGenerator", "SendRate vs Configured",
-				result.ConfiguredBitrateMbps, clientGenMetrics.AvgSendRateMbps, configuredThreshold)
+				result.ConfiguredBitrateMbps, activeSendRateMbps, configuredThreshold)
 		}
 
 		// Client should be receiving at approximately configured rate (minus losses)
-		if clientMetrics.AvgRecvRateMbps > 0 {
+		if clientMetrics.TotalBytesRecv > 0 {
+			// Compute rate using active transmission duration
+			activeRecvRateMbps := float64(clientMetrics.TotalBytesRecv*8) / activeSeconds / 1_000_000
+			result.ClientRecvRateMbps = activeRecvRateMbps // Update stored rate
 			// Allow more variance for receive (account for potential losses)
 			checkRate("Client", "RecvRate vs Configured",
-				result.ConfiguredBitrateMbps, clientMetrics.AvgRecvRateMbps, configuredThreshold+0.10)
+				result.ConfiguredBitrateMbps, activeRecvRateMbps, configuredThreshold+0.10)
 		}
 	}
 
