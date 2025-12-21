@@ -247,6 +247,10 @@ type srtConn struct {
 	// Per-connection send buffer pool (eliminates lock contention)
 	sendBufferPool sync.Pool // Isolated pool per connection
 
+	// Reference to listener/dialer's receive buffer pool (Phase 2: zero-copy)
+	// Used by receiver.releasePacketFully() to return buffers after packet delivery
+	recvBufferPool *sync.Pool
+
 	// Completion tracking - minimal structure for performance
 	sendCompletions map[uint64]*sendCompletionInfo // Maps request ID to completion info
 	sendCompLock    sync.RWMutex                   // Protects sendCompletions map
@@ -290,6 +294,7 @@ type srtConnConfig struct {
 	parentCtx                   context.Context            // Parent context (from listener/dialer)
 	parentWg                    *sync.WaitGroup            // Parent waitgroup (from listener/dialer)
 	metrics                     *metrics.ConnectionMetrics // Pre-created metrics (required)
+	recvBufferPool              *sync.Pool                 // Receive buffer pool (Phase 2: zero-copy)
 }
 
 // createConnectionMetrics creates a ConnectionMetrics instance for a connection.
@@ -347,7 +352,8 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		sendFilter:                  config.sendFilter, // Optional test filter
 		onShutdown:                  config.onShutdown,
 		logger:                      config.logger,
-		metrics:                     config.metrics, // Pre-created - no race!
+		metrics:                     config.metrics,        // Pre-created - no race!
+		recvBufferPool:              config.recvBufferPool, // Phase 2: zero-copy
 	}
 
 	if c.onShutdown == nil {
@@ -413,6 +419,9 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		BTreeDegree:            c.config.BTreeDegree,
 		LockTimingMetrics:      c.metrics.ReceiverLockTiming,
 		ConnectionMetrics:      c.metrics,
+
+		// Buffer pool for zero-copy support (Phase 2: Lockless Design)
+		BufferPool: c.recvBufferPool,
 
 		// NAK btree configuration - enables TSBPD-based "too recent" protection for io_uring
 		UseNakBtree:            c.config.UseNakBtree,

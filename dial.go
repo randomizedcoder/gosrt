@@ -69,7 +69,6 @@ type dialer struct {
 	// io_uring receive path (Linux only)
 	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
 	recvRingFd      int                            // UDP socket file descriptor
-	recvBufferPool  sync.Pool                      // Pool of []byte buffers (fixed size: config.MSS)
 	recvCompletions map[uint64]*recvCompletionInfo // Maps request ID to completion info
 	recvCompLock    sync.Mutex                     // Protects recvCompletions map
 	recvRequestID   atomic.Uint64                  // Atomic counter for generating unique request IDs
@@ -169,6 +168,9 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 
 	dl.start = time.Now()
 
+	// Phase 2: Zero-copy uses the shared globalRecvBufferPool (see buffers.go)
+	// This single pool is shared across ALL listeners and dialers for maximum reuse
+
 	// Initialize io_uring receive ring (if enabled)
 	// This is a no-op on non-Linux platforms
 	ioUringInitialized := false
@@ -202,8 +204,6 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 				dl.log("dial", func() string { return "ReadFrom goroutine exited" })
 			}()
 
-			buffer := make([]byte, MAX_MSS_SIZE) // MTU size
-
 			for {
 				// Check for context cancellation first
 				select {
@@ -218,9 +218,15 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 					return
 				}
 
+				// Phase 2: Zero-copy - get buffer from shared global pool
+				bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+
 				pc.SetReadDeadline(time.Now().Add(3 * time.Second))
-				n, _, err := pc.ReadFrom(buffer)
+				n, _, err := pc.ReadFrom(*bufferPtr)
 				if err != nil {
+					// Return buffer to pool on read error
+					GetRecvBufferPool().Put(bufferPtr)
+
 					if errors.Is(err, os.ErrDeadlineExceeded) {
 						continue
 					}
@@ -242,25 +248,30 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 					return
 				}
 
-				p, err := packet.NewPacketFromData(dl.remoteAddr, buffer[:n])
-				if err != nil {
-					// Parse error - can't track metrics (no connection identified yet)
+				// Phase 2: Zero-copy - unmarshal directly referencing the pooled buffer
+				p := packet.NewPacket(dl.remoteAddr)
+				if err := p.UnmarshalZeroCopy(bufferPtr, n, dl.remoteAddr); err != nil {
+					// Parse error - return buffer to pool via DecommissionWithBuffer
+					p.DecommissionWithBuffer(GetRecvBufferPool())
 					continue
 				}
+
+				// NOTE: Buffer is NOT returned to pool here! It's referenced by the packet.
+				// Buffer will be returned by receiver.releasePacketFully() after delivery.
 
 				// non-blocking
 				select {
 				case <-dl.ctx.Done():
-					// Context cancelled - decommission packet and exit
-					p.Decommission()
+					// Context cancelled - return buffer and decommission packet
+					p.DecommissionWithBuffer(GetRecvBufferPool())
 					dl.doneChan <- ErrClientClosed
 					return
 				case dl.rcvQueue <- p:
 					// Success - packet queued (metrics tracked in reader())
 				default:
 					dl.log("dial", func() string { return "receive queue is full" })
-					// Queue full - can't track metrics (no connection identified yet)
-					p.Decommission()
+					// Queue full - return buffer and decommission packet
+					p.DecommissionWithBuffer(GetRecvBufferPool())
 				}
 			}
 		}()
@@ -697,7 +708,8 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			socketFd:                    socketFd,
 			parentCtx:                   dl.ctx,
 			parentWg:                    &dl.connWg,
-			metrics:                     connMetrics, // Pre-created - no race!
+			metrics:                     connMetrics,        // Pre-created - no race!
+			recvBufferPool:              GetRecvBufferPool(), // Phase 2: shared global pool
 		})
 
 		dl.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })

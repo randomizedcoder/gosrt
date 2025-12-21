@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"io"
+	"net"
+	"sync"
 	"testing"
 
 	"github.com/datarhei/gosrt/packet"
@@ -234,6 +236,15 @@ func (m *mockPacket) UnmarshalCIF(cif packet.CIF) error {
 	return nil
 }
 func (m *mockPacket) Decommission() {}
+
+// Phase 2: Zero-copy interface methods
+func (m *mockPacket) DecommissionWithBuffer(bufferPool *sync.Pool) {}
+func (m *mockPacket) HasRecvBuffer() bool                          { return false }
+func (m *mockPacket) GetRecvBuffer() *[]byte                       { return nil }
+func (m *mockPacket) ClearRecvBuffer()                             {}
+func (m *mockPacket) UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error {
+	return nil
+}
 
 // createMockControlPacket creates a mock control packet for testing
 func createMockControlPacket(ctrlType packet.CtrlType) packet.Packet {

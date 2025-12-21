@@ -157,7 +157,6 @@ type listener struct {
 	// io_uring receive path (Linux only)
 	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
 	recvRingFd      int                            // UDP socket file descriptor
-	recvBufferPool  sync.Pool                      // Pool of []byte buffers (fixed size: config.MSS)
 	recvCompletions map[uint64]*recvCompletionInfo // Maps request ID to completion info
 	recvCompLock    sync.Mutex                     // Protects recvCompletions map
 	recvRequestID   atomic.Uint64                  // Atomic counter for generating unique request IDs
@@ -241,6 +240,9 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 
 	ln.start = time.Now()
 
+	// Phase 2: Zero-copy uses the shared globalRecvBufferPool (see buffers.go)
+	// This single pool is shared across ALL listeners and dialers for maximum reuse
+
 	// Initialize io_uring receive ring (if enabled)
 	// This is a no-op on non-Linux platforms
 	ioUringInitialized := false
@@ -264,8 +266,6 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 				ln.log("listen", func() string { return "ReadFrom goroutine exited" })
 			}()
 
-			buffer := make([]byte, config.MSS) // MTU size
-
 			for {
 				// Check for context cancellation first
 				select {
@@ -280,9 +280,15 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 					return
 				}
 
+				// Phase 2: Zero-copy - get buffer from shared global pool
+				bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+
 				ln.pc.SetReadDeadline(time.Now().Add(3 * time.Second))
-				n, addr, err := ln.pc.ReadFrom(buffer)
+				n, addr, err := ln.pc.ReadFrom(*bufferPtr)
 				if err != nil {
+					// Return buffer to pool on read error
+					GetRecvBufferPool().Put(bufferPtr)
+
 					if errors.Is(err, os.ErrDeadlineExceeded) {
 						continue
 					}
@@ -304,25 +310,30 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 					return
 				}
 
-				p, err := packet.NewPacketFromData(addr, buffer[:n])
-				if err != nil {
-					// Parse error - can't track metrics (no connection identified yet)
+				// Phase 2: Zero-copy - unmarshal directly referencing the pooled buffer
+				p := packet.NewPacket(addr)
+				if err := p.UnmarshalZeroCopy(bufferPtr, n, addr); err != nil {
+					// Parse error - return buffer to pool via DecommissionWithBuffer
+					p.DecommissionWithBuffer(GetRecvBufferPool())
 					continue
 				}
+
+				// NOTE: Buffer is NOT returned to pool here! It's referenced by the packet.
+				// Buffer will be returned by receiver.releasePacketFully() after delivery.
 
 				// non-blocking
 				select {
 				case <-ln.ctx.Done():
-					// Context cancelled - decommission packet and exit
-					p.Decommission()
+					// Context cancelled - return buffer and decommission packet
+					p.DecommissionWithBuffer(GetRecvBufferPool())
 					ln.markDone(ErrListenerClosed)
 					return
 				case ln.rcvQueue <- p:
 					// Success - packet queued (metrics tracked in reader())
 				default:
 					ln.log("listen", func() string { return "receive queue is full" })
-					// Queue full - can't track metrics (no connection identified yet)
-					p.Decommission()
+					// Queue full - return buffer and decommission packet
+					p.DecommissionWithBuffer(GetRecvBufferPool())
 				}
 			}
 		}()

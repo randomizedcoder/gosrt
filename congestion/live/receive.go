@@ -37,6 +37,10 @@ type ReceiveConfig struct {
 	LockTimingMetrics      *metrics.LockTimingMetrics // Optional lock timing metrics for performance monitoring
 	ConnectionMetrics      *metrics.ConnectionMetrics // For atomic statistics updates
 
+	// Buffer pool for zero-copy support (Phase 2: Lockless Design)
+	// When provided, receiver.releasePacketFully() returns buffers to this pool
+	BufferPool *sync.Pool
+
 	// NAK btree configuration (Phase 4)
 	UseNakBtree            bool    // Enable NAK btree for improved out-of-order handling
 	SuppressImmediateNak   bool    // Suppress immediate NAK, let periodic NAK handle gaps
@@ -61,6 +65,10 @@ type receiver struct {
 	lockTiming                  *metrics.LockTimingMetrics // Optional lock timing metrics
 	metrics                     *metrics.ConnectionMetrics // For atomic statistics updates
 
+	// Buffer pool for zero-copy support (Phase 2: Lockless Design)
+	// Used by releasePacketFully() to return receive buffers to the pool
+	bufferPool *sync.Pool
+
 	// nPackets removed - now using metrics.RecvLightACKCounter (Phase 1: Lockless)
 	// rate struct removed - now using metrics.ConnectionMetrics atomics (Phase 1: Lockless)
 
@@ -70,8 +78,10 @@ type receiver struct {
 	lastPeriodicACK uint64
 	lastPeriodicNAK uint64
 
-	avgPayloadSize  float64 // bytes
-	avgLinkCapacity float64 // packets per second
+	// Running averages (atomic uint64 with Float64bits/Float64frombits)
+	// Using atomic operations for lock-free access per gosrt_lockless_design.md Section 8.3
+	avgPayloadSizeBits  atomic.Uint64 // float64 via math.Float64bits/Float64frombits
+	avgLinkCapacityBits atomic.Uint64 // float64 via math.Float64bits/Float64frombits
 
 	probeTime    time.Time
 	probeNextSeq circular.Number
@@ -131,11 +141,12 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		packetStore:                 store,
 		lockTiming:                  config.LockTimingMetrics,
 		metrics:                     config.ConnectionMetrics,
+		bufferPool:                  config.BufferPool, // Phase 2: zero-copy support
 
 		periodicACKInterval: config.PeriodicACKInterval,
 		periodicNAKInterval: config.PeriodicNAKInterval,
 
-		avgPayloadSize: 1456, //  5.1.2. SRT's Default LiveCC Algorithm
+		// avgPayloadSize initialized via atomic below
 
 		sendACK: config.OnSendACK,
 		sendNAK: config.OnSendNAK,
@@ -183,15 +194,34 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		r.metrics.RecvRateLastUs.Store(0)
 	}
 
+	// Initialize running averages with atomic operations (Phase 2: avgPayloadSize atomic)
+	// 5.1.2. SRT's Default LiveCC Algorithm - default 1456 bytes
+	r.avgPayloadSizeBits.Store(math.Float64bits(1456))
+	// avgLinkCapacity starts at 0
+
 	return r
 }
 
+// releasePacketFully returns the packet's buffer to the pool, then decommissions the packet.
+// This is the Phase 2 (Lockless Design) buffer lifecycle abstraction.
+//
+// For zero-copy path: zeros the buffer, returns to bufferPool, clears recvBuffer, decommissions packet
+// For legacy path: just decommissions (recvBuffer will be nil)
+//
+// Call this instead of p.Decommission() when the packet came from a zero-copy unmarshal.
+func (r *receiver) releasePacketFully(p packet.Packet) {
+	// DecommissionWithBuffer safely handles both zero-copy and legacy paths.
+	// It checks HasRecvBuffer() internally and only returns buffer if present.
+	p.DecommissionWithBuffer(r.bufferPool)
+}
+
 func (r *receiver) Stats() congestion.ReceiveStats {
-	// Read lock only for avgPayloadSize/avgLinkCapacity (not rate - now lock-free)
-	r.lock.RLock()
-	bytePayload := uint64(r.avgPayloadSize)
-	mbpsLinkCapacity := r.avgLinkCapacity * packet.MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
-	r.lock.RUnlock()
+	// Lock-free reads of running averages via atomic operations
+	avgPayloadSize := math.Float64frombits(r.avgPayloadSizeBits.Load())
+	avgLinkCapacity := math.Float64frombits(r.avgLinkCapacityBits.Load())
+
+	bytePayload := uint64(avgPayloadSize)
+	mbpsLinkCapacity := avgLinkCapacity * packet.MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
 
 	// Phase 1: Lockless - Get rates from ConnectionMetrics (lock-free)
 	m := r.metrics
@@ -237,10 +267,8 @@ func (r *receiver) PacketRate() (pps, bps, capacity float64) {
 	pps = m.GetRecvRatePacketsPerSec()
 	bps = m.GetRecvRateBytesPerSec()
 
-	// Still need lock for avgLinkCapacity (non-atomic field)
-	r.lock.RLock()
-	capacity = r.avgLinkCapacity
-	r.lock.RUnlock()
+	// Lock-free read of avgLinkCapacity via atomic operation
+	capacity = math.Float64frombits(r.avgLinkCapacityBits.Load())
 
 	return
 }
@@ -308,8 +336,11 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 		m.RecvRateBytesRetrans.Add(pktLen)  // Replaces r.rate.bytesRetrans += pktLen
 	}
 
-	// 5.1.2. SRT's Default LiveCC Algorithm
-	r.avgPayloadSize = 0.875*r.avgPayloadSize + 0.125*float64(pktLen)
+	// 5.1.2. SRT's Default LiveCC Algorithm - Exponential Moving Average
+	// Using atomic load/store (no CAS loop needed - EMA tolerates rare lost updates)
+	oldAvg := math.Float64frombits(r.avgPayloadSizeBits.Load())
+	newAvg := 0.875*oldAvg + 0.125*float64(pktLen)
+	r.avgPayloadSizeBits.Store(math.Float64bits(newAvg))
 
 	// Check if too old (already delivered)
 	if pkt.Header().PacketSequenceNumber.Lte(r.lastDeliveredSequenceNumber) {
@@ -382,8 +413,10 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 				// The time between packets scaled to a fully loaded packet
 				diff := float64(time.Since(r.probeTime).Microseconds()) * (packet.MAX_PAYLOAD_SIZE / float64(pkt.Len()))
 				if diff != 0 {
-					// Here we're doing an average of the measurements.
-					r.avgLinkCapacity = 0.875*r.avgLinkCapacity + 0.125*1_000_000/diff
+					// Here we're doing an average of the measurements (atomic EMA update)
+					oldCap := math.Float64frombits(r.avgLinkCapacityBits.Load())
+					newCap := 0.875*oldCap + 0.125*1_000_000/diff
+					r.avgLinkCapacityBits.Store(math.Float64bits(newCap))
 				}
 			} else {
 				r.probeTime = time.Time{}
@@ -414,8 +447,11 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 		m.RecvRateBytesRetrans.Add(pktLen)  // Replaces r.rate.bytesRetrans += pktLen
 	}
 
-	//  5.1.2. SRT's Default LiveCC Algorithm
-	r.avgPayloadSize = 0.875*r.avgPayloadSize + 0.125*float64(pktLen)
+	// 5.1.2. SRT's Default LiveCC Algorithm - Exponential Moving Average
+	// Using atomic load/store (no CAS loop needed - EMA tolerates rare lost updates)
+	oldAvg := math.Float64frombits(r.avgPayloadSizeBits.Load())
+	newAvg := 0.875*oldAvg + 0.125*float64(pktLen)
+	r.avgPayloadSizeBits.Store(math.Float64bits(newAvg))
 
 	if pkt.Header().PacketSequenceNumber.Lte(r.lastDeliveredSequenceNumber) {
 		// Too old, because up until r.lastDeliveredSequenceNumber, we already delivered
@@ -472,7 +508,8 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 
 		// Update loss counters with the correct packet count
 		m.CongestionRecvPktLoss.Add(missingPkts)
-		m.CongestionRecvByteLoss.Add(missingPkts * uint64(r.avgPayloadSize))
+		avgPayloadSize := uint64(math.Float64frombits(r.avgPayloadSizeBits.Load()))
+		m.CongestionRecvByteLoss.Add(missingPkts * avgPayloadSize)
 
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
 	}
@@ -516,8 +553,24 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	// Get first packet - needed for buffer time calculation AND scan start validation
 	minPkt := r.packetStore.Min()
 	if minPkt == nil {
+		// No packets in btree - but we should still send periodic ACK for keepalive.
+		// This confirms to the sender what we've already received.
+		// Skip to write phase with current lastACKSequenceNumber.
 		r.lock.RUnlock()
-		return // No packets to scan
+
+		// Send ACK with last known sequence number (no new packets to acknowledge)
+		if r.lockTiming != nil {
+			var okResult bool
+			var seqResult circular.Number
+			var liteResult bool
+			metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
+				okResult, seqResult, liteResult = r.periodicACKWriteLocked(now, needLiteACK, ackSequenceNumber, minPktTsbpdTime, maxPktTsbpdTime, circular.Number{})
+			})
+			return okResult, seqResult, liteResult
+		}
+		r.lock.Lock()
+		defer r.lock.Unlock()
+		return r.periodicACKWriteLocked(now, needLiteACK, ackSequenceNumber, minPktTsbpdTime, maxPktTsbpdTime, circular.Number{})
 	}
 	minH := minPkt.Header()
 	minPktTsbpdTime = minH.PktTsbpdTime
@@ -542,19 +595,21 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 
 	// Case 3: High water mark points to expired packet
 	// Tick() released packets, minPkt advanced past our remembered position
+	// NOTE: This only updates scanStartPoint (where to START iterating), NOT ackSequenceNumber.
+	// We must still verify there's no gap between lastACKSequenceNumber and minPkt.
 	if minPktSeq.Gt(scanStartPoint) {
 		scanStartPoint = minPktSeq.Dec() // Start just before minPkt to include it
 	}
 
-	// Case 4: Valid - use high water mark
-	// We know packets from lastACKSequenceNumber to scanStartPoint are contiguous
-	if scanStartPoint.Gt(ackSequenceNumber) {
-		ackSequenceNumber = scanStartPoint
-	}
+	// NOTE: Removed buggy "Case 4" logic that advanced ackSequenceNumber based on scanStartPoint.
+	// The scanStartPoint only controls WHERE we start iterating (for efficiency).
+	// The ackSequenceNumber must only advance when we verify actual packet contiguity.
+	// See: lockless_phase2_implementation.md "ACK Scan High Water Mark Bug" section.
 
 	// Stack counter for skipped packets - batched update after loop (avoids atomic ops under lock)
 	var totalSkippedPkts uint64
 	var lastContiguousSeq circular.Number // Track highest verified contiguous sequence
+	firstPacketChecked := false           // Track if we've checked the first packet
 
 	// Find the sequence number up until we have all in a row.
 	// Where the first gap is (or at the end of the list) is where we can ACK to.
@@ -566,6 +621,20 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 		// Skip packets at or before scan start point (handles btree edge case)
 		if h.PacketSequenceNumber.Lte(scanStartPoint) {
 			return true // Continue
+		}
+
+		// CRITICAL FIX: Check for gap between lastACKSequenceNumber and first packet.
+		// If scanStartPoint was advanced due to packet delivery (Case 3), we must verify
+		// that there's no gap between the last ACKed packet and the first remaining packet.
+		// Without this check, we'd incorrectly ACK past lost packets.
+		if !firstPacketChecked {
+			firstPacketChecked = true
+			// If the first packet isn't contiguous with ackSequenceNumber, there's a gap
+			// (unless this packet's TSBPD time has passed, in which case we skip it)
+			if h.PktTsbpdTime > now && !h.PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
+				// Gap detected: can't advance ACK past lastACKSequenceNumber
+				return false // Stop iteration
+			}
 		}
 
 		// If there are packets that should have been delivered by now, move forward.
@@ -602,10 +671,12 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	r.lock.RUnlock()
 
 	// Update metrics ONCE after lock released (batched from stack counters)
+	// avgPayloadSize is now atomic - no race condition, can read anytime
 	m := r.metrics
 	if m != nil && totalSkippedPkts > 0 {
+		avgPayloadSize := uint64(math.Float64frombits(r.avgPayloadSizeBits.Load()))
 		m.CongestionRecvPktSkippedTSBPD.Add(totalSkippedPkts)
-		m.CongestionRecvByteSkippedTSBPD.Add(totalSkippedPkts * uint64(r.avgPayloadSize))
+		m.CongestionRecvByteSkippedTSBPD.Add(totalSkippedPkts * avgPayloadSize)
 	}
 
 	// Phase 2: Write updates with write lock (brief - only for field updates)

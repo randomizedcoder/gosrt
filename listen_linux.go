@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -133,14 +132,8 @@ func (ln *listener) initializeIoUringRecv() error {
 
 	ln.recvRing = ring // Store as interface{} for conditional compilation
 
-	// Initialize receive buffer pool (fixed size MSS)
-	// Store *[]byte to avoid allocations when putting back (staticcheck SA6002)
-	ln.recvBufferPool = sync.Pool{
-		New: func() interface{} {
-			buf := make([]byte, ln.config.MSS)
-			return &buf
-		},
-	}
+	// Note: Using shared globalRecvBufferPool (see buffers.go)
+	// Both io_uring and standard paths share the same global pool
 
 	// Initialize completion tracking
 	ln.recvCompletions = make(map[uint64]*recvCompletionInfo)
@@ -201,7 +194,7 @@ func (ln *listener) cleanupIoUringRecv() {
 	// Clean up completion map and return all buffers to pool
 	ln.recvCompLock.Lock()
 	for _, compInfo := range ln.recvCompletions {
-		ln.recvBufferPool.Put(compInfo.buffer)
+		GetRecvBufferPool().Put(compInfo.buffer)
 	}
 	ln.recvCompletions = nil
 	ln.recvCompLock.Unlock()
@@ -222,7 +215,7 @@ func (ln *listener) submitRecvRequest() {
 	}
 
 	// Get buffer from pool (fixed size MSS, no setup needed)
-	bufferPtr := ln.recvBufferPool.Get().(*[]byte)
+	bufferPtr := GetRecvBufferPool().Get().(*[]byte)
 	buffer := *bufferPtr
 	// No Reset() needed - kernel will overwrite the buffer
 
@@ -278,7 +271,7 @@ func (ln *listener) submitRecvRequest() {
 		delete(ln.recvCompletions, requestID)
 		ln.recvCompLock.Unlock()
 
-		ln.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 
 		ln.log("listen:recv:error", func() string {
 			return "io_uring ring full after retries"
@@ -320,7 +313,7 @@ func (ln *listener) submitRecvRequest() {
 		delete(ln.recvCompletions, requestID)
 		ln.recvCompLock.Unlock()
 
-		ln.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 
 		ln.log("listen:recv:error", func() string {
 			return fmt.Sprintf("failed to submit receive request: %v", err)
@@ -374,7 +367,7 @@ func (ln *listener) lookupAndRemoveRecvCompletion(cqe *giouring.CompletionQueueE
 // Always resubmits to maintain constant pending count (caller handles batching)
 func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.CompletionQueueEvent, compInfo *recvCompletionInfo) {
 	bufferPtr := compInfo.buffer
-	buffer := *bufferPtr
+	// Note: buffer variable removed - Phase 2 uses bufferPtr directly for zero-copy
 
 	// Check for receive errors
 	if cqe.Res < 0 {
@@ -384,7 +377,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		})
 		// Note: Can't track metrics here - no connection identified yet
 		ring.CQESeen(cqe)
-		ln.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
 	}
 
@@ -394,7 +387,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		// Empty datagram - return buffer and resubmit
 		// Note: Can't track metrics here - no connection identified yet
 		ring.CQESeen(cqe)
-		ln.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
 	}
 
@@ -407,7 +400,7 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		})
 		// Note: Can't track metrics here - no connection identified yet
 		ring.CQESeen(cqe)
-		ln.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
 	}
 
@@ -420,30 +413,34 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		})
 		// Note: Can't track metrics here - no connection identified yet
 		ring.CQESeen(cqe)
-		ln.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
 	}
 
-	// Use buffer directly (kernel wrote directly to it via iovec)
-	bufferSlice := buffer[:bytesReceived]
+	// Phase 2: Zero-copy - buffer lifetime extends until packet delivery
+	// The packet will reference the buffer directly via recvBuffer field.
+	// Buffer is returned to pool by receiver.releasePacketFully() after delivery.
 
-	// Deserialize packet (NewPacketFromData copies the data into packet structure)
-	p, err := packet.NewPacketFromData(addr, bufferSlice)
+	// Get packet from pool and unmarshal with zero-copy
+	p := packet.NewPacket(addr)
 
-	if err != nil {
-		// Deserialization error - log and resubmit
+	// UnmarshalZeroCopy stores buffer reference FIRST (before validation)
+	// This ensures DecommissionWithBuffer can always return the buffer
+	if err := p.UnmarshalZeroCopy(bufferPtr, bytesReceived, addr); err != nil {
+		// Deserialization error - log, cleanup, and resubmit
 		ln.log("listen:recv:parse:error", func() string {
 			return fmt.Sprintf("failed to parse packet: %v", err)
 		})
 		// Note: Can't track metrics here - no connection identified yet (parse failed)
+		// DecommissionWithBuffer returns buffer to pool and decommissions packet
+		p.DecommissionWithBuffer(GetRecvBufferPool())
 		ring.CQESeen(cqe)
-		ln.recvBufferPool.Put(bufferPtr)
 		return // Always resubmit to maintain constant pending count
 	}
 
-	// After successful deserialization, we can return buffer to pool immediately
-	// (NewPacketFromData has copied the data, so buffer is no longer needed)
-	ln.recvBufferPool.Put(bufferPtr)
+	// NOTE: Buffer is NOT returned to pool here! It's referenced by the packet.
+	// The buffer will be returned to pool by receiver.releasePacketFully() after
+	// packet delivery (Phase 2: zero-copy buffer lifetime extension).
 
 	// Route directly (bypass channels) - Channel Bypass Optimization
 	// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
@@ -611,7 +608,7 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 
 	for i := 0; i < count; i++ {
 		// Get buffer from pool
-		bufferPtr := ln.recvBufferPool.Get().(*[]byte)
+		bufferPtr := GetRecvBufferPool().Get().(*[]byte)
 		buffer := *bufferPtr
 
 		// Setup iovec using buffer directly
@@ -661,7 +658,7 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 			ln.recvCompLock.Lock()
 			delete(ln.recvCompletions, requestID)
 			ln.recvCompLock.Unlock()
-			ln.recvBufferPool.Put(bufferPtr)
+			GetRecvBufferPool().Put(bufferPtr)
 			break
 		}
 
@@ -683,7 +680,7 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 			ln.recvCompLock.Lock()
 			for i, requestID := range requestIDs {
 				delete(ln.recvCompletions, requestID)
-				ln.recvBufferPool.Put(compInfos[i].buffer)
+				GetRecvBufferPool().Put(compInfos[i].buffer)
 			}
 			ln.recvCompLock.Unlock()
 			ln.log("listen:recv:error", func() string {
@@ -816,7 +813,7 @@ func (ln *listener) drainRecvCompletions() {
 			ln.recvCompLock.Unlock()
 
 			// Cleanup (no reset needed - kernel overwrites on next use)
-			ln.recvBufferPool.Put(compInfo.buffer)
+			GetRecvBufferPool().Put(compInfo.buffer)
 
 			ring.CQESeen(cqe)
 		}

@@ -6,7 +6,6 @@ package srt
 import (
 	"context"
 	"fmt"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -49,14 +48,8 @@ func (dl *dialer) initializeIoUringRecv() error {
 
 	dl.recvRing = ring // Store as interface{} for conditional compilation
 
-	// Initialize receive buffer pool (fixed size MSS)
-	// Store *[]byte to avoid allocations when putting back (staticcheck SA6002)
-	dl.recvBufferPool = sync.Pool{
-		New: func() interface{} {
-			buf := make([]byte, dl.config.MSS)
-			return &buf
-		},
-	}
+	// Note: Using shared globalRecvBufferPool (see buffers.go)
+	// Both io_uring and standard paths share the same global pool
 
 	// Initialize completion tracking
 	dl.recvCompletions = make(map[uint64]*recvCompletionInfo)
@@ -107,7 +100,7 @@ func (dl *dialer) cleanupIoUringRecv() {
 	// Clean up completion map and return all buffers to pool
 	dl.recvCompLock.Lock()
 	for _, compInfo := range dl.recvCompletions {
-		dl.recvBufferPool.Put(compInfo.buffer)
+		GetRecvBufferPool().Put(compInfo.buffer)
 	}
 	dl.recvCompletions = nil
 	dl.recvCompLock.Unlock()
@@ -127,7 +120,7 @@ func (dl *dialer) submitRecvRequest() {
 	}
 
 	// Get buffer from pool (fixed size MSS, no setup needed)
-	bufferPtr := dl.recvBufferPool.Get().(*[]byte)
+	bufferPtr := GetRecvBufferPool().Get().(*[]byte)
 	buffer := *bufferPtr
 
 	// Setup iovec using buffer directly
@@ -178,7 +171,7 @@ func (dl *dialer) submitRecvRequest() {
 		dl.recvCompLock.Lock()
 		delete(dl.recvCompletions, requestID)
 		dl.recvCompLock.Unlock()
-		dl.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 		return
 	}
 
@@ -208,7 +201,7 @@ func (dl *dialer) submitRecvRequest() {
 		dl.recvCompLock.Lock()
 		delete(dl.recvCompletions, requestID)
 		dl.recvCompLock.Unlock()
-		dl.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 		return
 	}
 }
@@ -249,13 +242,13 @@ func (dl *dialer) lookupAndRemoveRecvCompletion(cqe *giouring.CompletionQueueEve
 // processRecvCompletion processes a single completion
 func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.CompletionQueueEvent, compInfo *recvCompletionInfo) {
 	bufferPtr := compInfo.buffer
-	buffer := *bufferPtr
+	// Note: buffer variable removed - Phase 2 uses bufferPtr directly for zero-copy
 
 	// Check for receive errors
 	if cqe.Res < 0 {
 		// Dialer doesn't have log method, skip logging
 		ring.CQESeen(cqe)
-		dl.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 		return
 	}
 
@@ -263,7 +256,7 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 	bytesReceived := int(cqe.Res)
 	if bytesReceived == 0 {
 		ring.CQESeen(cqe)
-		dl.recvBufferPool.Put(bufferPtr)
+		GetRecvBufferPool().Put(bufferPtr)
 		return
 	}
 
@@ -275,30 +268,31 @@ func (dl *dialer) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Compl
 			// RSA is nil - this shouldn't happen, but handle gracefully
 			// For dialer, we can continue without address if remoteAddr is set
 			ring.CQESeen(cqe)
+			GetRecvBufferPool().Put(bufferPtr) // Return buffer since packet won't be created
 			return
 		}
 		addr = extractAddrFromRSA(compInfo.rsa)
 		if addr == nil {
 			// Failed to extract address - can't process packet without address
 			ring.CQESeen(cqe)
+			GetRecvBufferPool().Put(bufferPtr) // Return buffer since packet won't be created
 			return
 		}
 	}
 
-	// Use buffer directly
-	bufferSlice := buffer[:bytesReceived]
+	// Phase 2: Zero-copy - buffer lifetime extends until packet delivery
+	p := packet.NewPacket(addr)
 
-	// Deserialize packet
-	p, err := packet.NewPacketFromData(addr, bufferSlice)
-
-	// Return buffer to pool
-	dl.recvBufferPool.Put(bufferPtr)
-
-	if err != nil {
-		// Deserialization error - skip logging (no log method)
+	// UnmarshalZeroCopy stores buffer reference FIRST (before validation)
+	if err := p.UnmarshalZeroCopy(bufferPtr, bytesReceived, addr); err != nil {
+		// Deserialization error - return buffer to pool and decommission packet
+		p.DecommissionWithBuffer(GetRecvBufferPool())
 		ring.CQESeen(cqe)
 		return
 	}
+
+	// NOTE: Buffer is NOT returned to pool here! It's referenced by the packet.
+	// Buffer will be returned by receiver.releasePacketFully() after delivery.
 
 	// Route directly (bypass channels) - Channel Bypass Optimization
 	// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
@@ -414,7 +408,7 @@ func (dl *dialer) submitRecvRequestBatch(count int) {
 	var requestIDs []uint64
 
 	for i := 0; i < count; i++ {
-		bufferPtr := dl.recvBufferPool.Get().(*[]byte)
+		bufferPtr := GetRecvBufferPool().Get().(*[]byte)
 		buffer := *bufferPtr
 
 		var iovec syscall.Iovec
@@ -457,7 +451,7 @@ func (dl *dialer) submitRecvRequestBatch(count int) {
 			dl.recvCompLock.Lock()
 			delete(dl.recvCompletions, requestID)
 			dl.recvCompLock.Unlock()
-			dl.recvBufferPool.Put(bufferPtr)
+			GetRecvBufferPool().Put(bufferPtr)
 			break
 		}
 
@@ -476,7 +470,7 @@ func (dl *dialer) submitRecvRequestBatch(count int) {
 			dl.recvCompLock.Lock()
 			for i, requestID := range requestIDs {
 				delete(dl.recvCompletions, requestID)
-				dl.recvBufferPool.Put(compInfos[i].buffer)
+				GetRecvBufferPool().Put(compInfos[i].buffer)
 			}
 			dl.recvCompLock.Unlock()
 		}
@@ -572,7 +566,7 @@ func (dl *dialer) drainRecvCompletions() {
 			delete(dl.recvCompletions, requestID)
 			dl.recvCompLock.Unlock()
 
-			dl.recvBufferPool.Put(compInfo.buffer)
+			GetRecvBufferPool().Put(compInfo.buffer)
 			ring.CQESeen(cqe)
 		}
 	}

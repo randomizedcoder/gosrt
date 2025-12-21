@@ -755,3 +755,551 @@ func BenchmarkBufferpool(b *testing.B) {
 		pool.Put(p)
 	}
 }
+
+// ========== Zero-Copy Tests (Phase 2: Lockless Design) ==========
+
+const (
+	// MPEG-TS packet size (ISO/IEC 13818-1 standard)
+	MpegTsPacketSize = 188
+
+	// Number of MPEG-TS packets typically packed into one SRT payload
+	MpegTsPacketsPerPayload = 7
+
+	// Realistic payload size: 188 * 7 = 1316 bytes
+	RealisticPayloadSize = MpegTsPacketSize * MpegTsPacketsPerPayload
+)
+
+// createTestDataPacket creates a valid data packet buffer with the given sequence and payload size
+func createTestDataPacket(seq uint32, payloadSize int) []byte {
+	buf := make([]byte, HeaderSize+payloadSize)
+	// Data packet: bit 15 = 0
+	buf[0] = byte(seq >> 24)
+	buf[1] = byte(seq >> 16)
+	buf[2] = byte(seq >> 8)
+	buf[3] = byte(seq)
+	// Position flag, order flag, encryption, retransmit, message number
+	buf[4] = 0xC0 // Single packet, no order, no encryption
+	buf[5] = 0x00
+	buf[6] = 0x00
+	buf[7] = 0x01 // Message number = 1
+	// Timestamp
+	buf[8] = 0x00
+	buf[9] = 0x01
+	buf[10] = 0x00
+	buf[11] = 0x00
+	// Socket ID
+	buf[12] = 0xAB
+	buf[13] = 0xCD
+	buf[14] = 0x12
+	buf[15] = 0x34
+	// Fill payload with pattern
+	for i := 0; i < payloadSize; i++ {
+		buf[HeaderSize+i] = byte(i % 256)
+	}
+	return buf
+}
+
+// createTestControlPacket creates a valid control packet buffer
+func createTestControlPacket(ctrlType CtrlType) []byte {
+	buf := make([]byte, HeaderSize)
+	// Control packet: bit 15 = 1
+	typeVal := uint16(ctrlType) | 0x8000
+	buf[0] = byte(typeVal >> 8)
+	buf[1] = byte(typeVal)
+	buf[2] = 0x00 // SubType high
+	buf[3] = 0x00 // SubType low
+	buf[4] = 0x00 // TypeSpecific
+	buf[5] = 0x00
+	buf[6] = 0x00
+	buf[7] = 0x00
+	// Timestamp
+	buf[8] = 0x00
+	buf[9] = 0x02
+	buf[10] = 0x00
+	buf[11] = 0x00
+	// Socket ID
+	buf[12] = 0xFE
+	buf[13] = 0xDC
+	buf[14] = 0xBA
+	buf[15] = 0x98
+	return buf
+}
+
+func TestUnmarshalZeroCopy(t *testing.T) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	t.Run("successful data packet", func(t *testing.T) {
+		buf := createTestDataPacket(12345, 100)
+		bufPtr := &buf
+		n := len(buf)
+
+		p := NewPacket(nil).(*pkt)
+		err := p.UnmarshalZeroCopy(bufPtr, n, testAddr)
+		require.NoError(t, err)
+
+		// Verify header parsed correctly
+		require.False(t, p.Header().IsControlPacket)
+		require.Equal(t, uint32(12345), p.Header().PacketSequenceNumber.Val())
+		require.Equal(t, uint32(0x00010000), p.Header().Timestamp)
+		require.Equal(t, uint32(0xABCD1234), p.Header().DestinationSocketId)
+
+		// Verify buffer tracking
+		require.True(t, p.HasRecvBuffer())
+		require.Equal(t, bufPtr, p.GetRecvBuffer())
+
+		// Verify payload access via Data()
+		payload := p.Data()
+		require.Len(t, payload, 100)
+		// Check payload pattern
+		for i := 0; i < 100; i++ {
+			require.Equal(t, byte(i%256), payload[i], "payload byte %d mismatch", i)
+		}
+
+		// Verify Len()
+		require.Equal(t, uint64(100), p.Len())
+
+		p.Decommission()
+	})
+
+	t.Run("successful control packet", func(t *testing.T) {
+		buf := createTestControlPacket(CTRLTYPE_ACK)
+		bufPtr := &buf
+
+		p := NewPacket(nil).(*pkt)
+		err := p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+		require.NoError(t, err)
+
+		require.True(t, p.Header().IsControlPacket)
+		require.Equal(t, CTRLTYPE_ACK, p.Header().ControlType)
+		require.Equal(t, uint32(0x00020000), p.Header().Timestamp)
+		require.Equal(t, uint32(0xFEDCBA98), p.Header().DestinationSocketId)
+
+		p.Decommission()
+	})
+
+	t.Run("packet too short returns error", func(t *testing.T) {
+		buf := make([]byte, HeaderSize-1) // One byte too short
+		bufPtr := &buf
+
+		p := NewPacket(nil).(*pkt)
+		err := p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "too short")
+
+		// CRITICAL: Buffer must still be tracked even on error!
+		// This allows DecommissionWithBuffer to clean up properly
+		require.True(t, p.HasRecvBuffer())
+		require.Equal(t, bufPtr, p.GetRecvBuffer())
+
+		p.Decommission()
+	})
+
+	t.Run("n field stored correctly", func(t *testing.T) {
+		buf := make([]byte, 1500)
+		// Create valid header
+		copy(buf, createTestDataPacket(1, 0)[:HeaderSize])
+		bufPtr := &buf
+
+		p := NewPacket(nil).(*pkt)
+		n := 200 // Only use first 200 bytes
+		err := p.UnmarshalZeroCopy(bufPtr, n, testAddr)
+		require.NoError(t, err)
+
+		// Data() should only return up to n, not full buffer
+		payload := p.Data()
+		require.Len(t, payload, n-HeaderSize) // 200-16 = 184
+
+		p.Decommission()
+	})
+}
+
+func TestDecommissionWithBuffer(t *testing.T) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	t.Run("returns buffer to pool", func(t *testing.T) {
+		pool := &sync.Pool{New: func() interface{} { b := make([]byte, 1500); return &b }}
+
+		bufPtr := pool.Get().(*[]byte)
+		copy(*bufPtr, createTestDataPacket(1, 100))
+
+		p := NewPacket(nil).(*pkt)
+		p.UnmarshalZeroCopy(bufPtr, HeaderSize+100, testAddr)
+		require.True(t, p.HasRecvBuffer())
+
+		p.DecommissionWithBuffer(pool)
+
+		// Buffer reference should be cleared (packet is now in pool, can't check directly)
+		// But we can verify no panic occurred
+	})
+
+	t.Run("handles nil buffer gracefully", func(t *testing.T) {
+		pool := &sync.Pool{New: func() interface{} { b := make([]byte, 1500); return &b }}
+
+		p := NewPacket(nil).(*pkt) // No buffer set
+		require.False(t, p.HasRecvBuffer())
+
+		// Should not panic
+		p.DecommissionWithBuffer(pool)
+	})
+
+	t.Run("handles nil pool gracefully", func(t *testing.T) {
+		buf := createTestDataPacket(1, 100)
+		bufPtr := &buf
+
+		p := NewPacket(nil).(*pkt)
+		p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+
+		// Should not panic with nil pool
+		p.DecommissionWithBuffer(nil)
+	})
+}
+
+func TestDataZeroCopy(t *testing.T) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	t.Run("zero-copy path computes slice correctly", func(t *testing.T) {
+		payloadData := []byte("test payload data here")
+		buf := make([]byte, HeaderSize+len(payloadData))
+		copy(buf[:HeaderSize], createTestDataPacket(1, 0)[:HeaderSize])
+		copy(buf[HeaderSize:], payloadData)
+		bufPtr := &buf
+
+		p := NewPacket(nil).(*pkt)
+		p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+
+		payload := p.Data()
+		require.Equal(t, payloadData, payload)
+
+		p.Decommission()
+	})
+
+	t.Run("returns nil for header-only packet", func(t *testing.T) {
+		buf := createTestDataPacket(1, 0) // Exactly header, no payload
+		bufPtr := &buf
+
+		p := NewPacket(nil).(*pkt)
+		p.UnmarshalZeroCopy(bufPtr, HeaderSize, testAddr)
+
+		payload := p.Data()
+		require.Empty(t, payload)
+
+		p.Decommission()
+	})
+
+	t.Run("returns nil when recvBuffer is nil", func(t *testing.T) {
+		p := NewPacket(nil).(*pkt)
+		// Don't call UnmarshalZeroCopy - legacy path with nil payload
+		p.payload = nil
+		p.recvBuffer = nil
+
+		require.Nil(t, p.Data())
+	})
+
+	t.Run("legacy path still works", func(t *testing.T) {
+		testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+		payloadData := []byte("legacy payload")
+
+		p := NewPacket(testAddr)
+		p.SetData(payloadData)
+
+		payload := p.Data()
+		require.Equal(t, payloadData, payload)
+
+		p.Decommission()
+	})
+}
+
+func TestLenZeroCopy(t *testing.T) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	t.Run("returns correct length for zero-copy", func(t *testing.T) {
+		buf := createTestDataPacket(1, 184)
+		bufPtr := &buf
+		n := len(buf) // HeaderSize + 184 = 200
+
+		p := NewPacket(nil).(*pkt)
+		p.UnmarshalZeroCopy(bufPtr, n, testAddr)
+
+		require.Equal(t, uint64(184), p.Len())
+
+		p.Decommission()
+	})
+
+	t.Run("returns zero for header-only", func(t *testing.T) {
+		buf := createTestDataPacket(1, 0)
+		bufPtr := &buf
+
+		p := NewPacket(nil).(*pkt)
+		p.UnmarshalZeroCopy(bufPtr, HeaderSize, testAddr)
+
+		require.Equal(t, uint64(0), p.Len())
+
+		p.Decommission()
+	})
+}
+
+// TestUnmarshalZeroCopyRoundTrip verifies that a packet can be marshaled,
+// then unmarshaled with UnmarshalZeroCopy, and produce identical header values.
+func TestUnmarshalZeroCopyRoundTrip(t *testing.T) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	testCases := []struct {
+		name        string
+		isControl   bool
+		ctrlType    CtrlType
+		seq         uint32
+		timestamp   uint32
+		socketID    uint32
+		payloadSize int
+	}{
+		{"data packet small payload", false, 0, 12345, 1000000, 0xABCD1234, 100},
+		{"data packet large payload", false, 0, 99999, 5000000, 0x12345678, 1400},
+		{"data packet min payload", false, 0, 1, 0, 0x1, 1},
+		{"ACK control packet", true, CTRLTYPE_ACK, 0, 2000000, 0xFACE0000, 0},
+		{"NAK control packet", true, CTRLTYPE_NAK, 0, 3000000, 0xBEEF0000, 0},
+		{"keepalive packet", true, CTRLTYPE_KEEPALIVE, 0, 4000000, 0xDEAD0000, 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create original packet using legacy path
+			original := NewPacket(testAddr)
+			original.Header().IsControlPacket = tc.isControl
+			original.Header().Timestamp = tc.timestamp
+			original.Header().DestinationSocketId = tc.socketID
+
+			if tc.isControl {
+				original.Header().ControlType = tc.ctrlType
+			} else {
+				original.Header().PacketSequenceNumber = circular.New(tc.seq, MAX_SEQUENCENUMBER)
+			}
+
+			if tc.payloadSize > 0 {
+				payload := make([]byte, tc.payloadSize)
+				for i := range payload {
+					payload[i] = byte(i % 256)
+				}
+				original.SetData(payload)
+			}
+
+			// Marshal to bytes
+			var buf bytes.Buffer
+			original.Marshal(&buf)
+			marshaled := buf.Bytes()
+
+			// Unmarshal with zero-copy
+			bufCopy := make([]byte, len(marshaled))
+			copy(bufCopy, marshaled)
+			bufPtr := &bufCopy
+
+			restored := NewPacket(nil).(*pkt)
+			err := restored.UnmarshalZeroCopy(bufPtr, len(bufCopy), testAddr)
+			require.NoError(t, err)
+
+			// Verify all header fields match
+			require.Equal(t, original.Header().IsControlPacket, restored.Header().IsControlPacket)
+			require.Equal(t, original.Header().Timestamp, restored.Header().Timestamp)
+			require.Equal(t, original.Header().DestinationSocketId, restored.Header().DestinationSocketId)
+
+			if tc.isControl {
+				require.Equal(t, original.Header().ControlType, restored.Header().ControlType)
+			} else {
+				require.Equal(t, original.Header().PacketSequenceNumber.Val(),
+					restored.Header().PacketSequenceNumber.Val())
+			}
+
+			// Verify payload matches
+			if tc.payloadSize > 0 {
+				require.Equal(t, original.Data(), restored.Data())
+			}
+
+			original.Decommission()
+			restored.Decommission()
+		})
+	}
+}
+
+// TestUnmarshalZeroCopyVsCopyEquivalence verifies that UnmarshalZeroCopy
+// produces the same results as the legacy Unmarshal for all packet types.
+func TestUnmarshalZeroCopyVsCopyEquivalence(t *testing.T) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	testCases := []struct {
+		name        string
+		isControl   bool
+		payloadSize int
+	}{
+		{"data packet 100 bytes", false, 100},
+		{"data packet 1400 bytes", false, 1400},
+		{"control ACK packet", true, 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a test packet buffer
+			var buf []byte
+			if tc.isControl {
+				buf = createTestControlPacket(CTRLTYPE_ACK)
+			} else {
+				buf = createTestDataPacket(54321, tc.payloadSize)
+			}
+
+			// Unmarshal with legacy copy method
+			pktCopy := NewPacket(testAddr)
+			errCopy := pktCopy.Unmarshal(buf)
+			require.NoError(t, errCopy)
+
+			// Unmarshal with zero-copy method
+			bufCopy := make([]byte, len(buf))
+			copy(bufCopy, buf) // Make a copy to avoid interference
+			bufPtr := &bufCopy
+			pktZero := NewPacket(nil).(*pkt)
+			errZero := pktZero.UnmarshalZeroCopy(bufPtr, len(bufCopy), testAddr)
+			require.NoError(t, errZero)
+
+			// Compare all header fields
+			require.Equal(t, pktCopy.Header().IsControlPacket, pktZero.Header().IsControlPacket,
+				"IsControlPacket mismatch")
+			require.Equal(t, pktCopy.Header().Timestamp, pktZero.Header().Timestamp,
+				"Timestamp mismatch")
+			require.Equal(t, pktCopy.Header().DestinationSocketId, pktZero.Header().DestinationSocketId,
+				"DestinationSocketId mismatch")
+
+			if tc.isControl {
+				require.Equal(t, pktCopy.Header().ControlType, pktZero.header.ControlType,
+					"ControlType mismatch")
+				require.Equal(t, pktCopy.Header().SubType, pktZero.header.SubType,
+					"SubType mismatch")
+				require.Equal(t, pktCopy.Header().TypeSpecific, pktZero.header.TypeSpecific,
+					"TypeSpecific mismatch")
+			} else {
+				require.Equal(t, pktCopy.Header().PacketSequenceNumber.Val(),
+					pktZero.header.PacketSequenceNumber.Val(),
+					"PacketSequenceNumber mismatch")
+				require.Equal(t, pktCopy.Header().PacketPositionFlag, pktZero.header.PacketPositionFlag,
+					"PacketPositionFlag mismatch")
+				require.Equal(t, pktCopy.Header().OrderFlag, pktZero.header.OrderFlag,
+					"OrderFlag mismatch")
+				require.Equal(t, pktCopy.Header().KeyBaseEncryptionFlag, pktZero.header.KeyBaseEncryptionFlag,
+					"KeyBaseEncryptionFlag mismatch")
+				require.Equal(t, pktCopy.Header().RetransmittedPacketFlag, pktZero.header.RetransmittedPacketFlag,
+					"RetransmittedPacketFlag mismatch")
+				require.Equal(t, pktCopy.Header().MessageNumber, pktZero.header.MessageNumber,
+					"MessageNumber mismatch")
+			}
+
+			// Compare payloads (content should be identical)
+			// Note: Empty payload can be either nil or []byte{}, so use bytes.Equal
+			// which treats both as equal
+			if len(pktCopy.Data()) == 0 && len(pktZero.Data()) == 0 {
+				// Both empty - that's fine (nil vs []byte{} is equivalent)
+			} else {
+				require.Equal(t, pktCopy.Data(), pktZero.Data(),
+					"Payload content mismatch")
+			}
+			require.Equal(t, pktCopy.Len(), pktZero.Len(),
+				"Len mismatch")
+
+			pktCopy.Decommission()
+			pktZero.Decommission()
+		})
+	}
+}
+
+// ========== Zero-Copy Benchmarks ==========
+
+// BenchmarkUnmarshalZeroCopy measures zero-copy unmarshal performance.
+// Uses realistic 7x MPEG-TS payload (1316 bytes) to demonstrate real-world benefit.
+func BenchmarkUnmarshalZeroCopy(b *testing.B) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+	buf := createTestDataPacket(12345, RealisticPayloadSize)
+	bufPtr := &buf
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		p := NewPacket(nil).(*pkt)
+		_ = p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+		p.ClearRecvBuffer() // Don't return buffer in benchmark
+		p.Decommission()
+	}
+}
+
+// BenchmarkUnmarshalCopy measures legacy copying unmarshal for comparison.
+func BenchmarkUnmarshalCopy(b *testing.B) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+	buf := createTestDataPacket(12345, RealisticPayloadSize)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		p := NewPacket(testAddr)
+		_ = p.Unmarshal(buf)
+		p.Decommission()
+	}
+}
+
+// BenchmarkUnmarshalComparison runs both methods with various payload sizes.
+func BenchmarkUnmarshalComparison(b *testing.B) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+
+	payloadSizes := []struct {
+		name string
+		size int
+	}{
+		{"1_MPEGTS", MpegTsPacketSize * 1},         // 188 bytes
+		{"4_MPEGTS", MpegTsPacketSize * 4},         // 752 bytes
+		{"7_MPEGTS_typical", MpegTsPacketSize * 7}, // 1316 bytes
+		{"max_payload", 1400},                      // Near MTU limit
+	}
+
+	for _, tc := range payloadSizes {
+		buf := createTestDataPacket(12345, tc.size)
+		bufCopy := make([]byte, len(buf))
+		copy(bufCopy, buf)
+		bufPtr := &buf
+
+		b.Run("ZeroCopy/"+tc.name, func(b *testing.B) {
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				p := NewPacket(nil).(*pkt)
+				_ = p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+				p.ClearRecvBuffer()
+				p.Decommission()
+			}
+		})
+
+		b.Run("Copy/"+tc.name, func(b *testing.B) {
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				p := NewPacket(testAddr)
+				_ = p.Unmarshal(bufCopy)
+				p.Decommission()
+			}
+		})
+	}
+}
+
+// BenchmarkDataAccess measures payload access overhead.
+func BenchmarkDataAccess(b *testing.B) {
+	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+	buf := createTestDataPacket(12345, RealisticPayloadSize)
+	bufPtr := &buf
+
+	p := NewPacket(nil).(*pkt)
+	_ = p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		payload := p.Data()
+		_ = payload // Prevent optimization
+	}
+}

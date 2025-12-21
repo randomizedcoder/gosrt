@@ -507,7 +507,8 @@ func (req *connRequest) Accept() (Conn, error) {
 		socketFd:                    socketFd,
 		parentCtx:                   req.ln.ctx,
 		parentWg:                    &req.ln.connWg,
-		metrics:                     connMetrics, // Pre-created - no race!
+		metrics:                     connMetrics,           // Pre-created - no race!
+		recvBufferPool:              GetRecvBufferPool(),   // Phase 2: shared global pool
 	})
 
 	req.ln.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })
