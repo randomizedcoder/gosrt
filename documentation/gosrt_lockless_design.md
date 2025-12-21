@@ -419,6 +419,7 @@ type ReceiverConfig struct {
     // Timer intervals (all time.Duration for consistency)
     ACKInterval  time.Duration  // Periodic ACK interval (default: 10ms)
     NAKInterval  time.Duration  // Periodic NAK interval (default: 20ms)
+    RateInterval time.Duration  // Rate calculation period (default: 1s)
     TickInterval time.Duration  // Tick loop interval (only when UseEventLoop=false)
 
     // ... other config fields ...
@@ -2184,6 +2185,7 @@ Stagger the ticker start times to spread work evenly:
 
 ```go
 // Per-connection event loop (replaces Tick())
+// NOTE: Simplified - see "Recommended" version below for rateTicker and adaptive backoff
 func (r *receiver) eventLoop(ctx context.Context) {
     // Config uses time.Duration (not *Ms suffix)
     // See Section 5.3 for ReceiverConfig struct
@@ -2284,6 +2286,7 @@ The cleanest solution uses an inline sleep during startup. The 5ms delay is negl
 func (r *receiver) eventLoop(ctx context.Context) {
     ackInterval := r.config.ACKInterval
     nakInterval := r.config.NAKInterval
+    rateInterval := r.config.RateInterval  // Default: 1s
 
     // Create ACK ticker first
     ackTicker := time.NewTicker(ackInterval)
@@ -2295,6 +2298,17 @@ func (r *receiver) eventLoop(ctx context.Context) {
 
     nakTicker := time.NewTicker(nakInterval)
     defer nakTicker.Stop()
+
+    // Phase shift rate ticker to spread work evenly
+    // ACK fires at 0, 10, 20, ...
+    // NAK fires at 5, 25, 45, ... (offset by ackInterval/2)
+    // Rate fires at 7.5, 1007.5, 2007.5, ... (offset by ackInterval/4)
+    time.Sleep(ackInterval / 4)
+
+    // Rate ticker fires at the actual calculation period (e.g., 1s)
+    // No need for early-return check in updateRecvRate - we fire at the right interval
+    rateTicker := time.NewTicker(rateInterval)
+    defer rateTicker.Stop()
 
     backoff := newAdaptiveBackoff(r.config)
 
@@ -2308,6 +2322,11 @@ func (r *receiver) eventLoop(ctx context.Context) {
 
         case <-nakTicker.C:
             r.periodicNAKNoLock(time.Now())
+
+        case <-rateTicker.C:
+            // Update rate metrics atomically (no lock needed)
+            // See Phase 1: Rate Metrics Atomics
+            r.updateRecvRate(uint64(time.Now().UnixMicro()))
 
         default:
             // Process packets and deliver
@@ -2336,6 +2355,48 @@ func (r *receiver) eventLoop(ctx context.Context) {
 - Potential for missed first NAK tick during reset
 - Goroutine coordination overhead
 - Not worth the complexity to save 5ms at startup
+
+#### Rate Ticker Design
+
+The `rateTicker` is separate from ACK/NAK tickers because rate calculation has different requirements:
+
+| Timer | Interval | Purpose |
+|-------|----------|---------|
+| `ackTicker` | 10ms | Send ACK packets to peer |
+| `nakTicker` | 20ms | Detect losses and send NAK packets |
+| `rateTicker` | 1s | Update rate metrics for Stats()/Prometheus |
+
+**Why a separate rate ticker?**
+
+1. **Different timescales**: ACK/NAK are protocol-level (fast), rate calculation is observability-level (slower)
+2. **Configurable independently**: `RateInterval` can be tuned without affecting protocol timing
+3. **No strict timing requirements**: Unlike ACK/NAK, rate calculation tolerates jitter
+
+**Simplified design:**
+
+The `rateTicker` fires at the actual rate calculation period (default 1s). When it fires, `updateRecvRate()` unconditionally calculates the rate - no early-return check needed.
+
+```go
+case <-rateTicker.C:
+    // Always calculate - ticker fires at the right interval
+    r.updateRecvRate(uint64(time.Now().UnixMicro()))
+```
+
+**Legacy Tick Path:**
+
+For the legacy `UseEventLoop=false` path, rate updates still happen in `Tick()`:
+
+```go
+func (r *receiver) Tick(now uint64) {
+    // ... other operations ...
+
+    // ===== Step 5: Rate stats =====
+    // Called every Tick (~10ms), but only calculates when period (1s) elapses
+    r.updateRateStatsAtomic(now)
+}
+```
+
+The legacy path still needs the time-elapsed check because `Tick()` fires every 10ms.
 
 // processOnePacket consumes one packet from the ring and inserts into btree
 // Returns true if a packet was processed, false if ring was empty
@@ -2645,10 +2706,16 @@ Phase 2 (Warm): After N packets
 
 #### Implementation
 
+**Dependency on Phase 1 (Rate Metrics Atomics):**
+
+The adaptive backoff reads `packetsPerSecond` from `ConnectionMetrics`. Phase 1 provides:
+- `RecvRatePacketsPerSec atomic.Uint64` - stores float64 as uint64 bits
+- `GetRecvRatePacketsPerSec() float64` - helper getter that decodes the value
+
 ```go
 type adaptiveBackoff struct {
-    // Rate tracking (from rate_metrics)
-    packetsPerSecond atomic.Uint64  // Stored as Float64bits
+    // Reference to metrics (uses Phase 1 rate metrics)
+    metrics *metrics.ConnectionMetrics
 
     // Backoff state
     coldStartPackets int64          // Countdown to warm state
@@ -2657,12 +2724,13 @@ type adaptiveBackoff struct {
     sleepFraction    float64        // Fraction of inter-packet time
 }
 
-func newAdaptiveBackoff() *adaptiveBackoff {
+func newAdaptiveBackoff(m *metrics.ConnectionMetrics, config ReceiverConfig) *adaptiveBackoff {
     return &adaptiveBackoff{
-        coldStartPackets: 1000,      // Process 1000 packets before adapting
-        minSleep:         1 * time.Microsecond,
-        maxSleep:         1 * time.Millisecond,
-        sleepFraction:    0.25,      // Sleep for 25% of expected inter-packet time
+        metrics:          m,
+        coldStartPackets: int64(config.BackoffColdStartPkts), // Default: 1000
+        minSleep:         config.BackoffMinSleep,              // Default: 10µs
+        maxSleep:         config.BackoffMaxSleep,              // Default: 1ms
+        sleepFraction:    0.25,                                // Sleep for 25% of expected inter-packet time
     }
 }
 
@@ -2680,8 +2748,8 @@ func (ab *adaptiveBackoff) getSleepDuration() time.Duration {
         return ab.minSleep
     }
 
-    // Get current rate
-    pps := math.Float64frombits(ab.packetsPerSecond.Load())
+    // Get current rate using Phase 1 helper getter
+    pps := ab.metrics.GetRecvRatePacketsPerSec()
     if pps <= 0 {
         return ab.minSleep  // No rate data yet
     }
@@ -2708,10 +2776,8 @@ func (ab *adaptiveBackoff) getSleepDuration() time.Duration {
 
 ```go
 func (r *receiver) eventLoop(ctx context.Context) {
-    backoff := newAdaptiveBackoff()
-
-    // Link to rate metrics
-    backoff.packetsPerSecond = r.metrics.packetsPerSecond  // Share the atomic
+    // Create backoff with reference to ConnectionMetrics (Phase 1)
+    backoff := newAdaptiveBackoff(r.metrics, r.config)
 
     // Offset tickers as discussed
     ackTicker := time.NewTicker(ackInterval)
@@ -2754,8 +2820,8 @@ Instead of sleeping longer when idle, sleep SHORTER (inverse of traditional back
 func (ab *adaptiveBackoff) inverseSleepDuration(idleDuration time.Duration) time.Duration {
     baseSleep := ab.getSleepDuration()
 
-    // Expected inter-packet time
-    pps := math.Float64frombits(ab.packetsPerSecond.Load())
+    // Expected inter-packet time (using Phase 1 getter)
+    pps := ab.metrics.GetRecvRatePacketsPerSec()
     if pps <= 0 {
         return ab.minSleep
     }
@@ -3472,9 +3538,9 @@ The implementation is organized so that **universal improvements** (benefits ALL
 │     - Validates approach before complex changes                              │
 │                                                                              │
 │  2. VALIDATE BETWEEN PHASES                                                  │
-│     - Run integration tests after each phase                                 │
-│     - Compare metrics old vs new                                             │
-│     - Ensure no regressions                                                  │
+│     - Run integration tests after each phase (see testing docs below)        │
+│     - Use parallel comparison for identical-network validation               │
+│     - Ensure no regressions in Tier 1/2/3 tests                              │
 │                                                                              │
 │  3. LOCKLESS CHANGES LAST                                                    │
 │     - More complex, higher risk                                              │
@@ -3484,6 +3550,27 @@ The implementation is organized so that **universal improvements** (benefits ALL
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Integration Testing References
+
+Each phase includes a **Validation Checkpoint** that uses the existing integration testing framework:
+
+| Document | Purpose | Key Features |
+|----------|---------|--------------|
+| [`integration_testing_design.md`](./integration_testing_design.md) | Core framework | Fail-safe principles, loss recovery validation, 12-24h stability tests |
+| [`integration_testing_matrix_design.md`](./integration_testing_matrix_design.md) | Matrix-based tests | Tier 1/2/3, RTT profiles (R0-R300), loss patterns, config variants |
+| [`parallel_comparison_test_design.md`](./parallel_comparison_test_design.md) | Side-by-side comparison | Two pipelines, identical network, metrics comparison |
+
+**Test Tiers** (from `integration_testing_matrix_design.md`):
+- **Tier 1 (Core)**: ~20 tests, essential coverage, runs on every PR
+- **Tier 2 (Extended)**: ~50 tests, broader coverage, daily CI
+- **Tier 3 (Comprehensive)**: ~150 tests, full matrix, nightly/weekly
+
+**Key Test Patterns**:
+- `Net-Starlink-*`: Starlink-style 60ms outages (gap recovery validation)
+- `Parallel-*-vs-*`: Same network, different configs (direct comparison)
+- `Net-Clean-*`: No impairment (baseline performance)
+- `Net-Loss-L{2,5,10,15}-*`: Uniform packet loss (ARQ stress test)
+
 ---
 
 ### Phase 1: Rate Metrics Atomics (2-3 hours) [NO FLAG - Always On]
@@ -3492,85 +3579,629 @@ The implementation is organized so that **universal improvements** (benefits ALL
 
 **Reference**: `rate_metrics_performance_design.md`
 
-#### 1.1 Files to Modify
+#### 1.1 Architecture Decision: Move Rate Metrics to ConnectionMetrics
+
+**Rationale**: The `metrics_and_statistics_design.md` established a unified metrics architecture using `ConnectionMetrics` in `metrics/metrics.go`. Moving rate metrics to this struct:
+
+1. **Consistency** - All connection metrics in one place
+2. **Prometheus integration** - Already exposed via custom high-performance `metrics/handler.go`
+3. **Tooling support** - `tools/metrics-audit/main.go` verifies completeness
+4. **Clean separation** - Congestion control logic separate from metrics storage
+
+**Important: GoSRT's Custom Prometheus Handler**
+
+GoSRT does NOT use the `promauto` or `prometheus/client_golang` libraries for metrics. Instead, it uses a custom high-performance HTTP handler (`metrics/handler.go`) because:
+
+| promauto Limitation | GoSRT Solution |
+|---------------------|----------------|
+| Can't read metric values back | Atomic fields with `.Load()` |
+| Memory overhead from descriptors | Direct `strings.Builder` output |
+| Global registry conflicts | Per-connection `ConnectionMetrics` structs |
+| Allocation per scrape | `sync.Pool` for 64KB pre-allocated buffers |
+
+**Pattern summary:**
+- Store values in `atomic.Uint64` fields in `ConnectionMetrics`
+- Float values encoded via `math.Float64bits()`, decoded via `math.Float64frombits()`
+- Export via `writeGauge()` / `writeCounterIfNonZero()` helpers in `handler.go`
+- Verify with `go run tools/metrics-audit/main.go`
+
+#### 1.2 Files to Modify
 
 | File | Changes |
 |------|---------|
-| `congestion/live/receive.go` | Convert counter fields to `atomic.Uint64` |
-| `congestion/live/sender.go` | Same atomic conversions |
-| `srt/statistics.go` | Update stats collection to use atomics |
-| `config.go` | No changes needed (always on) |
+| `metrics/metrics.go` | Add rate counter fields to `ConnectionMetrics` |
+| `metrics/handler.go` | Export new rate metrics to Prometheus |
+| `congestion/live/receive.go` | Remove embedded `rate` struct, use `*metrics.ConnectionMetrics` |
+| `congestion/live/send.go` | Same - use shared ConnectionMetrics |
+| `congestion/live/fake.go` | Update rate handling |
+| `contrib/integration_testing/analysis.go` | Add `VerifyRateMetrics()` validation function |
 
-#### 1.2 Detailed Steps
+#### 1.3 Detailed Steps
+
+**Step 1: Add rate fields to ConnectionMetrics (`metrics/metrics.go`)**
 
 ```go
-// Step 1: Convert counter fields in receiver struct
+// File: metrics/metrics.go
+
+type ConnectionMetrics struct {
+    // ... existing fields ...
+
+    // === Rate Calculation Fields (Phase 1: Lockless Design) ===
+    // These replace the embedded `rate struct` in congestion/live/receive.go and send.go
+
+    // Receiver rate counters (atomic for lock-free access)
+    RecvRatePeriodUs      atomic.Uint64 // Rate calculation period (microseconds)
+    RecvRateLastUs        atomic.Uint64 // Last rate calculation time (microseconds)
+    RecvRatePackets       atomic.Uint64 // Packets in current period
+    RecvRateBytes         atomic.Uint64 // Bytes in current period
+    RecvRateBytesRetrans  atomic.Uint64 // Retransmit bytes in current period
+
+    // Receiver computed rates (stored as uint64, use Float64frombits/Float64bits)
+    // These are updated atomically via CAS during rate calculation
+    RecvRatePacketsPerSec atomic.Uint64 // Packets/second (float64 bits)
+    RecvRateBytesPerSec   atomic.Uint64 // Bytes/second (float64 bits)
+    RecvRatePktRetransRate atomic.Uint64 // Retransmission rate % (float64 bits)
+
+    // Sender rate counters
+    SendRatePeriodUs      atomic.Uint64
+    SendRateLastUs        atomic.Uint64
+    SendRateBytes         atomic.Uint64
+    SendRateBytesSent     atomic.Uint64
+    SendRateBytesRetrans  atomic.Uint64
+
+    // Sender computed rates
+    SendRateEstInputBW    atomic.Uint64 // Estimated input bandwidth (float64 bits)
+    SendRateEstSentBW     atomic.Uint64 // Estimated sent bandwidth (float64 bits)
+    SendRatePktRetransRate atomic.Uint64 // Retransmission rate % (float64 bits)
+
+    // Light ACK threshold counter (replaces nPackets in receiver)
+    RecvLightACKCounter   atomic.Uint64 // Packets since last ACK (for light ACK threshold)
+}
+
+// Helper getter functions for float64 rates stored as uint64 bits
+// These encapsulate the Float64frombits() conversion for cleaner code
+
+// GetRecvRatePacketsPerSec returns packets per second as float64
+func (m *ConnectionMetrics) GetRecvRatePacketsPerSec() float64 {
+    return math.Float64frombits(m.RecvRatePacketsPerSec.Load())
+}
+
+// GetRecvRateBytesPerSec returns bytes per second as float64
+func (m *ConnectionMetrics) GetRecvRateBytesPerSec() float64 {
+    return math.Float64frombits(m.RecvRateBytesPerSec.Load())
+}
+
+// GetRecvRateMbps returns receive rate in megabits per second
+func (m *ConnectionMetrics) GetRecvRateMbps() float64 {
+    return m.GetRecvRateBytesPerSec() * 8 / 1024 / 1024
+}
+
+// GetRecvRateRetransPercent returns retransmission percentage
+func (m *ConnectionMetrics) GetRecvRateRetransPercent() float64 {
+    return math.Float64frombits(m.RecvRatePktRetransRate.Load())
+}
+
+// GetSendRateEstInputBW returns estimated input bandwidth in bytes/sec
+func (m *ConnectionMetrics) GetSendRateEstInputBW() float64 {
+    return math.Float64frombits(m.SendRateEstInputBW.Load())
+}
+
+// GetSendRateEstSentBW returns estimated sent bandwidth in bytes/sec
+func (m *ConnectionMetrics) GetSendRateEstSentBW() float64 {
+    return math.Float64frombits(m.SendRateEstSentBW.Load())
+}
+
+// GetSendRateMbps returns sent rate in megabits per second
+func (m *ConnectionMetrics) GetSendRateMbps() float64 {
+    return m.GetSendRateEstSentBW() * 8 / 1024 / 1024
+}
+
+// GetSendRateRetransPercent returns sender retransmission percentage
+func (m *ConnectionMetrics) GetSendRateRetransPercent() float64 {
+    return math.Float64frombits(m.SendRatePktRetransRate.Load())
+}
+```
+
+**Why helper getters?**
+
+1. **Encapsulation** - Hide `math.Float64frombits()` from callers
+2. **Convenience** - `GetRecvRateMbps()` does both decode AND unit conversion
+3. **Consistency** - Same pattern as other metric accessors
+4. **Cleaner Stats()** - `receiver.Stats()` and `sender.Stats()` can use getters
+
+**Step 2: Export rate metrics via Prometheus (`metrics/handler.go`)**
+
+**Why NOT promauto?** GoSRT uses a custom high-performance HTTP handler instead of the `promauto` library:
+
+1. **Read-back limitation**: `promauto` metrics can't be read back - you can't call `.Get()` on a Gauge
+2. **Memory overhead**: `promauto` creates descriptor objects for each metric
+3. **Global registration**: `promauto` uses a global registry which conflicts with multiple instances
+4. **Performance**: Custom handler uses `sync.Pool` for `strings.Builder` to avoid allocations
+
+**GoSRT's pattern** (see `metrics/helpers.go` and `metrics/handler.go`):
+- Atomic counters in `ConnectionMetrics` struct (`.Load()` for reads)
+- Custom `writeGauge()` and `writeCounterIfNonZero()` helpers
+- `sync.Pool` for `strings.Builder` (pre-allocated 64KB buffers)
+- Direct Prometheus text format output (no intermediate objects)
+
+```go
+// File: metrics/handler.go
+
+// In MetricsHandler(), inside the per-connection loop, add rate metrics:
+// (This follows the existing pattern - see handler.go lines 183-205 for gauge examples)
+
+// ========== Rate Metrics (Phase 1: Lockless Design) ==========
+// Float values stored as uint64 using math.Float64bits/Float64frombits
+
+// Receiver rate metrics
+writeGauge(b, "gosrt_recv_rate_packets_per_sec",
+    math.Float64frombits(metrics.RecvRatePacketsPerSec.Load()),
+    "socket_id", socketIdStr, "instance", instanceName)
+
+writeGauge(b, "gosrt_recv_rate_bytes_per_sec",
+    math.Float64frombits(metrics.RecvRateBytesPerSec.Load()),
+    "socket_id", socketIdStr, "instance", instanceName)
+
+writeGauge(b, "gosrt_recv_rate_retrans_percent",
+    math.Float64frombits(metrics.RecvRatePktRetransRate.Load()),
+    "socket_id", socketIdStr, "instance", instanceName)
+
+// Sender rate metrics
+writeGauge(b, "gosrt_send_rate_input_bandwidth_bps",
+    math.Float64frombits(metrics.SendRateEstInputBW.Load()),
+    "socket_id", socketIdStr, "instance", instanceName)
+
+writeGauge(b, "gosrt_send_rate_sent_bandwidth_bps",
+    math.Float64frombits(metrics.SendRateEstSentBW.Load()),
+    "socket_id", socketIdStr, "instance", instanceName)
+
+writeGauge(b, "gosrt_send_rate_retrans_percent",
+    math.Float64frombits(metrics.SendRatePktRetransRate.Load()),
+    "socket_id", socketIdStr, "instance", instanceName)
+```
+
+**Key differences from promauto pattern:**
+- No metric registration - metrics are written directly to the HTTP response
+- `writeGauge()` takes `float64` value directly (use `math.Float64frombits()` to decode)
+- Labels are variadic string pairs: `"key1", "value1", "key2", "value2", ...`
+- Minimal allocations via `sync.Pool` for `strings.Builder`
+
+**Step 3: Update congestion/live/receive.go to use ConnectionMetrics**
+
+```go
 // File: congestion/live/receive.go
 
 // BEFORE:
 type receiver struct {
-    mu               sync.RWMutex
-    packetsReceived  uint64
-    bytesReceived    uint64
-    // ...
+    // ... other fields ...
+
+    nPackets uint  // For light ACK threshold
+
+    rate struct {
+        last   uint64 // microseconds
+        period uint64
+        packets      uint64
+        bytes        uint64
+        bytesRetrans uint64
+        packetsPerSecond float64
+        bytesPerSecond   float64
+        pktRetransRate float64
+    }
+
+    lock sync.RWMutex
 }
+
+// Push increments under lock:
+r.lock.Lock()
+r.nPackets++
+r.rate.packets++
+r.rate.bytes += uint64(pktLen)
+r.lock.Unlock()
 
 // AFTER:
 type receiver struct {
-    mu               sync.RWMutex  // Keep for non-atomic fields
-    packetsReceived  atomic.Uint64
-    bytesReceived    atomic.Uint64
-    // ...
+    // ... other fields ...
+    metrics *metrics.ConnectionMetrics  // Shared metrics (already exists)
+    // Remove nPackets and rate struct - use metrics.* instead
 }
+
+// Push increments atomically (NO LOCK):
+r.metrics.RecvLightACKCounter.Add(1)
+r.metrics.RecvRatePackets.Add(1)
+r.metrics.RecvRateBytes.Add(uint64(pktLen))
 ```
 
-```go
-// Step 2: Update all write sites
-// BEFORE:
-r.mu.Lock()
-r.packetsReceived++
-r.mu.Unlock()
-
-// AFTER:
-r.packetsReceived.Add(1)
-```
+**Step 3b: Update receiver.Stats() and sender.Stats() to use getters**
 
 ```go
-// Step 3: Implement CAS-based running averages
-// For rate calculations that need compare-and-swap
-func (r *receiver) updateRate(newValue float64) {
-    for {
-        old := math.Float64frombits(r.rate.Load())
-        new := old*0.9 + newValue*0.1  // Exponential moving average
-        if r.rate.CompareAndSwap(
-            math.Float64bits(old),
-            math.Float64bits(new),
-        ) {
-            return
-        }
+// File: congestion/live/receive.go
+
+// BEFORE (reads from embedded rate struct under lock):
+func (r *receiver) Stats() congestion.RecvStats {
+    r.lock.RLock()
+    mbpsBandwidth := r.rate.bytesPerSecond * 8 / 1024 / 1024
+    pktRetransRate := r.rate.pktRetransRate
+    r.lock.RUnlock()
+    // ... populate stats ...
+}
+
+// AFTER (reads from ConnectionMetrics atomically, NO LOCK):
+func (r *receiver) Stats() congestion.RecvStats {
+    m := r.metrics
+
+    // Use helper getters for float64 rates
+    mbpsBandwidth := m.GetRecvRateMbps()            // Encapsulates Float64frombits + unit conversion
+    pktRetransRate := m.GetRecvRateRetransPercent() // Encapsulates Float64frombits
+
+    return congestion.RecvStats{
+        // ... other fields ...
+        MbpsEstimatedRecvBandwidth: mbpsBandwidth,
+        PktRetransRate:             pktRetransRate,
     }
 }
 ```
 
-#### 1.3 Validation Checkpoint
+```go
+// File: congestion/live/send.go
 
-```bash
-# Run BEFORE making changes (baseline)
-go test -v ./... -run TestIntegration > baseline_phase0.log
-go test -bench=. ./congestion/live/... > bench_phase0.log
+// BEFORE:
+func (s *sender) Stats() congestion.SendStats {
+    s.lock.RLock()
+    mbpsSentBW := s.rate.estimatedSentBW * 8 / 1024 / 1024
+    s.lock.RUnlock()
+    // ...
+}
 
-# After Phase 1 changes
-go test -race -v ./...                    # Race detector
-go test -v ./... -run TestIntegration     # Integration tests
-go test -bench=. ./congestion/live/...    # Performance comparison
+// AFTER:
+func (s *sender) Stats() congestion.SendStats {
+    m := s.metrics
 
-# Compare: metrics should be identical, performance same or better
-diff baseline_phase0.log phase1.log       # Behavior unchanged
+    // Use helper getters
+    mbpsSentBW := m.GetSendRateMbps()  // Encapsulates Float64frombits + unit conversion
+
+    return congestion.SendStats{
+        // ... other fields ...
+        MbpsEstimatedSentBandwidth: mbpsSentBW,
+    }
+}
 ```
 
-#### 1.4 Acceptance Criteria
+**Step 4: Implement CAS-based rate calculation**
 
+Two versions depending on the processing model:
+
+```go
+// File: congestion/live/receive.go
+
+// updateRecvRate calculates and stores rate metrics atomically
+// EVENT LOOP version: called by rateTicker at the correct interval
+// No early-return check needed - ticker fires at the right time
+func (r *receiver) updateRecvRate(nowUs uint64) {
+    m := r.metrics
+    lastUs := m.RecvRateLastUs.Load()
+
+    // Calculate rates based on actual elapsed time
+    packets := m.RecvRatePackets.Swap(0)  // Atomic swap and reset
+    bytes := m.RecvRateBytes.Swap(0)
+    bytesRetrans := m.RecvRateBytesRetrans.Swap(0)
+
+    elapsed := float64(nowUs - lastUs) / 1_000_000.0  // Seconds
+    if elapsed > 0 {
+        pps := float64(packets) / elapsed
+        bps := float64(bytes) / elapsed
+
+        // Store as uint64 bits (single atomic store, no CAS loop needed)
+        m.RecvRatePacketsPerSec.Store(math.Float64bits(pps))
+        m.RecvRateBytesPerSec.Store(math.Float64bits(bps))
+
+        // Retransmission rate: bytesRetrans / bytes * 100
+        var retransRate float64
+        if bytes > 0 {
+            retransRate = float64(bytesRetrans) / float64(bytes) * 100.0
+        }
+        m.RecvRatePktRetransRate.Store(math.Float64bits(retransRate))
+    }
+
+    m.RecvRateLastUs.Store(nowUs)
+}
+
+// updateRecvRateTick is for LEGACY Tick path
+// Called every Tick (~10ms), but only calculates when period (1s) elapses
+func (r *receiver) updateRecvRateTick(nowUs uint64) {
+    m := r.metrics
+    lastUs := m.RecvRateLastUs.Load()
+    periodUs := m.RecvRatePeriodUs.Load()
+
+    if nowUs-lastUs < periodUs {
+        return // Not time yet - wait for full period
+    }
+
+    // Same calculation as updateRecvRate
+    r.updateRecvRate(nowUs)
+}
+```
+
+**Note on CAS vs Store:**
+
+The original design used CAS loops, but simple `Store()` is sufficient here because:
+1. Only ONE goroutine (event loop or Tick) writes to these fields
+2. Multiple readers (Stats(), Prometheus handler) just need a consistent snapshot
+3. `atomic.Store` provides the necessary memory ordering
+
+#### 1.4 Impact on contrib/main.go Files
+
+**Question**: Do `contrib/client/main.go`, `contrib/client-generator/main.go`, and `contrib/server/main.go` need updates?
+
+**Answer**: **No changes required** - these files use `ThroughputGetter` which computes rates locally:
+
+```go
+// File: contrib/common/statistics.go (UNCHANGED)
+
+// ThroughputGetter returns raw byte/packet counts (not rates)
+type ThroughputGetter func() (bytes, pkts, gaps, naks, skips, retrans uint64)
+
+// RunThroughputDisplayWithLabel computes rates locally
+func RunThroughputDisplayWithLabel(...) {
+    // ...
+    mbps := float64(currentBytes-prevBytes) * 8 / (1000 * 1000 * diff.Seconds())
+    // ...
+}
+```
+
+```go
+// File: contrib/client/main.go (UNCHANGED)
+
+common.RunThroughputDisplayWithLabel(ctx, *common.StatsPeriod, instanceLabel,
+    func() (uint64, uint64, uint64, uint64, uint64, uint64) {
+        // These raw counters remain atomic.Uint64 - no API change
+        return clientMetrics.ByteRecvDataSuccess.Load(),
+               clientMetrics.PktRecvDataSuccess.Load(),
+               gaps, naks, skips, retrans
+    })
+```
+
+**Why no changes needed:**
+
+| Pattern | Used By | Data Source | Change Required? |
+|---------|---------|-------------|------------------|
+| `ThroughputGetter` | client/main.go, client-generator/main.go | Raw byte/pkt counts (`.Load()`) | ❌ No |
+| `PrintConnectionStatistics` | All main.go files | `conn.Stats()` → `Statistics.Instantaneous.MbpsRecvRate` | ❌ No (Stats() updated internally) |
+
+**Optional enhancement** (not required for Phase 1):
+
+If we wanted main.go files to display the pre-computed rates from `ConnectionMetrics`:
+
+```go
+// contrib/client/main.go - OPTIONAL enhancement
+// Instead of computing rate locally, use pre-computed rate
+
+// Option A: Use getter for Mbps rate
+if connMetrics != nil {
+    mbps := connMetrics.GetRecvRateMbps()
+}
+
+// Option B: Use bytes/sec rate and convert
+if connMetrics != nil {
+    bps := connMetrics.GetRecvRateBytesPerSec()
+    mbps := bps * 8 / 1_000_000
+}
+```
+
+This is optional because:
+1. Local computation works fine (current behavior preserved)
+2. Local computation is actually fresher (per-display-period vs per-rate-period)
+3. Adding getter calls would require additional metric lookups per display tick
+
+**Conclusion**: The main.go files will continue to work unchanged. The rate helper getters are primarily for internal use by `receiver.Stats()` and `sender.Stats()`, and for Prometheus export.
+
+#### 1.5 Analysis.go Rate Validation
+
+**File**: `contrib/integration_testing/analysis.go`
+
+The integration tests use `analysis.go` to perform post-test validation. We need to add a new validation function that compares the Prometheus rate metrics to the computed rates from byte deltas.
+
+**Step 5: Add rate metrics validation to analysis.go**
+
+```go
+// File: contrib/integration_testing/analysis.go
+
+// RateMetricsValidationResult holds the result of rate metrics validation
+type RateMetricsValidationResult struct {
+    Passed bool
+
+    // Expected rate (computed from byte deltas and duration)
+    ExpectedRecvRateMbps float64
+    ExpectedSendRateMbps float64
+
+    // Reported rate (from Prometheus gauges - new atomic rate metrics)
+    ReportedRecvRateMbps float64
+    ReportedSendRateMbps float64
+
+    // Variance (should be < 5% for healthy rate calculation)
+    RecvRateVariance float64  // |expected - reported| / expected * 100
+    SendRateVariance float64
+
+    // Tolerance
+    MaxVariancePercent float64  // Default: 5%
+
+    // Messages
+    Violations []string
+    Warnings   []string
+}
+
+// VerifyRateMetrics validates that Prometheus rate metrics match computed rates
+// This is critical for Phase 1 (Rate Atomics) - ensures new atomic rates are accurate
+func VerifyRateMetrics(
+    computedRecvMbps, computedSendMbps float64,
+    prometheusRecvBps, prometheusSendBps float64,
+    config *TestConfig,
+) RateMetricsValidationResult {
+    result := RateMetricsValidationResult{
+        Passed:              false, // Fail-safe: default to failed
+        ExpectedRecvRateMbps: computedRecvMbps,
+        ExpectedSendRateMbps: computedSendMbps,
+        ReportedRecvRateMbps: prometheusSendBps * 8 / 1_000_000, // bytes/sec to Mbps
+        ReportedSendRateMbps: prometheusRecvBps * 8 / 1_000_000,
+        MaxVariancePercent:   5.0, // 5% tolerance
+    }
+
+    // Calculate variance for receive rate
+    if computedRecvMbps > 0 {
+        result.RecvRateVariance = math.Abs(result.ReportedRecvRateMbps-computedRecvMbps) /
+            computedRecvMbps * 100
+    }
+
+    // Calculate variance for send rate
+    if computedSendMbps > 0 {
+        result.SendRateVariance = math.Abs(result.ReportedSendRateMbps-computedSendMbps) /
+            computedSendMbps * 100
+    }
+
+    // Check receive rate
+    recvPassed := result.RecvRateVariance <= result.MaxVariancePercent
+    if !recvPassed {
+        result.Violations = append(result.Violations,
+            fmt.Sprintf("Recv rate variance too high: expected %.2f Mbps, got %.2f Mbps (%.1f%% variance, max %.1f%%)",
+                computedRecvMbps, result.ReportedRecvRateMbps,
+                result.RecvRateVariance, result.MaxVariancePercent))
+    }
+
+    // Check send rate
+    sendPassed := result.SendRateVariance <= result.MaxVariancePercent
+    if !sendPassed {
+        result.Violations = append(result.Violations,
+            fmt.Sprintf("Send rate variance too high: expected %.2f Mbps, got %.2f Mbps (%.1f%% variance, max %.1f%%)",
+                computedSendMbps, result.ReportedSendRateMbps,
+                result.SendRateVariance, result.MaxVariancePercent))
+    }
+
+    // Also verify rate is close to configured test bitrate
+    if config != nil && config.Bitrate > 0 {
+        targetMbps := float64(config.Bitrate) / 1_000_000
+        targetVariance := math.Abs(result.ReportedRecvRateMbps-targetMbps) / targetMbps * 100
+
+        if targetVariance > 15 { // 15% from target is a warning
+            result.Warnings = append(result.Warnings,
+                fmt.Sprintf("Recv rate %.2f Mbps is %.1f%% off target %.2f Mbps",
+                    result.ReportedRecvRateMbps, targetVariance, targetMbps))
+        }
+    }
+
+    result.Passed = recvPassed && sendPassed
+    return result
+}
+
+// PrintRateMetricsValidation prints the rate validation result
+func PrintRateMetricsValidation(result RateMetricsValidationResult) {
+    fmt.Println("\nRate Metrics Validation (Phase 1 - Atomic Rates):")
+    if result.Passed {
+        fmt.Println("  ✓ PASSED")
+        fmt.Printf("    Recv: computed=%.2f Mbps, reported=%.2f Mbps (%.1f%% variance)\n",
+            result.ExpectedRecvRateMbps, result.ReportedRecvRateMbps, result.RecvRateVariance)
+        fmt.Printf("    Send: computed=%.2f Mbps, reported=%.2f Mbps (%.1f%% variance)\n",
+            result.ExpectedSendRateMbps, result.ReportedSendRateMbps, result.SendRateVariance)
+    } else {
+        fmt.Println("  ✗ FAILED")
+        for _, v := range result.Violations {
+            fmt.Printf("    ✗ %s\n", v)
+        }
+    }
+    for _, w := range result.Warnings {
+        fmt.Printf("    ⚠ %s\n", w)
+    }
+}
+```
+
+**Step 6: Integrate into test analysis**
+
+```go
+// In analyzeTest() function, add rate validation:
+
+func analyzeTest(ts *TestMetricsTimeSeries) AnalysisResult {
+    // ... existing analysis ...
+
+    // Get Prometheus rate metrics from final snapshot
+    lastSnapshot := ts.Client.Snapshots[len(ts.Client.Snapshots)-1]
+    prometheusRecvBps := getMetricValue(lastSnapshot, "gosrt_recv_rate_bytes_per_sec")
+    prometheusSendBps := getMetricValue(lastSnapshot, "gosrt_send_rate_bytes_per_sec")
+
+    // Validate rate metrics match computed rates
+    rateResult := VerifyRateMetrics(
+        clientMetrics.AvgRecvRateMbps,  // Computed from byte deltas
+        serverMetrics.AvgSendRateMbps,  // Computed from byte deltas
+        prometheusRecvBps,               // From new Prometheus gauge
+        prometheusSendBps,               // From new Prometheus gauge
+        ts.TestConfig,
+    )
+
+    PrintRateMetricsValidation(rateResult)
+
+    // Include in overall result
+    result.RateMetricsValidation = rateResult
+    if !rateResult.Passed {
+        result.Passed = false
+        result.Violations = append(result.Violations,
+            "Rate metrics validation failed - atomic rate calculation may be incorrect")
+    }
+
+    // ... rest of analysis ...
+}
+```
+
+#### 1.6 Validation Checkpoint
+
+**Reference**: `integration_testing_design.md`, `integration_testing_matrix_design.md`
+
+```bash
+# 1. Run metrics audit tool to verify no duplication
+go run tools/metrics-audit/main.go
+# Expected: All rate metrics defined, exported, and used without duplication
+
+# 2. Unit tests with race detector
+go test -race -v ./...
+
+# 3. Run Tier 1 integration tests (Core Validation)
+# See integration_testing_matrix_design.md Section 9
+# analysis.go will now validate rate metrics as part of the test
+cd contrib/integration-tests
+./run-tests.sh --tier=1 --config=Base
+
+# Expected output includes:
+# Rate Metrics Validation (Phase 1 - Atomic Rates):
+#   ✓ PASSED
+#     Recv: computed=20.00 Mbps, reported=19.95 Mbps (0.3% variance)
+#     Send: computed=20.00 Mbps, reported=20.02 Mbps (0.1% variance)
+
+# 4. Verify Prometheus metrics are exported
+curl http://localhost:8080/metrics | grep gosrt_recv_rate
+# Expected: gosrt_recv_rate_packets_per_sec, gosrt_recv_rate_bytes_per_sec, etc.
+
+# 5. Parallel comparison: verify metrics identical before/after
+# See parallel_comparison_test_design.md
+./run-tests.sh --mode=parallel --test=Net-Clean-20M-5s-R0-Base
+
+# 6. Run at multiple bitrates to verify rate accuracy scales
+./run-tests.sh --mode=network --test=Net-Clean-5M-5s-R0-Base   # 5 Mbps
+./run-tests.sh --mode=network --test=Net-Clean-20M-5s-R0-Base  # 20 Mbps
+./run-tests.sh --mode=network --test=Net-Clean-50M-5s-R0-Base  # 50 Mbps
+```
+
+**What we're validating:**
+- `metrics-audit` tool reports no missing/duplicate metrics
+- Race detector passes (no data races in atomics)
+- Prometheus endpoint exposes all new rate metrics
+- **NEW**: `analysis.go` validates rate metrics match computed rates (< 5% variance)
+- **NEW**: Rate metrics accuracy verified at multiple bitrates (5M, 20M, 50M)
+- Tier 1 tests pass with identical metrics to baseline
+- Rate calculations produce same values as locked version
+
+#### 1.7 Acceptance Criteria
+
+- [ ] `go run tools/metrics-audit/main.go` shows all rate metrics defined and exported
 - [ ] All tests pass with `-race` flag
+- [ ] Prometheus endpoint shows `gosrt_recv_rate_*` and `gosrt_send_rate_*` metrics
+- [ ] **NEW**: `analysis.go` rate validation passes (< 5% variance from computed rates)
+- [ ] **NEW**: Rate metrics accurate at 5M, 20M, and 50M bitrates
 - [ ] Rate metrics values match legacy implementation (< 0.1% difference)
 - [ ] No performance regression in benchmarks
 - [ ] Lock contention reduced (verify with `pprof` mutex profile)
@@ -3806,19 +4437,45 @@ func (c *connection) readLoop() {
 
 #### 2.3 Validation Checkpoint
 
+**Reference**: `integration_testing_design.md`, `integration_testing_matrix_design.md`, `parallel_comparison_test_design.md`
+
 ```bash
-# Run with flag DISABLED (legacy behavior)
-USE_ZERO_COPY=false go test -race -v ./... -run TestIntegration
+# 1. Unit tests with race detector
+go test -race -v ./...
 
-# Run with flag ENABLED (new behavior)
-USE_ZERO_COPY=true go test -race -v ./... -run TestIntegration
+# 2. Run Tier 1 integration tests with BOTH flag values
+# See integration_testing_matrix_design.md Section 9
+cd contrib/integration-tests
 
-# Memory leak test
-USE_ZERO_COPY=true go test -v ./... -run TestMemoryLeak -count=10
+# Legacy path (zero-copy disabled)
+./run-tests.sh --tier=1 --flag=UseZeroCopyBuffers=false
 
-# Performance comparison
-go test -bench=BenchmarkReceive ./... -benchmem
-# Compare allocations: zero-copy should show FEWER allocations
+# New path (zero-copy enabled)
+./run-tests.sh --tier=1 --flag=UseZeroCopyBuffers=true
+
+# 3. Parallel comparison: identical network, different config
+# See parallel_comparison_test_design.md - compare memory/allocations
+./run-tests.sh --mode=parallel \
+    --test=Parallel-Starlink-20M-5s-R60-Base-vs-ZeroCopy \
+    --compare-memory
+
+# 4. Long-duration memory leak test (12-24 hours)
+# See integration_testing_design.md Section "Long-Duration Stability"
+./run-tests.sh --mode=network \
+    --test=Net-Clean-20M-5s-R0-ZeroCopy \
+    --duration=12h \
+    --check-memory-leaks
+
+# 5. Performance benchmark with memory profiling
+go test -bench=BenchmarkReceive ./... -benchmem -memprofile=phase2.mem
+```
+
+**What we're validating:**
+- Tier 1 passes with `UseZeroCopyBuffers=false` (legacy unchanged)
+- Tier 1 passes with `UseZeroCopyBuffers=true` (new path works)
+- No buffer pool exhaustion under Starlink pattern
+- Memory allocations reduced (see parallel comparison output)
+- No memory leaks in 12h run
 
 # Parallel comparison test (both paths simultaneously)
 go test -v ./... -run TestParallelComparison
@@ -4016,31 +4673,58 @@ func (r *receiver) drainPacketRing() {
 
 #### 3.3 Validation Checkpoint
 
+**Reference**: `integration_testing_design.md`, `integration_testing_matrix_design.md`, `parallel_comparison_test_design.md`
+
 ```bash
+# 1. Unit tests with race detector
+go test -race -v ./...
+
+# 2. Run Tier 1 AND Tier 2 tests with BOTH flag values
+# See integration_testing_matrix_design.md Sections 9-10
+cd contrib/integration-tests
+
 # Legacy path (ring disabled)
-USE_PACKET_RING=false go test -race -v ./... -run TestIntegration
+./run-tests.sh --tier=1,2 --flag=UsePacketRing=false
 
 # New path (ring enabled)
-USE_PACKET_RING=true go test -race -v ./... -run TestIntegration
+./run-tests.sh --tier=1,2 --flag=UsePacketRing=true
 
-# Parallel comparison
-go test -v ./... -run TestParallelComparison -legacy=true -new=true
+# 3. Parallel comparison: legacy vs ring under IDENTICAL network
+# See parallel_comparison_test_design.md - this is the PRIMARY validation
+./run-tests.sh --mode=parallel \
+    --test=Parallel-Starlink-L5-20M-10s-R60-Base-vs-Ring \
+    --compare-all
 
-# Performance benchmark
-go test -bench=BenchmarkThroughput ./...
+# 4. Starlink recovery test (gap handling)
+# Critical: verify ring doesn't drop packets during 60ms outages
+./run-tests.sh --mode=network \
+    --test=Net-Starlink-20M-10s-R60-Ring \
+    --pattern=starlink
 
-# Stress test with packet loss
-go test -v ./... -run TestStressWithLoss -packet-loss=5
+# 5. High-throughput stress test
+./run-tests.sh --mode=network \
+    --test=Net-Clean-50M-5s-R10-Ring \
+    --duration=5m
+
+# 6. CPU profile to verify lock reduction
+go test -bench=BenchmarkReceive ./... -cpuprofile=phase3.prof
+go tool pprof -top phase3.prof | grep -E "futex|lock"
 ```
+
+**What we're validating:**
+- Tier 1 + Tier 2 pass with both `UsePacketRing=false` and `true`
+- Parallel comparison shows identical packet delivery
+- Starlink gaps recovered (no ring overflow)
+- `runtime.futex` CPU reduced in profile
 
 #### 3.4 Acceptance Criteria
 
-- [ ] All tests pass with `UsePacketRing=false`
-- [ ] All tests pass with `UsePacketRing=true`
-- [ ] Packet delivery order identical between paths
-- [ ] No dropped packets under normal load
-- [ ] Lock contention reduced (verify with pprof)
-- [ ] Ring buffer metrics show expected behavior
+- [ ] All Tier 1 + Tier 2 tests pass with `UsePacketRing=false`
+- [ ] All Tier 1 + Tier 2 tests pass with `UsePacketRing=true`
+- [ ] Parallel comparison: packet delivery order identical
+- [ ] No ring drops under normal load (check `gosrt_ring_drops_total`)
+- [ ] `runtime.futex` reduced from 44% to < 10% (pprof)
+- [ ] Starlink pattern: 100% recovery rate maintained
 
 ---
 
@@ -4050,7 +4734,9 @@ go test -v ./... -run TestStressWithLoss -packet-loss=5
 
 **Reference**: Section 9 (Event Loop Architecture)
 
-**Prerequisite**: Phase 3 completed and validated
+**Prerequisites**:
+- Phase 1 (Rate Metrics Atomics) - adaptive backoff uses `GetRecvRatePacketsPerSec()`
+- Phase 3 (Lock-Free Ring) - event loop consumes from ring buffer
 
 #### 4.1 Files to Modify
 
@@ -4072,6 +4758,7 @@ type Config struct {
 
     // Event Loop (requires UsePacketRing=true)
     UseEventLoop         bool          `json:"use_event_loop"`
+    RateInterval         time.Duration `json:"rate_interval"`              // Default: 1s
     BackoffColdStartPkts int           `json:"backoff_cold_start_packets"` // Default: 1000
     BackoffMinSleep      time.Duration `json:"backoff_min_sleep"`          // Default: 10µs
     BackoffMaxSleep      time.Duration `json:"backoff_max_sleep"`          // Default: 1ms
@@ -4156,102 +4843,158 @@ func (c *connection) startReceiver() {
 
 #### 4.3 Validation Checkpoint
 
+**Reference**: `integration_testing_design.md`, `integration_testing_matrix_design.md`, `parallel_comparison_test_design.md`
+
 ```bash
+# 1. Unit tests with race detector
+go test -race -v ./...
+
+# 2. Run full Tier 1 + Tier 2 + Tier 3 (Comprehensive)
+# See integration_testing_matrix_design.md Sections 9-11
+cd contrib/integration-tests
+
 # Tick loop (event loop disabled)
-USE_EVENT_LOOP=false go test -race -v ./... -run TestIntegration
+./run-tests.sh --tier=1,2,3 --flag=UseEventLoop=false
 
 # Event loop enabled
-USE_EVENT_LOOP=true go test -race -v ./... -run TestIntegration
+./run-tests.sh --tier=1,2,3 --flag=UseEventLoop=true
 
-# Latency comparison
-go test -v ./... -run TestLatencyComparison -tick=true -eventloop=true
+# 3. Parallel comparison: Tick vs Event Loop
+# See parallel_comparison_test_design.md - compare latency metrics
+./run-tests.sh --mode=parallel \
+    --test=Parallel-Starlink-L5-20M-10s-R60-Tick-vs-EventLoop \
+    --compare-latency
 
-# CPU profile comparison
-go test -bench=BenchmarkEventLoop ./... -cpuprofile=eventloop.prof
-go test -bench=BenchmarkTickLoop ./... -cpuprofile=tickloop.prof
+# 4. Latency-focused tests (continuous delivery verification)
+# Event loop should show smoother delivery (lower jitter)
+./run-tests.sh --mode=network \
+    --test=Net-Starlink-20M-10s-R130-EventLoop \
+    --measure-latency-percentiles
+
+# 5. CPU profile comparison: tick vs event loop
+go test -bench=BenchmarkReceive ./... -cpuprofile=tick.prof
+# Then with event loop enabled
+go test -bench=BenchmarkReceive ./... -cpuprofile=eventloop.prof
 ```
+
+**What we're validating:**
+- All Tier tests pass with both `UseEventLoop=false` and `true`
+- Event loop shows lower P99 latency than tick loop
+- Event loop shows smoother CPU usage (less bursty)
+- Packet delivery timing is more continuous (lower jitter)
 
 #### 4.4 Acceptance Criteria
 
-- [ ] All tests pass with `UseEventLoop=false`
-- [ ] All tests pass with `UseEventLoop=true`
-- [ ] Event loop shows lower latency than tick loop
-- [ ] CPU usage smooth (not bursty) with event loop
+- [ ] All Tier 1 + Tier 2 + Tier 3 tests pass with `UseEventLoop=false`
+- [ ] All Tier 1 + Tier 2 + Tier 3 tests pass with `UseEventLoop=true`
+- [ ] Parallel comparison: P99 latency improved with event loop
+- [ ] Delivery jitter reduced (continuous vs batched)
+- [ ] CPU profile shows smoother utilization (less bursty)
 - [ ] Adaptive backoff prevents busy-waiting when idle
 
 ---
 
 ### Phase 5: Integration Testing & Validation (2-3 hours)
 
-**Goal**: Comprehensive validation of all flag combinations.
+**Goal**: Comprehensive validation of all flag combinations using the existing integration testing framework.
+
+**Reference Documents**:
+- `integration_testing_design.md` - Core framework and principles
+- `integration_testing_matrix_design.md` - Matrix-based test generation
+- `parallel_comparison_test_design.md` - Side-by-side configuration comparison
 
 #### 5.1 Test Matrix
 
-Run all combinations from Section 11.6:
+The lockless design introduces 3 new feature flags. Combined with existing config variants, we have:
 
-```go
-var testConfigs = []struct {
-    Name               string
-    UseZeroCopyBuffers bool
-    UsePacketRing      bool
-    UseEventLoop       bool
-}{
-    {"Legacy",                    false, false, false},
-    {"ZeroCopy Only",             true,  false, false},
-    {"Ring Only",                 false, true,  false},
-    {"Ring + ZeroCopy",           true,  true,  false},
-    {"Full Lockless",             true,  true,  true},
-}
+```
+Flag Combinations (5 configs):
+  Legacy:           UseZeroCopyBuffers=false, UsePacketRing=false, UseEventLoop=false
+  ZeroCopy:         UseZeroCopyBuffers=true,  UsePacketRing=false, UseEventLoop=false
+  Ring:             UseZeroCopyBuffers=false, UsePacketRing=true,  UseEventLoop=false
+  Ring+ZeroCopy:    UseZeroCopyBuffers=true,  UsePacketRing=true,  UseEventLoop=false
+  Full Lockless:    UseZeroCopyBuffers=true,  UsePacketRing=true,  UseEventLoop=true
+
+Cross with existing matrix (from integration_testing_matrix_design.md):
+  Config Variants:  Base, Btree, IoUr, NakBtree, NakBtreeF, Full
+  RTT Profiles:     R0, R10, R60, R130, R300
+  Buffer Sizes:     1s, 5s, 10s, 30s
+  Bitrates:         20M, 50M
+  Loss Patterns:    Clean, L2, L5, L10, Starlink
 ```
 
-#### 5.2 Test Categories
+#### 5.2 Integration Test Execution
 
 ```bash
-# 1. Correctness tests (all configs)
-for config in "${configs[@]}"; do
-    go test -race -v ./... -run TestIntegration -config=$config
+cd contrib/integration-tests
+
+# 1. Run ALL tiers for EACH lockless flag combination
+for flags in "Legacy" "ZeroCopy" "Ring" "Ring+ZeroCopy" "FullLockless"; do
+    ./run-tests.sh --tier=1,2,3 --lockless-config=$flags
 done
 
-# 2. Packet delivery verification
-go test -v ./... -run TestPacketDeliveryOrder
+# 2. Parallel comparison tests (primary validation)
+# See parallel_comparison_test_design.md
+./run-tests.sh --mode=parallel \
+    --test=Parallel-Starlink-L5-20M-10s-R60-Legacy-vs-FullLockless \
+    --compare-all
 
-# 3. NAK/ACK timing tests
-go test -v ./... -run TestNAKGeneration
-go test -v ./... -run TestACKTiming
+./run-tests.sh --mode=parallel \
+    --test=Parallel-Starlink-L5-50M-30s-R130-Legacy-vs-FullLockless \
+    --compare-all
 
-# 4. Memory leak tests
-go test -v ./... -run TestBufferPoolExhaustion -duration=60s
+# 3. High-RTT tests (GEO satellite simulation)
+# See integration_testing_matrix_design.md Section 4 (RTT Profiles)
+./run-tests.sh --mode=network \
+    --test=Net-Starlink-20M-30s-R300-FullLockless \
+    --pattern=starlink
 
-# 5. Stress tests
-go test -v ./... -run TestHighBitrate -bitrate=100Mbps
-go test -v ./... -run TestPacketLoss -loss=10%
+# 4. Stress tests
+./run-tests.sh --mode=network \
+    --test=Net-Loss-L15-50M-10s-R60-FullLockless \
+    --duration=10m
 
-# 6. Performance benchmarks
-go test -bench=. ./... -benchmem > benchmark_results.txt
+# 5. Long-duration stability (12-24h)
+# See integration_testing_design.md Section "Long-Duration Stability"
+./run-tests.sh --mode=network \
+    --test=Net-Clean-20M-5s-R10-FullLockless \
+    --duration=24h \
+    --check-memory-leaks
 ```
 
-#### 5.3 Parallel Comparison Test
+#### 5.3 Parallel Comparison Validation
 
-```go
-// TestParallelComparison runs same traffic through legacy and new paths
-func TestParallelComparison(t *testing.T) {
-    legacyConn := newConnection(Config{UsePacketRing: false})
-    newConn := newConnection(Config{UsePacketRing: true, UseEventLoop: true})
+From `parallel_comparison_test_design.md`, the parallel tests run TWO pipelines through IDENTICAL network conditions:
 
-    // Send identical traffic to both
-    traffic := generateTestTraffic(10000)
-
-    legacyResults := runThrough(legacyConn, traffic)
-    newResults := runThrough(newConn, traffic)
-
-    // Compare results
-    assert.Equal(t, legacyResults.PacketsDelivered, newResults.PacketsDelivered)
-    assert.Equal(t, legacyResults.DeliveryOrder, newResults.DeliveryOrder)
-
-    // New should be faster
-    assert.Less(t, newResults.P99Latency, legacyResults.P99Latency)
-}
 ```
+=== Parallel Comparison: Starlink-20Mbps ===
+
+Pipeline Configuration:
+  Legacy:       list + no io_uring + locks + tick loop
+  FullLockless: btree + io_uring + ring + event loop
+
+Network Events:
+  Pattern: starlink (60ms 100% loss at 12,27,42,57s intervals)
+
+=== Expected Results ===
+
+                          Legacy        FullLockless    Improvement
+  Recovery Rate:          100.0%        100.0%          = (both recover)
+  Drops (too_late):       12            3               -75% ✓
+  P99 Latency (ms):       15.2          8.4             -45% ✓
+  CPU Time (s):           8.45          6.21            -26% ✓
+  Heap Allocated (MB):    45.2          32.7            -28% ✓
+  runtime.futex:          44%           < 5%            -90% ✓
+```
+
+#### 5.4 Acceptance Criteria
+
+- [ ] All Tier 1 + Tier 2 + Tier 3 pass for ALL 5 flag combinations
+- [ ] Parallel comparison: identical packet delivery, lower latency
+- [ ] Starlink pattern: 100% recovery rate maintained
+- [ ] High-RTT (R300): no timeout issues
+- [ ] 24h stability: no memory leaks, no degradation
+- [ ] `runtime.futex` CPU reduced from 44% to < 5%
 
 ---
 
