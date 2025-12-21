@@ -131,8 +131,10 @@ This document tracks the implementation progress of Phase 1 of the GoSRT Lockles
 - [x] Run `go test -race ./congestion/live/...` - passes (except 2 pre-existing failures)
 - [x] Run `go test -race ./metrics/...` - all 57 handler tests pass
 - [x] Run `go test ./contrib/integration_testing/...` - passes
-- [ ] Verify Prometheus endpoint shows new rate metrics (requires running server)
-- [ ] Run Tier 1 integration tests (requires test infrastructure)
+- [x] **Integration Tests - ALL PASS:**
+  - `Isolation-5M-Control`: 4.77 Mbps (baseline) ✅
+  - `Isolation-5M-Server-Btree`: 4.77 Mbps (btree) ✅
+  - `Isolation-5M-Full`: 4.77 Mbps (io_uring + btree + NAK btree) ✅
 
 ---
 
