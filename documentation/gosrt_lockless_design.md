@@ -57,7 +57,7 @@ The event loop replaces the timer-based `Tick()` function, providing smoother pa
 | Phase | Description | Status |
 |-------|-------------|--------|
 | **Phase 1** | Rate Metrics Atomics | ✅ **COMPLETE** - All integration tests pass |
-| Phase 2 | Buffer Lifetime (Zero-Copy) | 🔲 Pending |
+| Phase 2 | Buffer Lifetime (Zero-Copy) | 📋 **PLANNED** - Detailed steps ready |
 | Phase 3 | Lock-Free Ring Integration | 🔲 Pending |
 | Phase 4 | Event Loop Architecture | 🔲 Pending |
 | Phase 5 | Full Integration Testing | 🔲 Pending |
@@ -1009,7 +1009,7 @@ func (p *Packet) DecommissionWithBuffer(bufferPool *sync.Pool) {
         *p.recvBuffer = (*p.recvBuffer)[:0]  // Zero for immediate reuse
         bufferPool.Put(p.recvBuffer)
         p.recvBuffer = nil
-        p.dataLen = 0
+        p.n = 0
     }
     // Return packet to pool
     p.Decommission()
@@ -1018,21 +1018,27 @@ func (p *Packet) DecommissionWithBuffer(bufferPool *sync.Pool) {
 - **Pros**: Packet-centric, works without receiver
 - **Cons**: Requires passing pool reference, changes Decommission signature
 
-**Option D: Register Pool in Packet (Most Encapsulated)**
+**Option D: Register Pool in Packet (NOT SELECTED)**
+
+> ⚠️ **NOT IMPLEMENTED**: This option was considered but rejected. It adds unnecessary memory overhead (one `*sync.Pool` pointer per packet) and couples packet lifecycle to pool knowledge. We use Option B + Option C instead.
+
 ```go
+// REJECTED APPROACH - shown for completeness only
 // During deserialization
 pkt.SetBufferPool(bufferPool)
 
 // Later, single call handles everything
 pkt.DecommissionFully()
 ```
-Implementation:
+<details>
+<summary>Implementation (for reference only - NOT USED)</summary>
+
 ```go
 type Packet struct {
     Header     Header
     recvBuffer *[]byte
-    dataLen    int
-    bufferPool *sync.Pool  // NEW: Optional pool reference for self-cleanup
+    n          int       // Bytes received (from ReadFromUDP/io_uring)
+    bufferPool *sync.Pool  // NOT USED: Would add 8 bytes per packet
 }
 
 func (p *Packet) SetBufferPool(pool *sync.Pool) {
@@ -1040,22 +1046,27 @@ func (p *Packet) SetBufferPool(pool *sync.Pool) {
 }
 
 func (p *Packet) DecommissionFully() {
-    // Release buffer if pool is set
     if p.recvBuffer != nil && p.bufferPool != nil {
         *p.recvBuffer = (*p.recvBuffer)[:0]
         p.bufferPool.Put(p.recvBuffer)
         p.recvBuffer = nil
-        p.dataLen = 0
+        p.n = 0
     }
-    p.bufferPool = nil  // Clear pool reference
-    // Return packet to pool
+    p.bufferPool = nil
     p.Decommission()
 }
 ```
-- **Pros**: Most encapsulated, single call, works anywhere
-- **Cons**: Adds field to packet struct, pool reference per packet
+</details>
 
-#### Recommendation: Option B + Option C Hybrid
+- **Pros**: Most encapsulated, single call, works anywhere
+- **Cons**: Adds 8 bytes to every packet struct, pool reference per packet, couples packet to pool
+- **Reason Not Selected**: Memory overhead and unnecessary coupling; Option B + C achieves same goals without per-packet storage
+
+---
+
+#### ✅ CHOSEN DESIGN: Option B + Option C Hybrid
+
+> **Implementation Decision**: This is the selected design that will be implemented in Phase 2.
 
 Use **Option B** (`r.releasePacketFully()`) as the **primary path** for the event loop where the receiver is available.
 
@@ -1099,7 +1110,7 @@ func (p *Packet) DecommissionWithBuffer(bufferPool *sync.Pool) {
         *p.recvBuffer = (*p.recvBuffer)[:0]  // Zero slice for immediate reuse
         bufferPool.Put(p.recvBuffer)
         p.recvBuffer = nil
-        p.dataLen = 0
+        p.n = 0
     }
     p.Decommission()
 }
@@ -1134,21 +1145,21 @@ This design ensures:
 
 #### Simplified: Single-Call UnmarshalZeroCopy
 
-The new `UnmarshalZeroCopy(buf, n, addr)` sets `recvBuffer` and `dataLen` internally **BEFORE** any validation. This ensures `DecommissionWithBuffer()` can always return the buffer, even if parsing fails:
+The new `UnmarshalZeroCopy(buf, n, addr)` sets `recvBuffer` and `n` internally **BEFORE** any validation. This ensures `DecommissionWithBuffer()` can always return the buffer, even if parsing fails:
 
 ```go
 // NEW SIMPLIFIED PATTERN: Single call does everything
 pkt := packetPool.Get().(*packet.Packet)
-err := pkt.UnmarshalZeroCopy(buffer, n, addr)  // Sets recvBuffer+dataLen, then parses
+err := pkt.UnmarshalZeroCopy(buffer, n, addr)  // Sets recvBuffer+n, then parses
 if err != nil {
     // recvBuffer is ALREADY tracked (set before validation in UnmarshalZeroCopy)
     pkt.DecommissionWithBuffer(pool)           // ✓ Will return buffer to pool
     return
 }
-// Success - pkt.GetPayload() returns (*recvBuffer)[HeaderSize:dataLen]
+// Success - pkt.GetPayload() returns (*recvBuffer)[HeaderSize:n]
 ```
 
-**Why this is safe:** `UnmarshalZeroCopy` stores `recvBuffer` and `dataLen` as its FIRST action, before any validation or parsing. If header parsing fails, the buffer is still tracked.
+**Why this is safe:** `UnmarshalZeroCopy` stores `recvBuffer` and `n` as its FIRST action, before any validation or parsing. If header parsing fails, the buffer is still tracked.
 
 **Pattern applied in:**
 - Section 6.8: io_uring Completion Handler
@@ -1170,17 +1181,30 @@ The `recvBufferPool` reference is stored in the receiver struct, not in each pac
 **Key insight**: Since `HeaderSize` is constant (16 bytes) and we know `n` (bytes received), the payload can be computed on-demand via `GetPayload()`:
 
 ```go
-payload = (*p.recvBuffer)[HeaderSize:p.dataLen]
+payload = (*p.recvBuffer)[HeaderSize:p.n]
 ```
 
-**Solution**: Add `recvBuffer` and `dataLen` for zero-copy, keep `Payload` for backwards compatibility:
+**Naming Decision: `n` for bytes received**
+
+We use `n` rather than `dataLen` or `length` because:
+
+1. **Go standard library convention** - `n` is the ubiquitous name for "bytes read/written":
+   - `io.Reader.Read(p []byte) (n int, err error)`
+   - `net.Conn.Read(b []byte) (n int, err error)`
+   - `ReadFromUDP(b []byte) (n int, addr *UDPAddr, err error)`
+
+2. **Maintains connection to read operation** - developers immediately recognize `n` from the read call that populated the buffer
+
+3. **Least surprising to Go developers** - storing the same `n` value from the read preserves the mental model
+
+**Solution**: Add `recvBuffer` and `n` for zero-copy, keep `Payload` for backwards compatibility:
 
 ```go
 type Packet struct {
     Header     Header
     Payload    *[]byte  // LEGACY: points to copied data (nil in zero-copy path)
     recvBuffer *[]byte  // ZERO-COPY: original buffer from recvBufferPool (for return)
-    dataLen    int      // ZERO-COPY: total bytes received (n from ReadFromUDP/io_uring)
+    n          int      // ZERO-COPY: bytes received (from ReadFromUDP/io_uring CQE.Res)
 }
 
 // IMPORTANT: Use GetPayload() for all payload access - it handles both paths!
@@ -1190,9 +1214,9 @@ type Packet struct {
 // recvBuffer ──► ┌──────────────────┬──────────────────────────┬─────────┐
 //                │ Header (16 bytes)│ Payload Data             │ Unused  │
 //                └──────────────────┴──────────────────────────┴─────────┘
-//                │◄──────────────── dataLen bytes ────────────►│
+//                │◄──────────────── n bytes ──────────────────►│
 //
-// GetPayload() computes: (*recvBuffer)[HeaderSize:dataLen]
+// GetPayload() computes: (*recvBuffer)[HeaderSize:n]
 
 // GetPayload returns payload data, handling BOTH zero-copy and legacy paths
 // - Zero-copy (recvBuffer set): computes slice from recvBuffer
@@ -1200,7 +1224,7 @@ type Packet struct {
 func (p *Packet) GetPayload() []byte {
     // Zero-copy path: compute from recvBuffer
     if p.recvBuffer != nil {
-        return (*p.recvBuffer)[HeaderSize:p.dataLen]
+        return (*p.recvBuffer)[HeaderSize:p.n]
     }
     // Legacy path: return stored Payload
     if p.Payload != nil {
@@ -1209,12 +1233,12 @@ func (p *Packet) GetPayload() []byte {
     return nil
 }
 
-// GetPayloadLen returns the payload length (dataLen - HeaderSize)
+// GetPayloadLen returns the payload length (n - HeaderSize)
 func (p *Packet) GetPayloadLen() int {
-    if p.dataLen <= HeaderSize {
+    if p.n <= HeaderSize {
         return 0
     }
-    return p.dataLen - HeaderSize
+    return p.n - HeaderSize
 }
 
 // GetRecvBuffer returns the original buffer reference for pool release
@@ -1225,7 +1249,7 @@ func (p *Packet) GetRecvBuffer() *[]byte {
 // ClearRecvBuffer clears the buffer reference after pool release
 func (p *Packet) ClearRecvBuffer() {
     p.recvBuffer = nil
-    p.dataLen = 0
+    p.n = 0
 }
 
 // HasRecvBuffer returns true if packet has a tracked pool buffer
@@ -1234,13 +1258,13 @@ func (p *Packet) HasRecvBuffer() bool {
 }
 
 // NOTE: No SetRecvBuffer() needed!
-// UnmarshalZeroCopy(buf, n, addr) sets both recvBuffer and dataLen internally.
+// UnmarshalZeroCopy(buf, n, addr) sets both recvBuffer and n internally.
 // This is cleaner and ensures buffer is always tracked if parsing fails.
 ```
 
 **Backwards Compatibility Note:**
 
-The `Payload *[]byte` field is KEPT for backwards compatibility with legacy code paths. The zero-copy path uses `recvBuffer` + `dataLen` instead, but both work through the unified `GetPayload()` interface.
+The `Payload *[]byte` field is KEPT for backwards compatibility with legacy code paths. The zero-copy path uses `recvBuffer` + `n` instead, but both work through the unified `GetPayload()` interface.
 
 **Future optimization** (after migration complete): Once ALL code uses `GetPayload()`, the `Payload` field can be removed to save 16-24 bytes per packet. This requires an audit to ensure no direct `p.Payload` access remains.
 
@@ -1248,9 +1272,9 @@ The `Payload *[]byte` field is KEPT for backwards compatibility with legacy code
 
 | Approach | Storage | GetPayload() | UnmarshalZeroCopy |
 |----------|---------|--------------|-------------------|
-| Keep `Payload` (current) | +24 bytes | Check both paths | Sets recvBuffer+dataLen |
-| Remove `Payload` (future) | +8 bytes | Zero-copy only | Sets recvBuffer+dataLen |
-| Store `dataLen int` | 8 bytes (int) | Compute slice | Just store n |
+| Keep `Payload` (current) | +24 bytes | Check both paths | Sets recvBuffer+n |
+| Remove `Payload` (future) | +8 bytes | Zero-copy only | Sets recvBuffer+n |
+| Store `n int` | 8 bytes (int) | Compute slice | Just store n |
 | `Payload` | `data[HeaderSize:]` sub-slice | Application access to payload data |
 
 After `UnmarshalZeroCopy`:
@@ -1318,19 +1342,19 @@ func (r *receiver) deliverPackets(now uint64) {
                                      ┌──────────────────────┐
                                      │       Packet         │
                                      │ recvBuffer *[]byte   │ ← for pool Put()
-                                     │ dataLen int          │ ← bytes received
+                                     │ n int                │ ← bytes received
                                      └──────────────────────┘
                                              │
                                              │ GetPayload() computes:
-                                             │ (*recvBuffer)[HeaderSize:dataLen]
+                                             │ (*recvBuffer)[HeaderSize:n]
                                              ▼
 ```
 
 **Key insight**: The Packet struct stores:
 1. `recvBuffer` - Original pool buffer (for `Put()` back to pool)
-2. `dataLen` - Bytes received (to compute payload slice on-demand)
+2. `n` - Bytes received (to compute payload slice on-demand)
 
-**No Payload slice stored!** `GetPayload()` computes `(*recvBuffer)[HeaderSize:dataLen]`
+**No Payload slice stored!** `GetPayload()` computes `(*recvBuffer)[HeaderSize:n]`
 
 ### 6.7 Packet Unmarshalling Functions
 
@@ -1420,7 +1444,7 @@ For zero-copy, everything is done in a single `UnmarshalZeroCopy(buf, n, addr)` 
 // 2. Validates n >= HeaderSize
 // 3. Parses the header
 //
-// Payload access is via GetPayload() which computes: (*recvBuffer)[HeaderSize:dataLen]
+// Payload access is via GetPayload() which computes: (*recvBuffer)[HeaderSize:n]
 //
 // This is MORE EFFICIENT than separate SetRecvBuffer() + UnmarshalZeroCopy():
 // - Single function call
@@ -1430,15 +1454,15 @@ func (p *Packet) UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error {
     // Store buffer and length FIRST (before any validation that might fail)
     // This ensures DecommissionWithBuffer() can always return the buffer
     p.recvBuffer = buf
-    p.dataLen = n
+    p.n = n
 
     // Now validate
     if n < HeaderSize {
         return ErrPacketTooShort
     }
 
-    // Parse header directly from recvBuffer
-    if err := p.Header.Unmarshal((*p.recvBuffer)[:HeaderSize]); err != nil {
+    // Parse header directly from recvBuffer (no need to slice to n first)
+    if err := p.Header.Unmarshal((*buf)[:HeaderSize]); err != nil {
         return err
     }
 
@@ -1446,7 +1470,7 @@ func (p *Packet) UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error {
     return nil
 
     // NOTE: No Payload slice created!
-    // Callers use GetPayload() which computes: (*recvBuffer)[HeaderSize:dataLen]
+    // Callers use GetPayload() which computes: (*recvBuffer)[HeaderSize:n]
 }
 ```
 
@@ -1468,10 +1492,10 @@ After UnmarshalZeroCopy(buf, n=200, addr):
 │ Header (16 bytes)│ Payload Data (184 bytes) │ Unused (1300)     │
 └──────────────────┴──────────────────────────┴───────────────────┘
 ▲                                              ▲
-p.recvBuffer points here                       p.dataLen = 200
+p.recvBuffer points here                       p.n = 200
 (original pool buffer)
 
-GetPayload() computes: (*recvBuffer)[HeaderSize:dataLen]
+GetPayload() computes: (*recvBuffer)[HeaderSize:n]
                        (*recvBuffer)[16:200] → 184 bytes of payload
 
 NO separate Payload pointer stored - computed on demand!
@@ -1484,7 +1508,7 @@ NO separate Payload pointer stored - computed on demand!
 | Signature | `(addr, data []byte)` | `(addr)` |
 | Data copy | Yes (`copy()`) | No |
 | Memory allocation | Yes (`make()`) | No |
-| Payload storage | `Payload *[]byte` (24 bytes) | `dataLen int` (8 bytes) |
+| Payload storage | `Payload *[]byte` (24 bytes) | `n int` (8 bytes) |
 | Payload access | Direct (`p.Payload`) | Computed (`GetPayload()`) |
 | Buffer lifetime | Short (returned immediately) | Extended (until delivery) |
 | Precondition | None | None (single call does everything) |
@@ -1518,8 +1542,8 @@ if err != nil {
 
 // 4. Packet ready:
 //    - pkt.recvBuffer → original pool buffer (for return)
-//    - pkt.dataLen = n (bytes received)
-//    - pkt.GetPayload() → computed slice (*recvBuffer)[HeaderSize:dataLen]
+//    - pkt.n = n (bytes received)
+//    - pkt.GetPayload() → computed slice (*recvBuffer)[HeaderSize:n]
 ```
 
 This pattern is used in both the io_uring (Section 6.8) and standard receive (Section 6.9) paths.
@@ -1561,8 +1585,8 @@ func (ln *listener) processRecvCompletion(buffer *[]byte, n int, addr net.Addr) 
 
     // After success:
     //   p.recvBuffer → original pool buffer (for return)
-    //   p.dataLen = n (bytes received)
-    //   p.GetPayload() → computed slice (*recvBuffer)[HeaderSize:dataLen]
+    //   p.n = n (bytes received)
+    //   p.GetPayload() → computed slice (*recvBuffer)[HeaderSize:n]
     // route packet to connection's lock-free ring...
 }
 ```
@@ -1655,7 +1679,7 @@ func (c *connection) readLoop() {
 
         // After success:
         //   pkt.recvBuffer → original pool buffer (for return)
-        //   pkt.dataLen = n (bytes received)
+        //   pkt.n = n (bytes received)
         //   pkt.GetPayload() → computed slice for app access
         // Route packet to connection
         c.handlePacket(pkt)
@@ -1667,7 +1691,7 @@ func (c *connection) readLoop() {
 - **Error Path 1**: Read fails → `returnBufferToPool()` (buffer-only, no packet)
 - **Error Path 2**: Parse fails → `pkt.DecommissionWithBuffer()` (buffer stored before validation)
 - **Single `UnmarshalZeroCopy(buf, n, addr)` call** - tracks buffer AND parses
-- Payload access via `GetPayload()` → computed `(*recvBuffer)[HeaderSize:dataLen]`
+- Payload access via `GetPayload()` → computed `(*recvBuffer)[HeaderSize:n]`
 - Buffer is NOT returned to pool after successful read
 - Buffer lifetime extended until packet delivery
 - Primary path uses `r.releasePacketFully()` which uses `GetRecvBuffer()`
@@ -1752,7 +1776,7 @@ func (r *receiver) deliverPackets(now uint64) {
    - Next `recvBufferPool.Get()` returns a buffer ready to use
    - No need to reallocate or clear memory
 3. **Returns buffer to pool**: `r.bufferPool.Put(buf)`
-4. **Clears buffer reference**: `p.ClearRecvBuffer()` (sets `recvBuffer = nil`, `dataLen = 0`)
+4. **Clears buffer reference**: `p.ClearRecvBuffer()` (sets `recvBuffer = nil`, `n = 0`)
 5. **Returns packet to pool**: `p.Decommission()`
    - Clears packet fields for reuse
    - Existing gosrt pattern used throughout codebase
@@ -3082,14 +3106,14 @@ r.packetsReceived.Add(1)
 
 1. **New fields added** (no removal of existing fields):
    - `recvBuffer *[]byte` - tracks original pool buffer (nil in legacy path)
-   - `dataLen int` - tracks received bytes (0 in legacy path)
+   - `n int` - tracks received bytes (0 in legacy path)
 
 2. **`Payload` field behavior** (see Section 6.6):
    - Legacy path: `Payload *[]byte` is set to a NEW copied slice
    - Zero-copy path: `Payload` is NOT used; use `GetPayload()` instead
 
 3. **`GetPayload()` works for both paths**:
-   - If `recvBuffer != nil`: returns computed slice `(*recvBuffer)[HeaderSize:dataLen]`
+   - If `recvBuffer != nil`: returns computed slice `(*recvBuffer)[HeaderSize:n]`
    - If `recvBuffer == nil` and `Payload != nil`: returns `*Payload` (legacy)
 
 4. **Memory optimization** (optional, future):
@@ -3097,7 +3121,7 @@ r.packetsReceived.Add(1)
    - Saves 16-24 bytes per packet
    - Requires audit of all direct `Payload` access
 
-**Current design (Section 6.6)**: Keeps `Payload` for backwards compatibility, adds `recvBuffer` + `dataLen` for zero-copy. The `GetPayload()` function abstracts the difference.
+**Current design (Section 6.6)**: Keeps `Payload` for backwards compatibility, adds `recvBuffer` + `n` for zero-copy. The `GetPayload()` function abstracts the difference.
 
 ### 11.4 Features WITH Flags
 
@@ -4375,21 +4399,921 @@ curl http://localhost:8080/metrics | grep gosrt_recv_rate
 
 ---
 
-### Phase 2: Zero-Copy Buffer Lifetime Extension (3-4 hours) [UseZeroCopyBuffers FLAG]
+### Phase 2: Zero-Copy Buffer Lifetime Extension (3-4 hours) [NO FLAG - Always On]
+
+**Status**: 🔲 **PENDING**
 
 **Goal**: Eliminate buffer copying in packet receive path. Benefits ALL paths.
 
 **Reference**: Section 6 (Component 2: Buffer Lifetime Management)
 
-#### 2.1 Files to Modify
+**Implementation Tracking**: Create `lockless_phase2_implementation.md` when starting
 
-| File | Changes |
-|------|---------|
-| `config.go` | Add `UseZeroCopyBuffers bool` |
-| `packet/packet.go` | Add `recvBuffer`, `dataLen`, new methods |
-| `congestion/live/receive.go` | Add `releasePacketFully()`, `bufferPool` field |
-| `srt/listener.go` | Add branch in io_uring completion |
-| `srt/conn.go` | Add branch in standard receive loop |
+---
+
+#### Design Decision: Always-On (No Feature Flag)
+
+Per Section 11.4.3 recommendation, zero-copy is implemented as **always-on** because:
+
+1. **Universal benefit** - ALL implementation paths benefit equally:
+   - io_uring AND standard recv() paths
+   - btree AND linked list packet stores
+   - Tick() AND event loop processing models
+
+2. **No behavioral change** - Same packet data, same delivery timing, just less copying
+
+3. **API contract is simple** - Applications must not hold packet data references after delivery callback returns (this is already a reasonable expectation)
+
+4. **Simpler implementation** - No conditional branches in hot paths
+
+**Contrast with Ring Buffer/Event Loop**: Those features ARE gated by flags because they fundamentally change execution semantics and need A/B comparison testing.
+
+---
+
+#### 2.1 Files to Modify - Complete Matrix
+
+| File | Changes | Priority | Dependencies |
+|------|---------|----------|--------------|
+| `packet/packet.go` | Add `recvBuffer`, `n`, new methods, `UnmarshalZeroCopy`, `DecommissionWithBuffer` | 1 | None |
+| `packet/packet_test.go` | Add tests for new packet methods | 1.1 | packet.go |
+| `congestion/live/receive.go` | Add `releasePacketFully()`, `bufferPool` field, update `deliverPackets()` | 2 | packet.go |
+| `congestion/live/receive_test.go` | Add tests for `releasePacketFully()` | 2.1 | receive.go |
+| `listen_linux.go` | Update io_uring completion handler to use `UnmarshalZeroCopy` | 3 | All above |
+| `dial_linux.go` | Update io_uring path for dial side | 3 | All above |
+| `listen.go` | Update standard receive path to use `UnmarshalZeroCopy` | 4 | All above |
+| `dial.go` | Update standard receive path for dial side | 4 | All above |
+| `connection.go` | Pass `bufferPool` to receiver | 5 | All above |
+
+**Note**: No changes needed to `config.go` or `contrib/common/flags.go` - this is always-on!
+
+---
+
+#### 2.2 Detailed Implementation Steps
+
+##### **Step 1: Update packet structure (`packet/packet.go`)**
+
+**File**: `packet/packet.go`
+
+**Changes to `pkt` struct** (around line 240-280):
+
+```go
+type pkt struct {
+    header  PacketHeader
+    payload *payloadBuffer  // LEGACY: copied payload data
+
+    // Zero-copy fields
+    recvBuffer *[]byte  // Original buffer from recvBufferPool (for pool return)
+    n          int      // Bytes received (from ReadFromUDP/io_uring CQE.Res)
+}
+```
+
+**New methods to add** (after existing methods, ~line 500+):
+
+```go
+// ========== Zero-Copy Support (Phase 2: Lockless Design) ==========
+
+// UnmarshalZeroCopy parses a packet using zero-copy - the buffer reference is
+// stored for later pool return. No data is copied.
+//
+// IMPORTANT: This sets recvBuffer BEFORE validation, ensuring DecommissionWithBuffer()
+// can always return the buffer even if parsing fails.
+func (p *pkt) UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error {
+    // Store buffer reference FIRST (before any validation that might fail)
+    // This ensures DecommissionWithBuffer() can always return the buffer
+    p.recvBuffer = buf
+    p.n = n
+    p.header.Addr = addr
+
+    // Validate minimum size
+    if n < HeaderSize {
+        return fmt.Errorf("packet too short (%d bytes, need %d)", n, HeaderSize)
+    }
+
+    // Parse header directly from buffer (no intermediate slice needed)
+    // We access (*buf) directly - no need for data := (*buf)[:n]
+    p.header.IsControlPacket = ((*buf)[0] & 0x80) != 0
+
+    if p.header.IsControlPacket {
+        p.header.ControlType = CtrlType(binary.BigEndian.Uint16((*buf)[0:]) & ^uint16(1<<15))
+        p.header.SubType = CtrlSubType(binary.BigEndian.Uint16((*buf)[2:]))
+        p.header.TypeSpecific = binary.BigEndian.Uint32((*buf)[4:])
+    } else {
+        p.header.PacketSequenceNumber = circular.New(binary.BigEndian.Uint32((*buf)[0:]), MAX_SEQUENCENUMBER)
+        p.header.PacketPositionFlag = PacketPosition(((*buf)[4] & 0b11000000) >> 6)
+        p.header.OrderFlag = ((*buf)[4] & 0b00100000) != 0
+        p.header.KeyBaseEncryptionFlag = PacketEncryption(((*buf)[4] & 0b00011000) >> 3)
+        p.header.RetransmittedPacketFlag = ((*buf)[4] & 0b00000100) != 0
+        p.header.MessageNumber = binary.BigEndian.Uint32((*buf)[4:]) & ^uint32(0b11111100<<24)
+    }
+
+    p.header.Timestamp = binary.BigEndian.Uint32((*buf)[8:])
+    p.header.DestinationSocketId = binary.BigEndian.Uint32((*buf)[12:])
+
+    // NOTE: No payload copy! Payload is computed on-demand via GetPayload()
+    // GetPayload() returns (*recvBuffer)[HeaderSize:n]
+    return nil
+}
+
+// DecommissionWithBuffer returns the buffer to the provided pool, then
+// returns the packet struct to the packet pool.
+// Safe to call even if recvBuffer is nil (handles both legacy and zero-copy).
+func (p *pkt) DecommissionWithBuffer(bufferPool *sync.Pool) {
+    if p.recvBuffer != nil && bufferPool != nil {
+        // Zero buffer for immediate reuse
+        *p.recvBuffer = (*p.recvBuffer)[:0]
+        bufferPool.Put(p.recvBuffer)
+        p.recvBuffer = nil
+        p.n = 0
+    }
+    p.Decommission()
+}
+
+// GetRecvBuffer returns the original pool buffer reference (for zero-copy path).
+func (p *pkt) GetRecvBuffer() *[]byte {
+    return p.recvBuffer
+}
+
+// HasRecvBuffer returns true if packet has a tracked pool buffer (zero-copy path).
+func (p *pkt) HasRecvBuffer() bool {
+    return p.recvBuffer != nil
+}
+
+// ClearRecvBuffer clears the buffer reference after pool return.
+func (p *pkt) ClearRecvBuffer() {
+    p.recvBuffer = nil
+    p.n = 0
+}
+
+// GetPayload returns payload data, handling BOTH zero-copy and legacy paths.
+// For zero-copy: computes slice from recvBuffer: (*recvBuffer)[HeaderSize:n]
+// For legacy: returns stored payload directly
+func (p *pkt) GetPayload() []byte {
+    if p.recvBuffer != nil {
+        if p.n <= HeaderSize {
+            return nil
+        }
+        return (*p.recvBuffer)[HeaderSize:p.n]
+    }
+    // Legacy path
+    if p.payload != nil {
+        return p.payload.Bytes()
+    }
+    return nil
+}
+
+// GetPayloadLen returns payload length (n - HeaderSize for zero-copy).
+func (p *pkt) GetPayloadLen() int {
+    if p.recvBuffer != nil {
+        if p.n <= HeaderSize {
+            return 0
+        }
+        return p.n - HeaderSize
+    }
+    // Legacy path
+    if p.payload != nil {
+        return p.payload.Len()
+    }
+    return 0
+}
+```
+
+**Update existing `Payload()` method** to handle both paths:
+
+```go
+func (p *pkt) Payload() []byte {
+    // Zero-copy path: compute from recvBuffer
+    if p.recvBuffer != nil {
+        return p.GetPayloadZeroCopy()
+    }
+    // Legacy path: return stored payload
+    if p.payload == nil {
+        return nil
+    }
+    return p.payload.Bytes()
+}
+```
+
+**Update `Decommission()` to clear zero-copy fields**:
+
+```go
+func (p *pkt) Decommission() {
+    // ... existing cleanup ...
+
+    // Clear zero-copy fields
+    p.recvBuffer = nil
+    p.n = 0
+
+    // Return to pool
+    packetPool.Put(p)
+}
+```
+
+**Comment out legacy `NewPacketFromData()` for historical reference**:
+
+Instead of deleting the legacy copying function, comment it out with an explanation:
+
+```go
+// DEPRECATED: NewPacketFromData - replaced by UnmarshalZeroCopy (Phase 2: Lockless Design)
+// This function copied packet data into a new buffer. The new UnmarshalZeroCopy
+// references the pooled buffer directly, eliminating the copy and extending
+// buffer lifetime until packet delivery.
+//
+// Kept for historical reference - can be removed after migration is validated.
+//
+// func NewPacketFromData(addr net.Addr, data []byte) (Packet, error) {
+//     p := NewPacket(addr)
+//     if err := p.Unmarshal(data); err != nil {
+//         p.Decommission()
+//         return nil, fmt.Errorf("invalid data: %w", err)
+//     }
+//     return p, nil
+// }
+```
+
+This preserves the legacy code for reference while clearly marking that `UnmarshalZeroCopy` is the replacement.
+
+---
+
+##### **Step 1.1: Add packet tests (`packet/packet_test.go`)**
+
+**File**: `packet/packet_test.go`
+
+This is a **critical testing step** because `UnmarshalZeroCopy` is on the hot path for every packet received. We need:
+1. **Functional tests** - Verify correct behavior
+2. **Round-trip tests** - Ensure Marshal/Unmarshal compatibility
+3. **Cross-compatibility tests** - Verify `UnmarshalZeroCopy` produces same results as `UnmarshalCopy`
+4. **Benchmarks** - Measure performance improvement and prevent regressions
+
+**Existing tests to reference**: The existing `packet/packet_test.go` already has tests like `TestPacketRoundTrip` that marshal and unmarshal packets. We'll follow this pattern.
+
+---
+
+**New functional tests to add**:
+
+```go
+func TestUnmarshalZeroCopy(t *testing.T) {
+    t.Run("successful data packet", func(t *testing.T) {
+        // Create a valid data packet buffer
+        buf := createTestDataPacket(t, 1234, 100) // seq=1234, payload=100 bytes
+        bufPtr := &buf
+        n := len(buf)
+
+        pkt := NewPacket(nil)
+        err := pkt.UnmarshalZeroCopy(bufPtr, n, testAddr)
+        require.NoError(t, err)
+
+        // Verify header parsed correctly
+        require.False(t, pkt.Header().IsControlPacket)
+        require.Equal(t, uint32(1234), pkt.Header().PacketSequenceNumber.Val())
+
+        // Verify buffer tracking
+        require.True(t, pkt.HasRecvBuffer())
+        require.Equal(t, bufPtr, pkt.GetRecvBuffer())
+
+        // Verify payload access
+        payload := pkt.GetPayload()
+        require.Len(t, payload, 100)
+    })
+
+    t.Run("successful control packet", func(t *testing.T) {
+        buf := createTestControlPacket(t, CtrlTypeACK)
+        bufPtr := &buf
+
+        pkt := NewPacket(nil)
+        err := pkt.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+        require.NoError(t, err)
+        require.True(t, pkt.Header().IsControlPacket)
+        require.Equal(t, CtrlTypeACK, pkt.Header().ControlType)
+    })
+
+    t.Run("packet too short returns error", func(t *testing.T) {
+        buf := make([]byte, HeaderSize-1) // One byte too short
+        bufPtr := &buf
+
+        pkt := NewPacket(nil)
+        err := pkt.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+        require.Error(t, err)
+        require.Contains(t, err.Error(), "too short")
+
+        // CRITICAL: Buffer must still be tracked even on error!
+        // This allows DecommissionWithBuffer to clean up properly
+        require.True(t, pkt.HasRecvBuffer())
+        require.Equal(t, bufPtr, pkt.GetRecvBuffer())
+    })
+
+    t.Run("n field stored correctly", func(t *testing.T) {
+        buf := make([]byte, 1500)
+        createValidHeader(buf, false) // data packet
+        bufPtr := &buf
+
+        pkt := NewPacket(nil)
+        n := 200 // Only use first 200 bytes
+        err := pkt.UnmarshalZeroCopy(bufPtr, n, testAddr)
+        require.NoError(t, err)
+
+        // GetPayload should only return up to n, not full buffer
+        payload := pkt.GetPayload()
+        require.Len(t, payload, n-HeaderSize) // 200-16 = 184
+    })
+}
+
+func TestDecommissionWithBuffer(t *testing.T) {
+    t.Run("returns buffer to pool", func(t *testing.T) {
+        pool := &sync.Pool{New: func() interface{} { b := make([]byte, 1500); return &b }}
+
+        bufPtr := pool.Get().(*[]byte)
+        createValidHeader(*bufPtr, false)
+
+        pkt := NewPacket(nil)
+        pkt.UnmarshalZeroCopy(bufPtr, 200, testAddr)
+        require.True(t, pkt.HasRecvBuffer())
+
+        pkt.DecommissionWithBuffer(pool)
+
+        // Buffer should be cleared
+        require.False(t, pkt.HasRecvBuffer())
+        require.Nil(t, pkt.GetRecvBuffer())
+    })
+
+    t.Run("handles nil buffer gracefully", func(t *testing.T) {
+        pool := &sync.Pool{New: func() interface{} { b := make([]byte, 1500); return &b }}
+
+        pkt := NewPacket(nil) // No buffer set
+        require.False(t, pkt.HasRecvBuffer())
+
+        // Should not panic
+        pkt.DecommissionWithBuffer(pool)
+    })
+
+    t.Run("handles nil pool gracefully", func(t *testing.T) {
+        buf := make([]byte, 200)
+        createValidHeader(buf, false)
+        bufPtr := &buf
+
+        pkt := NewPacket(nil)
+        pkt.UnmarshalZeroCopy(bufPtr, 200, testAddr)
+
+        // Should not panic with nil pool
+        pkt.DecommissionWithBuffer(nil)
+    })
+}
+
+func TestGetPayload(t *testing.T) {
+    t.Run("zero-copy path computes slice correctly", func(t *testing.T) {
+        payloadData := []byte("test payload data here")
+        buf := make([]byte, HeaderSize+len(payloadData))
+        createValidHeader(buf, false)
+        copy(buf[HeaderSize:], payloadData)
+        bufPtr := &buf
+
+        pkt := NewPacket(nil)
+        pkt.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+
+        payload := pkt.GetPayload()
+        require.Equal(t, payloadData, payload)
+    })
+
+    t.Run("returns nil for header-only packet", func(t *testing.T) {
+        buf := make([]byte, HeaderSize) // Exactly header, no payload
+        createValidHeader(buf, false)
+        bufPtr := &buf
+
+        pkt := NewPacket(nil)
+        pkt.UnmarshalZeroCopy(bufPtr, HeaderSize, testAddr)
+
+        payload := pkt.GetPayload()
+        require.Empty(t, payload)
+    })
+
+    t.Run("returns nil when recvBuffer is nil", func(t *testing.T) {
+        pkt := NewPacket(nil)
+        require.Nil(t, pkt.GetPayload())
+    })
+
+    t.Run("legacy path still works", func(t *testing.T) {
+        // Use legacy Unmarshal (copying) path
+        payloadData := []byte("legacy payload")
+        buf := make([]byte, HeaderSize+len(payloadData))
+        createValidHeader(buf, false)
+        copy(buf[HeaderSize:], payloadData)
+
+        pkt := NewPacket(testAddr)
+        pkt.Unmarshal(buf) // Legacy copying unmarshal
+
+        payload := pkt.GetPayload()
+        require.Equal(t, payloadData, payload)
+    })
+}
+
+func TestGetPayloadLen(t *testing.T) {
+    t.Run("returns correct length for zero-copy", func(t *testing.T) {
+        buf := make([]byte, 500)
+        createValidHeader(buf, false)
+        bufPtr := &buf
+        n := 200
+
+        pkt := NewPacket(nil)
+        pkt.UnmarshalZeroCopy(bufPtr, n, testAddr)
+
+        require.Equal(t, n-HeaderSize, pkt.GetPayloadLen())
+    })
+
+    t.Run("returns zero for header-only", func(t *testing.T) {
+        buf := make([]byte, HeaderSize)
+        createValidHeader(buf, false)
+        bufPtr := &buf
+
+        pkt := NewPacket(nil)
+        pkt.UnmarshalZeroCopy(bufPtr, HeaderSize, testAddr)
+
+        require.Equal(t, 0, pkt.GetPayloadLen())
+    })
+}
+```
+
+---
+
+**Round-trip and cross-compatibility tests**:
+
+```go
+// TestUnmarshalZeroCopyRoundTrip verifies that a packet can be marshaled,
+// then unmarshaled with UnmarshalZeroCopy, and produce identical header values.
+func TestUnmarshalZeroCopyRoundTrip(t *testing.T) {
+    testCases := []struct {
+        name        string
+        isControl   bool
+        ctrlType    CtrlType
+        seq         uint32
+        timestamp   uint32
+        socketID    uint32
+        payloadSize int
+    }{
+        {"data packet small payload", false, 0, 12345, 1000000, 0xABCD1234, 100},
+        {"data packet large payload", false, 0, 99999, 5000000, 0x12345678, 1400},
+        {"data packet min payload", false, 0, 1, 0, 0x1, 1},
+        {"ACK control packet", true, CtrlTypeACK, 0, 2000000, 0xFACE0000, 0},
+        {"NAK control packet", true, CtrlTypeNAK, 0, 3000000, 0xBEEF0000, 0},
+        {"keepalive packet", true, CtrlTypeKeepalive, 0, 4000000, 0xDEAD0000, 0},
+    }
+
+    for _, tc := range testCases {
+        t.Run(tc.name, func(t *testing.T) {
+            // Create original packet
+            original := createTestPacketWithValues(t, tc.isControl, tc.ctrlType,
+                tc.seq, tc.timestamp, tc.socketID, tc.payloadSize)
+
+            // Marshal to bytes
+            marshaled := make([]byte, HeaderSize+tc.payloadSize)
+            original.Marshal(marshaled)
+
+            // Unmarshal with zero-copy
+            bufPtr := &marshaled
+            restored := NewPacket(nil)
+            err := restored.UnmarshalZeroCopy(bufPtr, len(marshaled), testAddr)
+            require.NoError(t, err)
+
+            // Verify all header fields match
+            require.Equal(t, original.Header().IsControlPacket, restored.Header().IsControlPacket)
+            require.Equal(t, original.Header().Timestamp, restored.Header().Timestamp)
+            require.Equal(t, original.Header().DestinationSocketId, restored.Header().DestinationSocketId)
+
+            if tc.isControl {
+                require.Equal(t, original.Header().ControlType, restored.Header().ControlType)
+            } else {
+                require.Equal(t, original.Header().PacketSequenceNumber.Val(),
+                              restored.Header().PacketSequenceNumber.Val())
+            }
+
+            // Verify payload matches
+            if tc.payloadSize > 0 {
+                require.Equal(t, original.GetPayload(), restored.GetPayload())
+            }
+        })
+    }
+}
+
+// TestUnmarshalZeroCopyVsCopyEquivalence verifies that UnmarshalZeroCopy
+// produces the same results as the legacy UnmarshalCopy for all packet types.
+func TestUnmarshalZeroCopyVsCopyEquivalence(t *testing.T) {
+    testCases := []struct {
+        name        string
+        isControl   bool
+        payloadSize int
+    }{
+        {"data packet 100 bytes", false, 100},
+        {"data packet 1400 bytes", false, 1400},
+        {"control ACK packet", true, 0},
+    }
+
+    for _, tc := range testCases {
+        t.Run(tc.name, func(t *testing.T) {
+            // Create a test packet buffer
+            buf := createTestPacketBuffer(t, tc.isControl, tc.payloadSize)
+
+            // Unmarshal with legacy copy method
+            pktCopy := NewPacket(testAddr)
+            errCopy := pktCopy.Unmarshal(buf)
+            require.NoError(t, errCopy)
+
+            // Unmarshal with zero-copy method
+            bufCopy := make([]byte, len(buf))
+            copy(bufCopy, buf) // Make a copy to avoid interference
+            bufPtr := &bufCopy
+            pktZero := NewPacket(nil)
+            errZero := pktZero.UnmarshalZeroCopy(bufPtr, len(bufCopy), testAddr)
+            require.NoError(t, errZero)
+
+            // Compare all header fields
+            require.Equal(t, pktCopy.Header().IsControlPacket, pktZero.Header().IsControlPacket,
+                "IsControlPacket mismatch")
+            require.Equal(t, pktCopy.Header().Timestamp, pktZero.Header().Timestamp,
+                "Timestamp mismatch")
+            require.Equal(t, pktCopy.Header().DestinationSocketId, pktZero.Header().DestinationSocketId,
+                "DestinationSocketId mismatch")
+
+            if tc.isControl {
+                require.Equal(t, pktCopy.Header().ControlType, pktZero.Header().ControlType,
+                    "ControlType mismatch")
+                require.Equal(t, pktCopy.Header().SubType, pktZero.Header().SubType,
+                    "SubType mismatch")
+                require.Equal(t, pktCopy.Header().TypeSpecific, pktZero.Header().TypeSpecific,
+                    "TypeSpecific mismatch")
+            } else {
+                require.Equal(t, pktCopy.Header().PacketSequenceNumber.Val(),
+                              pktZero.Header().PacketSequenceNumber.Val(),
+                    "PacketSequenceNumber mismatch")
+                require.Equal(t, pktCopy.Header().PacketPositionFlag, pktZero.Header().PacketPositionFlag,
+                    "PacketPositionFlag mismatch")
+                require.Equal(t, pktCopy.Header().OrderFlag, pktZero.Header().OrderFlag,
+                    "OrderFlag mismatch")
+                require.Equal(t, pktCopy.Header().KeyBaseEncryptionFlag, pktZero.Header().KeyBaseEncryptionFlag,
+                    "KeyBaseEncryptionFlag mismatch")
+                require.Equal(t, pktCopy.Header().RetransmittedPacketFlag, pktZero.Header().RetransmittedPacketFlag,
+                    "RetransmittedPacketFlag mismatch")
+                require.Equal(t, pktCopy.Header().MessageNumber, pktZero.Header().MessageNumber,
+                    "MessageNumber mismatch")
+            }
+
+            // Compare payloads (content should be identical)
+            require.Equal(t, pktCopy.GetPayload(), pktZero.GetPayload(),
+                "Payload content mismatch")
+            require.Equal(t, pktCopy.GetPayloadLen(), pktZero.GetPayloadLen(),
+                "PayloadLen mismatch")
+        })
+    }
+}
+```
+
+---
+
+**Benchmarks (CRITICAL for performance validation)**:
+
+```go
+const (
+    // MPEG-TS packet size (ISO/IEC 13818-1 standard)
+    MpegTsPacketSize = 188
+
+    // Number of MPEG-TS packets typically packed into one SRT payload.
+    // This is a common configuration for video streaming.
+    // Total payload: 188 * 7 = 1316 bytes
+    MpegTsPacketsPerPayload = 7
+
+    // Realistic payload size for video streaming benchmarks
+    // 1316 bytes payload + 16 bytes header = 1332 bytes total packet
+    RealisticPayloadSize = MpegTsPacketSize * MpegTsPacketsPerPayload // 1316 bytes
+)
+
+// BenchmarkUnmarshalZeroCopy measures zero-copy unmarshal performance.
+// Uses realistic 7x MPEG-TS payload (1316 bytes) to demonstrate real-world benefit.
+// Expected: Significantly faster than BenchmarkUnmarshalCopy due to no allocations.
+func BenchmarkUnmarshalZeroCopy(b *testing.B) {
+    // Realistic payload: 7 MPEG-TS packets = 1316 bytes
+    buf := createTestPacketBuffer(nil, false, RealisticPayloadSize)
+    bufPtr := &buf
+
+    pool := &sync.Pool{New: func() interface{} { return NewPacket(nil) }}
+
+    b.ResetTimer()
+    b.ReportAllocs()
+
+    for i := 0; i < b.N; i++ {
+        pkt := pool.Get().(Packet)
+        _ = pkt.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+        pkt.ClearRecvBuffer() // Don't return buffer in benchmark
+        pkt.Decommission()
+    }
+}
+
+// BenchmarkUnmarshalCopy measures legacy copying unmarshal for comparison.
+// Uses same realistic payload size for fair comparison.
+func BenchmarkUnmarshalCopy(b *testing.B) {
+    buf := createTestPacketBuffer(nil, false, RealisticPayloadSize)
+
+    pool := &sync.Pool{New: func() interface{} { return NewPacket(nil) }}
+
+    b.ResetTimer()
+    b.ReportAllocs()
+
+    for i := 0; i < b.N; i++ {
+        pkt := pool.Get().(Packet)
+        _ = pkt.Unmarshal(buf) // Legacy copy path
+        pkt.Decommission()
+    }
+}
+
+// BenchmarkUnmarshalComparison runs both methods with various payload sizes
+// to demonstrate performance difference across packet sizes.
+func BenchmarkUnmarshalComparison(b *testing.B) {
+    payloadSizes := []struct {
+        name string
+        size int
+    }{
+        {"1_MPEGTS", MpegTsPacketSize * 1},           // 188 bytes (minimum)
+        {"4_MPEGTS", MpegTsPacketSize * 4},           // 752 bytes
+        {"7_MPEGTS_typical", MpegTsPacketSize * 7},   // 1316 bytes (typical)
+        {"max_payload", 1400},                         // Near MTU limit
+    }
+
+    for _, tc := range payloadSizes {
+        buf := createTestPacketBuffer(nil, false, tc.size)
+        bufCopy := make([]byte, len(buf))
+        copy(bufCopy, buf)
+        bufPtr := &buf
+
+        b.Run(fmt.Sprintf("ZeroCopy/%s_%d_bytes", tc.name, tc.size+HeaderSize), func(b *testing.B) {
+            pool := &sync.Pool{New: func() interface{} { return NewPacket(nil) }}
+            b.ResetTimer()
+            b.ReportAllocs()
+
+            for i := 0; i < b.N; i++ {
+                pkt := pool.Get().(Packet)
+                _ = pkt.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+                pkt.ClearRecvBuffer()
+                pkt.Decommission()
+            }
+        })
+
+        b.Run(fmt.Sprintf("Copy/%s_%d_bytes", tc.name, tc.size+HeaderSize), func(b *testing.B) {
+            pool := &sync.Pool{New: func() interface{} { return NewPacket(nil) }}
+            b.ResetTimer()
+            b.ReportAllocs()
+
+            for i := 0; i < b.N; i++ {
+                pkt := pool.Get().(Packet)
+                _ = pkt.Unmarshal(bufCopy)
+                pkt.Decommission()
+            }
+        })
+    }
+}
+
+// BenchmarkGetPayload measures payload access overhead.
+// Uses realistic 7x MPEG-TS payload size.
+func BenchmarkGetPayload(b *testing.B) {
+    buf := createTestPacketBuffer(nil, false, RealisticPayloadSize)
+    bufPtr := &buf
+
+    pkt := NewPacket(nil)
+    _ = pkt.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+
+    b.ResetTimer()
+    b.ReportAllocs()
+
+    for i := 0; i < b.N; i++ {
+        payload := pkt.GetPayload()
+        _ = payload // Prevent optimization
+    }
+}
+```
+
+---
+
+**Expected benchmark results** (theory to validate):
+
+| Benchmark | Payload | Zero-Copy | Legacy Copy | Improvement |
+|-----------|---------|-----------|-------------|-------------|
+| 1 MPEG-TS | 188 bytes | ~50 ns | ~120 ns | ~2.4x faster |
+| 7 MPEG-TS (typical) | 1316 bytes | ~50 ns | ~350 ns | ~7x faster |
+| Near MTU | 1400 bytes | ~50 ns | ~400 ns | ~8x faster |
+| Allocations/op | any | 0 | 1 | ∞ improvement |
+| Bytes/op | any | 0 | ~payload size | ∞ improvement |
+
+**Why 7 MPEG-TS packets is the realistic benchmark**:
+- MPEG-TS is the standard transport stream format for video (DVB, ATSC, IPTV)
+- Each MPEG-TS packet is exactly 188 bytes (ISO/IEC 13818-1)
+- 7 packets × 188 bytes = 1316 bytes fits well within typical MTU
+- This is a common real-world configuration for video streaming over SRT
+
+The zero-copy approach eliminates the `copy(payload, data[HeaderSize:])` operation and the allocation for the payload buffer, which provides significant speedup especially for larger payloads like 7× MPEG-TS.
+
+**Running benchmarks**:
+```bash
+# Quick comparison
+go test -bench=BenchmarkUnmarshal -benchmem ./packet/
+
+# Detailed comparison with count for statistical significance
+go test -bench=BenchmarkUnmarshalComparison -benchmem -count=5 ./packet/ | tee benchmark_results.txt
+
+# Compare before/after using benchstat (if available)
+# Before: go test -bench=. -benchmem -count=10 ./packet/ > old.txt
+# After:  go test -bench=. -benchmem -count=10 ./packet/ > new.txt
+# benchstat old.txt new.txt
+```
+
+---
+
+##### **Step 2: Update receiver (`congestion/live/receive.go`)**
+
+**File**: `congestion/live/receive.go`
+
+**Add to `receiver` struct** (~line 55):
+
+```go
+type receiver struct {
+    // ... existing fields ...
+
+    // Zero-copy buffer management (Phase 2: Lockless Design)
+    bufferPool *sync.Pool  // Reference to recvBufferPool for buffer return
+}
+```
+
+**Update `NewReceiver` signature and initialization** (~line 100+):
+
+```go
+// Add bufferPool parameter to NewReceiver
+func NewReceiver(
+    config ReceiverConfig,
+    bufferPool *sync.Pool,  // NEW: for zero-copy buffer return
+    // ... other params ...
+) *receiver {
+    r := &receiver{
+        // ... existing initialization ...
+        bufferPool: bufferPool,
+    }
+    return r
+}
+```
+
+**Add `releasePacketFully` method** (after `NewReceiver`):
+
+```go
+// releasePacketFully releases both the buffer and the packet to their pools.
+// This is THE method to use for packet cleanup in all delivery paths.
+// Safe to call even if recvBuffer is nil (handles legacy packets gracefully).
+func (r *receiver) releasePacketFully(p packet.Packet) {
+    // Return buffer to pool if present (zero-copy path)
+    if buf := p.GetRecvBuffer(); buf != nil {
+        *buf = (*buf)[:0]  // Zero for immediate reuse
+        r.bufferPool.Put(buf)
+        p.ClearRecvBuffer()
+    }
+    p.Decommission()
+}
+```
+
+**Update `deliverPackets()` to use `releasePacketFully`** (~line in delivery code):
+
+Find existing `p.Decommission()` calls in delivery path and replace with:
+```go
+r.releasePacketFully(p)
+```
+
+---
+
+##### **Step 2.1: Add receiver tests (`congestion/live/receive_test.go`)**
+
+**File**: `congestion/live/receive_test.go`
+
+**New tests to add**:
+
+```go
+func TestReleasePacketFully_WithBuffer(t *testing.T) {
+    // Create receiver with bufferPool
+    // Create packet with recvBuffer set (zero-copy path)
+    // Call releasePacketFully
+    // Verify buffer returned to pool
+    // Verify packet decommissioned
+}
+
+func TestReleasePacketFully_NilBuffer(t *testing.T) {
+    // Create receiver with bufferPool
+    // Create packet with NO recvBuffer (edge case)
+    // Call releasePacketFully
+    // Verify packet decommissioned
+    // Verify no panic with nil buffer
+}
+
+func TestNewReceiverWithBufferPool(t *testing.T) {
+    // Verify receiver correctly stores bufferPool reference
+    // Verify bufferPool is accessible for releasePacketFully
+}
+```
+
+---
+
+##### **Step 3: Update io_uring receive path (`listen_linux.go`)**
+
+**File**: `listen_linux.go`
+
+**Update completion handler** (~line 425-446):
+
+Find the `NewPacketFromData` call and replace with zero-copy always-on:
+
+```go
+// CURRENT code (copies data):
+// p, err := packet.NewPacketFromData(addr, bufferSlice)
+// ln.recvBufferPool.Put(bufferPtr)  // Returns buffer immediately
+
+// NEW code (zero-copy always-on):
+p := packet.NewPacket(addr)
+
+// Zero-copy: parse header in place, buffer stays with packet
+err := p.UnmarshalZeroCopy(bufferPtr, bytesReceived, addr)
+if err != nil {
+    ln.log("listen:recv:parse:error", func() string {
+        return fmt.Sprintf("failed to parse packet: %v", err)
+    })
+    p.DecommissionWithBuffer(&ln.recvBufferPool)  // Returns buffer + decommissions packet
+    ring.CQESeen(cqe)
+    return
+}
+
+// Buffer stays with packet until delivery (no Put() here!)
+ring.CQESeen(cqe)
+// Continue with packet routing...
+```
+
+**Also update `dial_linux.go`** with similar changes for dialer-side io_uring.
+
+---
+
+##### **Step 4: Update standard receive path (`listen.go`)**
+
+**File**: `listen.go`
+
+**Update receive loop** (~line 302-327):
+
+```go
+// CURRENT code (copies data):
+// p, err := packet.NewPacketFromData(addr, buffer[:n])
+
+// NEW code (zero-copy always-on):
+// Get buffer from pool (already done)
+buf := ln.recvBufferPool.Get().(*[]byte)
+
+n, addr, err := ln.conn.ReadFromUDP(*buf)
+if err != nil {
+    returnBufferToPool(&ln.recvBufferPool, buf)  // Helper function
+    continue
+}
+
+p := packet.NewPacket(addr)
+
+// Zero-copy: parse header in place, buffer stays with packet
+err = p.UnmarshalZeroCopy(buf, n, addr)
+if err != nil {
+    p.DecommissionWithBuffer(&ln.recvBufferPool)
+    continue
+}
+
+// Buffer stays with packet until delivery (no Put() here!)
+// Route packet...
+```
+
+---
+
+##### **Step 5: Update connection to pass bufferPool to receiver**
+
+**File**: `connection.go` (and `dial.go`)
+
+Find where `NewReceiver()` is called and add `bufferPool` parameter:
+
+```go
+// Find existing call like:
+// receiver := live.NewReceiver(config, ...)
+
+// Update to:
+receiver := live.NewReceiver(config, &c.recvBufferPool, ...)
+// OR if recvBufferPool is on listener:
+receiver := live.NewReceiver(config, ln.recvBufferPool, ...)
+```
+
+---
+
+##### **Step 6: Add helper function for buffer-only cleanup**
+
+**File**: `listen_linux.go`, `listen.go`, `dial_linux.go`, `dial.go`
+
+Add helper for error paths where no packet is allocated:
+
+```go
+// returnBufferToPool returns a buffer to the pool without a packet.
+// Use when read fails before packet allocation.
+func returnBufferToPool(pool *sync.Pool, buf *[]byte) {
+    *buf = (*buf)[:0]  // Zero for immediate reuse
+    pool.Put(buf)
+}
+```
 
 #### 2.2 Detailed Steps
 
@@ -4418,244 +5342,244 @@ func (c *Config) Validate() error {
 }
 ```
 
-**Step 2: Update packet/packet.go**
+---
 
-```go
-// File: packet/packet.go
+#### 2.3 Test Files to Update/Create
 
-type Packet struct {
-    Header     Header
-    Payload    *[]byte   // For legacy path: points to copied data
+| Test File | Changes | Priority |
+|-----------|---------|----------|
+| `packet/packet_test.go` | **Comprehensive test suite** (see Step 1.1 for details): | **HIGH** |
+|  | - `TestUnmarshalZeroCopy` - functional tests (4 sub-tests) | |
+|  | - `TestDecommissionWithBuffer` - cleanup tests (3 sub-tests) | |
+|  | - `TestGetPayload` - payload access tests (4 sub-tests) | |
+|  | - `TestGetPayloadLen` - length calculation tests (2 sub-tests) | |
+|  | - `TestUnmarshalZeroCopyRoundTrip` - marshal/unmarshal cycle (6 test cases) | |
+|  | - `TestUnmarshalZeroCopyVsCopyEquivalence` - cross-method validation (3 test cases) | |
+| `packet/packet_bench_test.go` | **Benchmarks** (CRITICAL for performance validation): | **HIGH** |
+|  | - `BenchmarkUnmarshalZeroCopy` - measure zero-copy performance | |
+|  | - `BenchmarkUnmarshalCopy` - measure legacy performance for comparison | |
+|  | - `BenchmarkUnmarshalComparison` - side-by-side across payload sizes | |
+|  | - `BenchmarkGetPayload` - measure payload access overhead | |
+| `congestion/live/receive_test.go` | Add `TestReleasePacketFully`, `TestNewReceiverWithBufferPool` | MEDIUM |
+| `congestion/live/receive_bench_test.go` | Add benchmark for zero-copy delivery path | MEDIUM |
+| `listen_test.go` | Add test for io_uring completion with zero-copy | LOW |
+| `dial_test.go` | Add test for dial-side zero-copy | LOW |
 
-    // Zero-copy fields (only used when UseZeroCopyBuffers=true)
-    recvBuffer *[]byte   // Original pool buffer (for return)
-    dataLen    int       // Bytes received
+**Testing Philosophy**:
+1. **Functional correctness** - Every code path must be tested
+2. **Round-trip validation** - Marshal → UnmarshalZeroCopy must produce identical packets
+3. **Cross-method equivalence** - `UnmarshalZeroCopy` must produce same results as `UnmarshalCopy`
+4. **Performance validation** - Benchmarks prove zero-copy is faster and allocation-free
+5. **Error handling** - Buffer must be tracked even on parse errors
 
-    Addr       net.Addr
-}
+**Note**: No flag-related tests needed since zero-copy is always-on.
 
-// GetPayload returns payload data
-// For zero-copy: computes (*recvBuffer)[HeaderSize:dataLen]
-// For legacy: returns *Payload directly
-func (p *Packet) GetPayload() []byte {
-    if p.recvBuffer != nil {
-        // Zero-copy path
-        return (*p.recvBuffer)[HeaderSize:p.dataLen]
-    }
-    if p.Payload != nil {
-        // Legacy path
-        return *p.Payload
-    }
-    return nil
-}
+---
 
-// UnmarshalZeroCopy - new function for zero-copy path
-func (p *Packet) UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error {
-    p.recvBuffer = buf
-    p.dataLen = n
+#### 2.4 Validation Checkpoint
 
-    if n < HeaderSize {
-        return ErrPacketTooShort
-    }
+**Reference**: `integration_testing_design.md`, `integration_testing_matrix_design.md`, `integration_testing_profiling_design.md`, `integration_testing_profiling_design_implementation.md`
 
-    if err := p.Header.Unmarshal((*p.recvBuffer)[:HeaderSize]); err != nil {
-        return err
-    }
-
-    p.Addr = addr
-    return nil
-}
-
-// DecommissionWithBuffer - returns buffer to pool, then decommissions packet
-func (p *Packet) DecommissionWithBuffer(bufferPool *sync.Pool) {
-    if p.recvBuffer != nil && bufferPool != nil {
-        *p.recvBuffer = (*p.recvBuffer)[:0]
-        bufferPool.Put(p.recvBuffer)
-        p.recvBuffer = nil
-        p.dataLen = 0
-    }
-    p.Decommission()
-}
-
-// GetRecvBuffer returns original pool buffer reference
-func (p *Packet) GetRecvBuffer() *[]byte {
-    return p.recvBuffer
-}
-
-// ClearRecvBuffer clears zero-copy buffer reference
-func (p *Packet) ClearRecvBuffer() {
-    p.recvBuffer = nil
-    p.dataLen = 0
-}
-
-// HasRecvBuffer returns true if packet has tracked pool buffer
-func (p *Packet) HasRecvBuffer() bool {
-    return p.recvBuffer != nil
-}
-```
-
-**Step 3: Update congestion/live/receive.go**
-
-```go
-// File: congestion/live/receive.go
-
-type receiver struct {
-    // ... existing fields ...
-
-    // Buffer pool reference (for zero-copy buffer return)
-    bufferPool *sync.Pool
-
-    // Config
-    useZeroCopy bool
-}
-
-// NewReceiver - add bufferPool parameter
-func NewReceiver(config ReceiverConfig, bufferPool *sync.Pool, /* ... */) *receiver {
-    return &receiver{
-        // ... existing initialization ...
-        bufferPool:  bufferPool,
-        useZeroCopy: config.UseZeroCopyBuffers,
-    }
-}
-
-// releasePacketFully - handles both zero-copy and legacy paths
-func (r *receiver) releasePacketFully(p *packet.Packet) {
-    if r.useZeroCopy {
-        if buf := p.GetRecvBuffer(); buf != nil {
-            *buf = (*buf)[:0]
-            r.bufferPool.Put(buf)
-            p.ClearRecvBuffer()
-        }
-    }
-    p.Decommission()
-}
-```
-
-**Step 4: Update srt/listener.go (io_uring path)**
-
-```go
-// File: srt/listener.go
-
-func (ln *listener) processRecvCompletion(buffer *[]byte, n int, addr net.Addr) {
-    p := packetPool.Get().(*packet.Packet)
-
-    if ln.config.UseZeroCopyBuffers {
-        // Zero-copy path
-        err := p.UnmarshalZeroCopy(buffer, n, addr)
-        if err != nil {
-            p.DecommissionWithBuffer(ln.recvBufferPool)
-            return
-        }
-        // Buffer stays with packet
-    } else {
-        // Legacy path - copy and return immediately
-        err := p.UnmarshalCopy(addr, (*buffer)[:n])
-        *buffer = (*buffer)[:0]
-        ln.recvBufferPool.Put(buffer)
-        if err != nil {
-            p.Decommission()
-            return
-        }
-    }
-
-    // Route packet...
-}
-```
-
-**Step 5: Update srt/conn.go (standard receive path)**
-
-```go
-// File: srt/conn.go
-
-func (c *connection) readLoop() {
-    for {
-        buf := c.recvBufferPool.Get().(*[]byte)
-
-        n, addr, err := c.conn.ReadFromUDP(*buf)
-        if err != nil {
-            returnBufferToPool(c.recvBufferPool, buf)
-            continue
-        }
-
-        pkt := packetPool.Get().(*packet.Packet)
-
-        if c.config.UseZeroCopyBuffers {
-            // Zero-copy path
-            err = pkt.UnmarshalZeroCopy(buf, n, addr)
-            if err != nil {
-                pkt.DecommissionWithBuffer(c.recvBufferPool)
-                continue
-            }
-        } else {
-            // Legacy path
-            err = pkt.UnmarshalCopy(addr, (*buf)[:n])
-            *buf = (*buf)[:0]
-            c.recvBufferPool.Put(buf)
-            if err != nil {
-                pkt.Decommission()
-                continue
-            }
-        }
-
-        c.handlePacket(pkt)
-    }
-}
-```
-
-#### 2.3 Validation Checkpoint
-
-**Reference**: `integration_testing_design.md`, `integration_testing_matrix_design.md`, `parallel_comparison_test_design.md`
+##### Unit Testing
 
 ```bash
-# 1. Unit tests with race detector
-go test -race -v ./...
+# 1. Build verification
+go build ./...
 
-# 2. Run Tier 1 integration tests with BOTH flag values
-# See integration_testing_matrix_design.md Section 9
-cd contrib/integration-tests
+# 2. Unit tests with race detector
+go test -race -v ./packet/...
+go test -race -v ./congestion/live/...
+go test -race -v .
 
-# Legacy path (zero-copy disabled)
-./run-tests.sh --tier=1 --flag=UseZeroCopyBuffers=false
-
-# New path (zero-copy enabled)
-./run-tests.sh --tier=1 --flag=UseZeroCopyBuffers=true
-
-# 3. Parallel comparison: identical network, different config
-# See parallel_comparison_test_design.md - compare memory/allocations
-./run-tests.sh --mode=parallel \
-    --test=Parallel-Starlink-20M-5s-R60-Base-vs-ZeroCopy \
-    --compare-memory
-
-# 4. Long-duration memory leak test (12-24 hours)
-# See integration_testing_design.md Section "Long-Duration Stability"
-./run-tests.sh --mode=network \
-    --test=Net-Clean-20M-5s-R0-ZeroCopy \
-    --duration=12h \
-    --check-memory-leaks
-
-# 5. Performance benchmark with memory profiling
-go test -bench=BenchmarkReceive ./... -benchmem -memprofile=phase2.mem
+# 3. Run metrics audit (ensure no regressions)
+go run tools/metrics-audit/main.go
 ```
 
-**What we're validating:**
-- Tier 1 passes with `UseZeroCopyBuffers=false` (legacy unchanged)
-- Tier 1 passes with `UseZeroCopyBuffers=true` (new path works)
-- No buffer pool exhaustion under Starlink pattern
-- Memory allocations reduced (see parallel comparison output)
-- No memory leaks in 12h run
+##### Benchmark Testing
 
-# Parallel comparison test (both paths simultaneously)
-go test -v ./... -run TestParallelComparison
+```bash
+# 4. Run packet benchmarks to validate zero-copy performance
+cd /home/das/Downloads/srt/gosrt
+
+# Quick comparison
+go test -bench=BenchmarkUnmarshal -benchmem ./packet/
+
+# Detailed comparison with statistical significance
+go test -bench=BenchmarkUnmarshalComparison -benchmem -count=5 ./packet/ | tee benchmark_results.txt
+
+# Expected results:
+# - BenchmarkUnmarshalZeroCopy/7_MPEGTS: 0 allocs/op, ~50 ns/op
+# - BenchmarkUnmarshalCopy/7_MPEGTS: 1 alloc/op, ~350 ns/op
+# - Performance improvement: ~7x faster for realistic payload
 ```
 
-#### 2.4 Acceptance Criteria
+##### Integration Testing
 
-- [ ] All tests pass with `UseZeroCopyBuffers=false` (legacy unchanged)
-- [ ] All tests pass with `UseZeroCopyBuffers=true` (new path)
-- [ ] Race detector passes for both configurations
-- [ ] Memory allocations reduced when zero-copy enabled
-- [ ] No buffer pool exhaustion under sustained load
-- [ ] Benchmark shows improved throughput with zero-copy
+```bash
+# 5. Run key isolation tests (zero-copy is always-on now)
+cd /home/das/Downloads/srt/gosrt
+sudo bash -c 'cd contrib/integration_testing && go run . isolation-test "Isolation-5M-Control"'
+sudo bash -c 'cd contrib/integration_testing && go run . isolation-test "Isolation-5M-Server-Btree"'
+sudo bash -c 'cd contrib/integration_testing && go run . isolation-test "Isolation-5M-Full"'
+```
+
+##### Automated Profiling Analysis (CRITICAL for Performance Validation)
+
+**Reference**: See `integration_testing_profiling_design.md` and `integration_testing_profiling_design_implementation.md` for full details on the automated profiling infrastructure.
+
+The zero-copy optimization targets **memory allocation reduction** and **CPU reduction** (eliminating copy operations). We leverage the existing automated profiling capabilities to validate these improvements:
+
+```bash
+# 6. BEFORE Phase 2 implementation - capture baseline profiles
+# Save these for comparison!
+cd /home/das/Downloads/srt/gosrt
+
+# Baseline CPU profile (measure copy overhead)
+sudo PROFILES=cpu bash -c 'cd contrib/integration_testing && go run . isolation-test "Isolation-50M-Full"'
+# Output: /tmp/profile_Isolation-50M-Full_*/report.html
+
+# Baseline memory profiles (measure allocation patterns)
+sudo PROFILES=heap,allocs bash -c 'cd contrib/integration_testing && go run . isolation-test "Isolation-50M-Full"'
+# Expected to show:
+# - bytes.makeSlice or similar in top allocators
+# - runtime.mallocgc contributing to CPU time
+# - Significant allocation counts per packet
+
+# Save baseline report
+cp -r /tmp/profile_Isolation-50M-Full_* ./documentation/phase2_baseline_profiles/
+```
+
+```bash
+# 7. AFTER Phase 2 implementation - capture new profiles
+sudo PROFILES=cpu,heap,allocs bash -c 'cd contrib/integration_testing && go run . isolation-test "Isolation-50M-Full"'
+
+# Compare with baseline
+# The HTML report will show:
+# - Reduced allocation counts (target: ~28-50% reduction)
+# - Reduced bytes allocated (target: significant reduction)
+# - Reduced GC pressure (fewer GC cycles, shorter pauses)
+# - bytes.makeSlice/copy operations should disappear or reduce
+```
+
+**What the Profiling Will Show (Expected):**
+
+| Metric | Baseline (Before) | Zero-Copy (After) | Expected Delta |
+|--------|-------------------|-------------------|----------------|
+| Allocations/sec (server) | ~50,000 | ~35,000 | -30% ⬇ |
+| Bytes allocated (server) | ~2 GB | ~0.8 GB | -60% ⬇ |
+| GC cycles (60s test) | ~150 | ~60 | -60% ⬇ |
+| `runtime.memmove` CPU% | 5-8% | <1% | -80% ⬇ |
+| `bytes.makeSlice` CPU% | 3-5% | 0% | -100% ⬇ |
+| `runtime.mallocgc` CPU% | 8-12% | 3-5% | -60% ⬇ |
+
+**Profile Types to Capture:**
+
+| Profile Type | What It Measures | Why It Matters for Zero-Copy |
+|--------------|------------------|------------------------------|
+| `cpu` | CPU time per function | Should show reduction in `memmove`, `mallocgc` |
+| `allocs` | Allocation count by function | Should show significant reduction in packet path |
+| `heap` | Heap memory in use | Should show lower peak memory, smaller working set |
+
+**Automated Analysis Features:**
+- **HTML Report**: Generated automatically at `/tmp/profile_.../report.html`
+- **Top Functions**: Parsed from `pprof -top` output
+- **Recommendations**: Automatic detection of patterns (channel overhead, allocation hotspots, etc.)
+- **Delta Calculations**: When comparing profiles, shows % change per function
+
+##### What We're Validating
+
+| Check | Status | Validation Method |
+|-------|--------|-------------------|
+| All existing tests pass | ✅ Required | `go test -race ./...` |
+| No race conditions | ✅ Required | Race detector |
+| No memory leaks | ✅ Required | `heap` profile shows stable memory |
+| Buffer pool not exhausted | ✅ Required | No panics under 50Mb/s load |
+| Memory allocations reduced | ✅ Expected | `allocs` profile comparison |
+| CPU time for copy reduced | ✅ Expected | `cpu` profile shows `memmove` reduction |
+| GC pressure reduced | ✅ Expected | Fewer GC cycles in profile |
+
+---
+
+#### 2.5 Acceptance Criteria
+
+##### Functional Requirements
+
+- [ ] All existing tests pass (zero-copy is transparent to existing behavior)
+- [ ] Race detector passes: `go test -race ./...`
+- [ ] `Isolation-5M-Control` integration test passes
+- [ ] `Isolation-5M-Full` (io_uring + btree + NAK btree) integration test passes
+- [ ] `Isolation-5M-Server-Btree` integration test passes
+
+##### Performance Requirements (Validated via Automated Profiling)
+
+- [ ] `BenchmarkUnmarshalZeroCopy` shows 0 allocs/op
+- [ ] `BenchmarkUnmarshalComparison` shows ~7x speedup for 1316-byte payload
+- [ ] `PROFILES=allocs` shows allocation reduction (target: >25%)
+- [ ] `PROFILES=heap` shows heap bytes reduction (target: >40%)
+- [ ] `PROFILES=cpu` shows `runtime.memmove` reduction (target: >75%)
+- [ ] No buffer pool exhaustion under sustained 50Mb/s load for 5 minutes
+- [ ] Throughput equal or better (verify via isolation test throughput)
+
+##### Code Quality Requirements
+
+- [ ] All new methods have doc comments
+- [ ] Error paths tested (parse failures, buffer cleanup)
+- [ ] No linter errors
+
+---
+
+#### 2.6 Implementation Order Summary
+
+```
+========== PRE-IMPLEMENTATION (Capture Baseline) ==========
+Step 0:   Baseline profiling           [~30 min]  - CRITICAL: Capture BEFORE any changes!
+          sudo PROFILES=cpu,heap,allocs make test-isolation CONFIG=Isolation-50M-Full
+          cp -r /tmp/profile_Isolation-50M-Full_* ./documentation/phase2_baseline_profiles/
+
+========== IMPLEMENTATION ==========
+Step 1:   packet/packet.go             [~60 min]  - Add recvBuffer, n, new methods
+Step 1.1: packet/packet_test.go        [~90 min]  - Comprehensive tests + benchmarks
+          - Functional tests (4 test functions, ~15 sub-tests)
+          - Round-trip tests (6 test cases)
+          - Cross-compatibility tests (3 test cases)
+          - Benchmarks (4 benchmark functions)
+Step 2:   congestion/live/receive.go   [~45 min]  - Add releasePacketFully, bufferPool
+Step 2.1: congestion/live/*_test.go    [~20 min]  - Add receiver tests
+Step 3:   listen_linux.go              [~45 min]  - Update io_uring completion handler
+Step 4:   listen.go                    [~30 min]  - Update standard receive path
+Step 5:   connection.go/dial.go        [~30 min]  - Pass bufferPool to receiver
+
+========== VALIDATION ==========
+Step 6:   Benchmark validation         [~30 min]  - Run BenchmarkUnmarshalComparison
+Step 7:   Integration testing          [~30 min]  - Run isolation tests (verify no regressions)
+Step 8:   Profile comparison           [~45 min]  - Run PROFILES=cpu,heap,allocs
+          sudo PROFILES=cpu,heap,allocs make test-isolation CONFIG=Isolation-50M-Full
+          Compare HTML report with Step 0 baseline
+          Verify: allocs reduced, heap reduced, memmove/mallocgc CPU% reduced
+```
+
+**Total Estimated Time**: 7-8 hours (including baseline capture)
+
+**⚠️ IMPORTANT**: Step 0 (baseline profiling) MUST be done BEFORE any code changes. This captures the current allocation and CPU behavior so we can measure the improvement. Without baseline data, we cannot prove the optimization works.
+
+**Key Simplification**: No config flags or CLI flag setup needed - zero-copy is always-on!
+
+**Testing is prioritized** because `UnmarshalZeroCopy` is on the hot path for every packet. The benchmarks will validate our performance improvement hypothesis and provide a baseline to prevent future regressions.
+
+**Automated profiling is critical** for validating the memory and CPU improvements that are the primary goal of this phase. The existing profiling infrastructure generates HTML reports with allocation analysis, CPU hotspots, and automatic recommendations.
+
+---
+
+#### 2.7 Risk Mitigation
+
+| Risk | Mitigation |
+|------|------------|
+| Buffer pool exhaustion | Test with Starlink pattern (60ms outages with packet bursts) |
+| Application holds payload reference | Document API contract: "Do not hold packet data after callback returns" |
+| Memory leaks | Run long-duration tests, check with pprof |
+| Performance regression | Benchmark before/after, compare allocations |
+| Race conditions | All tests run with `-race` flag |
+| Breaking existing behavior | Zero-copy is transparent - `GetPayload()` works for both paths |
 
 ---
 
@@ -5170,7 +6094,7 @@ Network Events:
 | Phase | Effort | Risk | Value | Status |
 |-------|--------|------|-------|--------|
 | Phase 1: Rate Atomics | 2-3 hours | Low | Medium (foundation) | ✅ **COMPLETE** |
-| Phase 2: Zero-Copy | 3-4 hours | Low | **High** (immediate perf) | 🔲 Pending |
+| Phase 2: Zero-Copy | 3-4 hours | Low | **High** (immediate perf) | 📋 **PLANNED** |
 | Phase 3: Packet Ring | 4-5 hours | Medium | High (lockless) | 🔲 Pending |
 | Phase 4: Event Loop | 3-4 hours | Medium | High (latency) | 🔲 Pending |
 | Phase 5: Testing | 2-3 hours | Low | Critical (validation) | 🔲 Pending |
@@ -5184,7 +6108,8 @@ Network Events:
 Week 1: Universal Improvements
 ├── Day 1-2: Phase 1 (Rate Atomics) ✅ DONE
 │   └── Validated: integration tests pass ✅
-├── Day 3-4: Phase 2 (Zero-Copy)
+├── Day 3-4: Phase 2 (Zero-Copy) ← NEXT
+│   └── Detailed plan ready (9 implementation steps)
 │   └── Validate: integration tests pass
 │   └── DEPLOY TO PRODUCTION (UseZeroCopyBuffers=true)
 │
@@ -5217,7 +6142,7 @@ Week 3: Production Rollout
                                        ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
   │ PHASE 2: Zero-Copy Buffers                    [UseZeroCopyBuffers flag] │
-  │ ├── Add recvBuffer, dataLen to Packet struct                            │
+  │ ├── Add recvBuffer, n to Packet struct                                  │
   │ ├── Implement UnmarshalZeroCopy(), releasePacketFully()                 │
   │ ├── Branch in io_uring + standard receive paths                         │
   │ ├── VALIDATE: integration tests, memory leak tests                      │
