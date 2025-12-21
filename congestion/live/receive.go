@@ -2,6 +2,7 @@ package live
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,7 +61,8 @@ type receiver struct {
 	lockTiming                  *metrics.LockTimingMetrics // Optional lock timing metrics
 	metrics                     *metrics.ConnectionMetrics // For atomic statistics updates
 
-	nPackets uint
+	// nPackets removed - now using metrics.RecvLightACKCounter (Phase 1: Lockless)
+	// rate struct removed - now using metrics.ConnectionMetrics atomics (Phase 1: Lockless)
 
 	periodicACKInterval uint64 // config
 	periodicNAKInterval uint64 // config
@@ -73,20 +75,6 @@ type receiver struct {
 
 	probeTime    time.Time
 	probeNextSeq circular.Number
-
-	rate struct {
-		last   uint64 // microseconds
-		period uint64
-
-		packets      uint64
-		bytes        uint64
-		bytesRetrans uint64
-
-		packetsPerSecond float64
-		bytesPerSecond   float64
-
-		pktRetransRate float64 // Retransmission rate (NOT loss rate)
-	}
 
 	sendACK func(seq circular.Number, light bool)
 	sendNAK func(list []circular.Number)
@@ -188,23 +176,27 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		r.deliver = func(p packet.Packet) {}
 	}
 
-	r.rate.last = 0
-	r.rate.period = uint64(time.Second.Microseconds())
+	// Initialize rate calculation period in ConnectionMetrics (Phase 1: Lockless)
+	// Default period is 1 second (1,000,000 microseconds)
+	if r.metrics != nil {
+		r.metrics.RecvRatePeriodUs.Store(uint64(time.Second.Microseconds()))
+		r.metrics.RecvRateLastUs.Store(0)
+	}
 
 	return r
 }
 
 func (r *receiver) Stats() congestion.ReceiveStats {
-	// Read lock only for rate calculations (not for statistics)
+	// Read lock only for avgPayloadSize/avgLinkCapacity (not rate - now lock-free)
 	r.lock.RLock()
 	bytePayload := uint64(r.avgPayloadSize)
-	mbpsBandwidth := r.rate.bytesPerSecond * 8 / 1024 / 1024
 	mbpsLinkCapacity := r.avgLinkCapacity * packet.MAX_PAYLOAD_SIZE * 8 / 1024 / 1024
-	pktRetransRate := r.rate.pktRetransRate
 	r.lock.RUnlock()
 
-	// Metrics are always available (initialized in connection.go before NewReceiver)
+	// Phase 1: Lockless - Get rates from ConnectionMetrics (lock-free)
 	m := r.metrics
+	mbpsBandwidth := m.GetRecvRateMbps()              // Uses atomic load + conversion
+	pktRetransRate := m.GetRecvRateRetransPercent()   // Uses atomic load + conversion
 
 	// Update atomic counters for instantaneous/calculated values
 	m.CongestionRecvBytePayload.Store(bytePayload)
@@ -240,12 +232,15 @@ func (r *receiver) Stats() congestion.ReceiveStats {
 }
 
 func (r *receiver) PacketRate() (pps, bps, capacity float64) {
-	r.lock.Lock()
-	defer r.lock.Unlock()
+	// Phase 1: Lockless - pps and bps from atomic metrics (no lock needed)
+	m := r.metrics
+	pps = m.GetRecvRatePacketsPerSec()
+	bps = m.GetRecvRateBytesPerSec()
 
-	pps = r.rate.packetsPerSecond
-	bps = r.rate.bytesPerSecond
+	// Still need lock for avgLinkCapacity (non-atomic field)
+	r.lock.RLock()
 	capacity = r.avgLinkCapacity
+	r.lock.RUnlock()
 
 	return
 }
@@ -298,10 +293,11 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 		r.checkFastNakRecent(seq, now)
 	}
 
-	r.nPackets++
+	// Phase 1: Lockless - Use atomic counters instead of embedded rate struct
+	m.RecvLightACKCounter.Add(1)  // Replaces r.nPackets++
 	pktLen := pkt.Len()
-	r.rate.packets++
-	r.rate.bytes += pktLen
+	m.RecvRatePackets.Add(1)      // Replaces r.rate.packets++
+	m.RecvRateBytes.Add(pktLen)   // Replaces r.rate.bytes += pktLen
 
 	m.CongestionRecvPkt.Add(1)
 	m.CongestionRecvByte.Add(uint64(pktLen))
@@ -309,7 +305,7 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 	if pkt.Header().RetransmittedPacketFlag {
 		m.CongestionRecvPktRetrans.Add(1)
 		m.CongestionRecvByteRetrans.Add(uint64(pktLen))
-		r.rate.bytesRetrans += pktLen
+		m.RecvRateBytesRetrans.Add(pktLen)  // Replaces r.rate.bytesRetrans += pktLen
 	}
 
 	// 5.1.2. SRT's Default LiveCC Algorithm
@@ -399,12 +395,13 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 		r.probeTime = time.Time{}
 	}
 
-	r.nPackets++
+	// Phase 1: Lockless - Use atomic counters instead of embedded rate struct
+	m.RecvLightACKCounter.Add(1)  // Replaces r.nPackets++
 
 	pktLen := pkt.Len()
 
-	r.rate.packets++
-	r.rate.bytes += pktLen
+	m.RecvRatePackets.Add(1)      // Replaces r.rate.packets++
+	m.RecvRateBytes.Add(pktLen)   // Replaces r.rate.bytes += pktLen
 
 	m.CongestionRecvPkt.Add(1)
 	m.CongestionRecvByte.Add(uint64(pktLen))
@@ -414,7 +411,7 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 		m.CongestionRecvPktRetrans.Add(1)
 		m.CongestionRecvByteRetrans.Add(uint64(pktLen))
 
-		r.rate.bytesRetrans += pktLen
+		m.RecvRateBytesRetrans.Add(pktLen)  // Replaces r.rate.bytesRetrans += pktLen
 	}
 
 	//  5.1.2. SRT's Default LiveCC Algorithm
@@ -500,10 +497,12 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	r.lock.RLock()
 
 	// Early return check (read-only)
+	// Phase 1: Lockless - Use atomic RecvLightACKCounter instead of r.nPackets
 	needLiteACK := false
+	lightACKCount := r.metrics.RecvLightACKCounter.Load()
 	if now-r.lastPeriodicACK < r.periodicACKInterval {
-		if r.nPackets >= 64 {
-			needLiteACK = true // Will send light ACK, but can't update nPackets yet
+		if lightACKCount >= 64 {
+			needLiteACK = true // Will send light ACK, but can't reset counter yet
 		} else {
 			r.lock.RUnlock()
 			return // Early return - no ACK needed
@@ -660,7 +659,7 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 	}
 
 	r.lastPeriodicACK = now
-	r.nPackets = 0
+	r.metrics.RecvLightACKCounter.Store(0)  // Phase 1: Lockless - Reset atomic counter
 
 	msBuf := (maxPktTsbpdTime - minPktTsbpdTime) / 1_000
 	m.CongestionRecvMsBuf.Store(msBuf)
@@ -1007,22 +1006,41 @@ func (r *receiver) Tick(now uint64) {
 }
 
 func (r *receiver) updateRateStats(now uint64) {
-	tdiff := now - r.rate.last // microseconds
+	// Phase 1: Lockless - All rate calculations now use atomic ConnectionMetrics
+	m := r.metrics
 
-	if tdiff > r.rate.period {
-		r.rate.packetsPerSecond = float64(r.rate.packets) / (float64(tdiff) / 1000 / 1000)
-		r.rate.bytesPerSecond = float64(r.rate.bytes) / (float64(tdiff) / 1000 / 1000)
-		if r.rate.bytes != 0 {
-			r.rate.pktRetransRate = float64(r.rate.bytesRetrans) / float64(r.rate.bytes) * 100
-		} else {
-			r.rate.bytes = 0
+	lastUs := m.RecvRateLastUs.Load()
+	periodUs := m.RecvRatePeriodUs.Load()
+	tdiff := now - lastUs // microseconds
+
+	if tdiff > periodUs {
+		// Load current counters
+		packets := m.RecvRatePackets.Load()
+		bytes := m.RecvRateBytes.Load()
+		bytesRetrans := m.RecvRateBytesRetrans.Load()
+
+		// Calculate rates
+		seconds := float64(tdiff) / 1_000_000
+		packetsPerSecond := float64(packets) / seconds
+		bytesPerSecond := float64(bytes) / seconds
+
+		var pktRetransRate float64
+		if bytes != 0 {
+			pktRetransRate = float64(bytesRetrans) / float64(bytes) * 100
 		}
 
-		r.rate.packets = 0
-		r.rate.bytes = 0
-		r.rate.bytesRetrans = 0
+		// Store computed rates as float64 bits (lock-free)
+		m.RecvRatePacketsPerSec.Store(math.Float64bits(packetsPerSecond))
+		m.RecvRateBytesPerSec.Store(math.Float64bits(bytesPerSecond))
+		m.RecvRatePktRetransRate.Store(math.Float64bits(pktRetransRate))
 
-		r.rate.last = now
+		// Reset counters for next period
+		m.RecvRatePackets.Store(0)
+		m.RecvRateBytes.Store(0)
+		m.RecvRateBytesRetrans.Store(0)
+
+		// Update last calculation time
+		m.RecvRateLastUs.Store(now)
 	}
 }
 

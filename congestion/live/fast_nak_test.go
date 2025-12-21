@@ -1,6 +1,7 @@
 package live
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -24,8 +25,8 @@ func createTestReceiverForFastNak(t *testing.T) *receiver {
 		metrics:              m,
 	}
 
-	// Initialize rate stats with reasonable defaults
-	r.rate.packetsPerSecond = 500.0 // 500 pps default
+	// Initialize rate stats with reasonable defaults (Phase 1: Lockless)
+	m.RecvRatePacketsPerSec.Store(math.Float64bits(500.0)) // 500 pps default
 
 	return r
 }
@@ -232,7 +233,7 @@ func TestCheckFastNakRecent_SignificantJump(t *testing.T) {
 func TestPacketsPerSecondEstimate(t *testing.T) {
 	r := createTestReceiverForFastNak(t)
 
-	r.rate.packetsPerSecond = 1000.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(1000.0))
 
 	estimate := r.packetsPerSecondEstimate()
 
@@ -284,7 +285,7 @@ func TestCheckFastNakRecent_LargeBurstLoss_5Mbps(t *testing.T) {
 	// Scenario: 5 Mbps video stream, 60ms outage
 	// Packets: ~5000 pps (1000 byte packets) * 0.06s = ~300 packets
 	r := createTestReceiverForFastNak(t)
-	r.rate.packetsPerSecond = 5000.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(5000.0))
 
 	now := time.Now()
 	r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond)) // 60ms outage
@@ -339,7 +340,7 @@ func TestCheckFastNakRecent_LargeBurstLoss_20Mbps(t *testing.T) {
 		nakConsolidationBudget: 5 * time.Second, // Extended for large burst
 		metrics:                m,
 	}
-	r.rate.packetsPerSecond = 20000.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(20000.0))
 
 	now := time.Now()
 	r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond))
@@ -383,7 +384,7 @@ func TestCheckFastNakRecent_LargeBurstLoss_100Mbps(t *testing.T) {
 	// Packets: ~100000 pps * 0.06s = ~6000 packets
 	// This tests the overflow cap logic
 	r := createTestReceiverForFastNak(t)
-	r.rate.packetsPerSecond = 100000.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(100000.0))
 
 	now := time.Now()
 	r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond))
@@ -429,7 +430,7 @@ func TestCheckFastNakRecent_MultipleBurstLosses(t *testing.T) {
 		nakConsolidationBudget: 5 * time.Second,
 		metrics:                m,
 	}
-	r.rate.packetsPerSecond = 5000.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(5000.0))
 
 	baseTime := time.Now()
 
@@ -482,7 +483,7 @@ func TestCheckFastNakRecent_MultipleBurstLosses(t *testing.T) {
 func TestCheckFastNakRecent_LargeBurstThenConsolidate(t *testing.T) {
 	// Full integration: Large burst → consolidate → verify NAK format
 	r := createTestReceiverForFastNak(t)
-	r.rate.packetsPerSecond = 5000.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(5000.0))
 	r.nakMergeGap = 3
 	r.nakConsolidationBudget = 1 * time.Second
 
@@ -525,7 +526,7 @@ func TestCheckFastNakRecent_LargeBurstThenConsolidate(t *testing.T) {
 func TestCheckFastNakRecent_LargeBurstWithPriorGaps(t *testing.T) {
 	// Scenario: Some gaps already in NAK btree, then large burst
 	r := createTestReceiverForFastNak(t)
-	r.rate.packetsPerSecond = 5000.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(5000.0))
 	r.nakMergeGap = 3
 	r.nakConsolidationBudget = 1 * time.Second
 
@@ -562,7 +563,7 @@ func TestCheckFastNakRecent_LargeBurstWithPriorGaps(t *testing.T) {
 func TestCheckFastNakRecent_VeryLongOutage(t *testing.T) {
 	// Scenario: Very long outage (500ms) - tests cap logic
 	r := createTestReceiverForFastNak(t)
-	r.rate.packetsPerSecond = 5000.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(5000.0))
 
 	now := time.Now()
 	r.lastPacketArrivalTime.Store(now.Add(-500 * time.Millisecond)) // 500ms outage!
@@ -627,7 +628,7 @@ func benchmarkFastNakRecentBurst(b *testing.B, burstSize int) {
 			fastNakRecentEnabled: true,
 			metrics:              &metrics.ConnectionMetrics{},
 		}
-		r.rate.packetsPerSecond = float64(burstSize) / 0.06 // Calculate pps for 60ms burst
+		r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(float64(burstSize) / 0.06)) // Calculate pps for 60ms burst
 
 		now := time.Now()
 		r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond))
@@ -648,7 +649,7 @@ func BenchmarkCheckFastNakRecent(b *testing.B) {
 		fastNakRecentEnabled: true,
 		metrics:              &metrics.ConnectionMetrics{},
 	}
-	r.rate.packetsPerSecond = 500.0
+	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(500.0))
 
 	now := time.Now()
 	r.lastPacketArrivalTime.Store(now.Add(-10 * time.Millisecond)) // Short silence

@@ -2,6 +2,7 @@ package live
 
 import (
 	"container/list"
+	"math"
 	"sync"
 	"time"
 
@@ -46,19 +47,7 @@ type sender struct {
 
 	probeTime uint64
 
-	rate struct {
-		period uint64 // microseconds
-		last   uint64
-
-		bytes        uint64
-		bytesSent    uint64
-		bytesRetrans uint64
-
-		estimatedInputBW float64 // bytes/s
-		estimatedSentBW  float64 // bytes/s
-
-		pktRetransRate float64 // Retransmission rate (NOT loss rate)
-	}
+	// rate struct removed - now using metrics.ConnectionMetrics atomics (Phase 1: Lockless)
 
 	deliver func(p packet.Packet)
 
@@ -93,14 +82,18 @@ func NewSender(config SendConfig) congestion.Sender {
 	s.maxBW = 128 * 1024 * 1024 // 1 Gbit/s
 	s.pktSndPeriod = (s.avgPayloadSize + 16) * 1_000_000 / s.maxBW
 
-	s.rate.period = uint64(time.Second.Microseconds())
-	s.rate.last = 0
+	// Initialize rate calculation period in ConnectionMetrics (Phase 1: Lockless)
+	// Default period is 1 second (1,000,000 microseconds)
+	if s.metrics != nil {
+		s.metrics.SendRatePeriodUs.Store(uint64(time.Second.Microseconds()))
+		s.metrics.SendRateLastUs.Store(0)
+	}
 
 	return s
 }
 
 func (s *sender) Stats() congestion.SendStats {
-	// Read lock only for rate calculations
+	// Read lock only for non-atomic fields (pktSndPeriod, avgPayloadSize, lossList)
 	s.lock.RLock()
 	usPktSndPeriod := s.pktSndPeriod
 	bytePayload := uint64(s.avgPayloadSize)
@@ -110,13 +103,14 @@ func (s *sender) Stats() congestion.SendStats {
 	if max != nil && min != nil {
 		msBuf = (max.Value.(packet.Packet).Header().PktTsbpdTime - min.Value.(packet.Packet).Header().PktTsbpdTime) / 1_000
 	}
-	mbpsInputBW := s.rate.estimatedInputBW * 8 / 1024 / 1024
-	mbpsSentBW := s.rate.estimatedSentBW * 8 / 1024 / 1024
-	pktRetransRate := s.rate.pktRetransRate
 	s.lock.RUnlock()
 
+	// Phase 1: Lockless - Get rates from ConnectionMetrics (lock-free)
 	// Metrics are always available (initialized in connection.go before NewSender)
 	m := s.metrics
+	mbpsInputBW := m.GetSendRateEstInputBW() * 8 / 1024 / 1024 // Uses atomic load + conversion
+	mbpsSentBW := m.GetSendRateEstSentBW() * 8 / 1024 / 1024   // Uses atomic load + conversion
+	pktRetransRate := m.GetSendRateRetransPercent()            // Uses atomic load + conversion
 
 	// Update atomic counters for instantaneous/calculated values
 	m.CongestionSendUsPktSndPeriod.Store(uint64(usPktSndPeriod))
@@ -194,8 +188,8 @@ func (s *sender) pushLocked(p packet.Packet) {
 	m.CongestionSendPktBuf.Add(1)
 	m.CongestionSendByteBuf.Add(uint64(pktLen))
 
-	// Input bandwidth calculation
-	s.rate.bytes += pktLen
+	// Input bandwidth calculation (Phase 1: Lockless - use atomic)
+	s.metrics.SendRateBytes.Add(pktLen)
 
 	p.Header().Timestamp = uint32(p.Header().PktTsbpdTime & uint64(packet.MAX_TIMESTAMP))
 
@@ -269,7 +263,7 @@ func (s *sender) tickDeliverPackets(now uint64) {
 			//  5.1.2. SRT's Default LiveCC Algorithm
 			s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
 
-			s.rate.bytesSent += pktLen
+			s.metrics.SendRateBytesSent.Add(pktLen) // Phase 1: Lockless
 
 			s.deliver(p)
 			removeList = append(removeList, e)
@@ -319,22 +313,41 @@ func (s *sender) tickDropOldPackets(now uint64) {
 }
 
 func (s *sender) tickUpdateRateStats(now uint64) {
-	tdiff := now - s.rate.last
+	// Phase 1: Lockless - All rate calculations now use atomic ConnectionMetrics
+	m := s.metrics
 
-	if tdiff > s.rate.period {
-		s.rate.estimatedInputBW = float64(s.rate.bytes) / (float64(tdiff) / 1000 / 1000)
-		s.rate.estimatedSentBW = float64(s.rate.bytesSent) / (float64(tdiff) / 1000 / 1000)
-		if s.rate.bytesSent != 0 {
-			s.rate.pktRetransRate = float64(s.rate.bytesRetrans) / float64(s.rate.bytesSent) * 100
-		} else {
-			s.rate.pktRetransRate = 0
+	lastUs := m.SendRateLastUs.Load()
+	periodUs := m.SendRatePeriodUs.Load()
+	tdiff := now - lastUs
+
+	if tdiff > periodUs {
+		// Load current counters
+		bytes := m.SendRateBytes.Load()
+		bytesSent := m.SendRateBytesSent.Load()
+		bytesRetrans := m.SendRateBytesRetrans.Load()
+
+		// Calculate rates
+		seconds := float64(tdiff) / 1_000_000
+		estimatedInputBW := float64(bytes) / seconds
+		estimatedSentBW := float64(bytesSent) / seconds
+
+		var pktRetransRate float64
+		if bytesSent != 0 {
+			pktRetransRate = float64(bytesRetrans) / float64(bytesSent) * 100
 		}
 
-		s.rate.bytes = 0
-		s.rate.bytesSent = 0
-		s.rate.bytesRetrans = 0
+		// Store computed rates as float64 bits (lock-free)
+		m.SendRateEstInputBW.Store(math.Float64bits(estimatedInputBW))
+		m.SendRateEstSentBW.Store(math.Float64bits(estimatedSentBW))
+		m.SendRatePktRetransRate.Store(math.Float64bits(pktRetransRate))
 
-		s.rate.last = now
+		// Reset counters for next period
+		m.SendRateBytes.Store(0)
+		m.SendRateBytesSent.Store(0)
+		m.SendRateBytesRetrans.Store(0)
+
+		// Update last calculation time
+		m.SendRateLastUs.Store(now)
 	}
 }
 
@@ -442,8 +455,9 @@ func (s *sender) nakLockedOriginal(sequenceNumbers []circular.Number) uint64 {
 				//  5.1.2. SRT's Default LiveCC Algorithm
 				s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
 
-				s.rate.bytesSent += pktLen
-				s.rate.bytesRetrans += pktLen
+				// Phase 1: Lockless - use atomic counters
+				m.SendRateBytesSent.Add(pktLen)
+				m.SendRateBytesRetrans.Add(pktLen)
 
 				p.Header().RetransmittedPacketFlag = true
 				s.deliver(p)
@@ -502,8 +516,9 @@ func (s *sender) nakLockedHonorOrder(sequenceNumbers []circular.Number) uint64 {
 				// Update running average payload size
 				s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
 
-				s.rate.bytesSent += pktLen
-				s.rate.bytesRetrans += pktLen
+				// Phase 1: Lockless - use atomic counters
+				m.SendRateBytesSent.Add(pktLen)
+				m.SendRateBytesRetrans.Add(pktLen)
 
 				p.Header().RetransmittedPacketFlag = true
 				s.deliver(p)

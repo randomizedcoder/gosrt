@@ -135,8 +135,8 @@ func (r *receiver) checkFastNakRecent(currentSeq uint32, now time.Time) {
 // packetsPerSecondEstimate returns current packets per second estimate.
 // Used by FastNAKRecent to calculate expected gap.
 func (r *receiver) packetsPerSecondEstimate() float64 {
-	// Use the rate stat if available
-	return r.rate.packetsPerSecond
+	// Phase 1: Lockless - Use atomic getter from ConnectionMetrics
+	return r.metrics.GetRecvRatePacketsPerSec()
 }
 
 // AtomicTime provides atomic operations for time.Time values.

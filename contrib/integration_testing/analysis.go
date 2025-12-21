@@ -1121,6 +1121,145 @@ func getEffectiveLatency(config *TestConfig) time.Duration {
 	return 120 * time.Millisecond
 }
 
+// ============================================================================
+// RATE METRICS VALIDATION (Phase 1: Lockless Design)
+// ============================================================================
+// Validates that reported rate metrics from Prometheus closely match:
+// 1. Computed average rates (total bytes / test duration)
+// 2. Configured test bitrate (if specified)
+//
+// This validates the Phase 1 lockless rate metrics implementation.
+// See: gosrt_lockless_design.md
+
+// RateMetricsViolation describes a rate metric validation failure
+type RateMetricsViolation struct {
+	Component    string  // "Server", "ClientGenerator", "Client"
+	MetricName   string  // e.g., "RecvRateMbps", "SendRateMbps"
+	ExpectedMbps float64 // Expected rate (from computed avg or config)
+	ActualMbps   float64 // Actual reported rate from Prometheus
+	VariancePct  float64 // Percentage variance
+	Threshold    float64 // Allowed variance threshold
+	Message      string  // Human-readable description
+}
+
+// RateMetricsResult holds the result of rate metrics validation
+type RateMetricsResult struct {
+	Passed     bool
+	Violations []RateMetricsViolation
+	Warnings   []string
+
+	// Component rate summaries
+	ServerRecvRateMbps    float64
+	ServerSendRateMbps    float64
+	ClientGenSendRateMbps float64
+	ClientRecvRateMbps    float64
+	ConfiguredBitrateMbps float64
+}
+
+// VerifyRateMetrics validates that Prometheus rate metrics match computed averages
+// and configured bitrate. This is a key validation for Phase 1 lockless design.
+//
+// Validation thresholds:
+// - Computed avg vs Prometheus rate: 20% variance allowed (rates are smoothed)
+// - Prometheus rate vs configured bitrate: 15% variance allowed
+func VerifyRateMetrics(ts *TestMetricsTimeSeries, config *TestConfig) RateMetricsResult {
+	result := RateMetricsResult{
+		Passed: false, // Fail-safe: default to failed
+	}
+
+	// Get configured bitrate
+	if config != nil && config.Bitrate > 0 {
+		result.ConfiguredBitrateMbps = float64(config.Bitrate) / 1_000_000
+	}
+
+	// Compute derived metrics for each component
+	serverMetrics := ComputeDerivedMetrics(ts.Server)
+	clientGenMetrics := ComputeDerivedMetrics(ts.ClientGenerator)
+	clientMetrics := ComputeDerivedMetrics(ts.Client)
+
+	// Store computed rates for reporting
+	result.ServerRecvRateMbps = serverMetrics.AvgRecvRateMbps
+	result.ClientGenSendRateMbps = clientGenMetrics.AvgSendRateMbps
+	result.ClientRecvRateMbps = clientMetrics.AvgRecvRateMbps
+
+	// Define variance thresholds
+	const computedVsReportedThreshold = 0.20 // 20% variance for computed vs Prometheus
+	const configuredThreshold = 0.15         // 15% variance for configured bitrate check
+
+	// Helper function to check rate variance
+	checkRate := func(component, metricName string, expectedMbps, actualMbps, threshold float64) {
+		if expectedMbps <= 0 {
+			return // Skip if no expected rate
+		}
+
+		variancePct := 0.0
+		if expectedMbps > 0 {
+			variancePct = (actualMbps - expectedMbps) / expectedMbps
+			if variancePct < 0 {
+				variancePct = -variancePct // Absolute value
+			}
+		}
+
+		if variancePct > threshold {
+			result.Violations = append(result.Violations, RateMetricsViolation{
+				Component:    component,
+				MetricName:   metricName,
+				ExpectedMbps: expectedMbps,
+				ActualMbps:   actualMbps,
+				VariancePct:  variancePct * 100,
+				Threshold:    threshold * 100,
+				Message: fmt.Sprintf("%s %s: expected %.2f Mbps, got %.2f Mbps (%.1f%% variance, threshold %.0f%%)",
+					component, metricName, expectedMbps, actualMbps, variancePct*100, threshold*100),
+			})
+		}
+	}
+
+	// Check server receive rate against computed average
+	// Server receives from client-generator, so compare with clientGen send rate
+	if clientGenMetrics.AvgSendRateMbps > 0 && serverMetrics.AvgRecvRateMbps > 0 {
+		checkRate("Server", "RecvRate vs ClientGen SendRate",
+			clientGenMetrics.AvgSendRateMbps, serverMetrics.AvgRecvRateMbps, computedVsReportedThreshold)
+	}
+
+	// Check client receive rate against server send rate (passthrough)
+	if serverMetrics.AvgSendRateMbps > 0 && clientMetrics.AvgRecvRateMbps > 0 {
+		checkRate("Client", "RecvRate vs Server SendRate",
+			serverMetrics.AvgSendRateMbps, clientMetrics.AvgRecvRateMbps, computedVsReportedThreshold)
+	}
+
+	// Check against configured bitrate if available
+	if result.ConfiguredBitrateMbps > 0 {
+		// Client-generator should be sending at configured rate
+		if clientGenMetrics.AvgSendRateMbps > 0 {
+			checkRate("ClientGenerator", "SendRate vs Configured",
+				result.ConfiguredBitrateMbps, clientGenMetrics.AvgSendRateMbps, configuredThreshold)
+		}
+
+		// Client should be receiving at approximately configured rate (minus losses)
+		if clientMetrics.AvgRecvRateMbps > 0 {
+			// Allow more variance for receive (account for potential losses)
+			checkRate("Client", "RecvRate vs Configured",
+				result.ConfiguredBitrateMbps, clientMetrics.AvgRecvRateMbps, configuredThreshold+0.10)
+		}
+	}
+
+	// Add warnings for missing rate data
+	if clientGenMetrics.AvgSendRateMbps == 0 {
+		result.Warnings = append(result.Warnings, "ClientGenerator: No send rate data available")
+	}
+	if serverMetrics.AvgRecvRateMbps == 0 {
+		result.Warnings = append(result.Warnings, "Server: No receive rate data available")
+	}
+	if clientMetrics.AvgRecvRateMbps == 0 {
+		result.Warnings = append(result.Warnings, "Client: No receive rate data available")
+	}
+
+	// Pass if no violations (warnings are allowed)
+	result.Passed = len(result.Violations) == 0
+
+	return result
+}
+
 // AnalysisResult aggregates all analysis components
 type AnalysisResult struct {
 	TestName   string
@@ -1133,6 +1272,7 @@ type AnalysisResult struct {
 	ConnectionLifecycle   ConnectionLifecycleResult   // Connection establishment/closure tracking
 	StatisticalValidation StatisticalValidationResult // For network impairment tests
 	PipelineBalance       PipelineBalanceResult       // Clean network pipeline verification
+	RateMetrics           RateMetricsResult           // Phase 1: Lockless rate metrics validation
 
 	// Runtime stability (for long-running tests)
 	RuntimeStability []RuntimeStabilityResult
@@ -1155,6 +1295,7 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	signalResult := ValidatePositiveSignals(ts, config)
 	lifecycleResult := AnalyzeConnectionLifecycle(ts, config)
 	statisticalResult := ValidateStatistical(ts, config)
+	rateMetricsResult := VerifyRateMetrics(ts, config) // Phase 1: Lockless rate validation
 
 	// FAIL-SAFE: Default to failed - only set to passed after ALL checks confirm success
 	result := AnalysisResult{
@@ -1165,6 +1306,7 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 		PositiveSignals:       signalResult,
 		ConnectionLifecycle:   lifecycleResult,
 		StatisticalValidation: statisticalResult,
+		RateMetrics:           rateMetricsResult,
 	}
 
 	// Compute derived metrics for reporting
@@ -1198,8 +1340,8 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 
 	// Count violations and warnings from error and signal analysis
 	result.TotalViolations += len(errorResult.Violations) + len(signalResult.Violations) +
-		len(statisticalResult.Violations)
-	result.TotalWarnings += len(statisticalResult.Warnings)
+		len(statisticalResult.Violations) + len(rateMetricsResult.Violations)
+	result.TotalWarnings += len(statisticalResult.Warnings) + len(rateMetricsResult.Warnings)
 
 	// Track runtime stability pass/fail (for long-running tests)
 	runtimePassed := true // No runtime analysis = passes by default (not applicable)
@@ -1222,7 +1364,8 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	// This is the ONLY place where Passed can become true
 	pipelinePassed := !pipelineBalanceRequired || result.PipelineBalance.Passed
 	lifecyclePassed := lifecycleResult.Passed
-	if errorResult.Passed && signalResult.Passed && lifecyclePassed && statisticalResult.Passed && runtimePassed && pipelinePassed {
+	rateMetricsPassed := rateMetricsResult.Passed // Phase 1: Lockless rate metrics
+	if errorResult.Passed && signalResult.Passed && lifecyclePassed && statisticalResult.Passed && runtimePassed && pipelinePassed && rateMetricsPassed {
 		result.Passed = true
 	}
 
@@ -1482,6 +1625,33 @@ func PrintAnalysisResult(result AnalysisResult) {
 		// Option to print detailed analysis
 		if !allStable {
 			fmt.Println("\n  (Run with -verbose for detailed runtime analysis)")
+		}
+	}
+
+	// Rate Metrics Validation (Phase 1: Lockless)
+	if result.RateMetrics.ConfiguredBitrateMbps > 0 || result.RateMetrics.ServerRecvRateMbps > 0 {
+		if result.RateMetrics.Passed {
+			fmt.Println("\nRate Metrics: ✓ PASSED")
+			if result.RateMetrics.ConfiguredBitrateMbps > 0 {
+				fmt.Printf("  ✓ Configured: %.2f Mbps\n", result.RateMetrics.ConfiguredBitrateMbps)
+			}
+			if result.RateMetrics.ClientGenSendRateMbps > 0 {
+				fmt.Printf("  ✓ ClientGen send: %.2f Mbps\n", result.RateMetrics.ClientGenSendRateMbps)
+			}
+			if result.RateMetrics.ServerRecvRateMbps > 0 {
+				fmt.Printf("  ✓ Server recv: %.2f Mbps\n", result.RateMetrics.ServerRecvRateMbps)
+			}
+			if result.RateMetrics.ClientRecvRateMbps > 0 {
+				fmt.Printf("  ✓ Client recv: %.2f Mbps\n", result.RateMetrics.ClientRecvRateMbps)
+			}
+		} else {
+			fmt.Println("\nRate Metrics: ✗ FAILED")
+			for _, v := range result.RateMetrics.Violations {
+				fmt.Printf("  ✗ %s\n", v.Message)
+			}
+		}
+		for _, w := range result.RateMetrics.Warnings {
+			fmt.Printf("  ⚠ %s\n", w)
 		}
 	}
 

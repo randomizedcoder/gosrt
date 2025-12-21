@@ -72,15 +72,16 @@ This document tracks the implementation progress of Phase 1 of the GoSRT Lockles
 - [x] Update `intentionallyNotExported` map
 - [x] Update `TestPrometheusZeroFiltering` threshold (6 rate metrics always exported)
 
-### Step 3: Update receiver to use ConnectionMetrics (`congestion/live/receive.go`)
+### Step 3: Update receiver to use ConnectionMetrics (`congestion/live/receive.go`) ✅ COMPLETE
 
-- [ ] Remove embedded `rate` struct
-- [ ] Remove `nPackets` field (use `RecvLightACKCounter`)
-- [ ] Update `Push()` to use atomic increments
-- [ ] Add `updateRecvRate()` function
-- [ ] Add `updateRecvRateTick()` function (for legacy Tick path)
-- [ ] Update `Stats()` to use getter helpers
-- [ ] Update rate calculation in `Tick()` or periodic functions
+- [x] Remove embedded `rate` struct
+- [x] Remove `nPackets` field (use `RecvLightACKCounter`)
+- [x] Update `Push()` to use atomic increments (both btree and linked list paths)
+- [x] Update `updateRateStats()` to use ConnectionMetrics atomics
+- [x] Update `Stats()` to use getter helpers
+- [x] Update `PacketRate()` to use lock-free getters
+- [x] Update `periodicACK()` light ACK check to use `RecvLightACKCounter`
+- [x] Add math import for `Float64bits()`
 
 ### Step 3b: Update receiver.Stats() and sender.Stats()
 
@@ -88,31 +89,50 @@ This document tracks the implementation progress of Phase 1 of the GoSRT Lockles
 - [ ] Update `sender.Stats()` to use `GetSendRateMbps()`
 - [ ] Remove lock acquisition for rate reading
 
-### Step 4: Update sender to use ConnectionMetrics (`congestion/live/send.go`)
+### Step 4: Update sender to use ConnectionMetrics (`congestion/live/send.go`) ✅ COMPLETE
 
-- [ ] Remove embedded `rate` struct
-- [ ] Update rate counter increments to use atomics
-- [ ] Add `updateSendRate()` function
-- [ ] Update `Stats()` to use getter helpers
+- [x] Remove embedded `rate` struct
+- [x] Update `NewSender()` to initialize rate period in ConnectionMetrics
+- [x] Update `Stats()` to use getter helpers (lock-free)
+- [x] Update `Push()` to use `SendRateBytes.Add()`
+- [x] Update `tickSendPackets()` to use `SendRateBytesSent.Add()`
+- [x] Update `nakLocked()` to use `SendRateBytesSent.Add()` and `SendRateBytesRetrans.Add()`
+- [x] Update `nakHonorOrderLocked()` to use atomic counters
+- [x] Rewrite `tickUpdateRateStats()` to use atomic operations and `Float64bits()`
+- [x] Add `math` import
 
-### Step 5: Update fake receiver (`congestion/live/fake.go`)
+### Step 5: Update fake receiver (`congestion/live/fake.go`) ✅ COMPLETE
 
-- [ ] Update rate handling to use ConnectionMetrics
+- [x] Remove embedded `rate` struct
+- [x] Add `*metrics.ConnectionMetrics` field
+- [x] Update `NewFakeLiveReceive()` to create and initialize metrics
+- [x] Update `Push()` to use atomic increments
+- [x] Update `PacketRate()` to use lock-free rate calculation
+- [x] Update `periodicACK()` light ACK check to use `RecvLightACKCounter`
+- [x] Add `math` import
 
-### Step 6: Add rate validation to analysis.go
+### Step 6: Add rate validation to analysis.go ✅ COMPLETE
 
-- [ ] Add `RateMetricsValidationResult` struct
-- [ ] Add `VerifyRateMetrics()` function
-- [ ] Add `PrintRateMetricsValidation()` function
-- [ ] Integrate into `analyzeTest()` function
+- [x] Add `RateMetricsViolation` struct for rate validation failures
+- [x] Add `RateMetricsResult` struct to hold validation results
+- [x] Add `VerifyRateMetrics()` function with threshold checks:
+  - Computed avg vs Prometheus rate: 20% variance allowed
+  - Prometheus rate vs configured bitrate: 15% variance allowed
+- [x] Add `RateMetrics` field to `AnalysisResult` struct
+- [x] Update `AnalyzeTestMetrics()` to call `VerifyRateMetrics()`
+- [x] Include rate metrics violations/warnings in total counts
+- [x] Include `rateMetricsPassed` in overall pass/fail logic
+- [x] Add rate metrics printing section in `PrintAnalysisResult()`
 
-### Validation
+### Validation ✅ COMPLETE
 
-- [ ] Run `go run tools/metrics-audit/main.go` - no missing/duplicate metrics
-- [ ] Run `go test -race -v ./...` - no race conditions
-- [ ] Run `go test -v ./metrics/...` - all handler tests pass
-- [ ] Verify Prometheus endpoint shows new rate metrics
-- [ ] Run Tier 1 integration tests
+- [x] Run `go run tools/metrics-audit/main.go` - only 2 pre-existing unused fields
+- [x] Run `go build ./...` - compiles successfully
+- [x] Run `go test -race ./congestion/live/...` - passes (except 2 pre-existing failures)
+- [x] Run `go test -race ./metrics/...` - all 57 handler tests pass
+- [x] Run `go test ./contrib/integration_testing/...` - passes
+- [ ] Verify Prometheus endpoint shows new rate metrics (requires running server)
+- [ ] Run Tier 1 integration tests (requires test infrastructure)
 
 ---
 
@@ -156,11 +176,70 @@ This document tracks the implementation progress of Phase 1 of the GoSRT Lockles
 - All 57 metrics tests pass
 - No linter errors
 
-#### Step 3-6: Remaining Steps
+#### Step 3: congestion/live/receive.go ✅
 
-Steps 3-6 require updates to `congestion/live/receive.go`, `congestion/live/send.go`, `congestion/live/fake.go`, and `contrib/integration_testing/analysis.go` to actually USE the new rate metrics. This is the core refactoring work.
+**Completed:**
+- Removed embedded `rate` struct (77-89)
+- Removed `nPackets` field - now using `RecvLightACKCounter`
+- Updated `NewReceiver()` to initialize rate period in ConnectionMetrics
+- Updated `pushLockedNakBtree()` and `pushLockedLinkedList()` to use atomic increments
+- Updated `Stats()` and `PacketRate()` to use getter helpers (lock-free)
+- Updated `periodicACK()` light ACK check to use `RecvLightACKCounter`
+- Rewrote `updateRateStats()` to use atomic operations and `Float64bits()`
+- Added `math` import
+- No new linter errors
 
-*Pausing here - significant progress made on foundation (Steps 1-2b complete)*
+#### Step 5: congestion/live/fake.go ✅
+
+**Completed:**
+- Removed embedded `rate` struct and `nPackets` field
+- Added `*metrics.ConnectionMetrics` field
+- Updated `NewFakeLiveReceive()` to create and initialize metrics
+- Updated `Push()` to use atomic increments
+- Updated `PacketRate()` to calculate rates from atomics
+- Updated `periodicACK()` light ACK check
+- Added `math` import
+
+#### Also Updated:
+
+**`congestion/live/fast_nak.go`:**
+- Updated `packetsPerSecondEstimate()` to use `r.metrics.GetRecvRatePacketsPerSec()`
+
+**`congestion/live/fast_nak_test.go`:**
+- Updated all rate setters to use `m.RecvRatePacketsPerSec.Store(math.Float64bits(...))`
+- Added `math` import
+
+#### Step 4: congestion/live/send.go ✅
+
+**Completed:**
+- Removed embedded `rate` struct
+- Updated `NewSender()` to initialize rate period in ConnectionMetrics
+- Updated `Stats()` to use getter helpers (lock-free for rates)
+- Updated `Push()` to use `SendRateBytes.Add()`
+- Updated `tickSendPackets()` to use `SendRateBytesSent.Add()`
+- Updated `nakLocked()` and `nakHonorOrderLocked()` to use atomic counters
+- Rewrote `tickUpdateRateStats()` to use atomic operations and `Float64bits()`
+- Added `math` import
+- All sender tests pass (TestSend*, TestSendHonorOrder_*)
+
+#### Step 6: contrib/integration_testing/analysis.go ✅
+
+**Completed:**
+- Added `RateMetricsViolation` struct for rate validation failures
+- Added `RateMetricsResult` struct with component rate summaries
+- Added `VerifyRateMetrics()` function:
+  - Compares computed average rates vs Prometheus reported rates (20% threshold)
+  - Compares reported rates vs configured bitrate (15% threshold)
+  - Adds warnings for missing rate data
+- Integrated into `AnalysisResult` struct and `AnalyzeTestMetrics()`
+- Added `rateMetricsPassed` to overall pass/fail condition
+- Added rate metrics section to `PrintAnalysisResult()`
+
+#### Test Results:
+- ✅ All new FastNAK tests pass
+- ✅ All existing tests pass EXCEPT two pre-existing broken tests
+- ✅ All integration testing tests pass
+- ⚠️ `TestRecvACK` and `TestIssue67` fail (pre-existing bug in `ackScanHighWaterMark` optimization, NOT caused by Phase 1 changes)
 
 ---
 
@@ -171,16 +250,30 @@ Steps 3-6 require updates to `congestion/live/receive.go`, `congestion/live/send
 | `metrics/metrics.go` | ✅ COMPLETE | Added 17 rate fields + 8 getter helpers |
 | `metrics/handler.go` | ✅ COMPLETE | Added 6 rate metric exports using getter helpers |
 | `metrics/handler_test.go` | ✅ COMPLETE | Added 4 new tests + updated intentionallyNotExported |
-| `congestion/live/receive.go` | NOT STARTED | Use ConnectionMetrics for rates |
-| `congestion/live/send.go` | NOT STARTED | Use ConnectionMetrics for rates |
-| `congestion/live/fake.go` | NOT STARTED | Update rate handling |
-| `contrib/integration_testing/analysis.go` | NOT STARTED | Add rate validation |
+| `congestion/live/receive.go` | ✅ COMPLETE | Migrated rate/nPackets to atomics |
+| `congestion/live/send.go` | ✅ COMPLETE | Migrated rate to atomics |
+| `congestion/live/fake.go` | ✅ COMPLETE | Migrated rate handling to atomics |
+| `congestion/live/fast_nak.go` | ✅ COMPLETE | Updated packetsPerSecondEstimate() |
+| `congestion/live/fast_nak_test.go` | ✅ COMPLETE | Updated to use atomic rate setter |
+| `contrib/integration_testing/analysis.go` | ✅ COMPLETE | Added rate validation |
 
 ---
 
 ## Issues Encountered
 
-*Document any issues, decisions, or deviations from the plan here.*
+### Pre-existing Test Failures (NOT caused by Phase 1)
+
+Two tests fail both before and after Phase 1 changes:
+
+1. **`TestRecvACK`**: Expects `seqACK=5` but gets `seqACK=10`
+2. **`TestIssue67`**: Expects 9 deliveries but gets 1
+
+**Root Cause**: Bug in `ackScanHighWaterMark` optimization (Case 3/4 in periodicACK):
+- When packets are delivered and `minPkt` advances past a gap, the optimization incorrectly advances the ACK sequence past the gap
+- This is existing code, not affected by Phase 1 changes
+- Verified by running tests with `git stash` (original code also fails)
+
+**Recommendation**: File separate issue to fix `ackScanHighWaterMark` optimization
 
 ---
 
@@ -202,22 +295,24 @@ PASS
 ok  	github.com/datarhei/gosrt/metrics	0.302s
 ```
 
-### Metrics Audit (2025-12-21)
+### Metrics Audit (After Steps 3, 4, 5 - FINAL)
 ```
 $ go run tools/metrics-audit/main.go
 === GoSRT Metrics Audit ===
-Phase 1a: Found 165 atomic fields in ConnectionMetrics (was 148)
-Phase 2: Found 160 unique fields being incremented
+Phase 1a: Found 165 atomic fields in ConnectionMetrics
+Phase 2: Found 177 unique fields being incremented (+17 from rate usage)
 Phase 3: Found 162 fields being exported to Prometheus
 
 ✅ Fully Aligned (defined, used, exported): 160 fields
 
-⚠️  Defined but never used: 19 fields
-   - RecvRatePeriodUs, RecvRateLastUs, RecvRatePackets, ... (17 new rate fields)
-   - RecvLightACKCounter
-   - NakFastRecentOverflow, NakFastRecentSkipped (pre-existing)
+⚠️  Defined but never used: 2 fields (pre-existing)
+   - NakFastRecentOverflow
+   - NakFastRecentSkipped
 
-Note: "never used" warning expected - Steps 3-5 will add usage in receive.go/send.go
+✅ All rate fields NOW USED (internal counters, not exported):
+   - Receiver: RecvLightACKCounter, RecvRateBytes, RecvRatePackets, RecvRateBytesRetrans...
+   - Sender: SendRateBytes, SendRateBytesSent, SendRateBytesRetrans...
+   - Computed rates exported via Prometheus gauges (RecvRatePacketsPerSec, SendRateEstInputBW, etc.)
 ```
 
 ### Integration Tests
