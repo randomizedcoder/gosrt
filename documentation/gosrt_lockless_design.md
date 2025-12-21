@@ -3609,8 +3609,9 @@ GoSRT does NOT use the `promauto` or `prometheus/client_golang` libraries for me
 
 | File | Changes |
 |------|---------|
-| `metrics/metrics.go` | Add rate counter fields to `ConnectionMetrics` |
+| `metrics/metrics.go` | Add rate counter fields to `ConnectionMetrics`, add getter helpers |
 | `metrics/handler.go` | Export new rate metrics to Prometheus |
+| `metrics/handler_test.go` | Add tests for new rate metric exports |
 | `congestion/live/receive.go` | Remove embedded `rate` struct, use `*metrics.ConnectionMetrics` |
 | `congestion/live/send.go` | Same - use shared ConnectionMetrics |
 | `congestion/live/fake.go` | Update rate handling |
@@ -3765,6 +3766,135 @@ writeGauge(b, "gosrt_send_rate_retrans_percent",
 - `writeGauge()` takes `float64` value directly (use `math.Float64frombits()` to decode)
 - Labels are variadic string pairs: `"key1", "value1", "key2", "value2", ...`
 - Minimal allocations via `sync.Pool` for `strings.Builder`
+
+**Step 2b: Add tests for rate metrics (`metrics/handler_test.go`)**
+
+The existing test `TestPrometheusAllFieldsExported` excludes rate metrics because they're calculated values, not cumulative counters. We need to add specific tests for the new rate gauges:
+
+```go
+// File: metrics/handler_test.go
+
+// TestRateMetricsExported verifies rate metrics are correctly exported to Prometheus
+func TestRateMetricsExported(t *testing.T) {
+    socketId := uint32(0xRATE1234)
+    m := newTestConnectionMetrics()
+    RegisterConnection(socketId, m, "test-instance")
+    defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+    // Set known rate values (stored as float64 bits)
+    // Receiver rates
+    m.RecvRatePacketsPerSec.Store(math.Float64bits(1000.5))   // 1000.5 pkt/s
+    m.RecvRateBytesPerSec.Store(math.Float64bits(1250000.0))  // 1.25 MB/s (~10 Mbps)
+    m.RecvRatePktRetransRate.Store(math.Float64bits(2.5))     // 2.5% retrans
+
+    // Sender rates
+    m.SendRateEstInputBW.Store(math.Float64bits(1500000.0))   // 1.5 MB/s input
+    m.SendRateEstSentBW.Store(math.Float64bits(1450000.0))    // 1.45 MB/s sent
+    m.SendRatePktRetransRate.Store(math.Float64bits(1.8))     // 1.8% retrans
+
+    output := getPrometheusOutput(t)
+
+    // Verify receiver rate metrics present
+    require.Contains(t, output, "gosrt_recv_rate_packets_per_sec")
+    require.Contains(t, output, "gosrt_recv_rate_bytes_per_sec")
+    require.Contains(t, output, "gosrt_recv_rate_retrans_percent")
+
+    // Verify sender rate metrics present
+    require.Contains(t, output, "gosrt_send_rate_input_bandwidth_bps")
+    require.Contains(t, output, "gosrt_send_rate_sent_bandwidth_bps")
+    require.Contains(t, output, "gosrt_send_rate_retrans_percent")
+
+    // Verify socket_id label
+    require.Contains(t, output, `socket_id="0xrate1234"`)
+}
+
+// TestRateMetricsAccuracy verifies rate metric values are correctly encoded/decoded
+func TestRateMetricsAccuracy(t *testing.T) {
+    socketId := uint32(0xACCU1234)
+    m := newTestConnectionMetrics()
+    RegisterConnection(socketId, m, "")
+    defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+    // Set precise rate values
+    expectedPPS := 8642.75
+    expectedBPS := 12500000.0  // 12.5 MB/s = 100 Mbps
+
+    m.RecvRatePacketsPerSec.Store(math.Float64bits(expectedPPS))
+    m.RecvRateBytesPerSec.Store(math.Float64bits(expectedBPS))
+
+    output := getPrometheusOutput(t)
+
+    // Parse the output to verify values
+    // Rate metrics are floats, so look for the approximate value
+    // gosrt_recv_rate_packets_per_sec{socket_id="0xaccu1234"} 8642.750000
+    require.Contains(t, output, "8642.75")
+    require.Contains(t, output, "12500000")
+}
+
+// TestRateMetricsZeroValues verifies zero rates are exported correctly
+func TestRateMetricsZeroValues(t *testing.T) {
+    socketId := uint32(0xZERO1234)
+    m := newTestConnectionMetrics()
+    RegisterConnection(socketId, m, "")
+    defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+    // Rate fields default to 0 (math.Float64bits(0) = 0)
+    // Verify zero values are still exported (not omitted)
+    output := getPrometheusOutput(t)
+
+    // Should see the metric with value 0
+    require.Contains(t, output, "gosrt_recv_rate_packets_per_sec")
+    require.Contains(t, output, "gosrt_recv_rate_bytes_per_sec")
+}
+
+// TestGetterHelpers verifies the float64 getter helpers work correctly
+func TestGetterHelpers(t *testing.T) {
+    m := newTestConnectionMetrics()
+
+    // Set values using raw atomic
+    m.RecvRatePacketsPerSec.Store(math.Float64bits(1234.5))
+    m.RecvRateBytesPerSec.Store(math.Float64bits(1310720.0)) // 1.25 MB/s
+
+    // Verify getters decode correctly
+    require.InDelta(t, 1234.5, m.GetRecvRatePacketsPerSec(), 0.001)
+    require.InDelta(t, 1310720.0, m.GetRecvRateBytesPerSec(), 0.001)
+
+    // Verify Mbps conversion (1310720 bytes/s * 8 / 1024 / 1024 = 10 Mbps)
+    require.InDelta(t, 10.0, m.GetRecvRateMbps(), 0.001)
+}
+```
+
+**Update `intentionallyNotExported` map:**
+
+The existing `TestPrometheusAllFieldsExported` test has an `intentionallyNotExported` map. Add the new rate fields:
+
+```go
+// In TestPrometheusAllFieldsExported:
+intentionallyNotExported := map[string]bool{
+    // ... existing entries ...
+
+    // ========== Phase 1: Rate Metrics (float64 stored as uint64 bits) ==========
+    // These are gauge values, exported separately via writeGauge()
+    // Not included in the counter export loop
+    "RecvRatePeriodUs":        true,  // Internal timing, not exported
+    "RecvRateLastUs":          true,  // Internal timing, not exported
+    "RecvRatePackets":         true,  // Raw counter for calculation, not exported
+    "RecvRateBytes":           true,  // Raw counter for calculation, not exported
+    "RecvRateBytesRetrans":    true,  // Raw counter for calculation, not exported
+    "RecvRatePacketsPerSec":   true,  // Exported as gauge (tested in TestRateMetricsExported)
+    "RecvRateBytesPerSec":     true,  // Exported as gauge
+    "RecvRatePktRetransRate":  true,  // Exported as gauge
+    "SendRatePeriodUs":        true,
+    "SendRateLastUs":          true,
+    "SendRateBytes":           true,
+    "SendRateBytesSent":       true,
+    "SendRateBytesRetrans":    true,
+    "SendRateEstInputBW":      true,  // Exported as gauge
+    "SendRateEstSentBW":       true,  // Exported as gauge
+    "SendRatePktRetransRate":  true,  // Exported as gauge
+    "RecvLightACKCounter":     true,  // Internal counter, not exported
+}
+```
 
 **Step 3: Update congestion/live/receive.go to use ConnectionMetrics**
 
