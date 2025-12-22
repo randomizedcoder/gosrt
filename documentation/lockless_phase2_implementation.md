@@ -1,8 +1,8 @@
 # Lockless Design Phase 2: Zero-Copy Buffer Lifetime Extension Implementation
 
-**Status**: ✅ COMPLETE (Core Implementation)
+**Status**: ✅ COMPLETE
 **Started**: 2025-12-21
-**Completed**: 2025-12-21
+**Completed**: 2025-12-22
 **Design Document**: [`gosrt_lockless_design.md`](./gosrt_lockless_design.md) - Section 12, Phase 2
 
 ---
@@ -887,14 +887,14 @@ Two tests are failing in `congestion/live/receive_test.go`:
 
 ```
 --- FAIL: TestRecvACK (0.00s)
-    receive_test.go:310: 
-        Error:      Not equal: 
+    receive_test.go:310:
+        Error:      Not equal:
                     expected: 0x5
                     actual  : 0xa  (10)
 
 --- FAIL: TestIssue67 (0.00s)
-    receive_test.go:597: 
-        Error:      Not equal: 
+    receive_test.go:597:
+        Error:      Not equal:
                     expected: []uint32{1, 1, 1, 1, 1, 1, 1, 1, 1}
                     actual  : []uint32{1}
 ```
@@ -954,7 +954,7 @@ The code assumes "if minPkt advanced, the gap must have been filled" - but that'
 Remove the logic that advances `ackSequenceNumber` based on `scanStartPoint`. The `scanStartPoint` should only control WHERE to start iteration, not the ACK value:
 
 ```go
-// Case 3: High water mark points to expired packet  
+// Case 3: High water mark points to expired packet
 if minPktSeq.Gt(scanStartPoint) {
     scanStartPoint = minPktSeq.Dec()
 }
@@ -965,7 +965,7 @@ if minPktSeq.Gt(scanStartPoint) {
 // }
 
 // Instead: Always verify contiguity from lastACKSequenceNumber
-// The scanStartPoint only optimizes where we START looking, 
+// The scanStartPoint only optimizes where we START looking,
 // but we must still check if there's a gap
 ```
 
@@ -974,7 +974,7 @@ Then in the iteration, explicitly check for gaps:
 ```go
 r.packetStore.IterateFrom(scanStartPoint, func(p packet.Packet) bool {
     h := p.Header()
-    
+
     // If this is the first packet and there's a gap from lastACK, stop immediately
     if ackSequenceNumber.Equals(r.lastACKSequenceNumber) {
         if !h.PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
@@ -1017,11 +1017,11 @@ If the optimization is too complex to fix correctly, revert to always scanning f
 
 - [x] **Step 3**: Implement Option A fix ✅
   Two bugs were found and fixed:
-  
+
   **Bug 1**: Case 4 logic incorrectly advanced `ackSequenceNumber` based on `scanStartPoint`
   - Removed lines 571-575
   - Added explicit gap check in iteration (`firstPacketChecked` flag)
-  
+
   **Bug 2**: Early return when btree empty prevented periodic ACKs for keepalive
   - Modified empty btree path to still call `periodicACKWriteLocked()`
   - This ensures ACKs continue to be sent even when no new packets arrive
@@ -1110,7 +1110,7 @@ The `avgPayloadSize` field is accessed without proper synchronization:
 // receive.go:334 (pushLockedNakBtree) - UNDER WRITE LOCK
 r.avgPayloadSize = 0.875*r.avgPayloadSize + 0.125*float64(pktLen)
 
-// receive.go:440 (pushLockedOriginal) - UNDER WRITE LOCK  
+// receive.go:440 (pushLockedOriginal) - UNDER WRITE LOCK
 r.avgPayloadSize = 0.875*r.avgPayloadSize + 0.125*float64(pktLen)
 ```
 
@@ -1290,11 +1290,11 @@ func (r *receiver) updateAvgPayloadSize(pktLen uint64) {
     for {
         oldBits := r.avgPayloadSizeBits.Load()
         old := math.Float64frombits(oldBits)
-        
+
         // EMA: new = 0.875 * old + 0.125 * sample
         new := 0.875*old + 0.125*float64(pktLen)
         newBits := math.Float64bits(new)
-        
+
         if r.avgPayloadSizeBits.CompareAndSwap(oldBits, newBits) {
             return // Success
         }
