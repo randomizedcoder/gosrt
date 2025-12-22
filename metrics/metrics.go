@@ -280,6 +280,14 @@ type ConnectionMetrics struct {
 	PktSentControlErrorIoUring atomic.Uint64 // Control packet io_uring completion errors
 
 	// ========================================================================
+	// Lock-Free Ring Buffer Metrics (Phase 3: Lockless Design)
+	// ========================================================================
+	// Tracks packet ring buffer operations and overflow conditions.
+
+	RingDropsTotal     atomic.Uint64 // Packets dropped due to ring full (after backoff)
+	RingDrainedPackets atomic.Uint64 // Packets successfully drained from ring to btree
+
+	// ========================================================================
 	// Rate Calculation Fields (Phase 1: Lockless Design)
 	// ========================================================================
 	// These replace the embedded `rate struct` in congestion/live/receive.go and send.go

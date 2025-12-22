@@ -939,6 +939,145 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		CollectInterval: 2 * time.Second,
 		ProfileDuration: 5 * time.Minute,
 	},
+
+	// ========================================================================
+	// PHASE 3: LOCK-FREE RING BUFFER PARALLEL TESTS
+	// ========================================================================
+	// These tests compare lock-free ring buffer configurations.
+	// The ring buffer enables lockless packet handoff from io_uring to receiver.
+	// See gosrt_lockless_design.md Phase 3 for details.
+
+	// Compare: Baseline (list, no optimizations) vs Ring only
+	// Expected: Ring shows reduced lock contention, minimal overhead
+	{
+		Name:        "Parallel-Starlink-5M-Base-vs-Ring",
+		Description: "Phase 3: Baseline vs Lock-free Ring (isolate ring impact)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig, // Original: list, no io_uring, no ring
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigRing), // Ring only (list + ring)
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Compare: Full (io_uring + btree + NAK btree) vs FullRing (Full + Ring)
+	// Expected: FullRing shows improved lock-free performance
+	{
+		Name:        "Parallel-Starlink-5M-Full-vs-FullRing",
+		Description: "Phase 3: Full stack vs Full + Lock-free Ring (measure ring benefit)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          HighPerfSRTConfig, // Full: io_uring + btree + NAK btree + all features
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullRing), // Full + Ring buffer
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Compare: Baseline vs FullRing (complete Phase 3 lockless stack)
+	// Expected: FullRing shows maximum improvement over baseline
+	{
+		Name:        "Parallel-Starlink-5M-Base-vs-FullRing",
+		Description: "Phase 3: Baseline vs Full Lockless Stack (maximum improvement)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig, // Original: list, no optimizations
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullRing), // Full lockless: io_uring + btree + NAK btree + Ring
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// High-throughput test: 20 Mb/s with Full Lockless stack
+	// Expected: Ring shows more benefit at higher packet rates
+	{
+		Name:        "Parallel-Starlink-20M-Base-vs-FullRing",
+		Description: "Phase 3: 20 Mb/s - Baseline vs Full Lockless Stack (high-rate stress test)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullRing),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
 }
 
 // GetParallelTestConfigByName finds a parallel test configuration by name
@@ -1266,6 +1405,77 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		TestServer:    ControlSRTConfig.WithNakBtree().WithIoUringRecv(), // NAK btree + io_uring recv
 		TestDuration:  60 * time.Second,
 		Bitrate:       50_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ========================================================================
+	// PHASE 3: LOCK-FREE RING BUFFER ISOLATION TESTS
+	// ========================================================================
+	// These tests isolate the lock-free ring buffer feature.
+	// The ring enables lockless packet handoff from io_uring to receiver.
+
+	// Test: Server Ring buffer only (baseline server with ring)
+	{
+		Name:          "Isolation-5M-Server-Ring",
+		Description:   "Server: Lock-free ring buffer only (isolate ring overhead)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithPacketRing(), // Changed: ring buffer only
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Server Ring + io_uring recv (combines lockless recv with lockless handoff)
+	{
+		Name:          "Isolation-5M-Server-Ring-IoUr",
+		Description:   "Server: Ring + io_uring recv (lockless receive + lockless handoff)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithPacketRing().WithIoUringRecv(), // Ring + io_uring recv
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Server Ring + NAK btree + io_uring recv (high-perf receiver stack)
+	{
+		Name:          "Isolation-5M-Server-Ring-NakBtree-IoUr",
+		Description:   "Server: Ring + NAK btree + io_uring (full lockless receiver)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithPacketRing().WithNakBtree().WithIoUringRecv(),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Full lockless pipeline (io_uring + btree + NAK btree + Ring + HonorNakOrder)
+	{
+		Name:          "Isolation-5M-FullRing",
+		Description:   "Full Phase 3 Lockless: io_uring + btree + NAK btree + Ring + HonorNakOrder",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullRing).WithHonorNakOrder(), // Full + ring + honor NAK order
+		TestServer:    GetSRTConfig(ConfigFullRing),                     // Full + ring
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: High throughput 20 Mb/s with full lockless stack
+	{
+		Name:          "Isolation-20M-FullRing",
+		Description:   "20 Mb/s Full Lockless: stress test lock-free ring at higher rate",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullRing).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullRing),
+		TestDuration:  30 * time.Second,
+		Bitrate:       20_000_000,
 		StatsPeriod:   10 * time.Second,
 	},
 }

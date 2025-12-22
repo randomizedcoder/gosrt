@@ -52,6 +52,13 @@ const (
 
 	// ConfigFull enables everything: btree + io_uring + NAK btree + FastNAK + FastNAKRecent + HonorNakOrder
 	ConfigFull ConfigVariant = "Full"
+
+	// ConfigRing enables lock-free ring buffer only (on top of Base config)
+	ConfigRing ConfigVariant = "Ring"
+
+	// ConfigFullRing enables everything including lock-free ring buffer
+	// This is the complete Phase 3 lockless design configuration
+	ConfigFullRing ConfigVariant = "FullRing"
 )
 
 // GetSRTConfig returns an SRTConfig for a given ConfigVariant.
@@ -72,6 +79,10 @@ func GetSRTConfig(variant ConfigVariant) SRTConfig {
 		return ControlSRTConfig.WithIoUringRecv().WithNakBtreeOnly().WithFastNak().WithFastNakRecent()
 	case ConfigFull:
 		return HighPerfSRTConfig
+	case ConfigRing:
+		return ControlSRTConfig.WithPacketRing()
+	case ConfigFullRing:
+		return HighPerfSRTConfig.WithPacketRing()
 	default:
 		return BaselineSRTConfig
 	}
@@ -370,6 +381,14 @@ type SRTConfig struct {
 	TickIntervalMs        uint64 // -tickintervalms (TSBPD delivery tick, default: 10)
 	PeriodicNakIntervalMs uint64 // -periodicnakintervalms (periodic NAK timer, default: 20)
 	PeriodicAckIntervalMs uint64 // -periodicackintervalms (periodic ACK timer, default: 10)
+
+	// Lock-free ring buffer configuration (Phase 3: Lockless Design)
+	UsePacketRing             bool          // -usepacketring
+	PacketRingSize            int           // -packetringsize (default: 1024)
+	PacketRingShards          int           // -packetringshards (default: 4)
+	PacketRingMaxRetries      int           // -packetringmaxretries (default: 10)
+	PacketRingBackoffDuration time.Duration // -packetringbackoffduration (default: 100µs)
+	PacketRingMaxBackoffs     int           // -packetringmaxbackoffs (default: 0)
 }
 
 // ToCliFlags converts SRTConfig to CLI flag arguments
@@ -497,6 +516,26 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 	if c.PeriodicAckIntervalMs > 0 {
 		flags = append(flags, "-periodicackintervalms", strconv.FormatUint(c.PeriodicAckIntervalMs, 10))
+	}
+
+	// Lock-free ring buffer configuration (Phase 3: Lockless Design)
+	if c.UsePacketRing {
+		flags = append(flags, "-usepacketring")
+	}
+	if c.PacketRingSize > 0 {
+		flags = append(flags, "-packetringsize", strconv.Itoa(c.PacketRingSize))
+	}
+	if c.PacketRingShards > 0 {
+		flags = append(flags, "-packetringshards", strconv.Itoa(c.PacketRingShards))
+	}
+	if c.PacketRingMaxRetries > 0 {
+		flags = append(flags, "-packetringmaxretries", strconv.Itoa(c.PacketRingMaxRetries))
+	}
+	if c.PacketRingBackoffDuration > 0 {
+		flags = append(flags, "-packetringbackoffduration", c.PacketRingBackoffDuration.String())
+	}
+	if c.PacketRingMaxBackoffs > 0 {
+		flags = append(flags, "-packetringmaxbackoffs", strconv.Itoa(c.PacketRingMaxBackoffs))
 	}
 
 	return flags
@@ -1077,6 +1116,39 @@ func (c SRTConfig) WithTimerIntervals(tick, nak, ack uint64) SRTConfig {
 	c.TickIntervalMs = tick
 	c.PeriodicNakIntervalMs = nak
 	c.PeriodicAckIntervalMs = ack
+	return c
+}
+
+// ============================================================================
+// LOCK-FREE RING BUFFER HELPERS (Phase 3: Lockless Design)
+// ============================================================================
+
+// WithPacketRing enables the lock-free ring buffer with default settings.
+// Default: 1024 ring size, 4 shards, 10 retries, 100µs backoff, unlimited backoffs.
+func (c SRTConfig) WithPacketRing() SRTConfig {
+	c.UsePacketRing = true
+	c.PacketRingSize = 1024
+	c.PacketRingShards = 4
+	c.PacketRingMaxRetries = 10
+	c.PacketRingBackoffDuration = 100 * time.Microsecond
+	c.PacketRingMaxBackoffs = 0 // Unlimited
+	return c
+}
+
+// WithPacketRingCustom enables the lock-free ring buffer with custom settings.
+func (c SRTConfig) WithPacketRingCustom(size, shards, maxRetries int, backoffDuration time.Duration, maxBackoffs int) SRTConfig {
+	c.UsePacketRing = true
+	c.PacketRingSize = size
+	c.PacketRingShards = shards
+	c.PacketRingMaxRetries = maxRetries
+	c.PacketRingBackoffDuration = backoffDuration
+	c.PacketRingMaxBackoffs = maxBackoffs
+	return c
+}
+
+// WithoutPacketRing disables the lock-free ring buffer.
+func (c SRTConfig) WithoutPacketRing() SRTConfig {
+	c.UsePacketRing = false
 	return c
 }
 

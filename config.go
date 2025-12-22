@@ -329,6 +329,41 @@ type Config struct {
 	// Must be set BEFORE Dial()/Accept() - cannot be modified after connection starts.
 	// Default: nil (no filtering)
 	SendFilter func(p packet.Packet) bool
+
+	// --- Lock-Free Ring Buffer (Phase 3: Lockless Design) ---
+
+	// UsePacketRing enables lock-free ring buffer for packet handoff between
+	// io_uring completion handlers and the receiver Tick() event loop.
+	// When enabled, Push() writes to the ring (lock-free), and Tick() drains
+	// the ring before processing (single-threaded, no locks needed).
+	// Default: false (use legacy locked path)
+	UsePacketRing bool
+
+	// PacketRingSize is the capacity of the lock-free ring buffer (per shard).
+	// Total ring capacity = PacketRingSize * PacketRingShards
+	// Must be a power of 2. Default: 1024
+	PacketRingSize int
+
+	// PacketRingShards is the number of shards for the lock-free ring.
+	// More shards reduce contention between concurrent producers.
+	// Must be a power of 2. Default: 4
+	PacketRingShards int
+
+	// PacketRingMaxRetries is the maximum number of immediate retries
+	// before starting backoff when the ring is full.
+	// Default: 10
+	PacketRingMaxRetries int
+
+	// PacketRingBackoffDuration is the delay between backoff retries
+	// when the ring is full.
+	// Default: 100µs
+	PacketRingBackoffDuration time.Duration
+
+	// PacketRingMaxBackoffs is the maximum number of backoff iterations
+	// before giving up and dropping the packet.
+	// 0 = unlimited (keep retrying until success)
+	// Default: 0
+	PacketRingMaxBackoffs int
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -402,6 +437,14 @@ var defaultConfig Config = Config{
 	FastNakThresholdMs:       50,    // 50ms silent period triggers FastNAK
 	FastNakRecentEnabled:     false, // Auto-set when FastNakEnabled=true
 	HonorNakOrder:            false, // Existing behavior: newest-first
+
+	// Lock-free ring buffer defaults (Phase 3)
+	UsePacketRing:             false,                  // Legacy path by default
+	PacketRingSize:            1024,                   // Per-shard capacity
+	PacketRingShards:          4,                      // 4 shards = 4096 total capacity
+	PacketRingMaxRetries:      10,                     // Immediate retries before backoff
+	PacketRingBackoffDuration: 100 * time.Microsecond, // 100µs backoff delay
+	PacketRingMaxBackoffs:     0,                      // 0 = unlimited backoffs
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
@@ -1008,6 +1051,31 @@ func (c *Config) Validate() error {
 	// Validate ShutdownDelay
 	if c.ShutdownDelay <= 0 {
 		return fmt.Errorf("config: ShutdownDelay must be greater than 0")
+	}
+
+	// Validate lock-free ring buffer configuration
+	if c.UsePacketRing {
+		if c.PacketRingSize < 64 || c.PacketRingSize > 65536 {
+			return fmt.Errorf("config: PacketRingSize must be between 64 and 65536")
+		}
+		if c.PacketRingSize&(c.PacketRingSize-1) != 0 {
+			return fmt.Errorf("config: PacketRingSize must be a power of 2")
+		}
+		if c.PacketRingShards < 1 || c.PacketRingShards > 64 {
+			return fmt.Errorf("config: PacketRingShards must be between 1 and 64")
+		}
+		if c.PacketRingShards&(c.PacketRingShards-1) != 0 {
+			return fmt.Errorf("config: PacketRingShards must be a power of 2")
+		}
+		if c.PacketRingMaxRetries < 0 {
+			return fmt.Errorf("config: PacketRingMaxRetries must be >= 0")
+		}
+		if c.PacketRingBackoffDuration < 0 {
+			return fmt.Errorf("config: PacketRingBackoffDuration must be >= 0")
+		}
+		if c.PacketRingMaxBackoffs < 0 {
+			return fmt.Errorf("config: PacketRingMaxBackoffs must be >= 0")
+		}
 	}
 
 	return nil

@@ -12,6 +12,7 @@ import (
 	"github.com/datarhei/gosrt/congestion"
 	"github.com/datarhei/gosrt/metrics"
 	"github.com/datarhei/gosrt/packet"
+	ring "github.com/randomizedcoder/go-lock-free-ring"
 )
 
 // gapSlicePool reuses []uint32 slices for collecting gaps in periodicNakBtree.
@@ -53,6 +54,15 @@ type ReceiveConfig struct {
 	FastNakEnabled       bool   // Enable FastNAK after silence
 	FastNakThresholdUs   uint64 // Microseconds, silence threshold to trigger FastNAK
 	FastNakRecentEnabled bool   // Enable FastNAKRecent to detect sequence jumps
+
+	// Lock-free ring buffer configuration (Phase 3: Lockless Design)
+	// When enabled, Push() writes to ring (lock-free), Tick() drains ring before processing
+	UsePacketRing             bool          // Enable lock-free ring for packet handoff
+	PacketRingSize            int           // Ring capacity per shard (must be power of 2)
+	PacketRingShards          int           // Number of shards (must be power of 2)
+	PacketRingMaxRetries      int           // Max immediate retries before backoff
+	PacketRingBackoffDuration time.Duration // Delay between backoff retries
+	PacketRingMaxBackoffs     int           // Max backoff iterations (0 = unlimited)
 }
 
 // receiver implements the Receiver interface
@@ -117,6 +127,13 @@ type receiver struct {
 	// This allows periodicACK to only scan NEW packets, not re-verify entire buffer.
 	// Similar pattern to nakScanStartPoint. Protected by r.lock.
 	ackScanHighWaterMark circular.Number
+
+	// Lock-free ring buffer (Phase 3: Lockless Design)
+	// When enabled, Push() writes to packetRing (lock-free), Tick() drains to btree
+	usePacketRing bool
+	packetRing    *ring.ShardedRing   // Lock-free ring for packet handoff
+	writeConfig   ring.WriteConfig    // Backoff configuration for ring writes
+	pushFn        func(packet.Packet) // Function dispatch: pushToRing or pushWithLock
 }
 
 // NewReceiver takes a ReceiveConfig and returns a new Receiver
@@ -175,6 +192,49 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		r.nakBtree = newNakBtree(degree)
 	}
 
+	// Initialize lock-free ring buffer if enabled (Phase 3: Lockless Design)
+	if config.UsePacketRing {
+		r.usePacketRing = true
+
+		// Calculate total capacity (per-shard size * number of shards)
+		ringSize := config.PacketRingSize
+		if ringSize <= 0 {
+			ringSize = 1024 // Default per-shard capacity
+		}
+		numShards := config.PacketRingShards
+		if numShards <= 0 {
+			numShards = 4 // Default number of shards
+		}
+		totalCapacity := uint64(ringSize * numShards)
+
+		var err error
+		r.packetRing, err = ring.NewShardedRing(totalCapacity, uint64(numShards))
+		if err != nil {
+			panic(fmt.Sprintf("failed to create packet ring: %v", err))
+		}
+
+		// Configure backoff behavior for ring writes
+		r.writeConfig = ring.WriteConfig{
+			MaxRetries:      config.PacketRingMaxRetries,
+			BackoffDuration: config.PacketRingBackoffDuration,
+			MaxBackoffs:     config.PacketRingMaxBackoffs,
+		}
+		// Apply defaults if not configured
+		if r.writeConfig.MaxRetries <= 0 {
+			r.writeConfig.MaxRetries = 10
+		}
+		if r.writeConfig.BackoffDuration <= 0 {
+			r.writeConfig.BackoffDuration = 100 * time.Microsecond
+		}
+		// MaxBackoffs=0 is valid (unlimited), so no default needed
+
+		// Function dispatch: use ring path
+		r.pushFn = r.pushToRing
+	} else {
+		// Function dispatch: use legacy locked path
+		r.pushFn = r.pushWithLock
+	}
+
 	if r.sendACK == nil {
 		r.sendACK = func(seq circular.Number, light bool) {}
 	}
@@ -225,8 +285,8 @@ func (r *receiver) Stats() congestion.ReceiveStats {
 
 	// Phase 1: Lockless - Get rates from ConnectionMetrics (lock-free)
 	m := r.metrics
-	mbpsBandwidth := m.GetRecvRateMbps()              // Uses atomic load + conversion
-	pktRetransRate := m.GetRecvRateRetransPercent()   // Uses atomic load + conversion
+	mbpsBandwidth := m.GetRecvRateMbps()            // Uses atomic load + conversion
+	pktRetransRate := m.GetRecvRateRetransPercent() // Uses atomic load + conversion
 
 	// Update atomic counters for instantaneous/calculated values
 	m.CongestionRecvBytePayload.Store(bytePayload)
@@ -281,6 +341,13 @@ func (r *receiver) Flush() {
 }
 
 func (r *receiver) Push(pkt packet.Packet) {
+	// Phase 3: Lockless - Use function dispatch for ring vs locked path
+	r.pushFn(pkt)
+}
+
+// pushWithLock is the legacy locked path (UsePacketRing=false)
+// This wraps the existing pushLocked behavior with optional lock timing metrics.
+func (r *receiver) pushWithLock(pkt packet.Packet) {
 	if r.lockTiming != nil {
 		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
 			r.pushLocked(pkt)
@@ -290,6 +357,26 @@ func (r *receiver) Push(pkt packet.Packet) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	r.pushLocked(pkt)
+}
+
+// pushToRing is the new lock-free path (UsePacketRing=true)
+// Writes packet to lock-free ring buffer for later processing by Tick().
+// This decouples packet arrival (io_uring completion) from processing (event loop).
+func (r *receiver) pushToRing(pkt packet.Packet) {
+	// Rate metrics (always atomic - Phase 1)
+	m := r.metrics
+	m.RecvLightACKCounter.Add(1)
+	m.RecvRatePackets.Add(1)
+	m.RecvRateBytes.Add(pkt.Len())
+
+	// Use packet sequence number for shard selection (distributes load)
+	producerID := uint64(pkt.Header().PacketSequenceNumber.Val())
+
+	if !r.packetRing.WriteWithBackoff(producerID, pkt, r.writeConfig) {
+		// Ring write failed after all backoff retries - ring is persistently full
+		m.RingDropsTotal.Add(1)
+		r.releasePacketFully(pkt)
+	}
 }
 
 func (r *receiver) pushLocked(pkt packet.Packet) {
@@ -322,10 +409,10 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 	}
 
 	// Phase 1: Lockless - Use atomic counters instead of embedded rate struct
-	m.RecvLightACKCounter.Add(1)  // Replaces r.nPackets++
+	m.RecvLightACKCounter.Add(1) // Replaces r.nPackets++
 	pktLen := pkt.Len()
-	m.RecvRatePackets.Add(1)      // Replaces r.rate.packets++
-	m.RecvRateBytes.Add(pktLen)   // Replaces r.rate.bytes += pktLen
+	m.RecvRatePackets.Add(1)    // Replaces r.rate.packets++
+	m.RecvRateBytes.Add(pktLen) // Replaces r.rate.bytes += pktLen
 
 	m.CongestionRecvPkt.Add(1)
 	m.CongestionRecvByte.Add(uint64(pktLen))
@@ -333,7 +420,7 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 	if pkt.Header().RetransmittedPacketFlag {
 		m.CongestionRecvPktRetrans.Add(1)
 		m.CongestionRecvByteRetrans.Add(uint64(pktLen))
-		m.RecvRateBytesRetrans.Add(pktLen)  // Replaces r.rate.bytesRetrans += pktLen
+		m.RecvRateBytesRetrans.Add(pktLen) // Replaces r.rate.bytesRetrans += pktLen
 	}
 
 	// 5.1.2. SRT's Default LiveCC Algorithm - Exponential Moving Average
@@ -429,12 +516,12 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 	}
 
 	// Phase 1: Lockless - Use atomic counters instead of embedded rate struct
-	m.RecvLightACKCounter.Add(1)  // Replaces r.nPackets++
+	m.RecvLightACKCounter.Add(1) // Replaces r.nPackets++
 
 	pktLen := pkt.Len()
 
-	m.RecvRatePackets.Add(1)      // Replaces r.rate.packets++
-	m.RecvRateBytes.Add(pktLen)   // Replaces r.rate.bytes += pktLen
+	m.RecvRatePackets.Add(1)    // Replaces r.rate.packets++
+	m.RecvRateBytes.Add(pktLen) // Replaces r.rate.bytes += pktLen
 
 	m.CongestionRecvPkt.Add(1)
 	m.CongestionRecvByte.Add(uint64(pktLen))
@@ -444,7 +531,7 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 		m.CongestionRecvPktRetrans.Add(1)
 		m.CongestionRecvByteRetrans.Add(uint64(pktLen))
 
-		m.RecvRateBytesRetrans.Add(pktLen)  // Replaces r.rate.bytesRetrans += pktLen
+		m.RecvRateBytesRetrans.Add(pktLen) // Replaces r.rate.bytesRetrans += pktLen
 	}
 
 	// 5.1.2. SRT's Default LiveCC Algorithm - Exponential Moving Average
@@ -730,7 +817,7 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 	}
 
 	r.lastPeriodicACK = now
-	r.metrics.RecvLightACKCounter.Store(0)  // Phase 1: Lockless - Reset atomic counter
+	r.metrics.RecvLightACKCounter.Store(0) // Phase 1: Lockless - Reset atomic counter
 
 	msBuf := (maxPktTsbpdTime - minPktTsbpdTime) / 1_000
 	m.CongestionRecvMsBuf.Store(msBuf)
@@ -993,7 +1080,103 @@ func (r *receiver) expireNakEntries() int {
 	return expired
 }
 
+// drainPacketRing consumes all packets from the lock-free ring into the btree.
+// This is called at the start of Tick() when UsePacketRing is enabled.
+//
+// Key properties:
+//   - TryRead() is NON-BLOCKING: returns (nil, false) when ring is empty
+//   - Loop terminates immediately when ring is empty
+//   - After drain, Tick() has exclusive access to btree (no producers writing)
+//   - Packets are validated for duplicates/old sequences before insertion
+//
+// This is the Phase 3 lockless design: producers write to ring (lock-free),
+// single consumer (Tick) drains ring and processes btree exclusively.
+func (r *receiver) drainPacketRing(now uint64) {
+	m := r.metrics
+
+	// Track packets drained for metrics
+	var drained uint64
+
+	for {
+		// TryRead is non-blocking - returns immediately if ring is empty
+		item, ok := r.packetRing.TryRead()
+		if !ok {
+			// Ring is empty - exit loop and proceed with ACK/NAK/delivery
+			break
+		}
+
+		p := item.(packet.Packet)
+		h := p.Header()
+		seq := h.PacketSequenceNumber
+
+		drained++
+
+		// Duplicate/old packet check (same logic as pushLockedNakBtree)
+		// Too old: already delivered
+		if seq.Lte(r.lastDeliveredSequenceNumber) {
+			m.CongestionRecvPktBelated.Add(1)
+			m.CongestionRecvByteBelated.Add(uint64(p.Len()))
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, uint64(p.Len()))
+			r.releasePacketFully(p)
+			continue
+		}
+
+		// Already acknowledged
+		if seq.Lt(r.lastACKSequenceNumber) {
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, uint64(p.Len()))
+			r.releasePacketFully(p)
+			continue
+		}
+
+		// Duplicate: already in store
+		if r.packetStore.Has(seq) {
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, uint64(p.Len()))
+			r.releasePacketFully(p)
+			continue
+		}
+
+		// Delete from NAK btree - this packet is no longer missing
+		if r.nakBtree != nil {
+			if r.nakBtree.Delete(seq.Val()) {
+				m.NakBtreeDeletes.Add(1)
+			}
+		}
+
+		// Insert into btree (NO LOCK - exclusive access after drain)
+		pktLen := p.Len()
+		if r.packetStore.Insert(p) {
+			m.CongestionRecvPktBuf.Add(1)
+			m.CongestionRecvPktUnique.Add(1)
+			m.CongestionRecvByteBuf.Add(uint64(pktLen))
+			m.CongestionRecvByteUnique.Add(uint64(pktLen))
+			m.CongestionRecvPkt.Add(1)
+			m.CongestionRecvByte.Add(uint64(pktLen))
+
+			if h.RetransmittedPacketFlag {
+				m.CongestionRecvPktRetrans.Add(1)
+				m.CongestionRecvByteRetrans.Add(uint64(pktLen))
+			}
+		} else {
+			m.CongestionRecvPktStoreInsertFailed.Add(1)
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonStoreInsertFailed, uint64(pktLen))
+			r.releasePacketFully(p)
+		}
+	}
+
+	// Update drain metrics
+	if drained > 0 && m != nil {
+		m.RingDrainedPackets.Add(drained)
+	}
+}
+
 func (r *receiver) Tick(now uint64) {
+	// Phase 3: Drain ring buffer before processing (if enabled)
+	// This transfers packets from lock-free ring into btree for ordered processing.
+	// After drain, Tick() has exclusive access to btree - no locks needed.
+	if r.usePacketRing {
+		r.drainPacketRing(now)
+	}
+
 	if ok, sequenceNumber, lite := r.periodicACK(now); ok {
 		r.sendACK(sequenceNumber, lite)
 	}

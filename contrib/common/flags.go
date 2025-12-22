@@ -89,6 +89,14 @@ var (
 	// Sender retransmission configuration flags
 	HonorNakOrder = flag.Bool("honornakorder", false, "Retransmit packets in NAK packet order (oldest first)")
 
+	// Lock-free ring buffer configuration flags (Phase 3: Lockless Design)
+	UsePacketRing             = flag.Bool("usepacketring", false, "Enable lock-free ring buffer for packet handoff (decouples io_uring completion from Tick processing)")
+	PacketRingSize            = flag.Int("packetringsize", 0, "Capacity of the lock-free ring buffer per shard (must be power of 2, default: 1024)")
+	PacketRingShards          = flag.Int("packetringshards", 0, "Number of shards for the lock-free ring (must be power of 2, default: 4)")
+	PacketRingMaxRetries      = flag.Int("packetringmaxretries", -1, "Maximum immediate retries before backoff when ring is full (default: 10, -1 = not set)")
+	PacketRingBackoffDuration = flag.Duration("packetringbackoffduration", 0, "Delay between backoff retries when ring is full (default: 100µs)")
+	PacketRingMaxBackoffs     = flag.Int("packetringmaxbackoffs", -1, "Maximum backoff iterations before dropping packet (0 = unlimited, -1 = not set)")
+
 	// Statistics configuration flags
 	StatisticsPrintInterval = flag.Duration("statisticsinterval", 0, "Interval for printing connection statistics (e.g., 10s). 0 disables periodic statistics printing")
 
@@ -329,6 +337,26 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	// Sender flags
 	if FlagSet["honornakorder"] {
 		config.HonorNakOrder = *HonorNakOrder
+	}
+
+	// Lock-free ring buffer flags (Phase 3: Lockless Design)
+	if FlagSet["usepacketring"] {
+		config.UsePacketRing = *UsePacketRing
+	}
+	if FlagSet["packetringsize"] {
+		config.PacketRingSize = *PacketRingSize
+	}
+	if FlagSet["packetringshards"] {
+		config.PacketRingShards = *PacketRingShards
+	}
+	if FlagSet["packetringmaxretries"] && *PacketRingMaxRetries >= 0 {
+		config.PacketRingMaxRetries = *PacketRingMaxRetries
+	}
+	if FlagSet["packetringbackoffduration"] {
+		config.PacketRingBackoffDuration = *PacketRingBackoffDuration
+	}
+	if FlagSet["packetringmaxbackoffs"] && *PacketRingMaxBackoffs >= 0 {
+		config.PacketRingMaxBackoffs = *PacketRingMaxBackoffs
 	}
 
 	if FlagSet["statisticsinterval"] {

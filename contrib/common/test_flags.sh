@@ -234,37 +234,49 @@ run_test "HonorNakOrder flag" "-honornakorder" '"HonorNakOrder" *: *true' "$SERV
 # Test 35: NAK btree flag combinations
 run_test "NAK btree full config" "-usenakbtree -nakrecentpercent 0.2 -nakmergegap 4 -fastnakenabled -fastnakthresholdms 75" '"UseNakBtree" *: *true.*"NakRecentPercent" *: *0\.2.*"NakMergeGap" *: *4.*"FastNakEnabled" *: *true.*"FastNakThresholdMs" *: *75' "$SERVER_BIN"
 
-# Test 36: All flag types combined (excluding drifttracer=false due to known limitation)
+# Test 36: Lock-free ring buffer flags (Phase 3: Lockless Design)
+run_test "UsePacketRing flag" "-usepacketring" '"UsePacketRing" *: *true' "$SERVER_BIN"
+run_test "PacketRingSize flag" "-usepacketring -packetringsize 2048" '"PacketRingSize" *: *2048' "$SERVER_BIN"
+run_test "PacketRingShards flag" "-usepacketring -packetringshards 8" '"PacketRingShards" *: *8' "$SERVER_BIN"
+run_test "PacketRingMaxRetries flag" "-usepacketring -packetringmaxretries 20" '"PacketRingMaxRetries" *: *20' "$SERVER_BIN"
+run_test "PacketRingBackoffDuration flag" "-usepacketring -packetringbackoffduration 200us" '"PacketRingBackoffDuration" *: *200000' "$SERVER_BIN"
+run_test "PacketRingMaxBackoffs flag" "-usepacketring -packetringmaxbackoffs 5" '"PacketRingMaxBackoffs" *: *5' "$SERVER_BIN"
+run_test "Lock-free ring full config" "-usepacketring -packetringsize 4096 -packetringshards 4 -packetringmaxretries 15" '"UsePacketRing" *: *true.*"PacketRingSize" *: *4096.*"PacketRingShards" *: *4.*"PacketRingMaxRetries" *: *15' "$SERVER_BIN"
+
+# Test 43: All flag types combined (excluding drifttracer=false due to known limitation)
 # Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
 run_test "All flag types" "-statisticsinterval 10s -keepalivethreshold 0.6 -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"KeepaliveThreshold" *: *0\.6.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 
-# Test 37: InstanceName flag (server)
+# Test 44: InstanceName flag (server)
 run_test "InstanceName flag (server)" "-name TestServer" '"InstanceName" *: *"TestServer"' "$SERVER_BIN"
 
-# Test 38: InstanceName flag (client)
+# Test 45: InstanceName flag (client)
 run_test "InstanceName flag (client)" "-name TestClient" '"InstanceName" *: *"TestClient"' "$CLIENT_BIN"
 
-# Test 39: InstanceName with other flags
+# Test 46: InstanceName with other flags
 run_test "InstanceName with other flags" "-name MyServer -latency 200" '"InstanceName" *: *"MyServer".*"Latency" *: *200000000' "$SERVER_BIN"
 
 echo ""
 echo "--- Client-Generator Tests ---"
 echo ""
 
-# Test 40: Client-generator config flags
+# Test 47: Client-generator config flags
 run_test "Client-generator latency flag" "-latency 200" '"Latency" *: *200000000' "$CLIENTGEN_BIN"
 
-# Test 41: Client-generator InstanceName
+# Test 48: Client-generator InstanceName
 run_test "Client-generator InstanceName" "-name TestCG" '"InstanceName" *: *"TestCG"' "$CLIENTGEN_BIN"
 
-# Test 42: Client-generator NAK btree config
+# Test 49: Client-generator NAK btree config
 run_test "Client-generator NAK btree" "-usenakbtree -fastnakenabled" '"UseNakBtree" *: *true.*"FastNakEnabled" *: *true' "$CLIENTGEN_BIN"
+
+# Test 50: Client-generator lock-free ring config
+run_test "Client-generator lock-free ring" "-usepacketring -packetringsize 2048" '"UsePacketRing" *: *true.*"PacketRingSize" *: *2048' "$CLIENTGEN_BIN"
 
 echo ""
 echo "--- Component-Specific Flags (Help Output) ---"
 echo ""
 
-# Test 43-51: Profile-related flags (these don't affect config, so we check help output)
+# Test 51-59: Profile-related flags (these don't affect config, so we check help output)
 # These flags are defined in each main.go, not in common/flags.go
 
 test_help_flag "Server -profile flag exists" "-profile" "$SERVER_BIN"

@@ -1,0 +1,25 @@
+# Binaries
+bin/
+ring
+
+# Test and benchmark outputs
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Profiling outputs
+*.prof
+cpu.prof
+mem.prof
+*.pprof
+
+# Integration test outputs
+integration-tests/output/
+
+# IDE and editor files
+.vscode/
+
+# Go workspace files
+go.work
+go.work.sum
