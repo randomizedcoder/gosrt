@@ -198,9 +198,45 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 	controlMetrics.CollectAllMetrics("startup")
 	testMetrics.CollectAllMetrics("startup")
 
-	// Run for test duration
+	// Run for test duration, optionally with periodic metrics collection
 	fmt.Printf("Running for %v...\n", config.TestDuration)
-	time.Sleep(config.TestDuration)
+	if config.VerboseMetrics && config.StatsPeriod > 0 {
+		// Periodic metrics collection for debugging
+		statsTicker := time.NewTicker(config.StatsPeriod)
+		defer statsTicker.Stop()
+		testTimer := time.NewTimer(config.TestDuration)
+		defer testTimer.Stop()
+
+		snapshotCount := 1 // startup is snapshot 0
+	collectLoop:
+		for {
+			select {
+			case <-statsTicker.C:
+				label := fmt.Sprintf("periodic-%d", snapshotCount)
+				controlMetrics.CollectAllMetrics(label)
+				testMetrics.CollectAllMetrics(label)
+				snapshotCount++
+
+				// Print verbose NAK debug metrics for test pipeline
+				fmt.Printf("\n=== Stats Period %d ===\n", snapshotCount-1)
+				fmt.Println("  [Control Server]")
+				controlMetrics.PrintNakDebugMetrics(snapshotCount - 1)
+				fmt.Println("  [Test Server]")
+				testMetrics.PrintNakDebugMetrics(snapshotCount - 1)
+
+				// Print deltas if we have at least 2 snapshots
+				if snapshotCount >= 2 {
+					fmt.Println("  [Test Pipeline Delta]")
+					testMetrics.PrintVerboseMetricsDelta(snapshotCount-2, snapshotCount-1)
+				}
+
+			case <-testTimer.C:
+				break collectLoop
+			}
+		}
+	} else {
+		time.Sleep(config.TestDuration)
+	}
 
 	// Collect final metrics
 	fmt.Println("\nCollecting final metrics...")

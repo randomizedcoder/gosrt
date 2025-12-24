@@ -475,8 +475,13 @@ func (p *pkt) UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error {
 // Use this in error paths where the receiver isn't available.
 func (p *pkt) DecommissionWithBuffer(bufferPool *sync.Pool) {
 	if p.recvBuffer != nil && bufferPool != nil {
-		// Zero buffer slice for immediate reuse on Get()
-		*p.recvBuffer = (*p.recvBuffer)[:0]
+		// Return buffer to pool WITHOUT modifying slice length.
+		// The buffer will be overwritten during next receive.
+		//
+		// IMPORTANT: Do NOT zero the slice length like `*p.recvBuffer = (*p.recvBuffer)[:0]`
+		// This would cause panics in io_uring path when accessing buffer[0] for iovec.Base.
+		// See: lockless_phase4_implementation.md "Defect Analysis: Zero-Length Buffer Pool Bug"
+		// See: TestDecommissionWithBuffer/buffer_length_preserved_after_pool_return
 		bufferPool.Put(p.recvBuffer)
 		p.recvBuffer = nil
 		p.n = 0

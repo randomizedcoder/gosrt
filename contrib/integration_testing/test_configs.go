@@ -1078,6 +1078,333 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		CollectInterval: 2 * time.Second,
 		ProfileDuration: 5 * time.Minute,
 	},
+
+	// ============================================================================
+	// Phase 4: Event Loop Parallel Comparisons
+	// ============================================================================
+
+	// Compare Ring (Tick) vs Ring+EventLoop
+	// Expected: EventLoop shows lower latency, smoother CPU
+	{
+		Name:        "Parallel-Starlink-5M-Ring-vs-EventLoop",
+		Description: "Phase 4: Ring+Tick vs Ring+EventLoop (measure event loop benefit)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigRing), // Ring with Tick()
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigEventLoop), // Ring with EventLoop
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Compare FullRing (Tick) vs FullEventLoop
+	// Expected: FullEventLoop shows maximum Phase 4 improvement
+	{
+		Name:        "Parallel-Starlink-5M-FullRing-vs-FullEventLoop",
+		Description: "Phase 4: Full+Ring+Tick vs Full+Ring+EventLoop (measure event loop benefit)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigFullRing), // Full stack with Tick()
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop), // Full stack with EventLoop
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Ultimate comparison: Baseline vs Full Lockless + EventLoop
+	// Expected: Maximum improvement across all phases
+	{
+		Name:        "Parallel-Starlink-5M-Base-vs-FullEventLoop",
+		Description: "Phase 4: Baseline vs Full Lockless Pipeline (Phases 1-4 combined)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig, // Original: list, no optimizations
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop), // Full lockless: all optimizations
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// High-rate event loop stress test (Full Ring vs Full EventLoop)
+	{
+		Name:        "Parallel-Starlink-20M-FullRing-vs-FullEventLoop",
+		Description: "Phase 4: 20 Mb/s - Full+Ring vs Full+EventLoop (high-rate event loop test)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigFullRing),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Ultimate comparison at high rate: Baseline vs Full Lockless + EventLoop
+	// Expected: Tests whether the lockless pipeline scales to 20 Mb/s
+	{
+		Name:        "Parallel-Starlink-20M-Base-vs-FullEventLoop",
+		Description: "Phase 4: 20 Mb/s - Baseline vs Full Lockless Pipeline (high-rate stress test)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig, // Original: list, no optimizations
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop), // Full lockless: all optimizations
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// ========== High Throughput Parallel Tests (Phase 5: Find Performance Limits) ==========
+
+	// 50 Mb/s comparison: Baseline vs Full Lockless + EventLoop
+	{
+		Name:        "Parallel-Starlink-50M-Base-vs-FullEventLoop",
+		Description: "Phase 5: 50 Mb/s - Baseline vs Full Lockless Pipeline (high-throughput test)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         50_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// 100 Mb/s comparison: Baseline vs Full Lockless + EventLoop
+	{
+		Name:        "Parallel-Starlink-100M-Base-vs-FullEventLoop",
+		Description: "Phase 5: 100 Mb/s - Baseline vs Full Lockless Pipeline (extreme throughput test)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         100_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// 50 Mb/s clean (no impairment): Find raw throughput limit
+	{
+		Name:        "Parallel-Clean-50M-Base-vs-FullEventLoop",
+		Description: "Phase 5: 50 Mb/s Clean - No impairment, raw throughput comparison",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         50_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// 100 Mb/s clean (no impairment): Find raw throughput limit
+	{
+		Name:        "Parallel-Clean-100M-Base-vs-FullEventLoop",
+		Description: "Phase 5: 100 Mb/s Clean - No impairment, raw throughput comparison",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         100_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// 400 Mb/s clean (no impairment): Push beyond design target
+	{
+		Name:        "Parallel-Clean-400M-Base-vs-FullEventLoop",
+		Description: "Phase 5: 400 Mb/s Clean - No impairment, extreme throughput test",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         400_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
 }
 
 // GetParallelTestConfigByName finds a parallel test configuration by name
@@ -1476,6 +1803,182 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		TestServer:    GetSRTConfig(ConfigFullRing),
 		TestDuration:  30 * time.Second,
 		Bitrate:       20_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ============================================================================
+	// Phase 4: Event Loop Tests
+	// ============================================================================
+
+	// Test: Event loop only (ring + event loop on base config)
+	{
+		Name:          "Isolation-5M-EventLoop",
+		Description:   "Phase 4 Event Loop: Ring + continuous event loop (default settings)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigEventLoop),
+		TestServer:    GetSRTConfig(ConfigEventLoop),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Full lockless pipeline with event loop
+	{
+		Name:          "Isolation-5M-FullEventLoop",
+		Description:   "Full Phase 4 Lockless: io_uring + btree + NAK btree + Ring + EventLoop + HonorNakOrder",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Debug: Full lockless pipeline with verbose metrics (short duration)
+	{
+		Name:           "Isolation-5M-FullEventLoop-Debug",
+		Description:    "DEBUG: Full EventLoop with verbose metrics, receiver debug logging, short duration",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithReceiverDebug().WithLogTopics("receiver"),
+		TestServer:     GetSRTConfig(ConfigFullEventLoop).WithReceiverDebug().WithLogTopics("receiver"),
+		TestDuration:   10 * time.Second,
+		Bitrate:        5_000_000,
+		StatsPeriod:    2 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// Test: High throughput 20 Mb/s with full event loop stack
+	{
+		Name:          "Isolation-20M-FullEventLoop",
+		Description:   "20 Mb/s Full Phase 4 Lockless: stress test event loop at higher rate",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop),
+		TestDuration:  30 * time.Second,
+		Bitrate:       20_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Event loop with aggressive backoff (for low-traffic scenarios)
+	{
+		Name:          "Isolation-5M-EventLoop-LowBackoff",
+		Description:   "Event loop with shorter backoff (5µs-500µs) for lower latency",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithPacketRing().WithEventLoopCustom(1*time.Second, 500, 5*time.Microsecond, 500*time.Microsecond),
+		TestServer:    ControlSRTConfig.WithPacketRing().WithEventLoopCustom(1*time.Second, 500, 5*time.Microsecond, 500*time.Microsecond),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Event loop with relaxed backoff (for CPU efficiency)
+	{
+		Name:          "Isolation-5M-EventLoop-HighBackoff",
+		Description:   "Event loop with longer backoff (50µs-5ms) for CPU efficiency",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithPacketRing().WithEventLoopCustom(1*time.Second, 2000, 50*time.Microsecond, 5*time.Millisecond),
+		TestServer:    ControlSRTConfig.WithPacketRing().WithEventLoopCustom(1*time.Second, 2000, 50*time.Microsecond, 5*time.Millisecond),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ========== High Throughput Tests (Phase 5: Find Performance Limits) ==========
+
+	// Test: 50 Mb/s with full event loop stack
+	{
+		Name:          "Isolation-50M-FullEventLoop",
+		Description:   "50 Mb/s Full Phase 4 Lockless: high-throughput stress test",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop),
+		TestDuration:  60 * time.Second, // Longer duration for stability
+		Bitrate:       50_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: 100 Mb/s with full event loop stack
+	{
+		Name:          "Isolation-100M-FullEventLoop",
+		Description:   "100 Mb/s Full Phase 4 Lockless: extreme throughput test",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop),
+		TestDuration:  60 * time.Second,
+		Bitrate:       100_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: 150 Mb/s with full event loop stack (push the limits)
+	{
+		Name:          "Isolation-150M-FullEventLoop",
+		Description:   "150 Mb/s Full Phase 4 Lockless: find throughput ceiling",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop),
+		TestDuration:  60 * time.Second,
+		Bitrate:       150_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: 200 Mb/s with full event loop stack (target from design doc)
+	{
+		Name:          "Isolation-200M-FullEventLoop",
+		Description:   "200 Mb/s Full Phase 4 Lockless: design document target",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop),
+		TestDuration:  60 * time.Second,
+		Bitrate:       200_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: 400 Mb/s with full event loop stack (beyond design target)
+	{
+		Name:          "Isolation-400M-FullEventLoop",
+		Description:   "400 Mb/s Full Phase 4 Lockless: push beyond design target",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop),
+		TestDuration:  60 * time.Second,
+		Bitrate:       400_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: 400 Mb/s with LARGE io_uring ring (debug: test ring overflow hypothesis)
+	{
+		Name:          "Isolation-400M-FullEventLoop-LargeRing",
+		Description:   "400 Mb/s with 8192-entry io_uring ring (debug: test ring overflow hypothesis)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       400_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: 300 Mb/s to find exact throughput ceiling
+	{
+		Name:          "Isolation-300M-FullEventLoop",
+		Description:   "300 Mb/s Full Phase 4 Lockless: find exact throughput ceiling",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop),
+		TestDuration:  60 * time.Second,
+		Bitrate:       300_000_000,
 		StatsPeriod:   10 * time.Second,
 	},
 }

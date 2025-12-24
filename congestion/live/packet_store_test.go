@@ -120,48 +120,159 @@ func TestPacketStore_IterateFrom_List(t *testing.T) {
 // TestPacketStore_IterateFrom_Wraparound tests sequence number wraparound handling
 func TestPacketStore_IterateFrom_Wraparound(t *testing.T) {
 	// Test with sequences near MAX_SEQUENCENUMBER (31-bit: 0x7FFFFFFF)
-	// Wraparound: MAX-1, MAX, 0, 1, 2
+	// Wraparound: MAX-2, MAX-1, MAX, 0, 1, 2
+	// In circular order: MAX-2 < MAX-1 < MAX < 0 < 1 < 2
 
-	t.Run("BTree wraparound", func(t *testing.T) {
+	t.Run("BTree wraparound - full ordering", func(t *testing.T) {
 		store := NewBTreePacketStore(32)
 
-		// Insert sequences that span wraparound
+		// Insert sequences that span wraparound (in random order to test sorting)
+		maxSeq := packet.MAX_SEQUENCENUMBER
+		seqsToInsert := []uint32{1, maxSeq, 0, maxSeq - 1, 2, maxSeq - 2}
+		for _, seq := range seqsToInsert {
+			store.Insert(mockPacket(seq))
+		}
+
+		// Iterate all - should be in circular order
+		var seqs []uint32
+		store.Iterate(func(pkt packet.Packet) bool {
+			seqs = append(seqs, pkt.Header().PacketSequenceNumber.Val())
+			return true
+		})
+
+		// Expected circular order: MAX-2, MAX-1, MAX, 0, 1, 2
+		expectedOrder := []uint32{maxSeq - 2, maxSeq - 1, maxSeq, 0, 1, 2}
+		require.Equal(t, expectedOrder, seqs, "BTree should maintain circular order across MAX→0 boundary")
+	})
+
+	t.Run("BTree wraparound - IterateFrom before wrap", func(t *testing.T) {
+		store := NewBTreePacketStore(32)
+
 		maxSeq := packet.MAX_SEQUENCENUMBER
 		seqsToInsert := []uint32{maxSeq - 2, maxSeq - 1, maxSeq, 0, 1, 2}
 		for _, seq := range seqsToInsert {
 			store.Insert(mockPacket(seq))
 		}
 
-		// IterateFrom just before wrap should get packets in circular order
+		// IterateFrom MAX-1 should get: MAX-1, MAX, 0, 1, 2
 		var seqs []uint32
 		store.IterateFrom(circular.New(maxSeq-1, packet.MAX_SEQUENCENUMBER), func(pkt packet.Packet) bool {
 			seqs = append(seqs, pkt.Header().PacketSequenceNumber.Val())
 			return true
 		})
 
-		// Due to circular comparison in btree, this should work correctly
-		// Expected: maxSeq-1, maxSeq, then wraps to 0, 1, 2
-		require.GreaterOrEqual(t, len(seqs), 2, "Should get at least maxSeq-1 and maxSeq")
-		require.Equal(t, maxSeq-1, seqs[0])
+		expectedOrder := []uint32{maxSeq - 1, maxSeq, 0, 1, 2}
+		require.Equal(t, expectedOrder, seqs, "IterateFrom should continue across MAX→0 wraparound")
 	})
 
-	t.Run("List wraparound", func(t *testing.T) {
+	t.Run("BTree wraparound - IterateFrom after wrap", func(t *testing.T) {
+		store := NewBTreePacketStore(32)
+
+		maxSeq := packet.MAX_SEQUENCENUMBER
+		seqsToInsert := []uint32{maxSeq - 2, maxSeq - 1, maxSeq, 0, 1, 2}
+		for _, seq := range seqsToInsert {
+			store.Insert(mockPacket(seq))
+		}
+
+		// IterateFrom 0 should get: 0, 1, 2 (sequences after wrap)
+		var seqs []uint32
+		store.IterateFrom(circular.New(0, packet.MAX_SEQUENCENUMBER), func(pkt packet.Packet) bool {
+			seqs = append(seqs, pkt.Header().PacketSequenceNumber.Val())
+			return true
+		})
+
+		expectedOrder := []uint32{0, 1, 2}
+		require.Equal(t, expectedOrder, seqs, "IterateFrom after wrap should only get post-wrap packets")
+	})
+
+	t.Run("BTree wraparound - Min is MAX-2", func(t *testing.T) {
+		store := NewBTreePacketStore(32)
+
+		maxSeq := packet.MAX_SEQUENCENUMBER
+		seqsToInsert := []uint32{1, maxSeq, 0, maxSeq - 1, 2, maxSeq - 2}
+		for _, seq := range seqsToInsert {
+			store.Insert(mockPacket(seq))
+		}
+
+		// Min should be MAX-2 (the "oldest" in circular order)
+		min := store.Min()
+		require.NotNil(t, min)
+		require.Equal(t, maxSeq-2, min.Header().PacketSequenceNumber.Val(),
+			"Min() should return the circularly-smallest sequence (MAX-2)")
+	})
+
+	t.Run("List wraparound - full ordering", func(t *testing.T) {
 		store := NewListPacketStore()
 
 		maxSeq := packet.MAX_SEQUENCENUMBER
-		seqsToInsert := []uint32{maxSeq - 2, maxSeq - 1, maxSeq, 0, 1, 2}
+		seqsToInsert := []uint32{1, maxSeq, 0, maxSeq - 1, 2, maxSeq - 2}
 		for _, seq := range seqsToInsert {
 			store.Insert(mockPacket(seq))
 		}
 
 		var seqs []uint32
-		store.IterateFrom(circular.New(maxSeq-1, packet.MAX_SEQUENCENUMBER), func(pkt packet.Packet) bool {
+		store.Iterate(func(pkt packet.Packet) bool {
 			seqs = append(seqs, pkt.Header().PacketSequenceNumber.Val())
 			return true
 		})
 
-		require.GreaterOrEqual(t, len(seqs), 2, "Should get at least maxSeq-1 and maxSeq")
+		expectedOrder := []uint32{maxSeq - 2, maxSeq - 1, maxSeq, 0, 1, 2}
+		require.Equal(t, expectedOrder, seqs, "List should maintain circular order across MAX→0 boundary")
 	})
+}
+
+// TestPacketStore_SeqLess_Wraparound specifically tests that the btree uses correct circular comparison
+func TestPacketStore_SeqLess_Wraparound(t *testing.T) {
+	// This test verifies that the btree's SeqLess comparator handles MAX→0 wraparound
+	// Bug reference: receiver_stream_tests_design.md Section 12
+
+	maxSeq := packet.MAX_SEQUENCENUMBER
+
+	testCases := []struct {
+		name        string
+		insertOrder []uint32
+		expected    []uint32
+	}{
+		{
+			name:        "Simple wraparound",
+			insertOrder: []uint32{maxSeq, 0},
+			expected:    []uint32{maxSeq, 0}, // MAX < 0 in circular terms
+		},
+		{
+			name:        "Wraparound with gap",
+			insertOrder: []uint32{50, maxSeq - 50},
+			expected:    []uint32{maxSeq - 50, 50}, // MAX-50 < 50 in circular terms
+		},
+		{
+			name:        "Multiple around boundary",
+			insertOrder: []uint32{2, maxSeq - 1, 0, maxSeq, 1},
+			expected:    []uint32{maxSeq - 1, maxSeq, 0, 1, 2},
+		},
+		{
+			name:        "Large gap across boundary",
+			insertOrder: []uint32{100, maxSeq - 100},
+			expected:    []uint32{maxSeq - 100, 100}, // MAX-100 is "before" 100
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewBTreePacketStore(32)
+
+			for _, seq := range tc.insertOrder {
+				store.Insert(mockPacket(seq))
+			}
+
+			var result []uint32
+			store.Iterate(func(pkt packet.Packet) bool {
+				result = append(result, pkt.Header().PacketSequenceNumber.Val())
+				return true
+			})
+
+			require.Equal(t, tc.expected, result,
+				"BTree circular ordering failed for %s", tc.name)
+		})
+	}
 }
 
 // BenchmarkPacketStore_IterateFrom_vs_Iterate compares performance
@@ -199,4 +310,3 @@ func BenchmarkPacketStore_IterateFrom_vs_Iterate(b *testing.B) {
 		}
 	})
 }
-

@@ -1284,6 +1284,7 @@ type AnalysisResult struct {
 	StatisticalValidation StatisticalValidationResult // For network impairment tests
 	PipelineBalance       PipelineBalanceResult       // Clean network pipeline verification
 	RateMetrics           RateMetricsResult           // Phase 1: Lockless rate metrics validation
+	EventLoopHealth       EventLoopHealthResult       // Phase 4: Lockless EventLoop health
 
 	// Runtime stability (for long-running tests)
 	RuntimeStability []RuntimeStabilityResult
@@ -1306,7 +1307,8 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	signalResult := ValidatePositiveSignals(ts, config)
 	lifecycleResult := AnalyzeConnectionLifecycle(ts, config)
 	statisticalResult := ValidateStatistical(ts, config)
-	rateMetricsResult := VerifyRateMetrics(ts, config) // Phase 1: Lockless rate validation
+	rateMetricsResult := VerifyRateMetrics(ts, config)    // Phase 1: Lockless rate validation
+	eventLoopResult := AnalyzeEventLoopHealth(ts, config) // Phase 4: EventLoop health
 
 	// FAIL-SAFE: Default to failed - only set to passed after ALL checks confirm success
 	result := AnalysisResult{
@@ -1318,6 +1320,7 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 		ConnectionLifecycle:   lifecycleResult,
 		StatisticalValidation: statisticalResult,
 		RateMetrics:           rateMetricsResult,
+		EventLoopHealth:       eventLoopResult,
 	}
 
 	// Compute derived metrics for reporting
@@ -1351,8 +1354,10 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 
 	// Count violations and warnings from error and signal analysis
 	result.TotalViolations += len(errorResult.Violations) + len(signalResult.Violations) +
-		len(statisticalResult.Violations) + len(rateMetricsResult.Violations)
-	result.TotalWarnings += len(statisticalResult.Warnings) + len(rateMetricsResult.Warnings)
+		len(statisticalResult.Violations) + len(rateMetricsResult.Violations) +
+		len(eventLoopResult.Violations)
+	result.TotalWarnings += len(statisticalResult.Warnings) + len(rateMetricsResult.Warnings) +
+		len(eventLoopResult.Warnings)
 
 	// Track runtime stability pass/fail (for long-running tests)
 	runtimePassed := true // No runtime analysis = passes by default (not applicable)
@@ -1376,7 +1381,8 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	pipelinePassed := !pipelineBalanceRequired || result.PipelineBalance.Passed
 	lifecyclePassed := lifecycleResult.Passed
 	rateMetricsPassed := rateMetricsResult.Passed // Phase 1: Lockless rate metrics
-	if errorResult.Passed && signalResult.Passed && lifecyclePassed && statisticalResult.Passed && runtimePassed && pipelinePassed && rateMetricsPassed {
+	eventLoopPassed := eventLoopResult.Passed     // Phase 4: EventLoop health
+	if errorResult.Passed && signalResult.Passed && lifecyclePassed && statisticalResult.Passed && runtimePassed && pipelinePassed && rateMetricsPassed && eventLoopPassed {
 		result.Passed = true
 	}
 
@@ -1665,6 +1671,9 @@ func PrintAnalysisResult(result AnalysisResult) {
 			fmt.Printf("  ⚠ %s\n", w)
 		}
 	}
+
+	// EventLoop Health (Phase 4: Lockless)
+	PrintEventLoopHealth(result.EventLoopHealth)
 
 	// Final Result
 	if result.Passed {
@@ -2642,4 +2651,143 @@ func isWithinTolerance(observed, expected, tolerance float64) bool {
 	lowerBound := expected * (1 - tolerance)
 	upperBound := expected * (1 + tolerance)
 	return observed >= lowerBound && observed <= upperBound
+}
+
+// ========== EventLoop Health Analysis (Phase 4: Lockless Design) ==========
+
+// EventLoopHealthResult holds the result of EventLoop health analysis
+type EventLoopHealthResult struct {
+	Passed     bool
+	Applicable bool // false if EventLoop is not enabled
+
+	// Metrics (from server)
+	PacketsReceived  uint64 // RecvRatePackets (pushed to ring)
+	PacketsProcessed uint64 // RingPacketsProcessed (consumed from ring)
+	RingBacklog      uint64 // Current backlog = received - processed
+	RingDrops        uint64 // Packets dropped due to ring full
+
+	// Rate-based analysis
+	PacketRatePPS    float64 // Packets per second (from recv_rate_packets_per_sec)
+	PacketsPer10ms   float64 // How many packets arrive per Tick interval
+	MaxAcceptableLag uint64  // Max acceptable backlog = PacketsPer10ms * 2 (2 tick periods)
+
+	// Verdict
+	Violations []string
+	Warnings   []string
+}
+
+// AnalyzeEventLoopHealth checks if the EventLoop is keeping up with packet arrival
+// This is only applicable when UseEventLoop=true and UsePacketRing=true
+func AnalyzeEventLoopHealth(ts *TestMetricsTimeSeries, config *TestConfig) EventLoopHealthResult {
+	result := EventLoopHealthResult{
+		Passed:     false, // Fail-safe: default to failed
+		Applicable: false,
+	}
+
+	// Check if EventLoop is enabled for the server
+	if config == nil {
+		result.Passed = true // Can't validate - skip
+		return result
+	}
+
+	// Check server config for EventLoop
+	if !config.Server.SRT.UseEventLoop || !config.Server.SRT.UsePacketRing {
+		result.Passed = true // Not applicable - skip
+		return result
+	}
+
+	result.Applicable = true
+
+	// Get final server metrics
+	serverMetrics := ts.Server
+	if len(serverMetrics.Snapshots) < 2 {
+		result.Warnings = append(result.Warnings, "Insufficient metrics snapshots for EventLoop analysis")
+		result.Passed = true // Can't validate - skip
+		return result
+	}
+
+	finalSnap := serverMetrics.Snapshots[len(serverMetrics.Snapshots)-1]
+	if finalSnap == nil || finalSnap.Error != nil {
+		result.Warnings = append(result.Warnings, "Final snapshot unavailable for EventLoop analysis")
+		result.Passed = true // Can't validate - skip
+		return result
+	}
+
+	// Extract ring metrics
+	// Note: RecvRatePackets is an internal counter, we need to use the total from ring
+	result.PacketsProcessed = uint64(getSumByPrefix(finalSnap, "gosrt_ring_packets_processed_total"))
+	result.RingDrops = uint64(getSumByPrefix(finalSnap, "gosrt_ring_drops_total"))
+
+	// Get total packets received via congestion metrics (as fallback)
+	// The ring_backlog_packets gauge is computed from RecvRatePackets - RingPacketsProcessed
+	ringBacklog := getSumByPrefix(finalSnap, "gosrt_ring_backlog_packets")
+	result.RingBacklog = uint64(ringBacklog)
+
+	// Calculate PacketsReceived from backlog + processed
+	result.PacketsReceived = result.PacketsProcessed + result.RingBacklog
+
+	// Get packet rate for threshold calculation
+	result.PacketRatePPS = getSumByPrefix(finalSnap, "gosrt_recv_rate_packets_per_sec")
+
+	// Calculate acceptable lag threshold
+	// Tick interval = 10ms, so packets per tick = rate * 0.010
+	// Allow 2 tick periods of lag (20ms worth of packets)
+	result.PacketsPer10ms = result.PacketRatePPS * 0.010
+	result.MaxAcceptableLag = uint64(result.PacketsPer10ms * 2) // 2 tick periods
+	if result.MaxAcceptableLag < 10 {
+		result.MaxAcceptableLag = 10 // Minimum threshold
+	}
+
+	// Check for ring drops (serious issue)
+	if result.RingDrops > 0 {
+		result.Violations = append(result.Violations,
+			fmt.Sprintf("Ring buffer overflow: %d packets dropped (ring too small or EventLoop too slow)",
+				result.RingDrops))
+	}
+
+	// Check if EventLoop is keeping up
+	if result.RingBacklog > result.MaxAcceptableLag {
+		result.Violations = append(result.Violations,
+			fmt.Sprintf("EventLoop falling behind: backlog=%d packets, max_acceptable=%d (rate=%.0f pps)",
+				result.RingBacklog, result.MaxAcceptableLag, result.PacketRatePPS))
+	} else {
+		if result.RingBacklog > 0 && result.RingBacklog > result.MaxAcceptableLag/2 {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("Ring backlog elevated: %d packets (within acceptable range but >50%% of max)",
+					result.RingBacklog))
+		}
+	}
+
+	// Pass if no violations
+	result.Passed = len(result.Violations) == 0
+
+	return result
+}
+
+// PrintEventLoopHealth prints the EventLoop health analysis result
+func PrintEventLoopHealth(result EventLoopHealthResult) {
+	if !result.Applicable {
+		return // Not applicable - don't print
+	}
+
+	fmt.Println("\nEventLoop Health Analysis (Phase 4):")
+	if result.Passed {
+		fmt.Println("  ✓ PASSED")
+	} else {
+		fmt.Println("  ✗ FAILED")
+	}
+
+	fmt.Printf("    Packets received:   %d\n", result.PacketsReceived)
+	fmt.Printf("    Packets processed:  %d\n", result.PacketsProcessed)
+	fmt.Printf("    Ring backlog:       %d\n", result.RingBacklog)
+	fmt.Printf("    Ring drops:         %d\n", result.RingDrops)
+	fmt.Printf("    Packet rate:        %.0f pps\n", result.PacketRatePPS)
+	fmt.Printf("    Max acceptable lag: %d packets (2x 10ms tick)\n", result.MaxAcceptableLag)
+
+	for _, v := range result.Violations {
+		fmt.Printf("    ✗ %s\n", v)
+	}
+	for _, w := range result.Warnings {
+		fmt.Printf("    ⚠ %s\n", w)
+	}
 }

@@ -364,6 +364,45 @@ type Config struct {
 	// 0 = unlimited (keep retrying until success)
 	// Default: 0
 	PacketRingMaxBackoffs int
+
+	// --- Event Loop (Phase 4: Lockless Design) ---
+
+	// UseEventLoop enables continuous event loop processing instead of
+	// timer-driven Tick() for lower latency and smoother CPU utilization.
+	// When enabled, packets are processed immediately as they arrive from
+	// the ring buffer, and delivered as soon as TSBPD allows.
+	// REQUIRES: UsePacketRing=true (event loop consumes from ring)
+	// Default: false (use timer-driven Tick())
+	UseEventLoop bool
+
+	// EventLoopRateInterval is the interval for rate metric calculation
+	// in the event loop. Uses a separate ticker from ACK/NAK.
+	// Default: 1s
+	EventLoopRateInterval time.Duration
+
+	// BackoffColdStartPkts is the number of packets to receive before
+	// the adaptive backoff engages. During cold start, minimum sleep
+	// is used to ensure responsiveness during connection establishment.
+	// Default: 1000
+	BackoffColdStartPkts int
+
+	// BackoffMinSleep is the minimum sleep duration during idle periods
+	// in the event loop. Lower values = more responsive, higher CPU.
+	// Default: 10µs
+	BackoffMinSleep time.Duration
+
+	// BackoffMaxSleep is the maximum sleep duration during idle periods
+	// in the event loop. Higher values = lower CPU, less responsive.
+	// Default: 1ms
+	BackoffMaxSleep time.Duration
+
+	// --- Debug Configuration ---
+
+	// ReceiverDebug enables debug logging in the receiver for investigation.
+	// When enabled, receiver logs NAK dispatch decisions, ring buffer operations,
+	// and gap detection events. Uses the connection's logging function.
+	// Default: false (no debug logging)
+	ReceiverDebug bool
 }
 
 // DefaultConfig is the default configuration for a SRT connection
@@ -445,6 +484,13 @@ var defaultConfig Config = Config{
 	PacketRingMaxRetries:      10,                     // Immediate retries before backoff
 	PacketRingBackoffDuration: 100 * time.Microsecond, // 100µs backoff delay
 	PacketRingMaxBackoffs:     0,                      // 0 = unlimited backoffs
+
+	// Event loop defaults (Phase 4)
+	UseEventLoop:          false,                 // Timer-driven Tick() by default
+	EventLoopRateInterval: 1 * time.Second,       // Rate calculation every 1s
+	BackoffColdStartPkts:  1000,                  // 1000 packets before backoff engages
+	BackoffMinSleep:       10 * time.Microsecond, // 10µs minimum sleep
+	BackoffMaxSleep:       1 * time.Millisecond,  // 1ms maximum sleep
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
@@ -1076,6 +1122,52 @@ func (c *Config) Validate() error {
 		if c.PacketRingMaxBackoffs < 0 {
 			return fmt.Errorf("config: PacketRingMaxBackoffs must be >= 0")
 		}
+	}
+
+	// Validate event loop configuration (Phase 4)
+	if c.UseEventLoop {
+		// Event loop requires lock-free ring buffer (Phase 3)
+		if !c.UsePacketRing {
+			return fmt.Errorf("config: UseEventLoop requires UsePacketRing=true")
+		}
+		if c.EventLoopRateInterval <= 0 {
+			return fmt.Errorf("config: EventLoopRateInterval must be > 0")
+		}
+		if c.BackoffColdStartPkts < 0 {
+			return fmt.Errorf("config: BackoffColdStartPkts must be >= 0")
+		}
+		if c.BackoffMinSleep < 0 {
+			return fmt.Errorf("config: BackoffMinSleep must be >= 0")
+		}
+		if c.BackoffMaxSleep < 0 {
+			return fmt.Errorf("config: BackoffMaxSleep must be >= 0")
+		}
+		if c.BackoffMinSleep > c.BackoffMaxSleep {
+			return fmt.Errorf("config: BackoffMinSleep (%v) must be <= BackoffMaxSleep (%v)",
+				c.BackoffMinSleep, c.BackoffMaxSleep)
+		}
+	}
+
+	// Validate timer intervals - these control receiver processing frequency
+	// Zero values would cause infinite loops or division by zero
+	if c.TickIntervalMs == 0 {
+		return fmt.Errorf("config: TickIntervalMs must be > 0 (default: 10)")
+	}
+	if c.PeriodicNakIntervalMs == 0 {
+		return fmt.Errorf("config: PeriodicNakIntervalMs must be > 0 (default: 20)")
+	}
+	if c.PeriodicAckIntervalMs == 0 {
+		return fmt.Errorf("config: PeriodicAckIntervalMs must be > 0 (default: 10)")
+	}
+
+	// Validate NAK btree parameters
+	if c.NakRecentPercent < 0 || c.NakRecentPercent > 1.0 {
+		return fmt.Errorf("config: NakRecentPercent must be between 0.0 and 1.0 (default: 0.10)")
+	}
+
+	// Validate FastNAK threshold when enabled
+	if c.FastNakEnabled && c.FastNakThresholdMs == 0 {
+		return fmt.Errorf("config: FastNakThresholdMs must be > 0 when FastNakEnabled (default: 50)")
 	}
 
 	return nil

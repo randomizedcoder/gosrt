@@ -2,6 +2,8 @@
 package congestion
 
 import (
+	"context"
+
 	"github.com/datarhei/gosrt/circular"
 	"github.com/datarhei/gosrt/packet"
 )
@@ -54,6 +56,15 @@ type Receiver interface {
 
 	// SetNAKInterval sets the interval between two periodic NAK messages to the sender in microseconds.
 	SetNAKInterval(nakInterval uint64)
+
+	// EventLoop runs the continuous event loop for packet processing (Phase 4: Lockless Design).
+	// This replaces the timer-driven Tick() for lower latency and smoother CPU usage.
+	// Only runs if UseEventLoop() returns true.
+	EventLoop(ctx context.Context)
+
+	// UseEventLoop returns whether the event loop is enabled.
+	// Used by connection code to decide between EventLoop and Tick loop.
+	UseEventLoop() bool
 }
 
 // SendStats are collected statistics from a sender

@@ -189,6 +189,86 @@ network-status:
 test-congestion-live:
 	go test -v ./congestion/live
 
+## ============================================================================
+## Receiver Stream Tests (Table-Driven Unit Tests)
+## ============================================================================
+## These tests verify NAK generation, packet ordering, and wraparound handling
+## across all receiver configurations (Original, NakBtree, NakBtreeF, NakBtreeFr)
+
+## test-stream-tier1: Run Tier 1 stream tests (~50 tests, <3s) - every PR
+## These are the core validation tests that should pass for every change.
+test-stream-tier1:
+	@echo "=== Tier 1 Stream Tests (Core Validation) ==="
+	go test -v ./congestion/live -run 'TestStream_Tier1'
+
+## test-stream-tier2: Run Tier 2 stream tests (~200 tests, <15s) - daily CI
+## Extended coverage including wraparound and reordering scenarios.
+test-stream-tier2:
+	@echo "=== Tier 2 Stream Tests (Extended Coverage) ==="
+	go test -v ./congestion/live -run 'TestStream_Tier2'
+
+## test-stream-tier3: Run Tier 3 stream tests (~1080 tests, <60s) - nightly CI
+## Comprehensive coverage with all combinations of configs, loss, reordering.
+test-stream-tier3:
+	@echo "=== Tier 3 Stream Tests (Comprehensive) ==="
+	go test -v ./congestion/live -run 'TestStream_Tier3'
+
+## test-stream-all: Run all stream tier tests (~1330 tests)
+test-stream-all:
+	@echo "=== All Stream Tests (Tier 1 + 2 + 3) ==="
+	go test -v ./congestion/live -run 'TestStream_Tier'
+
+## test-stream-race: Run race detection on stream tests (Tier 1 only for speed)
+test-stream-race:
+	@echo "=== Stream Tests with Race Detection ==="
+	go test -race -v ./congestion/live -run 'TestStream_Tier1'
+
+## test-race: Run all receiver race detection tests
+## These tests exercise concurrent Push/Tick/NAK operations.
+test-race:
+	@echo "=== Receiver Race Detection Tests ==="
+	go test -race -v ./congestion/live -run 'TestRace'
+
+## test-race-wraparound: Run race test specifically for sequence wraparound
+test-race-wraparound:
+	@echo "=== Wraparound Race Detection Test ==="
+	go test -race -v ./congestion/live -run 'TestRace_SequenceWraparound'
+
+## bench-receiver: Run receiver benchmarks (config comparison)
+bench-receiver:
+	@echo "=== Receiver Configuration Benchmarks ==="
+	go test -bench='BenchmarkConfigComparison|BenchmarkPush|BenchmarkTick' -benchmem ./congestion/live -run='^$$'
+
+## bench-receiver-realistic: Run realistic receiver benchmarks (10-20Mbps, 3-30s streams)
+bench-receiver-realistic:
+	@echo "=== Realistic Receiver Benchmarks (10-20Mbps streams) ==="
+	go test -bench='BenchmarkRealistic' -benchmem ./congestion/live -run='^$$'
+
+## bench-receiver-full: Run all receiver benchmarks
+bench-receiver-full:
+	@echo "=== Full Receiver Benchmark Suite ==="
+	go test -bench='.' -benchmem ./congestion/live -run='^$$'
+
+## bench-nak-btree: Run NAK btree specific benchmarks
+bench-nak-btree:
+	@echo "=== NAK Btree Benchmarks ==="
+	go test -bench='BenchmarkNakBtree|BenchmarkNakScan|BenchmarkConsolidate' -benchmem ./congestion/live -run='^$$'
+
+## bench-seqless: Run SeqLess comparison benchmarks (fixed vs broken vs Number.Lt)
+bench-seqless:
+	@echo "=== SeqLess Comparison Benchmarks ==="
+	go test -bench='BenchmarkComparison|BenchmarkSeqLess' -benchmem ./circular -run='^$$'
+
+## test-circular: Run all circular package tests (including wraparound regression tests)
+test-circular:
+	@echo "=== Circular Package Tests (including SeqLess wraparound fix) ==="
+	go test -v ./circular
+
+## test-packet-store: Run packet store tests (including wraparound tests)
+test-packet-store:
+	@echo "=== Packet Store Tests (including wraparound) ==="
+	go test -v ./congestion/live -run 'TestPacketStore'
+
 ## test-packet-pool: Run packet pooling tests
 test-packet-pool:
 	go test -v ./packet -run TestPacketPool
@@ -317,6 +397,9 @@ nixshell:
 
 # Testing targets
 .PHONY: test test-flags test-flags-integration test-integration test-integration-all test-integration-config test-integration-list test-congestion-live test-packet-pool test-packet fuzz coverage
+# Receiver stream testing targets (table-driven unit tests)
+.PHONY: test-stream-tier1 test-stream-tier2 test-stream-tier3 test-stream-all test-stream-race
+.PHONY: test-race test-race-wraparound test-circular test-packet-store
 # Network impairment testing targets (require root)
 .PHONY: test-network-list test-network test-network-all test-network-quick network-setup network-cleanup network-status
 # Parallel comparison testing targets (require root)
@@ -332,6 +415,7 @@ nixshell:
 .PHONY: test-clean-matrix-tier1 test-clean-matrix-tier2 test-clean-matrix-all
 # Benchmark targets
 .PHONY: bench-packet bench-packet-all bench-packet-pool bench-circular
+.PHONY: bench-receiver bench-receiver-realistic bench-receiver-full bench-nak-btree bench-seqless
 # Code quality targets
 .PHONY: vet fmt lint
 # Dependency management targets

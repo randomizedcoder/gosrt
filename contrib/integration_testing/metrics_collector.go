@@ -636,3 +636,83 @@ func (tm *TestMetrics) PrintVerboseMetricsDelta(prevIndex, currIndex int) {
 		}
 	}
 }
+
+// PrintNakDebugMetrics prints detailed NAK-related metrics for debugging spurious NAKs
+// This focuses on ring buffer state, NAK btree state, and NAK generation path
+func (tm *TestMetrics) PrintNakDebugMetrics(snapshotIndex int) {
+	if len(tm.Server.Snapshots) <= snapshotIndex {
+		return
+	}
+	snap := tm.Server.Snapshots[snapshotIndex]
+	if snap.Error != nil {
+		fmt.Println("    [NAK Debug] Skipped - collection error")
+		return
+	}
+
+	// Helper to get a specific metric value
+	getMetric := func(prefix, contains string) float64 {
+		for name, val := range snap.Metrics {
+			if strings.HasPrefix(name, prefix) && (contains == "" || strings.Contains(name, contains)) {
+				return val
+			}
+		}
+		return 0
+	}
+
+	// Ring buffer state
+	ringProcessed := getMetric("gosrt_ring_packets_processed_total", "")
+	ringBacklog := getMetric("gosrt_ring_backlog_packets", "")
+	ringDrops := getMetric("gosrt_ring_drops_total", "")
+	ringDrained := getMetric("gosrt_ring_drained_packets_total", "")
+
+	fmt.Printf("    Ring: processed=%.0f, backlog=%.0f, drops=%.0f, drained=%.0f\n",
+		ringProcessed, ringBacklog, ringDrops, ringDrained)
+
+	// NAK btree state
+	nakInserts := getMetric("gosrt_nak_btree_inserts_total", "")
+	nakDeletes := getMetric("gosrt_nak_btree_deletes_total", "")
+	nakSize := getMetric("gosrt_nak_btree_size", "")
+	nakExpired := getMetric("gosrt_nak_btree_expired_total", "")
+	nakScanGaps := getMetric("gosrt_nak_btree_scan_gaps_total", "")
+
+	fmt.Printf("    NAK btree: inserts=%.0f, deletes=%.0f, size=%.0f, expired=%.0f, scan_gaps=%.0f\n",
+		nakInserts, nakDeletes, nakSize, nakExpired, nakScanGaps)
+
+	// NAK periodic runs (which implementation)
+	nakBtreeRuns := getMetric("gosrt_nak_periodic_runs_total", "impl=\"btree\"")
+	nakOriginalRuns := getMetric("gosrt_nak_periodic_runs_total", "impl=\"original\"")
+	nakSkipped := getMetric("gosrt_nak_periodic_skipped_total", "")
+
+	fmt.Printf("    Periodic NAK: btree_runs=%.0f, original_runs=%.0f, skipped=%.0f\n",
+		nakBtreeRuns, nakOriginalRuns, nakSkipped)
+
+	// NAK output
+	nakPktsSent := getMetric("gosrt_connection_packets_sent_total", "type=\"nak\"")
+	nakSingleSent := getMetric("gosrt_connection_nak_entries_total", "direction=\"sent\",type=\"single\"")
+	nakRangeSent := getMetric("gosrt_connection_nak_entries_total", "direction=\"sent\",type=\"range\"")
+	nakPktsRequested := getMetric("gosrt_connection_nak_packets_requested_total", "direction=\"sent\"")
+
+	fmt.Printf("    NAKs sent: pkts=%.0f (singles=%.0f, ranges=%.0f, requesting=%.0f pkts)\n",
+		nakPktsSent, nakSingleSent, nakRangeSent, nakPktsRequested)
+
+	// Gap detection
+	gapsDetected := getMetric("gosrt_connection_congestion_packets_lost_total", "direction=\"recv\"")
+	packetsRecv := getMetric("gosrt_connection_congestion_packets_total", "direction=\"recv\"")
+	packetsUnique := getMetric("gosrt_connection_congestion_packets_unique_total", "direction=\"recv\"")
+
+	fmt.Printf("    Packets: recv=%.0f, unique=%.0f, gaps=%.0f\n",
+		packetsRecv, packetsUnique, gapsDetected)
+
+	// Highlight anomalies
+	if nakPktsSent > 0 && gapsDetected == 0 {
+		fmt.Printf("    ⚠ SPURIOUS NAKs: %.0f NAKs sent but 0 gaps detected!\n", nakPktsSent)
+	}
+	if nakInserts > nakDeletes+nakSize+nakExpired {
+		fmt.Printf("    ⚠ NAK btree imbalance: inserts=%.0f > (deletes+size+expired)=%.0f\n",
+			nakInserts, nakDeletes+nakSize+nakExpired)
+	}
+	if nakOriginalRuns > 0 && nakBtreeRuns > 0 {
+		fmt.Printf("    ⚠ BOTH NAK implementations ran: btree=%.0f, original=%.0f\n",
+			nakBtreeRuns, nakOriginalRuns)
+	}
+}

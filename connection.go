@@ -404,14 +404,16 @@ func newSRTConn(config srtConnConfig) *srtConn {
 
 	// Metrics already created and registered via createConnectionMetrics()
 
-	c.tick = 10 * time.Millisecond
+	// TSBPD delivery tick interval - configurable via TickIntervalMs (default: 10ms)
+	c.tick = time.Duration(c.config.TickIntervalMs) * time.Millisecond
 
-	// 4.8.1.  Packet Acknowledgement (ACKs, ACKACKs) -> periodicACK = 10 milliseconds
-	// 4.8.2.  Packet Retransmission (NAKs) -> periodicNAK at least 20 milliseconds
+	// 4.8.1.  Packet Acknowledgement (ACKs, ACKACKs) -> periodicACK = 10 milliseconds (default)
+	// 4.8.2.  Packet Retransmission (NAKs) -> periodicNAK at least 20 milliseconds (default)
+	// Note: Timer intervals now configurable via PeriodicAckIntervalMs/PeriodicNakIntervalMs
 	c.recv = live.NewReceiver(live.ReceiveConfig{
 		InitialSequenceNumber:  c.initialPacketSequenceNumber,
-		PeriodicACKInterval:    10_000,
-		PeriodicNAKInterval:    20_000,
+		PeriodicACKInterval:    c.config.PeriodicAckIntervalMs * 1000, // Convert ms to µs
+		PeriodicNAKInterval:    c.config.PeriodicNakIntervalMs * 1000, // Convert ms to µs
 		OnSendACK:              c.sendACK,
 		OnSendNAK:              c.sendNAK,
 		OnDeliver:              c.deliver,
@@ -435,6 +437,25 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		FastNakEnabled:       c.config.FastNakEnabled,
 		FastNakThresholdUs:   c.config.FastNakThresholdMs * 1000, // Convert ms to µs
 		FastNakRecentEnabled: c.config.FastNakRecentEnabled,
+
+		// Lock-free ring buffer configuration (Phase 3: Lockless Design)
+		UsePacketRing:             c.config.UsePacketRing,
+		PacketRingSize:            c.config.PacketRingSize,
+		PacketRingShards:          c.config.PacketRingShards,
+		PacketRingMaxRetries:      c.config.PacketRingMaxRetries,
+		PacketRingBackoffDuration: c.config.PacketRingBackoffDuration,
+		PacketRingMaxBackoffs:     c.config.PacketRingMaxBackoffs,
+
+		// Event loop configuration (Phase 4: Lockless Design)
+		UseEventLoop:          c.config.UseEventLoop,
+		EventLoopRateInterval: c.config.EventLoopRateInterval,
+		BackoffColdStartPkts:  c.config.BackoffColdStartPkts,
+		BackoffMinSleep:       c.config.BackoffMinSleep,
+		BackoffMaxSleep:       c.config.BackoffMaxSleep,
+
+		// Debug logging - pass connection's log function
+		Debug:   c.config.ReceiverDebug,
+		LogFunc: c.log,
 	})
 
 	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second
@@ -561,7 +582,16 @@ func (c *srtConn) Version() uint32 {
 
 // ticker invokes the congestion control in regular intervals with
 // the current connection time.
+//
+// Phase 4: If the receiver uses event loop (UseEventLoop=true), the event loop
+// runs in a separate goroutine and handles packet processing continuously.
+// In this case, ticker() only drives the sender.
 func (c *srtConn) ticker(ctx context.Context) {
+	// Phase 4: Start event loop in separate goroutine if enabled
+	if c.recv.UseEventLoop() {
+		go c.recv.EventLoop(ctx)
+	}
+
 	ticker := time.NewTicker(c.tick)
 	defer ticker.Stop()
 	defer func() {
@@ -575,7 +605,10 @@ func (c *srtConn) ticker(ctx context.Context) {
 		case t := <-ticker.C:
 			tickTime := uint64(t.Sub(c.start).Microseconds())
 
-			c.recv.Tick(c.tsbpdTimeBase + tickTime)
+			// Phase 4: Only call recv.Tick if event loop is not running
+			if !c.recv.UseEventLoop() {
+				c.recv.Tick(c.tsbpdTimeBase + tickTime)
+			}
 			c.snd.Tick(tickTime)
 		}
 	}

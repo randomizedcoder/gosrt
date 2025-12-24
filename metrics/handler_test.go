@@ -536,6 +536,48 @@ func TestPrometheusNAKDetailMetrics(t *testing.T) {
 		"NAK packets requested (received by sender)")
 }
 
+// TestPrometheusRingBufferMetrics verifies ring buffer metrics are exported
+// including the computed backlog gauge (Phase 4)
+func TestPrometheusRingBufferMetrics(t *testing.T) {
+	socketId := uint32(0xEEEEEEEE)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set ring buffer metrics
+	m.RingDropsTotal.Store(5)
+	m.RingDrainedPackets.Store(10000)
+	m.RingPacketsProcessed.Store(9500)
+	m.RecvRatePackets.Store(10000) // Total received (for backlog calculation)
+
+	output := getPrometheusOutput(t)
+
+	// Verify ring counter metrics are present
+	require.Contains(t, output, `gosrt_ring_drops_total{socket_id="0xeeeeeeee",instance="default"} 5`)
+	require.Contains(t, output, `gosrt_ring_drained_packets_total{socket_id="0xeeeeeeee",instance="default"} 10000`)
+	require.Contains(t, output, `gosrt_ring_packets_processed_total{socket_id="0xeeeeeeee",instance="default"} 9500`)
+
+	// Verify computed backlog gauge (10000 received - 9500 processed = 500 backlog)
+	require.Contains(t, output, `gosrt_ring_backlog_packets{socket_id="0xeeeeeeee",instance="default"} 500`)
+}
+
+// TestPrometheusRingBacklogZero verifies backlog is zero when caught up
+func TestPrometheusRingBacklogZero(t *testing.T) {
+	socketId := uint32(0xFFFFFFFF)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// EventLoop caught up - processed == received
+	m.RecvRatePackets.Store(5000)
+	m.RingPacketsProcessed.Store(5000)
+
+	output := getPrometheusOutput(t)
+
+	// Backlog should be 0
+	require.Contains(t, output, `gosrt_ring_backlog_packets{socket_id="0xffffffff",instance="default"} 0`)
+}
+
 // Helper function to get Prometheus output as string
 func getPrometheusOutput(t *testing.T) string {
 	t.Helper()

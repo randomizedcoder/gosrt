@@ -59,6 +59,14 @@ const (
 	// ConfigFullRing enables everything including lock-free ring buffer
 	// This is the complete Phase 3 lockless design configuration
 	ConfigFullRing ConfigVariant = "FullRing"
+
+	// ConfigEventLoop enables lock-free ring + event loop (on top of Base config)
+	// This is ring buffer with continuous event loop processing
+	ConfigEventLoop ConfigVariant = "EventLoop"
+
+	// ConfigFullEventLoop enables everything including lock-free ring + event loop
+	// This is the complete Phase 4 lockless design configuration
+	ConfigFullEventLoop ConfigVariant = "FullEventLoop"
 )
 
 // GetSRTConfig returns an SRTConfig for a given ConfigVariant.
@@ -83,6 +91,10 @@ func GetSRTConfig(variant ConfigVariant) SRTConfig {
 		return ControlSRTConfig.WithPacketRing()
 	case ConfigFullRing:
 		return HighPerfSRTConfig.WithPacketRing()
+	case ConfigEventLoop:
+		return ControlSRTConfig.WithPacketRing().WithEventLoop()
+	case ConfigFullEventLoop:
+		return HighPerfSRTConfig.WithPacketRing().WithEventLoop()
 	default:
 		return BaselineSRTConfig
 	}
@@ -389,6 +401,17 @@ type SRTConfig struct {
 	PacketRingMaxRetries      int           // -packetringmaxretries (default: 10)
 	PacketRingBackoffDuration time.Duration // -packetringbackoffduration (default: 100µs)
 	PacketRingMaxBackoffs     int           // -packetringmaxbackoffs (default: 0)
+
+	// Event loop configuration (Phase 4: Lockless Design)
+	UseEventLoop          bool          // -useeventloop (requires -usepacketring)
+	EventLoopRateInterval time.Duration // -eventlooprateinterval (default: 1s)
+	BackoffColdStartPkts  int           // -backoffcoldstartpkts (default: 1000)
+	BackoffMinSleep       time.Duration // -backoffminsleep (default: 10µs)
+	BackoffMaxSleep       time.Duration // -backoffmaxsleep (default: 1ms)
+
+	// Debug configuration
+	ReceiverDebug bool   // -receiverdebug (enable receiver debug logging)
+	LogTopics     string // -logtopics (comma-separated log topics, e.g., "receiver" or "receiver:nak")
 }
 
 // ToCliFlags converts SRTConfig to CLI flag arguments
@@ -536,6 +559,31 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 	if c.PacketRingMaxBackoffs > 0 {
 		flags = append(flags, "-packetringmaxbackoffs", strconv.Itoa(c.PacketRingMaxBackoffs))
+	}
+
+	// Event loop configuration (Phase 4: Lockless Design)
+	if c.UseEventLoop {
+		flags = append(flags, "-useeventloop")
+	}
+	if c.EventLoopRateInterval > 0 {
+		flags = append(flags, "-eventlooprateinterval", c.EventLoopRateInterval.String())
+	}
+	if c.BackoffColdStartPkts > 0 {
+		flags = append(flags, "-backoffcoldstartpkts", strconv.Itoa(c.BackoffColdStartPkts))
+	}
+	if c.BackoffMinSleep > 0 {
+		flags = append(flags, "-backoffminsleep", c.BackoffMinSleep.String())
+	}
+	if c.BackoffMaxSleep > 0 {
+		flags = append(flags, "-backoffmaxsleep", c.BackoffMaxSleep.String())
+	}
+
+	// Debug configuration
+	if c.ReceiverDebug {
+		flags = append(flags, "-receiverdebug")
+	}
+	if c.LogTopics != "" {
+		flags = append(flags, "-logtopics", c.LogTopics)
 	}
 
 	return flags
@@ -967,10 +1015,11 @@ type IsolationTestConfig struct {
 	TestServer SRTConfig
 
 	// Test settings
-	TestDuration time.Duration // 30 seconds
-	Bitrate      int64         // 5 Mb/s
-	StatsPeriod  time.Duration // Stats display period (e.g., 10s to reduce output)
-	LogTopics    string        // Comma-separated log topics for debugging (e.g., "listen:io_uring:completion:seq")
+	TestDuration   time.Duration // 30 seconds
+	Bitrate        int64         // 5 Mb/s
+	StatsPeriod    time.Duration // Stats display period (e.g., 10s to reduce output)
+	LogTopics      string        // Comma-separated log topics for debugging (e.g., "listen:io_uring:completion:seq")
+	VerboseMetrics bool          // Print detailed metrics at each stats period
 }
 
 // ControlSRTConfig is the base control configuration: list, no io_uring
@@ -1149,6 +1198,84 @@ func (c SRTConfig) WithPacketRingCustom(size, shards, maxRetries int, backoffDur
 // WithoutPacketRing disables the lock-free ring buffer.
 func (c SRTConfig) WithoutPacketRing() SRTConfig {
 	c.UsePacketRing = false
+	return c
+}
+
+// ============================================================================
+// EVENT LOOP HELPERS (Phase 4: Lockless Design)
+// ============================================================================
+
+// WithEventLoop enables the continuous event loop with default settings.
+// NOTE: Requires UsePacketRing=true (automatically enabled by this method).
+// Default: 1s rate interval, 1000 cold start packets, 10µs-1ms backoff range.
+func (c SRTConfig) WithEventLoop() SRTConfig {
+	// Event loop requires ring buffer
+	if !c.UsePacketRing {
+		c = c.WithPacketRing()
+	}
+	c.UseEventLoop = true
+	c.EventLoopRateInterval = 1 * time.Second
+	c.BackoffColdStartPkts = 1000
+	c.BackoffMinSleep = 10 * time.Microsecond
+	c.BackoffMaxSleep = 1 * time.Millisecond
+	return c
+}
+
+// WithEventLoopCustom enables the event loop with custom settings.
+// NOTE: Requires UsePacketRing=true (automatically enabled by this method).
+func (c SRTConfig) WithEventLoopCustom(rateInterval time.Duration, coldStartPkts int, minSleep, maxSleep time.Duration) SRTConfig {
+	// Event loop requires ring buffer
+	if !c.UsePacketRing {
+		c = c.WithPacketRing()
+	}
+	c.UseEventLoop = true
+	c.EventLoopRateInterval = rateInterval
+	c.BackoffColdStartPkts = coldStartPkts
+	c.BackoffMinSleep = minSleep
+	c.BackoffMaxSleep = maxSleep
+	return c
+}
+
+// WithoutEventLoop disables the event loop (uses timer-driven Tick).
+func (c SRTConfig) WithoutEventLoop() SRTConfig {
+	c.UseEventLoop = false
+	return c
+}
+
+// ============================================================================
+// IO_URING TUNING HELPERS
+// ============================================================================
+
+// WithLargeIoUringRecvRing increases the io_uring receive ring size for high-throughput scenarios.
+// Default ring size is 512; this increases it to 8192 to prevent CQ overflow at high packet rates.
+// Use this when testing at 200+ Mb/s to avoid ring overflow crashes.
+func (c SRTConfig) WithLargeIoUringRecvRing() SRTConfig {
+	c.IoUringRecvRingSize = 8192
+	c.IoUringRecvBatchSize = 512 // Larger batch for high throughput
+	return c
+}
+
+// WithIoUringRecvRingCustom allows custom io_uring receive ring configuration.
+func (c SRTConfig) WithIoUringRecvRingCustom(ringSize, batchSize int) SRTConfig {
+	c.IoUringRecvRingSize = ringSize
+	c.IoUringRecvBatchSize = batchSize
+	return c
+}
+
+// ============================================================================
+// DEBUG HELPERS
+// ============================================================================
+
+// WithReceiverDebug enables debug logging in the receiver.
+func (c SRTConfig) WithReceiverDebug() SRTConfig {
+	c.ReceiverDebug = true
+	return c
+}
+
+// WithLogTopics sets the log topics for debug output.
+// Topics use prefix matching: "receiver" matches "receiver:nak:debug", etc.
+func (c SRTConfig) WithLogTopics(topics string) SRTConfig {
+	c.LogTopics = topics
 	return c
 }
 

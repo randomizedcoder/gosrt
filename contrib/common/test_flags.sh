@@ -243,7 +243,15 @@ run_test "PacketRingBackoffDuration flag" "-usepacketring -packetringbackoffdura
 run_test "PacketRingMaxBackoffs flag" "-usepacketring -packetringmaxbackoffs 5" '"PacketRingMaxBackoffs" *: *5' "$SERVER_BIN"
 run_test "Lock-free ring full config" "-usepacketring -packetringsize 4096 -packetringshards 4 -packetringmaxretries 15" '"UsePacketRing" *: *true.*"PacketRingSize" *: *4096.*"PacketRingShards" *: *4.*"PacketRingMaxRetries" *: *15' "$SERVER_BIN"
 
-# Test 43: All flag types combined (excluding drifttracer=false due to known limitation)
+# Test 43-48: Event loop flags (Phase 4: Lockless Design)
+run_test "UseEventLoop flag" "-usepacketring -useeventloop" '"UseEventLoop" *: *true' "$SERVER_BIN"
+run_test "EventLoopRateInterval flag" "-usepacketring -useeventloop -eventlooprateinterval 2s" '"EventLoopRateInterval" *: *2000000000' "$SERVER_BIN"
+run_test "BackoffColdStartPkts flag" "-usepacketring -useeventloop -backoffcoldstartpkts 500" '"BackoffColdStartPkts" *: *500' "$SERVER_BIN"
+run_test "BackoffMinSleep flag" "-usepacketring -useeventloop -backoffminsleep 5us" '"BackoffMinSleep" *: *5000' "$SERVER_BIN"
+run_test "BackoffMaxSleep flag" "-usepacketring -useeventloop -backoffmaxsleep 2ms" '"BackoffMaxSleep" *: *2000000' "$SERVER_BIN"
+run_test "Event loop full config" "-usepacketring -useeventloop -eventlooprateinterval 500ms -backoffcoldstartpkts 2000 -backoffminsleep 20us -backoffmaxsleep 500us" '"UseEventLoop" *: *true.*"EventLoopRateInterval" *: *500000000.*"BackoffColdStartPkts" *: *2000.*"BackoffMinSleep" *: *20000.*"BackoffMaxSleep" *: *500000' "$SERVER_BIN"
+
+# Test 49: All flag types combined (excluding drifttracer=false due to known limitation)
 # Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
 run_test "All flag types" "-statisticsinterval 10s -keepalivethreshold 0.6 -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"KeepaliveThreshold" *: *0\.6.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"
 
@@ -269,8 +277,17 @@ run_test "Client-generator InstanceName" "-name TestCG" '"InstanceName" *: *"Tes
 # Test 49: Client-generator NAK btree config
 run_test "Client-generator NAK btree" "-usenakbtree -fastnakenabled" '"UseNakBtree" *: *true.*"FastNakEnabled" *: *true' "$CLIENTGEN_BIN"
 
-# Test 50: Client-generator lock-free ring config
+# Test 56: Client-generator lock-free ring config
 run_test "Client-generator lock-free ring" "-usepacketring -packetringsize 2048" '"UsePacketRing" *: *true.*"PacketRingSize" *: *2048' "$CLIENTGEN_BIN"
+
+# Test 57: Client-generator event loop config (Phase 4)
+run_test "Client-generator event loop" "-usepacketring -useeventloop" '"UsePacketRing" *: *true.*"UseEventLoop" *: *true' "$CLIENTGEN_BIN"
+
+# Test 58: Full lockless pipeline config (Phase 3 + Phase 4)
+run_test "Full lockless pipeline" "-usepacketring -useeventloop -packetringsize 2048 -backoffminsleep 5us" '"UsePacketRing" *: *true.*"UseEventLoop" *: *true.*"PacketRingSize" *: *2048.*"BackoffMinSleep" *: *5000' "$SERVER_BIN"
+
+# Test 59: Debug configuration flags
+run_test "ReceiverDebug flag" "-receiverdebug" '"ReceiverDebug" *: *true' "$SERVER_BIN"
 
 echo ""
 echo "--- Component-Specific Flags (Help Output) ---"

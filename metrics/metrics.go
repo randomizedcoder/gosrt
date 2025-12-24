@@ -284,8 +284,9 @@ type ConnectionMetrics struct {
 	// ========================================================================
 	// Tracks packet ring buffer operations and overflow conditions.
 
-	RingDropsTotal     atomic.Uint64 // Packets dropped due to ring full (after backoff)
-	RingDrainedPackets atomic.Uint64 // Packets successfully drained from ring to btree
+	RingDropsTotal       atomic.Uint64 // Packets dropped due to ring full (after backoff)
+	RingDrainedPackets   atomic.Uint64 // Packets successfully drained from ring to btree
+	RingPacketsProcessed atomic.Uint64 // Total packets consumed from ring (for delta calculation)
 
 	// ========================================================================
 	// Rate Calculation Fields (Phase 1: Lockless Design)

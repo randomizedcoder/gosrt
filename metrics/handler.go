@@ -674,6 +674,28 @@ func MetricsHandler() http.Handler {
 				metrics.NakPacketsSplit.Load(),
 				"socket_id", socketIdStr, "instance", instanceName)
 
+			// ========== Lock-Free Ring Buffer Metrics (Phase 3/4) ==========
+			writeCounterIfNonZero(b, "gosrt_ring_drops_total",
+				metrics.RingDropsTotal.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_ring_drained_packets_total",
+				metrics.RingDrainedPackets.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_ring_packets_processed_total",
+				metrics.RingPacketsProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// Computed gauge: current ring backlog (received - processed)
+			// Useful for monitoring if EventLoop is keeping up with io_uring
+			ringReceived := metrics.RecvRatePackets.Load()
+			ringProcessed := metrics.RingPacketsProcessed.Load()
+			if ringReceived >= ringProcessed {
+				ringBacklog := ringReceived - ringProcessed
+				writeGauge(b, "gosrt_ring_backlog_packets",
+					float64(ringBacklog),
+					"socket_id", socketIdStr, "instance", instanceName)
+			}
+
 			// ========== Congestion Control Rate Gauges ==========
 			// Stored as percentage * 100 for precision (e.g., 5.5% = 550)
 			writeGaugeIfNonZero(b, "gosrt_connection_congestion_retrans_rate_permille",

@@ -1,6 +1,7 @@
 package live
 
 import (
+	"context"
 	"math"
 	"sync"
 	"time"
@@ -194,4 +195,16 @@ func (r *fakeLiveReceive) SetNAKInterval(nakInterval uint64) {
 	defer r.lock.Unlock()
 
 	r.periodicNAKInterval = nakInterval
+}
+
+// EventLoop is a no-op for the fake receiver (Phase 4: Lockless Design).
+// The fake receiver doesn't use the event loop - it uses timer-driven Tick().
+func (r *fakeLiveReceive) EventLoop(ctx context.Context) {
+	// No-op: fake receiver uses Tick() only
+}
+
+// UseEventLoop returns false for the fake receiver.
+// The fake receiver always uses timer-driven Tick().
+func (r *fakeLiveReceive) UseEventLoop() bool {
+	return false
 }

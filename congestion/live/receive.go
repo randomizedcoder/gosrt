@@ -1,6 +1,7 @@
 package live
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -23,6 +24,20 @@ var gapSlicePool = sync.Pool{
 		s := make([]uint32, 0, 128) // Pre-allocate typical capacity
 		return &s
 	},
+}
+
+// DefaultNakConsolidationBudgetUs is the default time budget for NAK consolidation (2ms).
+// This should be sufficient for consolidating thousands of NAK entries under normal conditions.
+// If consolidation routinely exceeds this budget, it indicates a performance problem.
+const DefaultNakConsolidationBudgetUs = 2_000 // 2ms in microseconds
+
+// defaultNakConsolidationBudget returns the NAK consolidation budget as a time.Duration.
+// If configValue is 0, uses DefaultNakConsolidationBudgetUs (5ms).
+func defaultNakConsolidationBudget(configValue uint64) time.Duration {
+	if configValue == 0 {
+		return DefaultNakConsolidationBudgetUs * time.Microsecond
+	}
+	return time.Duration(configValue) * time.Microsecond
 }
 
 // ReceiveConfig is the configuration for the liveRecv congestion control
@@ -63,6 +78,83 @@ type ReceiveConfig struct {
 	PacketRingMaxRetries      int           // Max immediate retries before backoff
 	PacketRingBackoffDuration time.Duration // Delay between backoff retries
 	PacketRingMaxBackoffs     int           // Max backoff iterations (0 = unlimited)
+
+	// Event loop configuration (Phase 4: Lockless Design)
+	// When enabled, replaces timer-driven Tick() with continuous event loop
+	// REQUIRES: UsePacketRing=true (event loop consumes from ring)
+	UseEventLoop          bool          // Enable continuous event loop
+	EventLoopRateInterval time.Duration // Rate metric calculation interval (default: 1s)
+	BackoffColdStartPkts  int           // Packets before adaptive backoff engages
+	BackoffMinSleep       time.Duration // Minimum sleep during idle periods
+	BackoffMaxSleep       time.Duration // Maximum sleep during idle periods
+
+	// Debug logging (for investigation)
+	// LogFunc is called for debug logging following the gosrt pattern:
+	//   LogFunc("receiver:nak:debug", func() string { return "message" })
+	Debug   bool                        // Enable debug logging
+	LogFunc func(string, func() string) // Logging callback (lazy evaluation)
+}
+
+// adaptiveBackoff manages sleep duration during idle periods in the event loop.
+// Uses actual receive rate (from Phase 1 metrics) to determine appropriate backoff.
+// Higher traffic = shorter sleeps, lower traffic = longer sleeps.
+type adaptiveBackoff struct {
+	metrics          *metrics.ConnectionMetrics
+	minSleep         time.Duration // Floor for sleep (e.g., 10µs)
+	maxSleep         time.Duration // Ceiling for sleep (e.g., 1ms)
+	coldStart        int           // Packets to see before engaging backoff
+	currentSleep     time.Duration // Current sleep duration
+	idleIterations   int64         // Consecutive idle iterations
+	packetsSeenTotal uint64        // Total packets seen (for cold start)
+}
+
+// newAdaptiveBackoff creates a new adaptive backoff with the given configuration.
+func newAdaptiveBackoff(m *metrics.ConnectionMetrics, minSleep, maxSleep time.Duration, coldStart int) *adaptiveBackoff {
+	return &adaptiveBackoff{
+		metrics:      m,
+		minSleep:     minSleep,
+		maxSleep:     maxSleep,
+		coldStart:    coldStart,
+		currentSleep: minSleep,
+	}
+}
+
+// recordActivity resets backoff state when a packet is processed or delivered.
+// This ensures the loop stays responsive when traffic is flowing.
+func (b *adaptiveBackoff) recordActivity() {
+	b.idleIterations = 0
+	b.currentSleep = b.minSleep
+	b.packetsSeenTotal++
+}
+
+// getSleepDuration returns the appropriate sleep duration for the current state.
+// Uses the receive rate from Phase 1 metrics to determine backoff.
+func (b *adaptiveBackoff) getSleepDuration() time.Duration {
+	b.idleIterations++
+
+	// Cold start: don't sleep much until we've seen enough traffic
+	// This ensures responsiveness during connection establishment
+	if b.packetsSeenTotal < uint64(b.coldStart) {
+		return b.minSleep
+	}
+
+	// Use receive rate to determine backoff
+	// Higher rate = shorter sleep, lower rate = longer sleep
+	rate := b.metrics.GetRecvRatePacketsPerSec()
+
+	if rate < 100 {
+		// Low rate (< 100 pkt/s): use maximum sleep
+		return b.maxSleep
+	} else if rate > 10000 {
+		// High rate (> 10000 pkt/s): use minimum sleep
+		return b.minSleep
+	}
+
+	// Linear interpolation: 100 pkt/s -> maxSleep, 10000 pkt/s -> minSleep
+	// ratio goes from 0.0 (at 100 pkt/s) to 1.0 (at 10000 pkt/s)
+	ratio := (rate - 100) / (10000 - 100)
+	sleepRange := b.maxSleep - b.minSleep
+	return b.maxSleep - time.Duration(float64(sleepRange)*ratio)
 }
 
 // receiver implements the Receiver interface
@@ -134,6 +226,18 @@ type receiver struct {
 	packetRing    *ring.ShardedRing   // Lock-free ring for packet handoff
 	writeConfig   ring.WriteConfig    // Backoff configuration for ring writes
 	pushFn        func(packet.Packet) // Function dispatch: pushToRing or pushWithLock
+
+	// Event loop (Phase 4: Lockless Design)
+	// When enabled, replaces timer-driven Tick() with continuous event loop
+	useEventLoop          bool
+	eventLoopRateInterval time.Duration
+	backoffColdStartPkts  int
+	backoffMinSleep       time.Duration
+	backoffMaxSleep       time.Duration
+
+	// Debug logging
+	debug   bool
+	logFunc func(string, func() string)
 }
 
 // NewReceiver takes a ReceiveConfig and returns a new Receiver
@@ -175,7 +279,7 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		tsbpdDelay:             config.TsbpdDelay,
 		nakRecentPercent:       config.NakRecentPercent,
 		nakMergeGap:            config.NakMergeGap,
-		nakConsolidationBudget: time.Duration(config.NakConsolidationBudget) * time.Microsecond,
+		nakConsolidationBudget: defaultNakConsolidationBudget(config.NakConsolidationBudget),
 
 		// FastNAK configuration
 		fastNakEnabled:       config.FastNakEnabled,
@@ -235,6 +339,33 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		r.pushFn = r.pushWithLock
 	}
 
+	// Event loop configuration (Phase 4: Lockless Design)
+	if config.UseEventLoop {
+		r.useEventLoop = true
+		r.eventLoopRateInterval = config.EventLoopRateInterval
+		if r.eventLoopRateInterval <= 0 {
+			r.eventLoopRateInterval = 1 * time.Second // Default: 1s
+		}
+		r.backoffColdStartPkts = config.BackoffColdStartPkts
+		if r.backoffColdStartPkts <= 0 {
+			r.backoffColdStartPkts = 1000 // Default: 1000 packets
+		}
+		r.backoffMinSleep = config.BackoffMinSleep
+		if r.backoffMinSleep <= 0 {
+			r.backoffMinSleep = 10 * time.Microsecond // Default: 10µs
+		}
+		r.backoffMaxSleep = config.BackoffMaxSleep
+		if r.backoffMaxSleep <= 0 {
+			r.backoffMaxSleep = 1 * time.Millisecond // Default: 1ms
+		}
+	}
+
+	// Debug logging configuration
+	if config.Debug {
+		r.debug = true
+		r.logFunc = config.LogFunc
+	}
+
 	if r.sendACK == nil {
 		r.sendACK = func(seq circular.Number, light bool) {}
 	}
@@ -258,6 +389,14 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 	// 5.1.2. SRT's Default LiveCC Algorithm - default 1456 bytes
 	r.avgPayloadSizeBits.Store(math.Float64bits(1456))
 	// avgLinkCapacity starts at 0
+
+	// Initialize nakScanStartPoint from InitialSequenceNumber (known from handshake).
+	// This is CRITICAL for wraparound handling:
+	// - If we used btree.Min() instead, we'd get the CIRCULAR minimum (e.g., 0 or 1)
+	// - But for a stream starting at MAX-2, logical order is: MAX-2, MAX-1, MAX, 0, 1, 2, ...
+	// - Btree circular order is: 0, 1, 2, ..., MAX-2, MAX-1, MAX
+	// - Starting from btree.Min() would give wrong gap detection across wraparound
+	r.nakScanStartPoint.Store(config.InitialSequenceNumber.Val())
 
 	return r
 }
@@ -826,6 +965,24 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 }
 
 func (r *receiver) periodicNAK(now uint64) []circular.Number {
+	// Debug: log dispatch decision
+	if r.debug && r.logFunc != nil {
+		if r.useNakBtree {
+			btreeSize := 0
+			if r.nakBtree != nil {
+				btreeSize = r.nakBtree.Len()
+			}
+			r.logFunc("receiver:nak:debug", func() string {
+				return fmt.Sprintf("periodicNAK: using NAK btree (size=%d, nakBtree=%v)",
+					btreeSize, r.nakBtree != nil)
+			})
+		} else {
+			r.logFunc("receiver:nak:debug", func() string {
+				return "periodicNAK: using original (packet btree scan)"
+			})
+		}
+	}
+
 	// Dispatch to appropriate implementation
 	if r.useNakBtree {
 		return r.periodicNakBtree(now)
@@ -948,6 +1105,14 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 		tooRecentThreshold = now + uint64(float64(r.tsbpdDelay)*r.nakRecentPercent)
 	}
 
+	// DEBUG: Log threshold calculation
+	if r.debug && r.logFunc != nil {
+		r.logFunc("receiver:nak:scan:debug", func() string {
+			return fmt.Sprintf("periodicNakBtree SCAN: now=%d, tsbpdDelay=%d, nakRecentPercent=%.2f, tooRecentThreshold=%d (now+%dms)",
+				now, r.tsbpdDelay, r.nakRecentPercent, tooRecentThreshold, (tooRecentThreshold-now)/1000)
+		})
+	}
+
 	// Get gap slice from pool (zero allocs per cycle)
 	gapsPtr := gapSlicePool.Get().(*[]uint32)
 	defer func() {
@@ -965,6 +1130,7 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	// Step 2: Get starting point (under lock for packetStore.Min access)
 	// Initialize lazily from oldest packet in store
 	startSeq := r.nakScanStartPoint.Load()
+	firstScanEver := false
 	if startSeq == 0 {
 		minPkt := r.packetStore.Min()
 		if minPkt == nil {
@@ -973,27 +1139,102 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 		}
 		startSeq = minPkt.Header().PacketSequenceNumber.Val()
 		r.nakScanStartPoint.Store(startSeq)
+		firstScanEver = true // Flag: this is our first NAK scan, expectedSeq should start from btree.Min()
+	}
+
+	// DEBUG: Log packet btree state
+	if r.debug && r.logFunc != nil {
+		minPkt := r.packetStore.Min()
+		var minSeq uint32
+		var minTsbpd uint64
+		if minPkt != nil {
+			minSeq = minPkt.Header().PacketSequenceNumber.Val()
+			minTsbpd = minPkt.Header().PktTsbpdTime
+		}
+		btreeSize := r.packetStore.Len()
+		r.logFunc("receiver:nak:scan:debug", func() string {
+			return fmt.Sprintf("SCAN WINDOW: startSeq=%d, btree_min=%d, btree_size=%d, minTsbpd=%d, threshold=%d",
+				startSeq, minSeq, btreeSize, minTsbpd, tooRecentThreshold)
+		})
 	}
 
 	// Step 3: Scan packet btree from startSeq to find gaps
 	// Uses IterateFrom with AscendGreaterOrEqual for O(log n) seek to start
-	expectedSeq := circular.New(startSeq, packet.MAX_SEQUENCENUMBER)
+	//
+	// IMPORTANT: The first packet we find might be > startSeq because:
+	// a) Packets between nakScanStartPoint and btree_min were DELIVERED (not lost)
+	// b) Packets between nakScanStartPoint and btree_min are ACTUALLY MISSING (lost)
+	//
+	// To distinguish: use lastDeliveredSequenceNumber
+	// - If startSeq <= lastDeliveredSequenceNumber: those packets were delivered (skip gap)
+	// - If startSeq > lastDeliveredSequenceNumber: those packets are missing (detect gap)
 	startSeqNum := circular.New(startSeq, packet.MAX_SEQUENCENUMBER)
 
-	r.packetStore.IterateFrom(startSeqNum, func(pkt packet.Packet) bool {
+	// Determine initial expectedSeq:
+	// - On first scan ever: start from btree.Min() (we just learned the starting sequence)
+	// - If startSeq is beyond what we've delivered: use startSeq (detect gaps from there)
+	// - If startSeq is at or before lastDelivered: use lastDelivered+1 (skip delivered packets)
+	var expectedSeq circular.Number
+	if firstScanEver {
+		// First NAK scan: we just learned the starting sequence from btree.Min()
+		// expectedSeq should start from there - nothing before that was ever received
+		expectedSeq = startSeqNum
+	} else {
+		lastDelivered := r.lastDeliveredSequenceNumber.Val()
+		if circular.SeqLessOrEqual(startSeq, lastDelivered) {
+			// startSeq was already delivered, start expecting from lastDelivered+1
+			expectedSeq = circular.New(circular.SeqAdd(lastDelivered, 1), packet.MAX_SEQUENCENUMBER)
+		} else {
+			// startSeq is beyond lastDelivered, start expecting from startSeq
+			expectedSeq = startSeqNum
+		}
+	}
+	firstPacket := true
+
+	// DEBUG: Track first gap for logging
+	var firstGapExpected, firstGapActual uint32
+	var firstGapFound bool
+
+	// scanPacket is a closure for processing each packet during NAK scan
+	// Returns true to continue iteration, false to stop
+	scanPacket := func(pkt packet.Packet) bool {
 		h := pkt.Header()
 		actualSeqNum := h.PacketSequenceNumber
 
 		// Stop if this packet is "too recent" (might still be reordered)
 		if h.PktTsbpdTime > tooRecentThreshold {
+			// DEBUG: Log why we stopped
+			if r.debug && r.logFunc != nil && packetsScanned == 0 {
+				r.logFunc("receiver:nak:scan:debug", func() string {
+					return fmt.Sprintf("SCAN STOPPED AT FIRST PACKET: seq=%d, PktTsbpdTime=%d > threshold=%d (packet is too recent)",
+						actualSeqNum.Val(), h.PktTsbpdTime, tooRecentThreshold)
+				})
+			}
 			return false // Stop iteration
 		}
 
-		// Detect gaps: expected vs actual
+		// For the first packet found, we DON'T reset expectedSeq
+		// It was already set correctly above based on lastDeliveredSequenceNumber
+		// This allows us to detect gaps from expectedSeq to actualSeqNum (if any)
+		if firstPacket {
+			firstPacket = false
+			// expectedSeq was already set above, don't override
+		}
+
+		// Detect gaps: expected vs actual (only BETWEEN packets we find)
 		if actualSeqNum.Gt(expectedSeq) {
 			// There's a gap - collect missing sequences for batch insert
-			seq := expectedSeq.Val()
+			gapStart := expectedSeq.Val()
+			seq := gapStart
 			endSeq := actualSeqNum.Dec().Val()
+
+			// DEBUG: Record first gap for logging
+			if !firstGapFound {
+				firstGapExpected = gapStart
+				firstGapActual = actualSeqNum.Val()
+				firstGapFound = true
+			}
+
 			for circular.SeqLess(seq, endSeq) || seq == endSeq {
 				*gapsPtr = append(*gapsPtr, seq)
 				seq = circular.SeqAdd(seq, 1)
@@ -1004,7 +1245,80 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 		lastScannedSeq = actualSeqNum.Val()
 		expectedSeq = actualSeqNum.Inc()
 		return true // Continue
+	}
+
+	// Pass 1: Iterate from startSeq to end of btree (in circular order)
+	stoppedEarly := false
+	r.packetStore.IterateFrom(startSeqNum, func(pkt packet.Packet) bool {
+		if !scanPacket(pkt) {
+			stoppedEarly = true
+			return false
+		}
+		return true
 	})
+
+	// DEBUG: Log state after Pass 1
+	if r.debug && r.logFunc != nil {
+		r.logFunc("receiver:nak:scan:debug", func() string {
+			return fmt.Sprintf("PASS1 COMPLETE: expectedSeq=%d, startSeq=%d, stoppedEarly=%v, packetsScanned=%d",
+				expectedSeq.Val(), startSeq, stoppedEarly, packetsScanned)
+		})
+	}
+
+	// Pass 2: Handle sequence number wraparound
+	// If we started near MAX and expectedSeq has wrapped to near 0, we need to
+	// continue scanning from the beginning of the btree (where 0, 1, 2, ... are stored)
+	//
+	// Detect wraparound: startSeq is "high" (> MAX/2) and expectedSeq is "low" (< MAX/2)
+	// This means we've crossed the MAX→0 boundary.
+	//
+	// NOTE: We use SeqLess directly, NOT circular.Number.Lt() because:
+	// - Lt() returns false when distance > threshold (half sequence space)
+	// - SeqLess uses signed arithmetic which correctly identifies wraparound
+	if !stoppedEarly && packetsScanned > 0 {
+		// Check if we need to wrap around using SeqLess (not Lt)
+		if circular.SeqLess(expectedSeq.Val(), startSeq) {
+			if r.debug && r.logFunc != nil {
+				r.logFunc("receiver:nak:scan:debug", func() string {
+					return fmt.Sprintf("WRAPAROUND DETECTED: expectedSeq=%d < startSeq=%d, continuing from btree.Min()",
+						expectedSeq.Val(), startSeq)
+				})
+			}
+
+			// Continue from beginning of btree (where wrapped sequences are stored)
+			// Stop when we reach startSeq or hit tooRecentThreshold
+			//
+			// NOTE: Use SeqGreaterOrEqual directly because Gte() uses threshold comparison
+			// which doesn't work correctly for wraparound scenarios
+			r.packetStore.Iterate(func(pkt packet.Packet) bool {
+				h := pkt.Header()
+				actualSeqNum := h.PacketSequenceNumber
+
+				// Stop if we've reached or passed startSeq (completed the wrap)
+				// Using SeqGreaterOrEqual for correct wraparound handling
+				if circular.SeqGreaterOrEqual(actualSeqNum.Val(), startSeq) {
+					return false
+				}
+
+				return scanPacket(pkt)
+			})
+		}
+	}
+
+	// DEBUG: Log scan results
+	if r.debug && r.logFunc != nil {
+		if firstGapFound {
+			r.logFunc("receiver:nak:scan:debug", func() string {
+				return fmt.Sprintf("GAPS DETECTED: first gap at expected=%d, actual=%d, total_gaps=%d, packets_scanned=%d, lastScannedSeq=%d",
+					firstGapExpected, firstGapActual, len(*gapsPtr), packetsScanned, lastScannedSeq)
+			})
+		} else if packetsScanned > 0 {
+			r.logFunc("receiver:nak:scan:debug", func() string {
+				return fmt.Sprintf("NO GAPS: packets_scanned=%d, lastScannedSeq=%d",
+					packetsScanned, lastScannedSeq)
+			})
+		}
+	}
 
 	r.lock.RUnlock()
 	// === END LOCK SCOPE ===
@@ -1039,6 +1353,20 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	}
 
 	r.lastPeriodicNAK = now
+
+	// Debug: log NAK list if not empty
+	if r.debug && r.logFunc != nil && len(list) > 0 {
+		btreeSize := r.nakBtree.Len()
+		r.logFunc("receiver:nak:debug", func() string {
+			// Show first few entries to avoid huge logs
+			preview := list
+			if len(preview) > 10 {
+				preview = preview[:10]
+			}
+			return fmt.Sprintf("periodicNakBtree: generated %d NAK entries, btree_size=%d, first_10=%v",
+				len(list), btreeSize, preview)
+		})
+	}
 
 	return list
 }
@@ -1094,8 +1422,11 @@ func (r *receiver) expireNakEntries() int {
 func (r *receiver) drainPacketRing(now uint64) {
 	m := r.metrics
 
-	// Track packets drained for metrics
-	var drained uint64
+	// Use local accumulators for performance (single atomic increment at end)
+	// processedCount = ALL packets read from ring (for delta calculation)
+	// drainedCount = packets SUCCESSFULLY inserted into btree
+	var processedCount uint64
+	var drainedCount uint64
 
 	for {
 		// TryRead is non-blocking - returns immediately if ring is empty
@@ -1109,7 +1440,7 @@ func (r *receiver) drainPacketRing(now uint64) {
 		h := p.Header()
 		seq := h.PacketSequenceNumber
 
-		drained++
+		processedCount++ // ALL packets read from ring
 
 		// Duplicate/old packet check (same logic as pushLockedNakBtree)
 		// Too old: already delivered
@@ -1145,6 +1476,7 @@ func (r *receiver) drainPacketRing(now uint64) {
 		// Insert into btree (NO LOCK - exclusive access after drain)
 		pktLen := p.Len()
 		if r.packetStore.Insert(p) {
+			drainedCount++ // Successfully inserted into btree
 			m.CongestionRecvPktBuf.Add(1)
 			m.CongestionRecvPktUnique.Add(1)
 			m.CongestionRecvByteBuf.Add(uint64(pktLen))
@@ -1163,18 +1495,156 @@ func (r *receiver) drainPacketRing(now uint64) {
 		}
 	}
 
-	// Update drain metrics
-	if drained > 0 && m != nil {
-		m.RingDrainedPackets.Add(drained)
+	// Single atomic increments at the end (performance optimization)
+	if m != nil {
+		if processedCount > 0 {
+			m.RingPacketsProcessed.Add(processedCount)
+		}
+		if drainedCount > 0 {
+			m.RingDrainedPackets.Add(drainedCount)
+		}
 	}
 }
 
+// drainAllFromRing drains all pending packets from the ring into the btree.
+// This is a wrapper around drainPacketRing for use in EventLoop where we need
+// to ensure the btree is up-to-date before ACK/NAK processing.
+// The `now` parameter in drainPacketRing is unused, so we pass 0.
+func (r *receiver) drainAllFromRing() {
+	if r.packetRing == nil {
+		return
+	}
+	r.drainPacketRing(0)
+}
+
+// drainRingByDelta drains packets from ring based on received vs processed delta.
+// This ensures all received packets are in the btree before periodic operations.
+//
+// The delta calculation uses two atomic counters:
+//   - RecvRatePackets: incremented when packets are pushed to ring
+//   - RingPacketsProcessed: incremented when packets are consumed from ring
+//
+// The difference tells us exactly how many packets are in the ring.
+// This is O(1) - just two atomic loads and a subtraction.
+//
+// Returns number of packets actually drained.
+func (r *receiver) drainRingByDelta() uint64 {
+	if r.packetRing == nil || r.metrics == nil {
+		return 0
+	}
+
+	m := r.metrics
+	received := m.RecvRatePackets.Load()
+	processed := m.RingPacketsProcessed.Load()
+
+	// Calculate expected ring contents
+	if received <= processed {
+		return 0 // Ring should be empty (or counter wrapped - unlikely)
+	}
+	delta := received - processed
+
+	// Debug: log delta calculation
+	if r.debug && r.logFunc != nil && delta > 0 {
+		r.logFunc("receiver:ring:debug", func() string {
+			return fmt.Sprintf("drainRingByDelta: received=%d, processed=%d, delta=%d",
+				received, processed, delta)
+		})
+	}
+
+	// Use local accumulators for performance (single atomic increment at end)
+	var processedCount uint64
+	var drainedCount uint64
+
+	// Drain up to delta packets
+	for i := uint64(0); i < delta; i++ {
+		item, ok := r.packetRing.TryRead()
+		if !ok {
+			break // Ring actually empty (counter race - fine)
+		}
+
+		processedCount++
+
+		// Process the packet (same logic as drainPacketRing)
+		p := item.(packet.Packet)
+		h := p.Header()
+		seq := h.PacketSequenceNumber
+		pktLen := p.Len()
+
+		// Duplicate/old packet check
+		if seq.Lte(r.lastDeliveredSequenceNumber) {
+			m.CongestionRecvPktBelated.Add(1)
+			m.CongestionRecvByteBelated.Add(uint64(pktLen))
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, uint64(pktLen))
+			r.releasePacketFully(p)
+			continue
+		}
+
+		if seq.Lt(r.lastACKSequenceNumber) {
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, uint64(pktLen))
+			r.releasePacketFully(p)
+			continue
+		}
+
+		if r.packetStore.Has(seq) {
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, uint64(pktLen))
+			r.releasePacketFully(p)
+			continue
+		}
+
+		// Delete from NAK btree - this packet is no longer missing
+		if r.nakBtree != nil {
+			if r.nakBtree.Delete(seq.Val()) {
+				m.NakBtreeDeletes.Add(1)
+			}
+		}
+
+		// Insert into btree
+		if r.packetStore.Insert(p) {
+			drainedCount++
+			m.CongestionRecvPktBuf.Add(1)
+			m.CongestionRecvPktUnique.Add(1)
+			m.CongestionRecvByteBuf.Add(uint64(pktLen))
+			m.CongestionRecvByteUnique.Add(uint64(pktLen))
+			m.CongestionRecvPkt.Add(1)
+			m.CongestionRecvByte.Add(uint64(pktLen))
+
+			if h.RetransmittedPacketFlag {
+				m.CongestionRecvPktRetrans.Add(1)
+				m.CongestionRecvByteRetrans.Add(uint64(pktLen))
+			}
+		} else {
+			m.CongestionRecvPktStoreInsertFailed.Add(1)
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonStoreInsertFailed, uint64(pktLen))
+			r.releasePacketFully(p)
+		}
+	}
+
+	// Single atomic increments at the end (performance optimization)
+	if processedCount > 0 {
+		m.RingPacketsProcessed.Add(processedCount)
+	}
+	if drainedCount > 0 {
+		m.RingDrainedPackets.Add(drainedCount)
+	}
+
+	// Debug: log drain result
+	if r.debug && r.logFunc != nil && processedCount > 0 {
+		r.logFunc("receiver:ring:debug", func() string {
+			return fmt.Sprintf("drainRingByDelta: drained %d packets (processed=%d, btree_inserts=%d)",
+				processedCount, processedCount, drainedCount)
+		})
+	}
+
+	return drainedCount
+}
+
 func (r *receiver) Tick(now uint64) {
-	// Phase 3: Drain ring buffer before processing (if enabled)
+	// Phase 3/4: Drain ring buffer before processing (if enabled)
+	// Uses delta-based drain for precise control: received - processed = in ring
 	// This transfers packets from lock-free ring into btree for ordered processing.
 	// After drain, Tick() has exclusive access to btree - no locks needed.
 	if r.usePacketRing {
-		r.drainPacketRing(now)
+		r.drainRingByDelta()
 	}
 
 	if ok, sequenceNumber, lite := r.periodicACK(now); ok {
@@ -1296,6 +1766,244 @@ func (r *receiver) updateRateStats(now uint64) {
 		// Update last calculation time
 		m.RecvRateLastUs.Store(now)
 	}
+}
+
+// ============================================================================
+// Event Loop (Phase 4: Lockless Design)
+// ============================================================================
+
+// EventLoop runs the continuous event loop for packet processing.
+// This replaces the timer-driven Tick() for lower latency and smoother CPU usage.
+// REQUIRES: UsePacketRing=true (event loop consumes from ring)
+//
+// The event loop:
+//   - Processes packets immediately as they arrive from the ring
+//   - Delivers packets when TSBPD-ready (not batched)
+//   - Uses separate tickers for ACK, NAK, and rate calculation
+//   - Adaptive backoff minimizes CPU spin when idle
+func (r *receiver) EventLoop(ctx context.Context) {
+	if !r.useEventLoop {
+		return // Event loop not enabled
+	}
+	if r.packetRing == nil {
+		return // Ring not initialized (should not happen if config validated)
+	}
+
+	// Create backoff manager
+	backoff := newAdaptiveBackoff(
+		r.metrics,
+		r.backoffMinSleep,
+		r.backoffMaxSleep,
+		r.backoffColdStartPkts,
+	)
+
+	// ACK interval from config (microseconds -> time.Duration)
+	ackInterval := time.Duration(r.periodicACKInterval) * time.Microsecond
+	if ackInterval <= 0 {
+		ackInterval = 10 * time.Millisecond // Default: 10ms
+	}
+
+	// NAK interval from config (microseconds -> time.Duration)
+	nakInterval := time.Duration(r.periodicNAKInterval) * time.Microsecond
+	if nakInterval <= 0 {
+		nakInterval = 20 * time.Millisecond // Default: 20ms
+	}
+
+	// Rate calculation interval
+	rateInterval := r.eventLoopRateInterval
+	if rateInterval <= 0 {
+		rateInterval = 1 * time.Second // Default: 1s
+	}
+
+	// Create ACK ticker first
+	ackTicker := time.NewTicker(ackInterval)
+	defer ackTicker.Stop()
+
+	// Offset NAK ticker by half ACK interval to spread work evenly
+	// This prevents ACK and NAK from firing simultaneously
+	time.Sleep(ackInterval / 2)
+	nakTicker := time.NewTicker(nakInterval)
+	defer nakTicker.Stop()
+
+	// Offset rate ticker further to spread work
+	time.Sleep(ackInterval / 4)
+	rateTicker := time.NewTicker(rateInterval)
+	defer rateTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ackTicker.C:
+			// CRITICAL: Drain ring before ACK to ensure ACK reflects all received packets
+			// Uses delta-based drain for precise control: received - processed = in ring
+			r.drainRingByDelta()
+			now := uint64(time.Now().UnixMicro())
+			if ok, seq, lite := r.periodicACK(now); ok {
+				r.sendACK(seq, lite)
+			}
+
+		case <-nakTicker.C:
+			// CRITICAL: Drain ring before NAK scan to avoid false gaps
+			// Without this, packets sitting in the ring appear as "gaps" in the btree,
+			// causing spurious NAKs even when no packets are actually lost.
+			// Uses delta-based drain for precise control: received - processed = in ring
+			r.drainRingByDelta()
+			now := uint64(time.Now().UnixMicro())
+			if list := r.periodicNAK(now); len(list) != 0 {
+				metrics.CountNAKEntries(r.metrics, list, metrics.NAKCounterSend)
+				r.sendNAK(list)
+			}
+			// Expire NAK btree entries after NAK is sent
+			if r.useNakBtree && r.nakBtree != nil {
+				r.expireNakEntries()
+			}
+
+		case <-rateTicker.C:
+			now := uint64(time.Now().UnixMicro())
+			r.updateRateStats(now)
+
+		default:
+			// Primary work: process packets and deliver
+			now := uint64(time.Now().UnixMicro())
+			processed := r.processOnePacket()
+			delivered := r.deliverReadyPacketsNoLock(now)
+
+			if !processed && delivered == 0 {
+				// No work done - sleep to avoid CPU spin
+				time.Sleep(backoff.getSleepDuration())
+			} else {
+				// Activity recorded - reset backoff
+				backoff.recordActivity()
+			}
+		}
+	}
+}
+
+// processOnePacket consumes one packet from the ring and inserts into btree.
+// Returns true if a packet was processed (or rejected as duplicate).
+// Called by EventLoop's default case for continuous processing.
+func (r *receiver) processOnePacket() bool {
+	if r.packetRing == nil {
+		return false
+	}
+
+	// TryRead is non-blocking - returns immediately if ring is empty
+	item, ok := r.packetRing.TryRead()
+	if !ok {
+		return false // Ring empty
+	}
+
+	p := item.(packet.Packet)
+	h := p.Header()
+	seq := h.PacketSequenceNumber
+	pktLen := p.Len()
+	m := r.metrics
+
+	// RingPacketsProcessed = ALL packets read from ring (for delta calculation)
+	// This is incremented unconditionally when a packet is read from the ring
+	if m != nil {
+		m.RingPacketsProcessed.Add(1)
+	}
+
+	// Duplicate/old packet check
+	// Too old: already delivered
+	if seq.Lte(r.lastDeliveredSequenceNumber) {
+		m.CongestionRecvPktBelated.Add(1)
+		m.CongestionRecvByteBelated.Add(uint64(pktLen))
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, uint64(pktLen))
+		r.releasePacketFully(p)
+		return true // Still processed (rejected)
+	}
+
+	// Already acknowledged
+	if seq.Lt(r.lastACKSequenceNumber) {
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, uint64(pktLen))
+		r.releasePacketFully(p)
+		return true
+	}
+
+	// Duplicate: already in store
+	if r.packetStore.Has(seq) {
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, uint64(pktLen))
+		r.releasePacketFully(p)
+		return true
+	}
+
+	// Delete from NAK btree - this packet is no longer missing
+	if r.nakBtree != nil {
+		if r.nakBtree.Delete(seq.Val()) {
+			m.NakBtreeDeletes.Add(1)
+		}
+	}
+
+	// Insert into btree (NO LOCK - exclusive access in event loop)
+	if r.packetStore.Insert(p) {
+		// RingDrainedPackets = packets SUCCESSFULLY inserted into btree (subset of processed)
+		m.RingDrainedPackets.Add(1)
+		m.CongestionRecvPktBuf.Add(1)
+		m.CongestionRecvPktUnique.Add(1)
+		m.CongestionRecvByteBuf.Add(uint64(pktLen))
+		m.CongestionRecvByteUnique.Add(uint64(pktLen))
+		m.CongestionRecvPkt.Add(1)
+		m.CongestionRecvByte.Add(uint64(pktLen))
+
+		if h.RetransmittedPacketFlag {
+			m.CongestionRecvPktRetrans.Add(1)
+			m.CongestionRecvByteRetrans.Add(uint64(pktLen))
+		}
+	} else {
+		m.CongestionRecvPktStoreInsertFailed.Add(1)
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonStoreInsertFailed, uint64(pktLen))
+		r.releasePacketFully(p)
+	}
+
+	return true
+}
+
+// deliverReadyPacketsNoLock delivers all packets whose TSBPD time has arrived.
+// Called every loop iteration for smooth, non-bursty delivery.
+// Returns the count of packets delivered.
+// NO LOCK needed - event loop has exclusive access to btree.
+func (r *receiver) deliverReadyPacketsNoLock(now uint64) int {
+	m := r.metrics
+	delivered := 0
+
+	// Iterate from btree.Min() forward, delivering packets whose time has come
+	// Stop when we hit a packet still in the future
+	removed := r.packetStore.RemoveAll(
+		func(p packet.Packet) bool {
+			// Check if packet is ready for delivery:
+			// 1. Must be <= lastACKSequenceNumber (acknowledged)
+			// 2. Must have TSBPD time <= now (ready for playback)
+			h := p.Header()
+			return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
+		},
+		func(p packet.Packet) {
+			// Update metrics
+			pktLen := p.Len()
+			m.CongestionRecvPktBuf.Add(^uint64(0))                   // Decrement by 1
+			m.CongestionRecvByteBuf.Add(^uint64(uint64(pktLen) - 1)) // Subtract pktLen
+
+			// Update last delivered sequence
+			h := p.Header()
+			r.lastDeliveredSequenceNumber = h.PacketSequenceNumber
+
+			// Deliver to application
+			r.deliver(p)
+			delivered++
+		},
+	)
+	_ = removed
+
+	return delivered
+}
+
+// UseEventLoop returns whether the event loop is enabled.
+// Used by connection code to decide between EventLoop and Tick loop.
+func (r *receiver) UseEventLoop() bool {
+	return r.useEventLoop
 }
 
 func (r *receiver) SetNAKInterval(nakInterval uint64) {

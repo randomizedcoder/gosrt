@@ -97,6 +97,16 @@ var (
 	PacketRingBackoffDuration = flag.Duration("packetringbackoffduration", 0, "Delay between backoff retries when ring is full (default: 100µs)")
 	PacketRingMaxBackoffs     = flag.Int("packetringmaxbackoffs", -1, "Maximum backoff iterations before dropping packet (0 = unlimited, -1 = not set)")
 
+	// Event loop configuration flags (Phase 4: Lockless Design)
+	UseEventLoop          = flag.Bool("useeventloop", false, "Enable continuous event loop (requires -usepacketring, replaces timer-driven Tick)")
+	EventLoopRateInterval = flag.Duration("eventlooprateinterval", 0, "Rate metric calculation interval in event loop (default: 1s)")
+	BackoffColdStartPkts  = flag.Int("backoffcoldstartpkts", -1, "Packets before adaptive backoff engages (default: 1000, -1 = not set)")
+	BackoffMinSleep       = flag.Duration("backoffminsleep", 0, "Minimum sleep during idle periods (default: 10µs)")
+	BackoffMaxSleep       = flag.Duration("backoffmaxsleep", 0, "Maximum sleep during idle periods (default: 1ms)")
+
+	// Debug configuration flags
+	ReceiverDebug = flag.Bool("receiverdebug", false, "Enable debug logging in receiver (NAK dispatch, ring ops, gap detection)")
+
 	// Statistics configuration flags
 	StatisticsPrintInterval = flag.Duration("statisticsinterval", 0, "Interval for printing connection statistics (e.g., 10s). 0 disables periodic statistics printing")
 
@@ -357,6 +367,28 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["packetringmaxbackoffs"] && *PacketRingMaxBackoffs >= 0 {
 		config.PacketRingMaxBackoffs = *PacketRingMaxBackoffs
+	}
+
+	// Event loop flags (Phase 4: Lockless Design)
+	if FlagSet["useeventloop"] {
+		config.UseEventLoop = *UseEventLoop
+	}
+	if FlagSet["eventlooprateinterval"] {
+		config.EventLoopRateInterval = *EventLoopRateInterval
+	}
+	if FlagSet["backoffcoldstartpkts"] && *BackoffColdStartPkts >= 0 {
+		config.BackoffColdStartPkts = *BackoffColdStartPkts
+	}
+	if FlagSet["backoffminsleep"] {
+		config.BackoffMinSleep = *BackoffMinSleep
+	}
+	if FlagSet["backoffmaxsleep"] {
+		config.BackoffMaxSleep = *BackoffMaxSleep
+	}
+
+	// Debug flags
+	if FlagSet["receiverdebug"] {
+		config.ReceiverDebug = *ReceiverDebug
 	}
 
 	if FlagSet["statisticsinterval"] {

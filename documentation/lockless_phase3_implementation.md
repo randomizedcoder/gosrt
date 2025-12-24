@@ -471,6 +471,7 @@ sudo PROFILES=cpu,mutex make test-parallel CONFIG=Parallel-Starlink-5M-Base-vs-F
 | 2025-12-22 | 11 | Added isolation test configs: `Isolation-*-Ring` variants | ✅ |
 | 2025-12-22 | 11 | **VALIDATION**: Isolation-5M-FullRing - 100% recovery | ✅ |
 | 2025-12-22 | 11 | **VALIDATION**: Parallel-Starlink-5M-Full-vs-FullRing with profiling | ✅ |
+| 2025-12-22 | 11 | **VALIDATION**: Isolation-20M-FullRing - 20 Mb/s stress test | ✅ |
 | 2025-12-22 | - | **PHASE 3 COMPLETE** - Lock contention reduced ~12% | 🎉 |
 
 ---
@@ -523,6 +524,27 @@ Results:
 - 7 CPU profile improvements vs 3 regressions
 - Primary benefit: Reduced mutex wait time in packet receive path
 - The lock-free ring successfully decouples io_uring completions from receiver processing
+
+### Stress Test: Isolation-20M-FullRing ✅
+
+**Test**: 20 Mb/s stress test (4x baseline rate)
+
+```
+=== Isolation Test: Isolation-20M-FullRing ===
+Description: 20 Mb/s Full Lockless: stress test lock-free ring at higher rate
+Duration: 30s
+Bitrate: 20000000 bps (20.00 Mb/s)
+
+Results:
+  Control: 54,980 packets, 0 gaps, 100% recovery
+  Test:    54,928 packets, 0 gaps, 100% recovery
+```
+
+**Key Findings**:
+- ✅ Ring buffer handles ~1,717 pkt/s without drops
+- ✅ No NAKs, no retransmissions at 20 Mb/s
+- ✅ Identical results between control and test pipelines
+- ✅ Validates stability at higher packet rates
 
 ---
 

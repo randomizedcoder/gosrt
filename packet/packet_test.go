@@ -952,6 +952,47 @@ func TestDecommissionWithBuffer(t *testing.T) {
 		// Should not panic with nil pool
 		p.DecommissionWithBuffer(nil)
 	})
+
+	t.Run("buffer length preserved after pool return", func(t *testing.T) {
+		// This test catches the bug where DecommissionWithBuffer zeroed the slice length
+		// before returning to pool, causing panics in io_uring path when accessing buffer[0].
+		//
+		// The bug was: *p.recvBuffer = (*p.recvBuffer)[:0]
+		//
+		// With the bug, subsequent Get() returns a zero-length slice, causing:
+		//   panic: runtime error: index out of range [0] with length 0
+		// when io_uring tries to set iovec.Base = &buffer[0]
+
+		const bufferSize = 1500
+		pool := &sync.Pool{New: func() interface{} { b := make([]byte, bufferSize); return &b }}
+
+		// Get buffer, simulate zero-copy receive, then return to pool
+		bufPtr := pool.Get().(*[]byte)
+		require.Equal(t, bufferSize, len(*bufPtr), "initial buffer should have full length")
+
+		copy(*bufPtr, createTestDataPacket(1, 100))
+		p := NewPacket(nil).(*pkt)
+		err := p.UnmarshalZeroCopy(bufPtr, HeaderSize+100, testAddr)
+		require.NoError(t, err)
+
+		// Return buffer to pool via DecommissionWithBuffer
+		p.DecommissionWithBuffer(pool)
+
+		// Get buffer again from pool (should be the same one we just returned)
+		bufPtr2 := pool.Get().(*[]byte)
+
+		// CRITICAL: Buffer must still have full length, not zero!
+		// The io_uring path does: iovec.Base = &buffer[0]
+		// If buffer has length 0, this panics with "index out of range [0] with length 0"
+		require.Equal(t, bufferSize, len(*bufPtr2),
+			"buffer returned from pool must have full length (not zeroed); "+
+				"io_uring requires buffer[0] access for iovec setup")
+
+		// Also verify we can actually access buffer[0] without panic
+		require.NotPanics(t, func() {
+			_ = (*bufPtr2)[0]
+		}, "must be able to access buffer[0] without panic")
+	})
 }
 
 func TestDataZeroCopy(t *testing.T) {
