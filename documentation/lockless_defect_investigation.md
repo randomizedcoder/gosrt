@@ -15,7 +15,9 @@ This document tracks all defects discovered during the lockless design implement
 3. [Defect #2: Spurious NAKs with io_uring + EventLoop](#defect-2-spurious-naks-with-io_uring--eventloop)
 4. [Defect #3: 31-bit Sequence Number Wraparound](#defect-3-31-bit-sequence-number-wraparound)
 5. [Defect #4: NakConsolidationBudget Default Bug](#defect-4-nakconsolidationbudget-default-bug)
-6. [Defect #5: SIGSEGV at 400 Mb/s (CRITICAL)](#defect-5-sigsegv-at-400-mbs-critical)
+6. [Defect #5: SIGSEGV at 400 Mb/s (io_uring ring overflow)](#defect-5-sigsegv-at-400-mbs-critical)
+7. [Defect #6: WriteQueue Overflow at High Bitrates (ROOT CAUSE)](#defect-6-writequeue-overflow-at-high-bitrates-root-cause)
+8. [Defect #6b: Nil Map Panic in sendIoUring](#defect-6b-nil-map-panic-in-sendiouringring-secondary)
 
 ---
 
@@ -27,7 +29,18 @@ This document tracks all defects discovered during the lockless design implement
 | #2 | Spurious NAKs with io_uring + EventLoop | Medium | ✅ Fixed | Phase 4 |
 | #3 | 31-bit sequence wraparound in SeqLess | High | ✅ Fixed | Phase 4 |
 | #4 | NakConsolidationBudget defaults to 0 | Medium | ✅ Fixed | Phase 4 |
-| #5 | SIGSEGV crash at 400 Mb/s | **Critical** | 🔴 Open | Phase 5 |
+| #5 | SIGSEGV crash at 400 Mb/s (io_uring ring overflow) | **Critical** | 🟡 Mitigated | Phase 5 |
+| **#6** | **WriteQueue overflow at high bitrates (ROOT CAUSE)** | **Critical** | 🔴 Identified | Phase 5 |
+| #6b | Nil map panic in sendIoUring (secondary to #6) | Critical | 🔴 Open | Phase 5 |
+
+### Defect Chain at 400 Mb/s
+
+```
+WriteQueue fills (30ms) → Write() returns EOF → Connection closes →
+  ├─→ cleanupIoUring() sets sendCompletions = nil
+  └─→ recvCompletionHandler still processing ACKs → sendACKACK() →
+      sendIoUring() → PANIC (nil map)
+```
 
 ---
 
@@ -433,16 +446,403 @@ func (dl *dialer) recvCompletionHandler(ctx context.Context) {
 
 ---
 
-## Defect #6: Nil Map Panic in sendIoUring (NEW)
+## Defect #6: WriteQueue Overflow at High Bitrates (ROOT CAUSE)
 
-**Phase**: 5 (Validation and Testing)  
-**Severity**: **Critical** (panic)  
-**Status**: 🔴 Open - Active Investigation  
-**Discovered**: 2025-12-23 (during 400M LargeRing test)
+**Phase**: 5 (Validation and Testing)
+**Severity**: **Critical** (causes cascade of failures)
+**Status**: 🔴 Root Cause Identified - Needs Fix
+**Discovered**: 2025-12-24
 
 ### Symptom
 
-After fixing the io_uring ring size (Defect #5 hypothesis confirmed!), a new panic occurred:
+Both control and test pipelines fail with `Error: write: EOF` within ~500ms of starting at 400 Mb/s. The connections DO establish successfully (PUBLISH START appears), but then fail very quickly.
+
+### Root Cause Analysis
+
+The `Write()` function in `connection.go` uses a **non-blocking channel write**:
+
+```go
+// connection.go lines 694-701
+func (c *srtConn) Write(b []byte) (int, error) {
+    // ...
+    select {
+    case <-c.ctx.Done():
+        return 0, io.EOF
+    case c.writeQueue <- p:
+        // Success - packet queued
+    default:
+        return 0, io.EOF  // <-- WriteQueue full → IMMEDIATE EOF!
+    }
+    // ...
+}
+```
+
+**Queue Math at 400 Mb/s**:
+- Packet rate: ~34,400 packets/second (400M bps / 1500 bytes × 8 bits / 1000ms)
+- WriteQueueSize: 1024 (default in `config.go:451`)
+- **Time to overflow: 1024 / 34,400 ≈ 30 milliseconds!**
+
+If the congestion control sender can't drain the queue fast enough, the queue fills in ~30ms and ALL subsequent writes return EOF.
+
+### Why This Wasn't Seen Before
+
+| Bitrate | Packets/s | Queue Fill Time |
+|---------|-----------|-----------------|
+| 5 Mb/s | ~430 | 2.4 seconds |
+| 20 Mb/s | ~1,700 | 600ms |
+| 100 Mb/s | ~8,600 | 120ms |
+| **400 Mb/s** | **~34,400** | **~30ms** |
+
+At lower bitrates, the queue can absorb bursts. At 400 Mb/s, 30ms is not enough time for the sender to react.
+
+### Cascade Effect
+
+1. `Write()` returns `io.EOF` (queue full)
+2. Client-generator sees EOF error
+3. Client-generator calls `w.Close()`
+4. Connection cleanup starts (`cleanupIoUring()`)
+5. Receive completion handler is still running → **Defect #6b (nil map panic)**
+
+### Potential Solutions
+
+**Option A: Increase WriteQueueSize for high bitrates**
+```go
+// For 400 Mb/s with 3s latency buffer:
+// 34,400 pkt/s × 3s = 103,200 packets minimum
+WriteQueueSize: 110000
+```
+Pros: Simple fix
+Cons: High memory overhead (each queue entry is a packet pointer)
+
+**Option B: Make Write() blocking with timeout**
+```go
+select {
+case <-c.ctx.Done():
+    return 0, io.EOF
+case c.writeQueue <- p:
+    // Success
+case <-time.After(100 * time.Millisecond):
+    return 0, fmt.Errorf("write timeout: queue full")
+}
+```
+Pros: Allows backpressure, application can react
+Cons: Blocks application thread
+
+**Option C: Dynamic queue sizing based on FC (Flow Control)**
+```go
+// Queue size = Flow Control window × safety factor
+queueSize := config.FC * 2  // FC default is 25600
+```
+Pros: Automatically scales with configured buffer size
+Cons: May still not be enough for extreme rates
+
+**Option D: Rate limit at application level**
+- Client-generator should pace sends to match network capacity
+- SRT already does congestion control internally
+- This is more of a workaround than a fix
+
+---
+
+## Deep Dive: WriteQueue Architecture and Channel Overhead
+
+### Context: Why Channels Are Problematic for High-Performance Packet Paths
+
+As documented extensively in `IO_Uring.md`, Go channels have significant overhead for high-throughput packet processing:
+
+1. **Every channel send/receive requires lock acquisition** (internal mutex)
+2. **Goroutine scheduling overhead** when channels block
+3. **Memory allocation** for channel infrastructure
+4. **Cache line contention** when multiple goroutines access the same channel
+
+This is why the io_uring work (Phases 1-4) focused on **bypassing channels on the receive path** using direct packet handling (`handlePacketDirect()`) and lock-free ring buffers. The send path, however, still uses the original channel-based `writeQueue`.
+
+### WriteQueue Write Flow (Application → Network)
+
+**Summary**: Application writes data → `Write()` → `writeQueue` channel → `writeQueueReader()` goroutine → congestion control `snd.Push()` → `pop()` → `onSend()` callback → network syscall
+
+#### Step-by-Step Flow with File/Function References
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    WRITE PATH (Application → Network)                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. APPLICATION WRITE                                                        │
+│     ─────────────────                                                        │
+│     File: connection.go                                                      │
+│     Func: Write(b []byte) (int, error)                                       │
+│     Line: ~677                                                               │
+│                                                                              │
+│     - Creates packet.NewPacket()                                             │
+│     - Sets payload via p.SetData(c.writeData[:n])                            │
+│     - Sets timestamp: p.Header().PktTsbpdTime = c.getTimestamp()             │
+│                                                                              │
+│                              │                                               │
+│                              ▼                                               │
+│  2. NON-BLOCKING CHANNEL SEND (⚠️ BOTTLENECK AT HIGH RATES)                  │
+│     ────────────────────────                                                 │
+│     File: connection.go                                                      │
+│     Func: Write()                                                            │
+│     Lines: 694-701                                                           │
+│                                                                              │
+│     select {                                                                 │
+│     case <-c.ctx.Done():                                                     │
+│         return 0, io.EOF                                                     │
+│     case c.writeQueue <- p:    // ← SUCCESS: packet queued                   │
+│     default:                                                                 │
+│         return 0, io.EOF       // ← FAILURE: queue full → immediate EOF!     │
+│     }                                                                        │
+│                                                                              │
+│     ⚠️ DEFAULT CASE: If channel is full, Write() returns EOF immediately!    │
+│     ⚠️ At 400 Mb/s: ~34,400 pkt/s, queue fills in ~30ms                      │
+│                                                                              │
+│                              │                                               │
+│                              ▼                                               │
+│  3. CHANNEL BUFFER                                                           │
+│     ──────────────                                                           │
+│     File: connection.go                                                      │
+│     Func: newSRTConn()                                                       │
+│     Lines: 382-386                                                           │
+│                                                                              │
+│     writeQueueSize := c.config.WriteQueueSize                                │
+│     if writeQueueSize <= 0 {                                                 │
+│         writeQueueSize = 1024    // ← DEFAULT: only 1024 packets!            │
+│     }                                                                        │
+│     c.writeQueue = make(chan packet.Packet, writeQueueSize)                  │
+│                                                                              │
+│                              │                                               │
+│                              ▼                                               │
+│  4. CHANNEL READER GOROUTINE                                                 │
+│     ────────────────────────                                                 │
+│     File: connection.go                                                      │
+│     Func: writeQueueReader(ctx context.Context)                              │
+│     Lines: 822-838                                                           │
+│     Started at: newSRTConn() line 506-510                                    │
+│                                                                              │
+│     for {                                                                    │
+│         select {                                                             │
+│         case <-ctx.Done():                                                   │
+│             return                                                           │
+│         case p := <-c.writeQueue:  // ← Blocking read from channel           │
+│             c.snd.Push(p)          // ← Feed to congestion control           │
+│         }                                                                    │
+│     }                                                                        │
+│                                                                              │
+│     ⚠️ This goroutine must drain packets faster than Write() produces them   │
+│                                                                              │
+│                              │                                               │
+│                              ▼                                               │
+│  5. CONGESTION CONTROL SENDER                                                │
+│     ─────────────────────────                                                │
+│     File: congestion/live/send.go                                            │
+│     Func: Push(p packet.Packet)                                              │
+│                                                                              │
+│     - Assigns sequence number                                                │
+│     - Adds to send buffer (for potential retransmission)                     │
+│     - Rate limiting / pacing                                                 │
+│     - Calls OnDeliver callback when packet ready to send                     │
+│                                                                              │
+│                              │                                               │
+│                              ▼                                               │
+│  6. POP AND SEND CALLBACK                                                    │
+│     ─────────────────────                                                    │
+│     File: connection.go                                                      │
+│     Func: pop(p packet.Packet)                                               │
+│     Line: ~737                                                               │
+│                                                                              │
+│     - Sets destination address: p.Header().Addr = c.remoteAddr               │
+│     - Sets socket ID: p.Header().DestinationSocketId = c.peerSocketId        │
+│     - Encrypts payload if needed                                             │
+│     - Calls: c.onSend(p)                                                     │
+│                                                                              │
+│                              │                                               │
+│                              ▼                                               │
+│  7. NETWORK SEND (io_uring OR standard)                                      │
+│     ─────────────────────────────────                                        │
+│                                                                              │
+│     IF io_uring enabled (per-connection ring):                               │
+│     File: connection_linux.go                                                │
+│     Func: sendIoUring(p packet.Packet)                                       │
+│     Lines: ~142-259                                                          │
+│     - Get buffer from pool                                                   │
+│     - Marshal packet                                                         │
+│     - Prepare SQE with PrepareSendMsg()                                      │
+│     - Submit to per-connection io_uring ring                                 │
+│     - Completion handler processes result asynchronously                     │
+│                                                                              │
+│     IF standard path (listener):                                             │
+│     File: listen.go                                                          │
+│     Func: send(p packet.Packet)                                              │
+│     Lines: ~427-453                                                          │
+│     - Marshal packet to bytes                                                │
+│     - WriteTo(buffer, addr) syscall                                          │
+│                                                                              │
+│     IF standard path (dialer):                                               │
+│     File: dial.go                                                            │
+│     Func: send(p packet.Packet)                                              │
+│     Lines: ~258-284                                                          │
+│     - Marshal packet to bytes                                                │
+│     - Write(buffer) syscall (connected UDP)                                  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Observations
+
+#### 1. The Bottleneck is NOT io_uring
+
+The io_uring send path (`sendIoUring()`) is already implemented and working. The problem is **before** io_uring - at the `writeQueue` channel.
+
+#### 2. Non-Blocking Write with No Backpressure
+
+```go
+// connection.go lines 694-701
+select {
+case c.writeQueue <- p:
+default:
+    return 0, io.EOF  // ← Drops packet immediately if queue full
+}
+```
+
+This design choice was made to prevent application blocking, but at high rates it causes:
+- Silent packet drops (returned as EOF, not a distinct error)
+- No opportunity for backpressure to slow the application
+
+#### 3. Comparison with Receive Path (Already Optimized)
+
+The **receive path** was optimized in Phases 1-4 to bypass channels:
+
+```
+io_uring CQE → processRecvCompletion() → handlePacketDirect() → Push() → Lock-Free Ring
+                  │
+                  └─ NO CHANNEL on hot path! Data flows directly to receiver
+```
+
+But the **write path** still uses the original channel:
+
+```
+Write() → writeQueue CHANNEL → writeQueueReader() → snd.Push() → io_uring
+              │
+              └─ CHANNEL is the bottleneck, even though io_uring is used for actual send
+```
+
+### Why Receive Path Doesn't Have This Problem
+
+The receive path was already optimized to **bypass channels** using io_uring + lock-free ring:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    OPTIMIZED RECEIVE PATH (io_uring)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  io_uring CQE (Completion Queue Entry)                                       │
+│       │                                                                      │
+│       ▼                                                                      │
+│  recvCompletionHandler()          File: listen_linux.go / dial_linux.go      │
+│       │                                                                      │
+│       ▼                                                                      │
+│  processRecvCompletion()          - Parses packet from buffer                │
+│       │                           - NO CHANNEL INVOLVED!                     │
+│       ▼                                                                      │
+│  handlePacketDirect()             File: connection.go                        │
+│       │                           - Handles control packets inline           │
+│       ▼                           - Calls recv.Push() for data packets       │
+│  recv.Push()                      File: congestion/live/receive.go           │
+│       │                                                                      │
+│       ▼                                                                      │
+│  ┌─ IF UsePacketRing ──────────────────────────────────────────────┐         │
+│  │  pushToRing()  →  Lock-Free Ring  →  drainPacketRing()          │         │
+│  │                        │                                         │         │
+│  │                        └─ NO LOCKS on hot path!                  │         │
+│  └─────────────────────────────────────────────────────────────────┘         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key differences:**
+- Receive path: `io_uring CQE → handlePacketDirect() → Lock-Free Ring` (no channels)
+- Write path: `Write() → writeQueue CHANNEL → writeQueueReader()` (channel bottleneck)
+
+### Proposed Fix Approaches
+
+#### Approach 1: Quick Fix - Increase WriteQueueSize (Immediate)
+
+For high-bitrate tests, increase `WriteQueueSize` via CLI flag:
+```bash
+-writequeuesize 110000  # ~3 seconds buffer at 400 Mb/s
+```
+
+**Pros**: Simple, immediate
+**Cons**: High memory usage, doesn't fix architectural issue
+
+#### Approach 2: Auto-Size WriteQueue Based on Bitrate (Medium-term)
+
+Add validation in `config.go` to automatically size the queue:
+```go
+// Calculate queue size based on expected packet rate and latency
+// At 400Mbps, 3s latency: 34,400 × 3 = 103,200 packets
+estimatedPktRate := config.MaxBW / (config.PayloadSize * 8)
+minQueueSize := estimatedPktRate * uint64(config.ReceiverLatency.Seconds()) * 2
+if minQueueSize > uint64(config.WriteQueueSize) {
+    config.WriteQueueSize = int(minQueueSize)
+}
+```
+
+**Pros**: Automatic, scales with bitrate
+**Cons**: Still uses channel (architectural limit remains)
+
+#### Approach 3: Bypass WriteQueue Channel (Long-term)
+
+Mirror the receive path optimization: bypass the `writeQueue` channel entirely using a lock-free ring or direct submission to congestion control.
+
+```
+CURRENT:
+Write() → writeQueue CHANNEL → writeQueueReader() → snd.Push()
+
+PROPOSED:
+Write() → Lock-Free Ring → eventLoop drains → snd.Push()
+    OR
+Write() → Direct snd.Push() (with backpressure mechanism)
+```
+
+**Pros**: Eliminates channel overhead entirely
+**Cons**: Significant code changes, needs design
+
+### Files to Modify
+
+| File | Change | Priority |
+|------|--------|----------|
+| `config.go` | Validation/auto-sizing for WriteQueueSize | Medium |
+| `connection.go` | Better queue full handling / blocking variant | Medium |
+| `contrib/integration_testing/config.go` | Add WriteQueueSize to 100M+ test configs | Immediate |
+| `contrib/integration_testing/test_configs.go` | Add WriteQueueSize to high-bitrate tests | Immediate |
+
+---
+
+## Defect #6b: Nil Map Panic in sendIoUring (Secondary)
+
+**Phase**: 5 (Validation and Testing)
+**Severity**: **Critical** (panic)
+**Status**: 🔴 Open - Active Investigation
+**Discovered**: 2025-12-24 (during 400M LargeRing test)
+
+### Symptom
+
+After fixing the io_uring ring size (Defect #5 hypothesis confirmed!), a new panic occurred.
+
+**Also observed**: `Error: write: EOF` from client-generator before the panic:
+```
+Error: write: EOF
+```
+
+This comes from `contrib/client-generator/main.go:333`:
+```go
+doneChan <- fmt.Errorf("write: %w", err)
+```
+
+The `io.EOF` indicates the SRT connection closed unexpectedly. At 400 Mb/s, the high packet rate causes connection failure, which then triggers the cleanup race condition leading to the panic.
+
+**Full panic stack**:
 
 ```
 panic: assignment to entry in nil map
@@ -552,6 +952,17 @@ Most robust approach:
 1. Add `sendShutdown` atomic flag (fast check without lock)
 2. Also check for nil map (defense in depth)
 
+### Why EOF Triggers This Bug
+
+The sequence of events at 400 Mb/s:
+
+1. **High packet rate** causes receiver to fall behind
+2. **Packet drops** accumulate (553 drops in 500ms = ~1100 drops/s)
+3. **Connection times out or peer closes** → EOF on write
+4. **EOF triggers cleanup** → `cleanupIoUring()` sets `sendCompletions = nil`
+5. **Meanwhile, ACK still being processed** → `sendACKACK()` → `sendIoUring()`
+6. **Race condition** → panic on nil map assignment
+
 ### Files to Modify
 - `connection_linux.go`: Add nil check in `sendIoUring()`, add shutdown flag
 
@@ -570,12 +981,20 @@ The 400M test with large ring lasted ~500ms (vs ~130ms with small ring) before h
 
 ## Immediate Action Items
 
-1. [ ] **Fix Defect #6 first** - Add nil check in `sendIoUring()` 
-2. [ ] **Add shutdown flag** to prevent sends during cleanup
-3. [ ] **Re-test 400M with large ring** after Defect #6 fix
-4. [ ] **Add `recvRingClosed` atomic flag** (original Defect #5 mitigation)
-5. [ ] **Check for similar issues** in `listen_linux.go`
-6. [ ] **Add 300 Mb/s test** to find exact throughput ceiling without crashes
+### Priority 1: Fix Root Cause (Defect #6 - WriteQueue Overflow)
+1. [ ] **Increase WriteQueueSize** for high-bitrate tests (110000+ for 400 Mb/s)
+2. [ ] **Consider blocking Write()** or better queue full handling
+3. [ ] **Add WriteQueueSize to test configs** for 100M+ tests
+
+### Priority 2: Fix Secondary Panic (Defect #6b - Nil Map)
+4. [ ] **Add nil check in `sendIoUring()`** - defense in depth
+5. [ ] **Add `sendShutdown` atomic flag** - prevent sends during cleanup
+6. [ ] **Check for similar issues** in `listen_linux.go`
+
+### Priority 3: Validation
+7. [ ] **Add `recvRingClosed` atomic flag** (Defect #5 mitigation)
+8. [ ] **Re-test 400M with WriteQueueSize fix**
+9. [ ] **Add 300 Mb/s test** to find exact throughput ceiling
 
 ---
 
