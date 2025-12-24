@@ -31,6 +31,8 @@ var gapSlicePool = sync.Pool{
 // If consolidation routinely exceeds this budget, it indicates a performance problem.
 const DefaultNakConsolidationBudgetUs = 2_000 // 2ms in microseconds
 
+const DefaultPayloadSizeBytes = 1456
+
 // defaultNakConsolidationBudget returns the NAK consolidation budget as a time.Duration.
 // If configValue is 0, uses DefaultNakConsolidationBudgetUs (5ms).
 func defaultNakConsolidationBudget(configValue uint64) time.Duration {
@@ -241,11 +243,11 @@ type receiver struct {
 }
 
 // NewReceiver takes a ReceiveConfig and returns a new Receiver
-func NewReceiver(config ReceiveConfig) congestion.Receiver {
-	// Choose packet store implementation based on config
+func NewReceiver(recvConfig ReceiveConfig) congestion.Receiver {
+	// Choose packet store implementation based on recvConfig
 	var store packetStore
-	if config.PacketReorderAlgorithm == "btree" {
-		degree := config.BTreeDegree
+	if recvConfig.PacketReorderAlgorithm == "btree" {
+		degree := recvConfig.BTreeDegree
 		if degree <= 0 {
 			degree = 32 // Default btree degree
 		}
@@ -256,40 +258,40 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 	}
 
 	r := &receiver{
-		maxSeenSequenceNumber:       config.InitialSequenceNumber.Dec(),
-		lastACKSequenceNumber:       config.InitialSequenceNumber.Dec(),
-		lastDeliveredSequenceNumber: config.InitialSequenceNumber.Dec(),
+		maxSeenSequenceNumber:       recvConfig.InitialSequenceNumber.Dec(),
+		lastACKSequenceNumber:       recvConfig.InitialSequenceNumber.Dec(),
+		lastDeliveredSequenceNumber: recvConfig.InitialSequenceNumber.Dec(),
 		packetStore:                 store,
-		lockTiming:                  config.LockTimingMetrics,
-		metrics:                     config.ConnectionMetrics,
-		bufferPool:                  config.BufferPool, // Phase 2: zero-copy support
+		lockTiming:                  recvConfig.LockTimingMetrics,
+		metrics:                     recvConfig.ConnectionMetrics,
+		bufferPool:                  recvConfig.BufferPool, // Phase 2: zero-copy support
 
-		periodicACKInterval: config.PeriodicACKInterval,
-		periodicNAKInterval: config.PeriodicNAKInterval,
+		periodicACKInterval: recvConfig.PeriodicACKInterval,
+		periodicNAKInterval: recvConfig.PeriodicNAKInterval,
 
 		// avgPayloadSize initialized via atomic below
 
-		sendACK: config.OnSendACK,
-		sendNAK: config.OnSendNAK,
-		deliver: config.OnDeliver,
+		sendACK: recvConfig.OnSendACK,
+		sendNAK: recvConfig.OnSendNAK,
+		deliver: recvConfig.OnDeliver,
 
 		// NAK btree configuration
-		useNakBtree:            config.UseNakBtree,
-		suppressImmediateNak:   config.SuppressImmediateNak,
-		tsbpdDelay:             config.TsbpdDelay,
-		nakRecentPercent:       config.NakRecentPercent,
-		nakMergeGap:            config.NakMergeGap,
-		nakConsolidationBudget: defaultNakConsolidationBudget(config.NakConsolidationBudget),
+		useNakBtree:            recvConfig.UseNakBtree,
+		suppressImmediateNak:   recvConfig.SuppressImmediateNak,
+		tsbpdDelay:             recvConfig.TsbpdDelay,
+		nakRecentPercent:       recvConfig.NakRecentPercent,
+		nakMergeGap:            recvConfig.NakMergeGap,
+		nakConsolidationBudget: defaultNakConsolidationBudget(recvConfig.NakConsolidationBudget),
 
 		// FastNAK configuration
-		fastNakEnabled:       config.FastNakEnabled,
-		fastNakThreshold:     time.Duration(config.FastNakThresholdUs) * time.Microsecond,
-		fastNakRecentEnabled: config.FastNakRecentEnabled,
+		fastNakEnabled:       recvConfig.FastNakEnabled,
+		fastNakThreshold:     time.Duration(recvConfig.FastNakThresholdUs) * time.Microsecond,
+		fastNakRecentEnabled: recvConfig.FastNakRecentEnabled,
 	}
 
 	// Create NAK btree if enabled
 	if r.useNakBtree {
-		degree := config.BTreeDegree
+		degree := recvConfig.BTreeDegree
 		if degree <= 0 {
 			degree = 32 // Default btree degree
 		}
@@ -297,15 +299,15 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 	}
 
 	// Initialize lock-free ring buffer if enabled (Phase 3: Lockless Design)
-	if config.UsePacketRing {
+	if recvConfig.UsePacketRing {
 		r.usePacketRing = true
 
 		// Calculate total capacity (per-shard size * number of shards)
-		ringSize := config.PacketRingSize
+		ringSize := recvConfig.PacketRingSize
 		if ringSize <= 0 {
 			ringSize = 1024 // Default per-shard capacity
 		}
-		numShards := config.PacketRingShards
+		numShards := recvConfig.PacketRingShards
 		if numShards <= 0 {
 			numShards = 4 // Default number of shards
 		}
@@ -319,9 +321,9 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 
 		// Configure backoff behavior for ring writes
 		r.writeConfig = ring.WriteConfig{
-			MaxRetries:      config.PacketRingMaxRetries,
-			BackoffDuration: config.PacketRingBackoffDuration,
-			MaxBackoffs:     config.PacketRingMaxBackoffs,
+			MaxRetries:      recvConfig.PacketRingMaxRetries,
+			BackoffDuration: recvConfig.PacketRingBackoffDuration,
+			MaxBackoffs:     recvConfig.PacketRingMaxBackoffs,
 		}
 		// Apply defaults if not configured
 		if r.writeConfig.MaxRetries <= 0 {
@@ -340,30 +342,30 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 	}
 
 	// Event loop configuration (Phase 4: Lockless Design)
-	if config.UseEventLoop {
+	if recvConfig.UseEventLoop {
 		r.useEventLoop = true
-		r.eventLoopRateInterval = config.EventLoopRateInterval
+		r.eventLoopRateInterval = recvConfig.EventLoopRateInterval
 		if r.eventLoopRateInterval <= 0 {
 			r.eventLoopRateInterval = 1 * time.Second // Default: 1s
 		}
-		r.backoffColdStartPkts = config.BackoffColdStartPkts
+		r.backoffColdStartPkts = recvConfig.BackoffColdStartPkts
 		if r.backoffColdStartPkts <= 0 {
 			r.backoffColdStartPkts = 1000 // Default: 1000 packets
 		}
-		r.backoffMinSleep = config.BackoffMinSleep
+		r.backoffMinSleep = recvConfig.BackoffMinSleep
 		if r.backoffMinSleep <= 0 {
 			r.backoffMinSleep = 10 * time.Microsecond // Default: 10µs
 		}
-		r.backoffMaxSleep = config.BackoffMaxSleep
+		r.backoffMaxSleep = recvConfig.BackoffMaxSleep
 		if r.backoffMaxSleep <= 0 {
 			r.backoffMaxSleep = 1 * time.Millisecond // Default: 1ms
 		}
 	}
 
 	// Debug logging configuration
-	if config.Debug {
+	if recvConfig.Debug {
 		r.debug = true
-		r.logFunc = config.LogFunc
+		r.logFunc = recvConfig.LogFunc
 	}
 
 	if r.sendACK == nil {
@@ -387,7 +389,7 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 
 	// Initialize running averages with atomic operations (Phase 2: avgPayloadSize atomic)
 	// 5.1.2. SRT's Default LiveCC Algorithm - default 1456 bytes
-	r.avgPayloadSizeBits.Store(math.Float64bits(1456))
+	r.avgPayloadSizeBits.Store(math.Float64bits(DefaultPayloadSizeBytes))
 	// avgLinkCapacity starts at 0
 
 	// Initialize nakScanStartPoint from InitialSequenceNumber (known from handshake).
@@ -396,7 +398,7 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 	// - But for a stream starting at MAX-2, logical order is: MAX-2, MAX-1, MAX, 0, 1, 2, ...
 	// - Btree circular order is: 0, 1, 2, ..., MAX-2, MAX-1, MAX
 	// - Starting from btree.Min() would give wrong gap detection across wraparound
-	r.nakScanStartPoint.Store(config.InitialSequenceNumber.Val())
+	r.nakScanStartPoint.Store(recvConfig.InitialSequenceNumber.Val())
 
 	return r
 }

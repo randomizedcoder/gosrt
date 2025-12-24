@@ -3155,12 +3155,12 @@ The ~10ms RTT in EventLoop mode vs ~0.08ms in Tick mode is **expected behavior**
 
 **Original Tick Mode (with standard receive):**
 ```
-Packet arrives → handlePacket() → Push() → LightACK sent immediately
+Packet arrives → handlePacket() → Push() → Lite ACK sent immediately
                                               ↓
                                          RTT ≈ 0.08ms (instant)
 ```
 
-Every time a packet arrives and advances the sequence number, a "LightACK" is sent immediately. This gives near-instant RTT.
+Every time a packet arrives and advances the sequence number, a "Lite ACK" is sent immediately. This gives near-instant RTT.
 
 **EventLoop Mode (with io_uring):**
 ```
@@ -3176,12 +3176,89 @@ io_uring CQE → Push() → Ring Buffer → [wait for ACK ticker]
 With io_uring:
 1. Packets arrive slightly **out of order** due to io_uring's batched completion
 2. Packets go into the lock-free ring, then btree (sorted)
-3. **No LightACK** on each packet - ACKs are batched on the 10ms ticker
+3. **No Lite ACK** on each packet - ACKs are batched on the 10ms ticker
 4. RTT reflects the ACK ticker interval, not network latency
 
-#### Why No LightACK in EventLoop?
+#### Terminology: Lite ACK vs Full ACK
 
-In the original design, `LightACK` was sent in `pushLocked()` when:
+**Note**: The term is "**Lite ACK**" (lightweight), not "Light ACK" (brightness). The SRT specification uses "Lite ACK" to describe a minimal acknowledgment packet.
+
+| ACK Type | Content | When Sent | Triggers ACKACK? |
+|----------|---------|-----------|------------------|
+| **Full ACK** | Sequence + RTT + stats | Every `periodicACKInterval` (10ms) | ✅ Yes |
+| **Lite ACK** | Sequence only | When 64+ packets received between full ACKs | ❌ No |
+
+See `packet/packet.go` `CIFACK` struct:
+```go
+type CIFACK struct {
+    IsLite                      bool   // Lite ACK (sequence only)
+    IsSmall                     bool   // Small ACK (no link capacity)
+    LastACKPacketSequenceNumber circular.Number
+    RTT                         uint32 // Only in full ACK
+    RTTVar                      uint32 // Only in full ACK
+    // ... other fields only in full ACK
+}
+```
+
+#### How RTT is Calculated via ACKACK
+
+RTT calculation requires a **Full ACK** (not Lite ACK) and works as follows:
+
+**File**: `connection.go`
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         RTT Calculation Flow                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  RECEIVER                              SENDER                                │
+│  ────────                              ──────                                │
+│                                                                              │
+│  1. periodicACK() runs (10ms timer)                                          │
+│     ↓                                                                        │
+│  2. sendACK() called with lite=false (full ACK)                              │
+│     - Records: c.ackNumbers[ackNumber] = time.Now()                          │
+│     - Sends: ACK packet with TypeSpecific = ackNumber                        │
+│                          ─────────────────────►                              │
+│                                                                              │
+│                                        3. handleACK() receives packet        │
+│                                           - Checks: !cif.IsLite && !cif.IsSmall │
+│                                           - Calls: sendACKACK(typeSpecific)  │
+│                          ◄─────────────────────                              │
+│                                                                              │
+│  4. handleACKACK() receives ACKACK                                           │
+│     - Looks up: ts = c.ackNumbers[typeSpecific]                              │
+│     - Calculates: RTT = time.Since(ts)                                       │
+│     - Calls: c.recalculateRTT(RTT)                                           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key code** (`connection.go` lines 1178-1208):
+```go
+func (c *srtConn) handleACKACK(p packet.Packet) {
+    c.ackLock.Lock()
+
+    // p.typeSpecific is the ACKNumber from the original ACK
+    if ts, ok := c.ackNumbers[p.Header().TypeSpecific]; ok {
+        // 4.10. Round-Trip Time Estimation
+        c.recalculateRTT(time.Since(ts))  // RTT = now - when we sent the ACK
+        delete(c.ackNumbers, p.Header().TypeSpecific)
+    }
+    // ... cleanup old ACK numbers ...
+
+    c.ackLock.Unlock()
+
+    // Update NAK interval based on new RTT
+    c.recv.SetNAKInterval(uint64(c.rtt.NAKInterval()))
+}
+```
+
+**Why Lite ACKs don't update RTT**: Lite ACKs have `TypeSpecific = 0` and don't get ACKACK responses. They're designed for fast sequence acknowledgment without the overhead of RTT measurement.
+
+#### Why No Lite ACK in EventLoop?
+
+In the original design, Lite ACK was sent in `pushLocked()` when:
 1. A packet arrived
 2. The sequence number advanced (was contiguous)
 
@@ -3211,9 +3288,22 @@ In EventLoop mode with io_uring:
 
 #### Possible Optimizations (Future)
 
-1. **Add LightACK to EventLoop's default case**: After `processOnePacket()`, if sequence advanced, send LightACK
+1. **Inline ACK in EventLoop's default case**: After `processOnePacket()`, if the packet is the next expected sequence number, send an ACK immediately (O(1) - no btree scan needed)
 2. **Reduce ACK ticker interval**: From 10ms to 5ms or less
-3. **Hybrid approach**: Send LightACK after draining N contiguous packets
+3. **ACK Modulus**: Only send inline ACK every Nth consecutive packet (e.g., `ACKModulus=10` → ACK every 10th sequential packet)
+
+**See**: [`ack_optimization.md` - ACK Optimization: Inline ACK and ACK Modulus](./ack_optimization.md)
+
+This optimization addresses the RTT increase by detecting sequential packet arrivals inline during `processOnePacket()`. Key benefits:
+
+| Approach | RTT | ACK Overhead | Implementation |
+|----------|-----|--------------|----------------|
+| Current (timer only) | ~10ms | Low | ✅ Implemented |
+| Inline ACK (every packet) | <1ms | High | Proposed |
+| Inline ACK + ACKModulus=10 | ~2.3ms | Medium | Proposed |
+| Inline ACK + ACKModulus=64 | ~15ms | Low | Proposed |
+
+The inline ACK uses **stack-local variables** in the event loop (avoiding atomics) and is O(1) when packets arrive in sequence—no btree iteration required.
 
 ### Parallel Test Results: `Parallel-Starlink-5M-Base-vs-FullEventLoop`
 
@@ -3333,7 +3423,8 @@ The `too_old` drops are a trade-off from batched ACKs. With the 3000ms TSBPD buf
 
 ### Known Trade-offs
 
-1. **RTT increase**: ~10-20ms (from ACK batching) vs ~0.08ms (instant LightACK)
+1. **RTT increase**: ~10-20ms (from ACK batching) vs ~0.08ms (instant Lite ACK in legacy mode)
+   - See "Possible Optimizations" above for inline ACK solution
 2. **`too_old` drops**: Packets that exceed TSBPD deadline due to batched delivery
    - 5Mb/s: ~249 packets
    - 20Mb/s: ~1,279 packets

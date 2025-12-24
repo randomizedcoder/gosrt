@@ -418,11 +418,13 @@ gosrt.(*dialer).recvCompletionHandler() at dial_linux.go:508
 
 ### Issue 2: RTT Increase in EventLoop Mode
 
-**Description**: RTT shows ~10-20ms (from ACK batching) vs ~0.08ms (instant LightACK).
+**Description**: RTT shows ~10-20ms (from ACK batching) vs ~0.08ms (instant Lite ACK in legacy mode).
 
 **Impact**: Sender sees higher RTT, may affect congestion control.
 
 **Mitigation**: Acceptable for live streaming with 3000ms TSBPD buffer.
+
+**Future Optimization**: See [`ack_optimization.md`](./ack_optimization.md) for inline ACK with ACKModulus approach.
 
 ### Issue 3: SIGSEGV Crash at 400 Mb/s (CRITICAL) 🚨
 
@@ -576,9 +578,9 @@ After Phase 5 completion:
 2. **Create release notes** - Document all lockless features and flags
 3. **Performance benchmarks** - Capture before/after metrics for documentation
 4. **Consider future optimizations**:
-   - Add LightACK to EventLoop's default case
+   - Inline ACK with ACKModulus (see [`ack_optimization.md`](./ack_optimization.md))
    - Reduce ACK ticker interval
-   - Hybrid ACK approach
+   - Stack-local ACK state to avoid atomics
 
 ---
 

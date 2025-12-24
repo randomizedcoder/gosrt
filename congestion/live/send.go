@@ -56,23 +56,23 @@ type sender struct {
 }
 
 // NewSender takes a SendConfig and returns a new Sender
-func NewSender(config SendConfig) congestion.Sender {
+func NewSender(sendConfig SendConfig) congestion.Sender {
 	s := &sender{
-		nextSequenceNumber: config.InitialSequenceNumber,
-		dropThreshold:      config.DropThreshold,
+		nextSequenceNumber: sendConfig.InitialSequenceNumber,
+		dropThreshold:      sendConfig.DropThreshold,
 		packetList:         list.New(),
 		lossList:           list.New(),
-		lockTiming:         config.LockTimingMetrics,
-		metrics:            config.ConnectionMetrics,
+		lockTiming:         sendConfig.LockTimingMetrics,
+		metrics:            sendConfig.ConnectionMetrics,
 
 		avgPayloadSize: packet.MAX_PAYLOAD_SIZE, //  5.1.2. SRT's Default LiveCC Algorithm
-		maxBW:          float64(config.MaxBW),
-		inputBW:        float64(config.InputBW),
-		overheadBW:     float64(config.OverheadBW),
+		maxBW:          float64(sendConfig.MaxBW),
+		inputBW:        float64(sendConfig.InputBW),
+		overheadBW:     float64(sendConfig.OverheadBW),
 
-		deliver: config.OnDeliver,
+		deliver: sendConfig.OnDeliver,
 
-		honorNakOrder: config.HonorNakOrder,
+		honorNakOrder: sendConfig.HonorNakOrder,
 	}
 
 	if s.deliver == nil {

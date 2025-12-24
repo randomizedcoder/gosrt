@@ -29,6 +29,8 @@
 13. [Risk Analysis](#13-risk-analysis)
 14. [Success Metrics](#14-success-metrics)
 
+**Related**: [ACK Optimization: Inline ACK and ACK Modulus](./ack_optimization.md) - Proposed optimization for RTT reduction
+
 ---
 
 ## 1. Executive Summary

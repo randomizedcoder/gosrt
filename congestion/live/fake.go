@@ -36,25 +36,25 @@ type fakeLiveReceive struct {
 	lock sync.RWMutex
 }
 
-func NewFakeLiveReceive(config ReceiveConfig) congestion.Receiver {
+func NewFakeLiveReceive(recvConfig ReceiveConfig) congestion.Receiver {
 	// Phase 1: Lockless - Create metrics for rate tracking (even for fake receiver)
 	m := metrics.NewConnectionMetrics()
 
 	r := &fakeLiveReceive{
-		maxSeenSequenceNumber:       config.InitialSequenceNumber.Dec(),
-		lastACKSequenceNumber:       config.InitialSequenceNumber.Dec(),
-		lastDeliveredSequenceNumber: config.InitialSequenceNumber.Dec(),
+		maxSeenSequenceNumber:       recvConfig.InitialSequenceNumber.Dec(),
+		lastACKSequenceNumber:       recvConfig.InitialSequenceNumber.Dec(),
+		lastDeliveredSequenceNumber: recvConfig.InitialSequenceNumber.Dec(),
 
-		periodicACKInterval: config.PeriodicACKInterval,
-		periodicNAKInterval: config.PeriodicNAKInterval,
+		periodicACKInterval: recvConfig.PeriodicACKInterval,
+		periodicNAKInterval: recvConfig.PeriodicNAKInterval,
 
 		avgPayloadSize: 1456, //  5.1.2. SRT's Default LiveCC Algorithm
 
 		metrics: m, // Phase 1: Lockless
 
-		sendACK: config.OnSendACK,
-		sendNAK: config.OnSendNAK,
-		deliver: config.OnDeliver,
+		sendACK: recvConfig.OnSendACK,
+		sendNAK: recvConfig.OnSendNAK,
+		deliver: recvConfig.OnDeliver,
 	}
 
 	if r.sendACK == nil {
