@@ -96,6 +96,39 @@ func TestPrometheusCounterAccuracy(t *testing.T) {
 	require.Contains(t, output, `gosrt_connection_retransmissions_from_nak_total{socket_id="0xabcd1234",instance="default"} 99`)
 }
 
+// TestPrometheusACKLiteFullCounters verifies Light and Full ACK metrics are correctly exported
+// Phase 12: ACK Optimization - validates new ack_lite/ack_full type labels
+func TestPrometheusACKLiteFullCounters(t *testing.T) {
+	socketId := uint32(0xACAC1234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set Light/Full ACK counters (Phase 5: ACK Optimization)
+	m.PktSentACKLiteSuccess.Store(1234)
+	m.PktSentACKFullSuccess.Store(567)
+	m.PktRecvACKLiteSuccess.Store(890)
+	m.PktRecvACKFullSuccess.Store(111)
+
+	output := getPrometheusOutput(t)
+
+	// Verify Light ACK metrics with type="ack_lite" label
+	require.Contains(t, output,
+		`gosrt_connection_packets_sent_total{socket_id="0xacac1234",instance="default",type="ack_lite",status="success"} 1234`,
+		"Light ACKs sent should be exported with type=ack_lite")
+	require.Contains(t, output,
+		`gosrt_connection_packets_received_total{socket_id="0xacac1234",instance="default",type="ack_lite",status="success"} 890`,
+		"Light ACKs received should be exported with type=ack_lite")
+
+	// Verify Full ACK metrics with type="ack_full" label
+	require.Contains(t, output,
+		`gosrt_connection_packets_sent_total{socket_id="0xacac1234",instance="default",type="ack_full",status="success"} 567`,
+		"Full ACKs sent should be exported with type=ack_full")
+	require.Contains(t, output,
+		`gosrt_connection_packets_received_total{socket_id="0xacac1234",instance="default",type="ack_full",status="success"} 111`,
+		"Full ACKs received should be exported with type=ack_full")
+}
+
 // TestPrometheusExportsAllCounters uses reflection to verify every atomic counter
 // in ConnectionMetrics is exported to Prometheus output.
 // This catches any metrics that are added to the struct but forgotten in handler.go.

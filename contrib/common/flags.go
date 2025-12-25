@@ -104,6 +104,11 @@ var (
 	BackoffMinSleep       = flag.Duration("backoffminsleep", 0, "Minimum sleep during idle periods (default: 10µs)")
 	BackoffMaxSleep       = flag.Duration("backoffmaxsleep", 0, "Maximum sleep during idle periods (default: 1ms)")
 
+	// ACK optimization configuration flags (Phase 5: ACK Optimization)
+	LightACKDifference = flag.Int("lightackdifference", -1,
+		"Send Light ACK after N contiguous packets progress (default: 64, max: 5000). "+
+			"Higher values reduce ACK overhead at high bitrates.")
+
 	// Debug configuration flags
 	ReceiverDebug = flag.Bool("receiverdebug", false, "Enable debug logging in receiver (NAK dispatch, ring ops, gap detection)")
 
@@ -384,6 +389,11 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["backoffmaxsleep"] {
 		config.BackoffMaxSleep = *BackoffMaxSleep
+	}
+
+	// ACK optimization flags (Phase 5: ACK Optimization)
+	if FlagSet["lightackdifference"] && *LightACKDifference > 0 {
+		config.LightACKDifference = uint32(*LightACKDifference)
 	}
 
 	// Debug flags

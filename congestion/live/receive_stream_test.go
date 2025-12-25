@@ -664,20 +664,57 @@ func generateMatrixStream(addr net.Addr, profile StreamProfile, startSeq uint32)
 }
 
 // runNakCycles runs multiple NAK cycles to ensure all gaps are detected.
-// We need to advance time enough that:
-// 1. All packets have passed the "too recent" threshold
-// 2. Multiple NAK intervals have elapsed to give periodic NAK a chance to run
-func runNakCycles(recv *receiver, startTimeUs uint64, profile StreamProfile, cycles int) {
-	// Start NAK cycles after a full TSBPD delay has passed from the stream end
-	// This ensures all packets are past the "too recent" threshold
-	baseTime := startTimeUs + profile.TsbpdDelayUs
+//
+// With the unified contiguousPoint approach (Phase 14), NAK scanning only processes
+// packets in a specific time window:
+//   - Not TSBPD-expired: now < PktTsbpdTime
+//   - Not too recent: PktTsbpdTime <= now + TsbpdDelay * NakRecentPercent
+//
+// This means valid tick time for a packet is:
+//   PktTsbpdTime - TsbpdDelay * NakRecentPercent <= now < PktTsbpdTime
+//
+// The window is only NakRecentPercent wide (typically 10% = 12ms for 120ms TSBPD).
+// To scan ALL packets, we slide through the stream in small steps.
+func runNakCycles(recv *receiver, streamEndTimeUs uint64, profile StreamProfile, cycles int) {
+	// Stream timing:
+	// - First packet arrival: 1_000_000 µs (1 second)
+	// - First packet's PktTsbpdTime = 1_000_000 + TsbpdDelayUs
+	// - Last packet's PktTsbpdTime ≈ streamEndTimeUs + TsbpdDelayUs
+	startTimeUs := uint64(1_000_000)
+	firstPktTsbpdTime := startTimeUs + profile.TsbpdDelayUs
+	lastPktTsbpdTime := streamEndTimeUs + profile.TsbpdDelayUs
+
+	// Valid tick window for first packet:
+	//   firstPktTsbpdTime - TsbpdDelay * NakRecentPercent <= now < firstPktTsbpdTime
+	nakRecentPercent := 0.10 // matches CfgNakBtree
+	windowSize := uint64(float64(profile.TsbpdDelayUs) * nakRecentPercent)
+
+	// Start just before first packet becomes scannable
+	// (at the moment it exits the "too recent" window)
+	tickTime := firstPktTsbpdTime - windowSize
+
+	// Slide by half the window to ensure overlapping coverage
+	slideStep := windowSize / 2
+	if slideStep < 1000 {
+		slideStep = 1000 // minimum 1ms step
+	}
 
 	for i := 0; i < cycles; i++ {
-		// Advance time by the NAK interval for each cycle
-		// This ensures periodicNAK is triggered on each tick
-		tickTime := baseTime + uint64(i)*20_000 // 20ms between cycles
 		recv.Tick(tickTime)
+
+		// Slide the window forward
+		tickTime += slideStep
+
+		// Stop when we've processed all packets
+		// (when tick time is past the last packet's valid window)
+		if tickTime > lastPktTsbpdTime {
+			break
+		}
 	}
+
+	// Final passes at stream end to ensure complete coverage
+	recv.Tick(lastPktTsbpdTime - windowSize/2)
+	recv.Tick(lastPktTsbpdTime - 1) // Just before last packet expires
 }
 
 // verifyNakResults checks that all dropped packets were NAKed (excluding "too recent" packets).

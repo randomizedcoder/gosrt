@@ -289,6 +289,12 @@ run_test "Full lockless pipeline" "-usepacketring -useeventloop -packetringsize 
 # Test 59: Debug configuration flags
 run_test "ReceiverDebug flag" "-receiverdebug" '"ReceiverDebug" *: *true' "$SERVER_BIN"
 
+# Test 60-63: ACK optimization flags (Phase 5: ACK Optimization)
+run_test "LightACKDifference default (64)" "-useeventloop -usepacketring" '"LightACKDifference" *: *64' "$SERVER_BIN"
+run_test "LightACKDifference flag (128)" "-lightackdifference 128" '"LightACKDifference" *: *128' "$SERVER_BIN"
+run_test "LightACKDifference flag (256)" "-lightackdifference 256" '"LightACKDifference" *: *256' "$SERVER_BIN"
+run_test "LightACKDifference with event loop" "-usepacketring -useeventloop -lightackdifference 256" '"UseEventLoop" *: *true.*"LightACKDifference" *: *256' "$SERVER_BIN"
+
 echo ""
 echo "--- Component-Specific Flags (Help Output) ---"
 echo ""

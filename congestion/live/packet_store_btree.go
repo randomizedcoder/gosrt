@@ -89,7 +89,46 @@ func (s *btreePacketStore) Remove(seqNum circular.Number) packet.Packet {
 	return removed.packet
 }
 
+// RemoveAll removes packets starting from Min() that match predicate.
+// Uses DeleteMin() for O(log n) per delete (no lookup needed).
+// This is the optimized implementation - see RemoveAllSlow for the original.
+//
+// Performance: For n packets to remove from btree of size N:
+//   - RemoveAll (optimized):  O(n * log N) - DeleteMin is O(log N)
+//   - RemoveAllSlow:          O(n * log N) for collection + O(n * log N) for deletes
+//     BUT requires allocation of toRemove slice
+//
+// The optimization eliminates the temporary slice allocation and second pass.
 func (s *btreePacketStore) RemoveAll(predicate func(pkt packet.Packet) bool, deliverFunc func(pkt packet.Packet)) int {
+	removed := 0
+
+	for {
+		// Get the minimum element
+		minItem, found := s.tree.Min()
+		if !found {
+			break // Tree is empty
+		}
+
+		// Check if it matches predicate
+		if !predicate(minItem.packet) {
+			break // Stop at first non-matching (sorted order)
+		}
+
+		// Deliver the packet
+		deliverFunc(minItem.packet)
+
+		// Delete the minimum (O(log n), no lookup needed)
+		s.tree.DeleteMin()
+		removed++
+	}
+
+	return removed
+}
+
+// RemoveAllSlow is the original implementation for benchmarking comparison.
+// It collects items to remove in a slice, then deletes them in a second pass.
+// This requires allocation of the toRemove slice and two traversals.
+func (s *btreePacketStore) RemoveAllSlow(predicate func(pkt packet.Packet) bool, deliverFunc func(pkt packet.Packet)) int {
 	removed := 0
 	var toRemove []*packetItem
 

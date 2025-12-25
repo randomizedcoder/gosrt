@@ -217,6 +217,14 @@ type DerivedMetrics struct {
 	TotalACKACKsRecv     int64
 	TotalErrors          int64
 
+	// Light/Full ACK counters (Phase 12: ACK Optimization)
+	// Expected: ACKLiteSent ≈ (packets_sent / LightACKDifference) for EventLoop mode
+	// Expected: ACKFullSent ≈ (test_duration_sec * 100) for 10ms Full ACK interval
+	ACKLiteSent int64 // gosrt_connection_packets_sent_total{type="ack_lite"}
+	ACKFullSent int64 // gosrt_connection_packets_sent_total{type="ack_full"}
+	ACKLiteRecv int64 // gosrt_connection_packets_received_total{type="ack_lite"}
+	ACKFullRecv int64 // gosrt_connection_packets_received_total{type="ack_full"}
+
 	// Network vs SRT Loss (see integration_testing_design.md#3-understanding-loss-network-vs-srt)
 	// TotalGapsDetected: Sequence gaps detected by receiver (≈ netem loss, triggers NAK/retrans)
 	TotalGapsDetected int64
@@ -422,6 +430,18 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 		getSumByPrefixContaining(first, "gosrt_connection_packets_sent_total", "type=\"ackack\""))
 	dm.TotalACKACKsRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_received_total", "type=\"ackack\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_packets_received_total", "type=\"ackack\""))
+
+	// ========== Light/Full ACK Metrics (Phase 12: ACK Optimization) ==========
+	// Light ACKs - sent for each LightACKDifference packets in EventLoop mode
+	// Uses type="ack_lite" and type="ack_full" labels in gosrt_connection_packets_*_total
+	dm.ACKLiteSent = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_sent_total", "type=\"ack_lite\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_packets_sent_total", "type=\"ack_lite\""))
+	dm.ACKFullSent = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_sent_total", "type=\"ack_full\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_packets_sent_total", "type=\"ack_full\""))
+	dm.ACKLiteRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_received_total", "type=\"ack_lite\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_packets_received_total", "type=\"ack_lite\""))
+	dm.ACKFullRecv = int64(getSumByPrefixContaining(last, "gosrt_connection_packets_received_total", "type=\"ack_full\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_packets_received_total", "type=\"ack_full\""))
 
 	// ========== NAK btree Metrics (io_uring reorder handling) ==========
 	// Core operations
@@ -1156,6 +1176,82 @@ type RateMetricsResult struct {
 	ConfiguredBitrateMbps float64
 }
 
+// ACKRateValidation holds the result of ACK rate validation (Phase 12: ACK Optimization)
+type ACKRateValidation struct {
+	Passed        bool
+	LightACKError string
+	FullACKError  string
+	// Observed values for reporting
+	LightACKsSent         int64
+	FullACKsSent          int64
+	ExpectedLightACKs     int64
+	ExpectedFullACKs      int64
+	LightACKDifference    int64
+	TestDurationSec       float64
+	IsEventLoopMode       bool // True if EventLoop is enabled (affects expectations)
+}
+
+// ValidateACKRates checks that Light and Full ACK rates are within expected bounds
+// For EventLoop mode:
+//   - Light ACKs: ≈ packets_sent / LightACKDifference
+//   - Full ACKs: ≈ 0 (Full ACKs only sent on massive jumps in EventLoop)
+// For Tick mode:
+//   - Light ACKs: ≈ 0 (Light ACKs not triggered in Tick mode)
+//   - Full ACKs: ≈ test_duration_sec * 100 (10ms interval = 100/sec)
+func ValidateACKRates(dm DerivedMetrics, testDurationSec float64,
+	lightACKDifference int64, packetsSent int64, isEventLoopMode bool) ACKRateValidation {
+	result := ACKRateValidation{
+		Passed:             false, // Fail-safe default
+		LightACKsSent:      dm.ACKLiteSent,
+		FullACKsSent:       dm.ACKFullSent,
+		LightACKDifference: lightACKDifference,
+		TestDurationSec:    testDurationSec,
+		IsEventLoopMode:    isEventLoopMode,
+	}
+
+	if isEventLoopMode && lightACKDifference > 0 {
+		// EventLoop mode: Light ACKs sent based on LightACKDifference
+		result.ExpectedLightACKs = packetsSent / lightACKDifference
+		lightACKTolerance := result.ExpectedLightACKs / 5 // ±20% tolerance
+		if lightACKTolerance < 10 {
+			lightACKTolerance = 10 // Minimum tolerance
+		}
+
+		if dm.ACKLiteSent < result.ExpectedLightACKs-lightACKTolerance ||
+			dm.ACKLiteSent > result.ExpectedLightACKs+lightACKTolerance {
+			result.LightACKError = fmt.Sprintf("Light ACKs sent %d, expected %d±%d",
+				dm.ACKLiteSent, result.ExpectedLightACKs, lightACKTolerance)
+			return result
+		}
+
+		// In EventLoop mode, Full ACKs are only sent on massive jumps
+		// We don't set strict expectations, but warn if there are many
+		result.ExpectedFullACKs = 0 // Not expected in normal operation
+		// Note: Don't fail on Full ACK count in EventLoop mode
+	} else {
+		// Tick mode: Full ACKs sent at 10ms intervals
+		result.ExpectedFullACKs = int64(testDurationSec * 100) // 10ms = 100/sec
+		fullACKTolerance := int64(testDurationSec * 20)        // ±20/sec tolerance
+		if fullACKTolerance < 10 {
+			fullACKTolerance = 10 // Minimum tolerance
+		}
+
+		if dm.ACKFullSent < result.ExpectedFullACKs-fullACKTolerance ||
+			dm.ACKFullSent > result.ExpectedFullACKs+fullACKTolerance {
+			result.FullACKError = fmt.Sprintf("Full ACKs sent %d, expected %d±%d",
+				dm.ACKFullSent, result.ExpectedFullACKs, fullACKTolerance)
+			return result
+		}
+
+		// In Tick mode, Light ACKs are sent via RecvLightACKCounter (legacy)
+		// We don't validate this in Tick mode
+		result.ExpectedLightACKs = 0
+	}
+
+	result.Passed = true
+	return result
+}
+
 // VerifyRateMetrics validates that Prometheus rate metrics match computed averages
 // and configured bitrate. This is a key validation for Phase 1 lockless design.
 //
@@ -1798,6 +1894,11 @@ type JSONComponentMetrics struct {
 	ACKsRecv        int64   `json:"acks_recv"`
 	NAKsRecv        int64   `json:"naks_recv"`
 	AvgRecvRateMbps float64 `json:"avg_recv_rate_mbps,omitempty"`
+	// Light/Full ACK counters (Phase 12: ACK Optimization)
+	ACKLiteSent int64 `json:"ack_lite_sent,omitempty"`
+	ACKFullSent int64 `json:"ack_full_sent,omitempty"`
+	ACKLiteRecv int64 `json:"ack_lite_recv,omitempty"`
+	ACKFullRecv int64 `json:"ack_full_recv,omitempty"`
 }
 
 // ToJSON converts AnalysisResult to JSON-serializable format
@@ -1874,6 +1975,11 @@ func (r *AnalysisResult) ToJSON() JSONAnalysisResult {
 			ACKsRecv:        r.ServerMetrics.TotalACKsRecv,
 			NAKsRecv:        r.ServerMetrics.TotalNAKsRecv,
 			AvgRecvRateMbps: r.ServerMetrics.AvgRecvRateMbps,
+			// Phase 12: Light/Full ACK metrics
+			ACKLiteSent: r.ServerMetrics.ACKLiteSent,
+			ACKFullSent: r.ServerMetrics.ACKFullSent,
+			ACKLiteRecv: r.ServerMetrics.ACKLiteRecv,
+			ACKFullRecv: r.ServerMetrics.ACKFullRecv,
 		},
 		ClientGenerator: JSONComponentMetrics{
 			PacketsRecv:     r.ClientGenMetrics.TotalPacketsRecv,
@@ -1882,6 +1988,11 @@ func (r *AnalysisResult) ToJSON() JSONAnalysisResult {
 			Retransmissions: r.ClientGenMetrics.TotalRetransmissions,
 			ACKsRecv:        r.ClientGenMetrics.TotalACKsRecv,
 			NAKsRecv:        r.ClientGenMetrics.TotalNAKsRecv,
+			// Phase 12: Light/Full ACK metrics
+			ACKLiteSent: r.ClientGenMetrics.ACKLiteSent,
+			ACKFullSent: r.ClientGenMetrics.ACKFullSent,
+			ACKLiteRecv: r.ClientGenMetrics.ACKLiteRecv,
+			ACKFullRecv: r.ClientGenMetrics.ACKFullRecv,
 		},
 		Client: JSONComponentMetrics{
 			PacketsRecv:     r.ClientMetrics.TotalPacketsRecv,
@@ -1891,6 +2002,11 @@ func (r *AnalysisResult) ToJSON() JSONAnalysisResult {
 			ACKsRecv:        r.ClientMetrics.TotalACKsRecv,
 			NAKsRecv:        r.ClientMetrics.TotalNAKsRecv,
 			AvgRecvRateMbps: r.ClientMetrics.AvgRecvRateMbps,
+			// Phase 12: Light/Full ACK metrics
+			ACKLiteSent: r.ClientMetrics.ACKLiteSent,
+			ACKFullSent: r.ClientMetrics.ACKFullSent,
+			ACKLiteRecv: r.ClientMetrics.ACKLiteRecv,
+			ACKFullRecv: r.ClientMetrics.ACKFullRecv,
 		},
 	}
 

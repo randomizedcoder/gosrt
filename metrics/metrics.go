@@ -38,6 +38,12 @@ type ConnectionMetrics struct {
 	// PktSentACKDropped atomic.Uint64 // Not implemented - control packets currently never dropped
 	// PktSentACKError   atomic.Uint64 // Not implemented - control packets currently never error
 
+	// Control packet counters - ACK (Light vs Full breakdown) - Phase 5: ACK Optimization
+	PktSentACKLiteSuccess atomic.Uint64 // Light ACKs sent (sequence only, no RTT)
+	PktSentACKFullSuccess atomic.Uint64 // Full ACKs sent (includes RTT, triggers ACKACK)
+	PktRecvACKLiteSuccess atomic.Uint64 // Light ACKs received
+	PktRecvACKFullSuccess atomic.Uint64 // Full ACKs received
+
 	// Control packet counters - ACKACK
 	PktRecvACKACKSuccess atomic.Uint64
 	// PktRecvACKACKDropped atomic.Uint64 // Not implemented - control packets currently never dropped

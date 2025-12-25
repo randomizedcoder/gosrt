@@ -710,11 +710,11 @@ func TestOutOfOrderArrival_MixedPattern(t *testing.T) {
 }
 
 // ============================================================================
-// Test 6: nakScanStartPoint Progression
+// Test 6: contiguousPoint Progression (Phase 14: unified scan variable)
 // ============================================================================
 
-func TestNakScanStartPoint_ProgressesToRecentBoundary(t *testing.T) {
-	// Verify nakScanStartPoint advances correctly through the buffer
+func TestContiguousPoint_ProgressesToRecentBoundary(t *testing.T) {
+	// Verify contiguousPoint advances correctly through the buffer
 
 	const (
 		numPackets   = 200
@@ -751,26 +751,26 @@ func TestNakScanStartPoint_ProgressesToRecentBoundary(t *testing.T) {
 		recv.Push(pkt)
 	}
 
-	// Track nakScanStartPoint progression
-	initialScanPoint := recv.nakScanStartPoint.Load()
-	t.Logf("Initial nakScanStartPoint: %d", initialScanPoint)
+	// Track contiguousPoint progression (Phase 14: unified scan variable)
+	initialScanPoint := recv.contiguousPoint.Load()
+	t.Logf("Initial contiguousPoint: %d", initialScanPoint)
 
 	// Run NAK cycles with advancing time and track progression
 	currentTime := baseTime
 	for cycle := 0; cycle < 20; cycle++ {
 		currentTime += 50_000 // Advance 50ms per cycle (big jumps to observe scan window movement)
 		recv.Tick(currentTime)
-		currentScanPoint := recv.nakScanStartPoint.Load()
-		t.Logf("After cycle %d (time=%d): nakScanStartPoint=%d", cycle, currentTime, currentScanPoint)
+		currentScanPoint := recv.contiguousPoint.Load()
+		t.Logf("After cycle %d (time=%d): contiguousPoint=%d", cycle, currentTime, currentScanPoint)
 	}
 
-	finalScanPoint := recv.nakScanStartPoint.Load()
+	finalScanPoint := recv.contiguousPoint.Load()
 
-	// nakScanStartPoint should have advanced from initial position
+	// contiguousPoint should have advanced from initial position
 	// (unless we scanned everything immediately, which is also valid)
-	t.Logf("Final nakScanStartPoint: %d (advanced by %d)", finalScanPoint, finalScanPoint-initialScanPoint)
+	t.Logf("Final contiguousPoint: %d (advanced by %d)", finalScanPoint, finalScanPoint-initialScanPoint)
 
-	t.Logf("✅ nakScanStartPoint progression test completed")
+	t.Logf("✅ contiguousPoint progression test completed")
 }
 
 // ============================================================================

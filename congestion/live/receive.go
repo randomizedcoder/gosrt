@@ -72,6 +72,9 @@ type ReceiveConfig struct {
 	FastNakThresholdUs   uint64 // Microseconds, silence threshold to trigger FastNAK
 	FastNakRecentEnabled bool   // Enable FastNAKRecent to detect sequence jumps
 
+	// Light ACK configuration (Phase 5: ACK Optimization)
+	LightACKDifference uint32 // Send Light ACK after N packets progress (default: 64)
+
 	// Lock-free ring buffer configuration (Phase 3: Lockless Design)
 	// When enabled, Push() writes to ring (lock-free), Tick() drains ring before processing
 	UsePacketRing             bool          // Enable lock-free ring for packet handoff
@@ -213,14 +216,17 @@ type receiver struct {
 	lastNakTime           AtomicTime    // Time of last NAK sent
 	lastDataPacketSeq     atomic.Uint32 // Last data packet sequence (for FastNAKRecent)
 
-	// NAK scan tracking - independent of ACK to avoid TSBPD skip issues
-	// This ensures we never skip scanning a region even if ACK jumps forward
-	nakScanStartPoint atomic.Uint32 // Starting sequence for next NAK btree scan
+	// Unified scan starting point (Phase 6/14: ACK Optimization)
+	// Last known contiguous sequence number - shared by ACK and NAK scans.
+	// Both contiguousScan() and gapScan() start scanning from this point.
+	// When contiguous packets are found, this point advances.
+	// Uses atomic.Uint32 for lock-free access in EventLoop mode.
+	contiguousPoint atomic.Uint32
 
-	// ACK scan optimization: remembers the highest verified contiguous sequence.
-	// This allows periodicACK to only scan NEW packets, not re-verify entire buffer.
-	// Similar pattern to nakScanStartPoint. Protected by r.lock.
-	ackScanHighWaterMark circular.Number
+	// Light ACK tracking (Phase 5: ACK Optimization)
+	// Uses difference-based approach: send Light ACK when contiguous progress >= threshold
+	lightACKDifference uint32 // Threshold for sending Light ACK (default: 64)
+	lastLightACKSeq    uint32 // Sequence when last Light ACK was sent
 
 	// Lock-free ring buffer (Phase 3: Lockless Design)
 	// When enabled, Push() writes to packetRing (lock-free), Tick() drains to btree
@@ -236,6 +242,11 @@ type receiver struct {
 	backoffColdStartPkts  int
 	backoffMinSleep       time.Duration
 	backoffMaxSleep       time.Duration
+
+	// Time provider for testability (Phase 9: ACK Optimization)
+	// Defaults to time.Now().UnixMicro(). In tests, this can be replaced
+	// with a mock to enable deterministic TSBPD delivery testing.
+	nowFn func() uint64
 
 	// Debug logging
 	debug   bool
@@ -368,6 +379,10 @@ func NewReceiver(recvConfig ReceiveConfig) congestion.Receiver {
 		r.logFunc = recvConfig.LogFunc
 	}
 
+	// Initialize time provider for TSBPD delivery (Phase 9: ACK Optimization)
+	// Default to real time; tests can replace with mock for deterministic testing
+	r.nowFn = func() uint64 { return uint64(time.Now().UnixMicro()) }
+
 	if r.sendACK == nil {
 		r.sendACK = func(seq circular.Number, light bool) {}
 	}
@@ -392,13 +407,31 @@ func NewReceiver(recvConfig ReceiveConfig) congestion.Receiver {
 	r.avgPayloadSizeBits.Store(math.Float64bits(DefaultPayloadSizeBytes))
 	// avgLinkCapacity starts at 0
 
-	// Initialize nakScanStartPoint from InitialSequenceNumber (known from handshake).
-	// This is CRITICAL for wraparound handling:
-	// - If we used btree.Min() instead, we'd get the CIRCULAR minimum (e.g., 0 or 1)
-	// - But for a stream starting at MAX-2, logical order is: MAX-2, MAX-1, MAX, 0, 1, 2, ...
-	// - Btree circular order is: 0, 1, 2, ..., MAX-2, MAX-1, MAX
-	// - Starting from btree.Min() would give wrong gap detection across wraparound
-	r.nakScanStartPoint.Store(recvConfig.InitialSequenceNumber.Val())
+	// Initialize contiguousPoint to ISN.Dec() (Phase 6/14: ACK Optimization)
+	// This matches lastACKSequenceNumber initialization (line ~282).
+	//
+	// CRITICAL: Must be ISN-1, NOT ISN, because:
+	// - contiguousScan() skips packets <= contiguousPoint
+	// - If contiguousPoint = ISN, the FIRST packet at ISN would be skipped!
+	// - With contiguousPoint = ISN-1, packet at ISN is found contiguous
+	//
+	// Example: ISN=0
+	// - contiguousPoint = -1 (MAX_SEQUENCENUMBER due to wraparound)
+	// - First packet at seq=0 arrives
+	// - contiguousScan: expected = (-1)+1 = 0, seq=0, contiguous!
+	// - Returns ACK = 1 (next expected)
+	r.contiguousPoint.Store(recvConfig.InitialSequenceNumber.Dec().Val())
+
+	// Initialize Light ACK tracking (Phase 5: ACK Optimization)
+	// Use difference-based approach instead of counter-based
+	lightACKDiff := recvConfig.LightACKDifference
+	if lightACKDiff == 0 {
+		lightACKDiff = 64 // RFC default
+	}
+	r.lightACKDifference = lightACKDiff
+	// Initialize lastLightACKSeq from lastACKSequenceNumber (NOT ISN)
+	// This ensures the initial difference is 0, not a huge number due to Dec()
+	r.lastLightACKSeq = r.lastACKSequenceNumber.Val()
 
 	return r
 }
@@ -506,7 +539,7 @@ func (r *receiver) pushWithLock(pkt packet.Packet) {
 func (r *receiver) pushToRing(pkt packet.Packet) {
 	// Rate metrics (always atomic - Phase 1)
 	m := r.metrics
-	m.RecvLightACKCounter.Add(1)
+	m.RecvLightACKCounter.Add(1) // Used for Light ACK triggering until Phase 5 complete
 	m.RecvRatePackets.Add(1)
 	m.RecvRateBytes.Add(pkt.Len())
 
@@ -550,7 +583,7 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 	}
 
 	// Phase 1: Lockless - Use atomic counters instead of embedded rate struct
-	m.RecvLightACKCounter.Add(1) // Replaces r.nPackets++
+	m.RecvLightACKCounter.Add(1) // Used for Light ACK triggering until Phase 5 complete
 	pktLen := pkt.Len()
 	m.RecvRatePackets.Add(1)    // Replaces r.rate.packets++
 	m.RecvRateBytes.Add(pktLen) // Replaces r.rate.bytes += pktLen
@@ -657,7 +690,7 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 	}
 
 	// Phase 1: Lockless - Use atomic counters instead of embedded rate struct
-	m.RecvLightACKCounter.Add(1) // Replaces r.nPackets++
+	m.RecvLightACKCounter.Add(1) // Used for Light ACK triggering until Phase 5 complete
 
 	pktLen := pkt.Len()
 
@@ -750,6 +783,421 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 	r.packetStore.Insert(pkt)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7: Core Scan Functions (ACK Optimization)
+// These functions use uint32 internally for efficiency.
+// Wrappers convert to circular.Number at API boundary.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// contiguousScan scans packet btree for contiguous sequences (ACKing process).
+// Updates contiguousPoint atomically when progress is made.
+// Thread-safe: uses atomic for contiguousPoint, caller handles btree access.
+// Returns: ok=true if ACK should be sent, ackSeq=sequence to ACK
+//
+// IMPORTANT: Uses circular.SeqLessOrEqual for 31-bit wraparound safety.
+// See: circular/seq_math_31bit_wraparound_test.go for the wraparound bug that was fixed.
+//
+// ⚠️ CRITICAL: All sequence comparisons MUST use circular.Seq* functions.
+// Never use raw >, <, >=, <= or subtraction on sequence numbers.
+//
+// STALE contiguousPoint HANDLING:
+// When btree.Min() > contiguousPoint, it means packets between contiguousPoint
+// and btree.Min() have been delivered via TSBPD expiry and removed from the btree.
+// In this case, we advance contiguousPoint to btree.Min()-1 to skip the gap.
+// This is equivalent to the TSBPD skip logic in the old periodicACK().
+func (r *receiver) contiguousScan() (ok bool, ackSeq uint32) {
+	ok, ackSeq, _ = r.contiguousScanWithTime(r.nowFn())
+	return ok, ackSeq
+}
+
+// contiguousScanWithTime scans for contiguous packets with TSBPD skip logic.
+// The `now` parameter enables skipping packets whose TSBPD time has passed.
+// Returns: ok=true if progress, ackSeq=sequence to ACK, skippedPkts=packets skipped due to TSBPD
+func (r *receiver) contiguousScanWithTime(now uint64) (ok bool, ackSeq uint32, skippedPkts uint64) {
+	// Atomic load of contiguous point
+	lastContiguous := r.contiguousPoint.Load()
+
+	// Get min packet (need btree access - caller ensures safety)
+	minPkt := r.packetStore.Min()
+	if minPkt == nil {
+		return false, 0, 0 // Empty btree
+	}
+
+	minSeq := minPkt.Header().PacketSequenceNumber.Val()
+
+	// STALE contiguousPoint CHECK:
+	// If btree.Min() is significantly ahead of contiguousPoint, packets were likely
+	// delivered via TSBPD expiry and removed from btree.
+	//
+	// We use a threshold to distinguish:
+	// - Small gap (< threshold): Real packet loss, don't skip
+	// - Large gap (>= threshold): TSBPD delivery, safe to skip
+	//
+	// Threshold rationale: At 100Mb/s with 1316-byte packets, we get ~10K pkts/sec.
+	// A 10ms TSBPD delay would have ~100 packets. Using 64 as a conservative threshold.
+	const staleGapThreshold = uint32(64)
+
+	expectedNextSeq := circular.SeqAdd(lastContiguous, 1)
+	gapSize := circular.SeqSub(minSeq, expectedNextSeq)
+
+	if circular.SeqLess(expectedNextSeq, minSeq) && gapSize >= staleGapThreshold {
+		// Large gap between contiguousPoint and btree.Min - packets were delivered
+		// Advance to just before btree.Min
+		//
+		// Example: contiguousPoint=100, btree.Min()=200 (gap=99)
+		//   - Packets 100-199 were delivered and removed from btree
+		//   - We should advance contiguousPoint to 199 (btree.Min()-1)
+		//   - Then scan from 199 to find contiguous packets starting at 200
+		lastContiguous = circular.SeqSub(minSeq, 1)
+	}
+
+	// Scan forward looking for contiguous sequence
+	// NOTE: We do NOT skip gaps based on TSBPD here anymore.
+	// Reason: contiguousPoint must represent ACTUAL contiguous packets so that
+	// NAK scanning can detect gaps. TSBPD-based skipping is handled during
+	// packet delivery (deliverReadyPackets), not during ACK scanning.
+	//
+	// The old TSBPD skip behavior caused NAK to miss gaps because:
+	// 1. ACK scan would skip gaps when packets expired
+	// 2. contiguousPoint would advance past the gap
+	// 3. NAK scan uses contiguousPoint as starting point
+	// 4. NAK would never see the gap
+	startSeq := lastContiguous
+	r.packetStore.IterateFrom(circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		func(p packet.Packet) bool {
+			h := p.Header()
+			seq := h.PacketSequenceNumber.Val()
+
+			// Skip packets at or before current contiguous point
+			// MUST use circular.SeqLessOrEqual for 31-bit wraparound!
+			// Bug scenario: contiguousPoint=MAX-1, seq=2
+			//   Raw: 2 <= MAX-1 → true (WRONG! 2 is circularly AFTER MAX-1)
+			//   Circular: SeqLessOrEqual(2, MAX-1) → false (correct)
+			if circular.SeqLessOrEqual(seq, startSeq) {
+				return true
+			}
+
+			// Check if next in sequence
+			expected := circular.SeqAdd(lastContiguous, 1)
+			if seq == expected {
+				lastContiguous = seq
+				return true // Continue scanning
+			}
+
+			return false // Gap found and not expired, stop
+		})
+
+	// Check for progress - either from stale adjustment or from scan
+	originalContiguous := r.contiguousPoint.Load()
+	if lastContiguous == originalContiguous {
+		return false, 0, 0 // No progress
+	}
+
+	// Atomic store of new contiguous point
+	r.contiguousPoint.Store(lastContiguous)
+
+	// Return the sequence number to ACK (lastContiguous + 1 per SRT spec)
+	// https://datatracker.ietf.org/doc/html/draft-sharabayko-srt-01#section-3.2.4
+	//   Last Acknowledged Packet Sequence Number: 32 bits. This field
+	//   contains the sequence number of the last data packet being
+	//   acknowledged plus one. In other words, it is the sequence number
+	//   of the first unacknowledged packet.
+	//
+	// Note: skippedPkts is always 0 now since we removed TSBPD skip logic.
+	// TSBPD-based skipping happens during delivery, not ACK scanning.
+	return true, circular.SeqAdd(lastContiguous, 1), 0
+}
+
+// gapScan scans packet btree for gaps (missing sequences).
+// Updates contiguousPoint atomically when contiguous packets are found before gaps.
+// Thread-safe: uses atomic for contiguousPoint, caller handles btree access.
+// Returns: list of missing sequence numbers to NAK
+//
+// IMPORTANT: Uses circular.SeqLessOrEqual for 31-bit wraparound safety.
+// See: circular/seq_math_31bit_wraparound_test.go for the wraparound bug that was fixed.
+//
+// ⚠️ CRITICAL: All sequence comparisons MUST use circular.Seq* functions.
+// Never use raw >, <, >=, <= or subtraction on sequence numbers.
+//
+// STALE contiguousPoint HANDLING:
+// When btree.Min() > contiguousPoint, it means packets between contiguousPoint
+// and btree.Min() have been delivered via TSBPD expiry and removed from the btree.
+// We should NOT NAK those sequences - they were already delivered!
+// Instead, advance the scan start point to btree.Min()-1.
+func (r *receiver) gapScan() []uint32 {
+	// Atomic load of contiguous point (shared with contiguousScan)
+	lastContiguous := r.contiguousPoint.Load()
+
+	// Get min packet to check for stale contiguousPoint
+	minPkt := r.packetStore.Min()
+	if minPkt == nil {
+		return nil // Empty btree, no gaps to report
+	}
+
+	minSeq := minPkt.Header().PacketSequenceNumber.Val()
+
+	// STALE contiguousPoint CHECK:
+	// If btree.Min() is significantly ahead of contiguousPoint, packets were likely
+	// delivered via TSBPD expiry. Don't NAK those sequences!
+	//
+	// We use a threshold to distinguish:
+	// - Small gap (< threshold): Real packet loss, should NAK
+	// - Large gap (>= threshold): TSBPD delivery, don't NAK
+	//
+	// Same threshold as contiguousScan for consistency.
+	const staleGapThreshold = uint32(64)
+
+	expectedNextSeq := circular.SeqAdd(lastContiguous, 1)
+	gapSize := circular.SeqSub(minSeq, expectedNextSeq)
+
+	if circular.SeqLess(expectedNextSeq, minSeq) && gapSize >= staleGapThreshold {
+		// Large gap between contiguousPoint and btree.Min - packets were delivered
+		// Advance to just before btree.Min to avoid false NAKs
+		//
+		// Example: contiguousPoint=100, btree.Min()=200 (gap=99)
+		//   - Packets 100-199 were delivered and removed from btree
+		//   - We should NOT NAK 101-199 (they were already delivered!)
+		//   - Start scanning from 199 (btree.Min()-1) instead
+		lastContiguous = circular.SeqSub(minSeq, 1)
+	}
+
+	// Get current time for "too recent" threshold calculation
+	now := uint64(time.Now().UnixMicro())
+
+	// Calculate tooRecentThreshold - don't NAK packets that arrived recently
+	// (they might be out-of-order, not lost)
+	tooRecentThreshold := now + uint64(float64(r.tsbpdDelay)*(1.0-r.nakRecentPercent))
+
+	// Scan forward looking for gaps
+	var gaps []uint32
+	startSeq := lastContiguous
+	expectedSeq := circular.SeqAdd(lastContiguous, 1)
+
+	r.packetStore.IterateFrom(circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		func(p packet.Packet) bool {
+			h := p.Header()
+			seq := h.PacketSequenceNumber.Val()
+
+			// Stop if too recent
+			if h.PktTsbpdTime > tooRecentThreshold {
+				return false
+			}
+
+			// Skip packets at or before contiguous point
+			// MUST use circular.SeqLessOrEqual for 31-bit wraparound!
+			if circular.SeqLessOrEqual(seq, startSeq) {
+				return true
+			}
+
+			// Record gaps between expectedSeq and seq
+			// Use circular.SeqLess to handle wraparound in gap detection
+			for expectedSeq != seq && circular.SeqLess(expectedSeq, seq) {
+				gaps = append(gaps, expectedSeq)
+				expectedSeq = circular.SeqAdd(expectedSeq, 1)
+			}
+
+			// This packet is present - if no gaps before it, advance contiguousPoint
+			// Example: contiguousPoint=5, we find 6,7,8 present, gap at 9
+			//          → lastContiguous advances to 8, gaps=[9]
+			if len(gaps) == 0 {
+				lastContiguous = seq
+			}
+
+			expectedSeq = circular.SeqAdd(seq, 1)
+			return true
+		})
+
+	// Update contiguousPoint if we made progress
+	originalContiguous := r.contiguousPoint.Load()
+	if lastContiguous != originalContiguous {
+		r.contiguousPoint.Store(lastContiguous)
+	}
+
+	return gaps
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// End Phase 7: Core Scan Functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 8: Locked Wrappers (ACK Optimization)
+// These wrap the core scan functions with locking for Tick()-based mode.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// periodicACKLocked implements full ACK logic for Tick()-based mode.
+// Uses contiguousScan() for scanning but adds timing, Light ACK logic, and metrics.
+// Returns: ok=true if ACK should be sent, seq=sequence to ACK, lite=true for Light ACK
+//
+// Phase 10: Full implementation with all functionality from periodicACK():
+// - Interval check (Full ACK every 10ms)
+// - Light ACK triggering based on lightACKDifference
+// - lastACKSequenceNumber and lastPeriodicACK updates
+// - Buffer time metrics
+func (r *receiver) periodicACKLocked(now uint64) (ok bool, seq circular.Number, lite bool) {
+	r.lock.RLock()
+
+	// Early return check: Should we send ACK at all?
+	// Full ACK: every periodicACKInterval (10ms)
+	// Light ACK: when sequence advances by lightACKDifference
+	needLiteACK := false
+	if now-r.lastPeriodicACK < r.periodicACKInterval {
+		// Not time for Full ACK - check if we need Light ACK
+		currentSeq := r.maxSeenSequenceNumber.Val()
+		diff := circular.SeqSub(currentSeq, r.lastLightACKSeq)
+		if diff >= r.lightACKDifference {
+			needLiteACK = true
+		} else {
+			r.lock.RUnlock()
+			return false, circular.Number{}, false // No ACK needed
+		}
+	}
+
+	// Get buffer time info (for Full ACK metrics)
+	minPktTsbpdTime, maxPktTsbpdTime := uint64(0), uint64(0)
+	minPkt := r.packetStore.Min()
+	if minPkt != nil {
+		minH := minPkt.Header()
+		minPktTsbpdTime = minH.PktTsbpdTime
+		maxPktTsbpdTime = minH.PktTsbpdTime
+	}
+
+	// Use contiguousScanWithTime to find the ACK sequence (with TSBPD skip logic)
+	// NOTE: contiguousScanWithTime() returns the "next expected" sequence (lastContiguous + 1)
+	// per SRT spec. We need to convert this to "last received" for internal tracking.
+	scanOk, nextExpectedSeq, skippedPkts := r.contiguousScanWithTime(now)
+
+	// Get max TSBPD time for buffer calculation (iterate to find max)
+	if scanOk {
+		// Update maxPktTsbpdTime from contiguous packets
+		// contiguousPoint is the last received, so iterate from there
+		r.packetStore.IterateFrom(circular.New(r.contiguousPoint.Load(), packet.MAX_SEQUENCENUMBER), func(p packet.Packet) bool {
+			h := p.Header()
+			// contiguousPoint is already updated by contiguousScan, use it as boundary
+			if circular.SeqLessOrEqual(h.PacketSequenceNumber.Val(), r.contiguousPoint.Load()) {
+				if h.PktTsbpdTime > maxPktTsbpdTime {
+					maxPktTsbpdTime = h.PktTsbpdTime
+				}
+				return true
+			}
+			return false
+		})
+	}
+
+	r.lock.RUnlock()
+
+	// If no packets to ACK, still send keepalive ACK with last known sequence
+	// ackSequenceNumber is the LAST RECEIVED sequence, not the next expected
+	ackSequenceNumber := r.lastACKSequenceNumber
+	if scanOk {
+		// nextExpectedSeq is "lastContiguous + 1", so subtract 1 to get "lastContiguous"
+		lastReceivedSeq := circular.SeqSub(nextExpectedSeq, 1)
+		ackSequenceNumber = circular.New(lastReceivedSeq, packet.MAX_SEQUENCENUMBER)
+	}
+
+	// Write phase: update fields
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	m := r.metrics
+
+	// Re-check interval (may have changed between read and write lock)
+	if now-r.lastPeriodicACK < r.periodicACKInterval {
+		if !needLiteACK {
+			return false, circular.Number{}, false
+		}
+		lite = true
+	}
+
+	// Update tracking fields
+	// lastLightACKSeq tracks the last ACKed sequence (last received, not next expected)
+	r.lastLightACKSeq = ackSequenceNumber.Val()
+	r.lastACKSequenceNumber = ackSequenceNumber
+	r.lastPeriodicACK = now
+
+	// Track metrics
+	if m != nil {
+		m.CongestionRecvPeriodicACKRuns.Add(1)
+		msBuf := (maxPktTsbpdTime - minPktTsbpdTime) / 1_000
+		m.CongestionRecvMsBuf.Store(msBuf)
+
+		// Track packets skipped due to TSBPD expiry
+		if skippedPkts > 0 {
+			m.CongestionRecvPktSkippedTSBPD.Add(skippedPkts)
+			// Estimate byte count using average payload size
+			avgPayloadSize := uint64(math.Float64frombits(r.avgPayloadSizeBits.Load()))
+			m.CongestionRecvByteSkippedTSBPD.Add(skippedPkts * avgPayloadSize)
+		}
+	}
+
+	// Return: seq is the "next expected" sequence per SRT ACK spec
+	// which is ackSequenceNumber.Inc() (last received + 1)
+	return true, ackSequenceNumber.Inc(), lite
+}
+
+// periodicNakBtreeLocked implements full NAK logic for Tick()-based mode.
+// Uses gapScan() for gap detection but adds interval check and metrics.
+// Returns: list of NAK ranges as circular.Number pairs (start, end)
+//
+// Phase 10: Full implementation with timing and range consolidation.
+func (r *receiver) periodicNakBtreeLocked(now uint64) []circular.Number {
+	// Interval check: only run NAK every periodicNAKInterval
+	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
+		if r.metrics != nil {
+			r.metrics.NakPeriodicSkipped.Add(1)
+		}
+		return nil
+	}
+
+	// Track that periodicNAK ran
+	m := r.metrics
+	if m != nil {
+		m.CongestionRecvPeriodicNAKRuns.Add(1)
+	}
+
+	r.lock.RLock()
+	gaps := r.gapScan()
+	r.lock.RUnlock()
+
+	if len(gaps) == 0 {
+		r.lastPeriodicNAK = now
+		return nil
+	}
+
+	// Convert individual gaps to NAK ranges (start, end pairs)
+	// Consolidate consecutive sequences into ranges for efficiency
+	var result []circular.Number
+	rangeStart := gaps[0]
+	rangeEnd := gaps[0]
+
+	for i := 1; i < len(gaps); i++ {
+		// Check if this gap is consecutive with the current range
+		// Use circular arithmetic for wraparound safety
+		if circular.SeqAdd(rangeEnd, 1) == gaps[i] {
+			rangeEnd = gaps[i]
+		} else {
+			// End current range and start new one
+			result = append(result,
+				circular.New(rangeStart, packet.MAX_SEQUENCENUMBER),
+				circular.New(rangeEnd, packet.MAX_SEQUENCENUMBER))
+			rangeStart = gaps[i]
+			rangeEnd = gaps[i]
+		}
+	}
+
+	// Add final range
+	result = append(result,
+		circular.New(rangeStart, packet.MAX_SEQUENCENUMBER),
+		circular.New(rangeEnd, packet.MAX_SEQUENCENUMBER))
+
+	r.lastPeriodicNAK = now
+	return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// End Phase 8: Locked Wrappers
+// ═══════════════════════════════════════════════════════════════════════════
+
 // periodicACK calculates the ACK sequence number by scanning contiguous packets.
 //
 // Performance optimizations (see integration_testing_50mbps_defect.md Section 24 & 26):
@@ -762,12 +1210,16 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	r.lock.RLock()
 
 	// Early return check (read-only)
-	// Phase 1: Lockless - Use atomic RecvLightACKCounter instead of r.nPackets
+	// Phase 5: ACK Optimization - Use difference-based Light ACK triggering
 	needLiteACK := false
-	lightACKCount := r.metrics.RecvLightACKCounter.Load()
 	if now-r.lastPeriodicACK < r.periodicACKInterval {
-		if lightACKCount >= 64 {
-			needLiteACK = true // Will send light ACK, but can't reset counter yet
+		// Check if we've advanced enough for a Light ACK
+		// Use maxSeenSequenceNumber (updated on Push) for early check
+		// Use circular arithmetic for wraparound safety
+		currentSeq := r.maxSeenSequenceNumber.Val()
+		diff := circular.SeqSub(currentSeq, r.lastLightACKSeq)
+		if diff >= r.lightACKDifference {
+			needLiteACK = true // Will send light ACK
 		} else {
 			r.lock.RUnlock()
 			return // Early return - no ACK needed
@@ -809,14 +1261,18 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 	// Instead of scanning from lastACKSequenceNumber every time, remember where we
 	// verified contiguous packets up to. Only scan NEW packets since last check.
 	// This reduces iterations by ~96.7% at steady state.
-	scanStartPoint := r.ackScanHighWaterMark
+	//
+	// Phase 10/14: Use contiguousPoint (unified scan variable) instead of ackScanHighWaterMark.
+	// This shares the scan tracking with EventLoop mode and simplifies cleanup.
+	scanStartPointVal := r.contiguousPoint.Load()
+	scanStartPoint := circular.New(scanStartPointVal, packet.MAX_SEQUENCENUMBER)
 
 	// Determine valid scan start point (must handle four cases):
 	// 1. Not initialized (Val() == 0): start from lastACKSequenceNumber
 	// 2. Behind lastACKSequenceNumber: start from lastACKSequenceNumber
 	// 3. Behind minPkt (packets expired from btree): start from minPkt
 	// 4. Valid (ahead of both): use high water mark
-	if scanStartPoint.Val() == 0 || scanStartPoint.Lt(ackSequenceNumber) {
+	if scanStartPointVal == 0 || scanStartPoint.Lt(ackSequenceNumber) {
 		// Case 1 & 2: Not initialized or behind ACK point
 		scanStartPoint = ackSequenceNumber
 	}
@@ -936,6 +1392,9 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 		// Lite ACK needed, continue to update fields
 		lite = true
 	}
+	// Phase 5: ACK Optimization - Track last Light ACK sequence for difference check
+	// Update on BOTH full ACK and lite ACK (ackSequenceNumber is the actual ACKed seq)
+	r.lastLightACKSeq = ackSequenceNumber.Val()
 
 	// Track that periodicACK actually ran (not just returned early)
 	// Used for health monitoring: expected ~100/sec (10ms interval)
@@ -951,14 +1410,11 @@ func (r *receiver) periodicACKWriteLocked(now uint64, needLiteACK bool, ackSeque
 	// packets that come in late that have a lower sequence number.
 	r.lastACKSequenceNumber = ackSequenceNumber
 
-	// Update ACK scan high water mark for next periodicACK call
-	// This allows us to skip re-verifying contiguous packets we've already checked
-	if newHighWaterMark.Val() > 0 && newHighWaterMark.Gt(r.ackScanHighWaterMark) {
-		r.ackScanHighWaterMark = newHighWaterMark
-	}
+	// Phase 14: ackScanHighWaterMark removed - contiguousPoint is now the unified scan variable
+	// contiguousPoint is updated by contiguousScan() in periodicACKLocked()
 
 	r.lastPeriodicACK = now
-	r.metrics.RecvLightACKCounter.Store(0) // Phase 1: Lockless - Reset atomic counter
+	// RecvLightACKCounter.Store(0) removed - using difference-based Light ACK tracking (Phase 5)
 
 	msBuf := (maxPktTsbpdTime - minPktTsbpdTime) / 1_000
 	m.CongestionRecvMsBuf.Store(msBuf)
@@ -1129,19 +1585,31 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	// === MINIMAL LOCK SCOPE: Only for packetStore access ===
 	r.lock.RLock()
 
-	// Step 2: Get starting point (under lock for packetStore.Min access)
-	// Initialize lazily from oldest packet in store
-	startSeq := r.nakScanStartPoint.Load()
+	// Step 2: Get starting point from unified contiguousPoint (Phase 14)
+	// Per ack_optimization_plan.md Section 3.1: Both ACK and NAK use contiguousPoint
+	// We scan from contiguousPoint+1 since contiguousPoint is the last VERIFIED sequence
+	contiguousPt := r.contiguousPoint.Load()
+	startSeq := circular.SeqAdd(contiguousPt, 1) // Next expected sequence
 	firstScanEver := false
-	if startSeq == 0 {
-		minPkt := r.packetStore.Min()
-		if minPkt == nil {
-			r.lock.RUnlock()
-			return nil // No packets yet
+
+	// Check if btree is empty
+	minPkt := r.packetStore.Min()
+	if minPkt == nil {
+		r.lock.RUnlock()
+		return nil // No packets yet
+	}
+
+	// Handle stale contiguousPoint: btree.Min() is far ahead (TSBPD delivery removed packets)
+	// This aligns with the gapScan() stale handling
+	const staleGapThreshold = uint32(64)
+	btreeMin := minPkt.Header().PacketSequenceNumber.Val()
+	if circular.SeqLess(startSeq, btreeMin) {
+		gapSize := circular.SeqSub(btreeMin, startSeq)
+		if gapSize >= staleGapThreshold {
+			// Large gap - packets were delivered via TSBPD, advance scan start
+			startSeq = btreeMin
+			firstScanEver = true // Treat like first scan
 		}
-		startSeq = minPkt.Header().PacketSequenceNumber.Val()
-		r.nakScanStartPoint.Store(startSeq)
-		firstScanEver = true // Flag: this is our first NAK scan, expectedSeq should start from btree.Min()
 	}
 
 	// DEBUG: Log packet btree state
@@ -1164,8 +1632,8 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	// Uses IterateFrom with AscendGreaterOrEqual for O(log n) seek to start
 	//
 	// IMPORTANT: The first packet we find might be > startSeq because:
-	// a) Packets between nakScanStartPoint and btree_min were DELIVERED (not lost)
-	// b) Packets between nakScanStartPoint and btree_min are ACTUALLY MISSING (lost)
+	// a) Packets between contiguousPoint and btree_min were DELIVERED (TSBPD expiry)
+	// b) Packets between contiguousPoint and btree_min are ACTUALLY MISSING (lost)
 	//
 	// To distinguish: use lastDeliveredSequenceNumber
 	// - If startSeq <= lastDeliveredSequenceNumber: those packets were delivered (skip gap)
@@ -1341,9 +1809,13 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 		}
 	}
 
-	// Step 4: Update scan start point for next iteration
-	if lastScannedSeq > 0 {
-		r.nakScanStartPoint.Store(lastScannedSeq)
+	// Step 4: Update contiguousPoint if we found contiguous packets (Phase 14)
+	// Per ack_optimization_plan.md Section 3.2: gapScan advances contiguousPoint
+	// if it finds contiguous packets BEFORE the first gap
+	// Example: contiguousPoint=5, btree=[5,6,7,8,11,12] → advance to 8, gaps=[9,10]
+	if lastScannedSeq > 0 && len(*gapsPtr) == 0 {
+		// No gaps found - all scanned packets were contiguous, advance contiguousPoint
+		r.contiguousPoint.Store(lastScannedSeq)
 	}
 
 	// Step 5: Consolidate NAK btree into ranges (has its own lock)
@@ -1649,10 +2121,22 @@ func (r *receiver) Tick(now uint64) {
 		r.drainRingByDelta()
 	}
 
-	if ok, sequenceNumber, lite := r.periodicACK(now); ok {
+	// Phase 10: Use the new locked wrapper for ACK.
+	// periodicACKLocked() internally uses contiguousScan() which has:
+	// - STALE contiguousPoint handling (TSBPD skip logic) via threshold-based detection
+	// - 31-bit wraparound safety using circular.Seq* functions
+	// - Interval checks, Light ACK logic, and metrics
+	//
+	// ACK first - delivery depends on lastACKSequenceNumber being updated
+	if ok, sequenceNumber, lite := r.periodicACKLocked(now); ok {
 		r.sendACK(sequenceNumber, lite)
 	}
 
+	// NAK: Use periodicNAK() which dispatches to the correct implementation:
+	// - periodicNakBtree() when useNakBtree=true (has NAK btree, merge gap, etc.)
+	// - periodicNakOriginal() otherwise
+	// NOTE: We keep using periodicNAK() for NAK because the NAK btree implementation
+	// has complex features (merge gap, consolidation) that aren't in gapScan().
 	if list := r.periodicNAK(now); len(list) != 0 {
 		// Count NAK entries using shared helper before sending.
 		// This ensures 100% consistency with how the sender counts received NAKs.
@@ -1670,54 +2154,10 @@ func (r *receiver) Tick(now uint64) {
 		r.expireNakEntries()
 	}
 
-	// Deliver packets whose PktTsbpdTime is ripe
-	// Capture metrics once to avoid repeated checks in closures
-	m := r.metrics
-	if r.lockTiming != nil {
-		var removed int
-		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
-			removed = r.packetStore.RemoveAll(
-				func(p packet.Packet) bool {
-					// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
-					h := p.Header()
-					return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
-				},
-				func(p packet.Packet) {
-					m.CongestionRecvPktBuf.Add(^uint64(0))                    // Decrement by 1
-					m.CongestionRecvByteBuf.Add(^uint64(uint64(p.Len()) - 1)) // Subtract pktLen
-					// PktBuf and ByteBuf are decremented in atomic counters above
-
-					// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
-					h := p.Header()
-					r.lastDeliveredSequenceNumber = h.PacketSequenceNumber
-
-					r.deliver(p)
-				},
-			)
-		})
-		_ = removed
-	} else {
-		r.lock.Lock()
-		removed := r.packetStore.RemoveAll(
-			func(p packet.Packet) bool {
-				// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
-				h := p.Header()
-				return h.PacketSequenceNumber.Lte(r.lastACKSequenceNumber) && h.PktTsbpdTime <= now
-			},
-			func(p packet.Packet) {
-				m.CongestionRecvPktBuf.Add(^uint64(0))                    // Decrement by 1
-				m.CongestionRecvByteBuf.Add(^uint64(uint64(p.Len()) - 1)) // Subtract pktLen
-
-				// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
-				h := p.Header()
-				r.lastDeliveredSequenceNumber = h.PacketSequenceNumber
-
-				r.deliver(p)
-			},
-		)
-		r.lock.Unlock()
-		_ = removed
-	}
+	// Phase 10 (ACK Optimization): Use deliverReadyPacketsLocked() instead of inline code
+	// Note: Delivery MUST happen AFTER ACK - packets require lastACKSequenceNumber to be set.
+	// The original plan to reorder delivery before ACK was incorrect due to this dependency.
+	r.deliverReadyPacketsLocked(now)
 
 	// Update rate statistics
 	if r.lockTiming != nil {
@@ -1818,17 +2258,17 @@ func (r *receiver) EventLoop(ctx context.Context) {
 	}
 
 	// Create ACK ticker first
-	ackTicker := time.NewTicker(ackInterval)
-	defer ackTicker.Stop()
+	// Phase 11 (ACK Optimization): ackTicker REMOVED
+	// ACK is now processed continuously in the default case using contiguousScan()
+	// and Light ACK difference checking. This eliminates 10ms ACK batching latency.
+	// ackTicker := time.NewTicker(ackInterval)  // REMOVED
+	// defer ackTicker.Stop()                     // REMOVED
 
-	// Offset NAK ticker by half ACK interval to spread work evenly
-	// This prevents ACK and NAK from firing simultaneously
-	time.Sleep(ackInterval / 2)
+	// NAK ticker remains - gap detection is still timer-based
 	nakTicker := time.NewTicker(nakInterval)
 	defer nakTicker.Stop()
 
-	// Offset rate ticker further to spread work
-	time.Sleep(ackInterval / 4)
+	// Rate ticker for statistics
 	rateTicker := time.NewTicker(rateInterval)
 	defer rateTicker.Stop()
 
@@ -1837,14 +2277,9 @@ func (r *receiver) EventLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 
-		case <-ackTicker.C:
-			// CRITICAL: Drain ring before ACK to ensure ACK reflects all received packets
-			// Uses delta-based drain for precise control: received - processed = in ring
-			r.drainRingByDelta()
-			now := uint64(time.Now().UnixMicro())
-			if ok, seq, lite := r.periodicACK(now); ok {
-				r.sendACK(seq, lite)
-			}
+		// Phase 11 (ACK Optimization): ackTicker REMOVED
+		// ACK is now processed continuously in the default case using contiguousScan()
+		// This reduces RTT (no 10ms batching) while using Light ACK difference to control overhead.
 
 		case <-nakTicker.C:
 			// CRITICAL: Drain ring before NAK scan to avoid false gaps
@@ -1867,12 +2302,45 @@ func (r *receiver) EventLoop(ctx context.Context) {
 			r.updateRateStats(now)
 
 		default:
-			// Primary work: process packets and deliver
-			now := uint64(time.Now().UnixMicro())
+			// Phase 11 (ACK Optimization): REORDERED - Deliver first to shrink btree
+			// Note: In EventLoop, delivery happens BEFORE ACK because we do continuous ACK
+			// The dependency (ACK before delivery) from Tick() doesn't apply here because:
+			// 1. We process packets continuously, not in batches
+			// 2. lastACKSequenceNumber is updated after each contiguousScan
+			delivered := r.deliverReadyPackets()
 			processed := r.processOnePacket()
-			delivered := r.deliverReadyPacketsNoLock(now)
 
-			if !processed && delivered == 0 {
+			// Phase 11 (ACK Optimization): Continuous ACK scan with Light ACK difference
+			// This replaces the ticker-based periodicACK - called every iteration
+			ok, newContiguous := r.contiguousScan()
+			if ok {
+				// Check if we've advanced enough to send an ACK
+				diff := circular.SeqSub(newContiguous, r.lastLightACKSeq)
+				if diff >= r.lightACKDifference {
+					// Determine ACK type: Light vs Full (Force Full on massive jump)
+					//
+					// Rationale: If contiguousPoint jumps by a large amount (e.g., 500 packets
+					// when a large gap is filled), sending just a Light ACK loses valuable info.
+					// A Full ACK is more valuable here because it:
+					//   1. Updates the sender's congestion window immediately
+					//   2. Provides fresh RTT information after recovery
+					//   3. Triggers ACKACK for accurate RTT measurement
+					//
+					// Threshold: 4x the LightACKDifference (e.g., 256 packets if diff=64)
+					forceFullACK := diff >= (r.lightACKDifference * 4)
+					lite := !forceFullACK
+
+					// Update lastACKSequenceNumber for delivery check
+					r.lastACKSequenceNumber = circular.New(newContiguous, packet.MAX_SEQUENCENUMBER)
+
+					// Send ACK (newContiguous + 1 per SRT spec: "next expected sequence")
+					r.sendACK(circular.New(circular.SeqAdd(newContiguous, 1), packet.MAX_SEQUENCENUMBER), lite)
+					r.lastLightACKSeq = newContiguous
+				}
+			}
+
+			// Adaptive backoff when idle
+			if !processed && delivered == 0 && !ok {
 				// No work done - sleep to avoid CPU spin
 				time.Sleep(backoff.getSleepDuration())
 			} else {
@@ -1964,11 +2432,16 @@ func (r *receiver) processOnePacket() bool {
 	return true
 }
 
-// deliverReadyPacketsNoLock delivers all packets whose TSBPD time has arrived.
-// Called every loop iteration for smooth, non-bursty delivery.
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 9: Delivery Functions (ACK Optimization)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// deliverReadyPacketsWithTime delivers all packets whose TSBPD time <= now.
+// This is the core function - no locking.
+// Called every EventLoop/Tick iteration for smooth, non-bursty delivery.
 // Returns the count of packets delivered.
-// NO LOCK needed - event loop has exclusive access to btree.
-func (r *receiver) deliverReadyPacketsNoLock(now uint64) int {
+// NO LOCK needed when event loop has exclusive access to btree.
+func (r *receiver) deliverReadyPacketsWithTime(now uint64) int {
 	m := r.metrics
 	delivered := 0
 
@@ -2001,6 +2474,38 @@ func (r *receiver) deliverReadyPacketsNoLock(now uint64) int {
 
 	return delivered
 }
+
+// deliverReadyPackets delivers packets using nowFn for current time.
+// This is for EventLoop where we want to use injectable time.
+func (r *receiver) deliverReadyPackets() int {
+	return r.deliverReadyPacketsWithTime(r.nowFn())
+}
+
+// deliverReadyPacketsLocked wraps deliverReadyPacketsWithTime with write lock (for Tick()-based mode)
+// Takes `now` parameter to match the time used by other Tick() operations.
+func (r *receiver) deliverReadyPacketsLocked(now uint64) int {
+	if r.lockTiming != nil {
+		var delivered int
+		metrics.WithWLockTiming(r.lockTiming, &r.lock, func() {
+			delivered = r.deliverReadyPacketsWithTime(now)
+		})
+		return delivered
+	}
+	r.lock.Lock()
+	delivered := r.deliverReadyPacketsWithTime(now)
+	r.lock.Unlock()
+	return delivered
+}
+
+// deliverReadyPacketsNoLock is a backward-compatible wrapper for EventLoop callers.
+// Deprecated - prefer deliverReadyPackets().
+func (r *receiver) deliverReadyPacketsNoLock(now uint64) int {
+	return r.deliverReadyPacketsWithTime(now)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// End Phase 9: Delivery Functions
+// ═══════════════════════════════════════════════════════════════════════════
 
 // UseEventLoop returns whether the event loop is enabled.
 // Used by connection code to decide between EventLoop and Tick loop.

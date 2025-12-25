@@ -453,6 +453,9 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		BackoffMinSleep:       c.config.BackoffMinSleep,
 		BackoffMaxSleep:       c.config.BackoffMaxSleep,
 
+		// Light ACK configuration (Phase 5: ACK Optimization)
+		LightACKDifference: c.config.LightACKDifference,
+
 		// Debug logging - pass connection's log function
 		Debug:   c.config.ReceiverDebug,
 		LogFunc: c.log,
@@ -1108,6 +1111,16 @@ func (c *srtConn) handleACK(p packet.Packet) {
 
 	c.log("control:recv:ACK:cif", func() string { return cif.String() })
 
+	// Phase 5: Track Light vs Full ACK received
+	if c.metrics != nil {
+		if cif.IsLite {
+			c.metrics.PktRecvACKLiteSuccess.Add(1)
+		} else if !cif.IsSmall {
+			c.metrics.PktRecvACKFullSuccess.Add(1)
+		}
+		// Note: Small ACKs are not separately tracked
+	}
+
 	c.snd.ACK(cif.LastACKPacketSequenceNumber)
 
 	if !cif.IsLite && !cif.IsSmall {
@@ -1725,6 +1738,7 @@ func (c *srtConn) sendACK(seq circular.Number, lite bool) {
 		cif.IsLite = true
 
 		p.Header().TypeSpecific = 0
+		c.metrics.PktSentACKLiteSuccess.Add(1) // Phase 5: Track Light ACK
 	} else {
 		pps, bps, capacity := c.recv.PacketRate()
 
@@ -1742,6 +1756,7 @@ func (c *srtConn) sendACK(seq circular.Number, lite bool) {
 		if c.nextACKNumber.Val() == 0 {
 			c.nextACKNumber = c.nextACKNumber.Inc()
 		}
+		c.metrics.PktSentACKFullSuccess.Add(1) // Phase 5: Track Full ACK
 	}
 
 	p.MarshalCIF(&cif)

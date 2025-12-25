@@ -29,6 +29,10 @@ type fakeLiveReceive struct {
 
 	metrics *metrics.ConnectionMetrics // Phase 1: Lockless
 
+	// Light ACK tracking (Phase 5: ACK Optimization)
+	lightACKDifference uint32 // Threshold for sending Light ACK (default: 64)
+	lastLightACKSeq    uint32 // Sequence when last Light ACK was sent
+
 	sendACK func(seq circular.Number, light bool)
 	sendNAK func(list []circular.Number)
 	deliver func(p packet.Packet)
@@ -40,9 +44,18 @@ func NewFakeLiveReceive(recvConfig ReceiveConfig) congestion.Receiver {
 	// Phase 1: Lockless - Create metrics for rate tracking (even for fake receiver)
 	m := metrics.NewConnectionMetrics()
 
+	// Initialize Light ACK tracking (Phase 5: ACK Optimization)
+	lightACKDiff := recvConfig.LightACKDifference
+	if lightACKDiff == 0 {
+		lightACKDiff = 64 // RFC default
+	}
+
+	// lastACKSequenceNumber is ISN.Dec(), so use that for lastLightACKSeq initialization
+	lastACKSeq := recvConfig.InitialSequenceNumber.Dec()
+
 	r := &fakeLiveReceive{
 		maxSeenSequenceNumber:       recvConfig.InitialSequenceNumber.Dec(),
-		lastACKSequenceNumber:       recvConfig.InitialSequenceNumber.Dec(),
+		lastACKSequenceNumber:       lastACKSeq,
 		lastDeliveredSequenceNumber: recvConfig.InitialSequenceNumber.Dec(),
 
 		periodicACKInterval: recvConfig.PeriodicACKInterval,
@@ -51,6 +64,11 @@ func NewFakeLiveReceive(recvConfig ReceiveConfig) congestion.Receiver {
 		avgPayloadSize: 1456, //  5.1.2. SRT's Default LiveCC Algorithm
 
 		metrics: m, // Phase 1: Lockless
+
+		// Light ACK tracking (Phase 5: ACK Optimization)
+		// Initialize lastLightACKSeq from lastACKSequenceNumber (NOT ISN)
+		lightACKDifference: lightACKDiff,
+		lastLightACKSeq:    lastACKSeq.Val(),
 
 		sendACK: recvConfig.OnSendACK,
 		sendNAK: recvConfig.OnSendNAK,
@@ -124,7 +142,7 @@ func (r *fakeLiveReceive) Push(pkt packet.Packet) {
 
 	// Phase 1: Lockless - Use atomic counters
 	m := r.metrics
-	m.RecvLightACKCounter.Add(1) // Replaces r.nPackets++
+	m.RecvLightACKCounter.Add(1) // Used for Light ACK triggering until Phase 5 complete
 
 	pktLen := pkt.Len()
 
@@ -155,12 +173,14 @@ func (r *fakeLiveReceive) periodicACK(now uint64) (ok bool, sequenceNumber circu
 	r.lock.RLock()
 	defer r.lock.RUnlock()
 
-	// Phase 1: Lockless - Use atomic RecvLightACKCounter instead of r.nPackets
-	lightACKCount := r.metrics.RecvLightACKCounter.Load()
-
+	// Phase 5: ACK Optimization - Use difference-based Light ACK triggering
 	// 4.8.1. Packet Acknowledgement (ACKs, ACKACKs)
 	if now-r.lastPeriodicACK < r.periodicACKInterval {
-		if lightACKCount >= 64 {
+		// Check if we've advanced enough for a Light ACK
+		// Use maxSeenSequenceNumber (updated on Push) for early check
+		currentSeq := r.maxSeenSequenceNumber.Val()
+		diff := circular.SeqSub(currentSeq, r.lastLightACKSeq)
+		if diff >= r.lightACKDifference {
 			lite = true // Send light ACK
 		} else {
 			return
@@ -173,7 +193,9 @@ func (r *fakeLiveReceive) periodicACK(now uint64) (ok bool, sequenceNumber circu
 	r.lastACKSequenceNumber = r.maxSeenSequenceNumber
 
 	r.lastPeriodicACK = now
-	r.metrics.RecvLightACKCounter.Store(0) // Phase 1: Lockless - Reset atomic counter
+	// Phase 5: ACK Optimization - Track last Light ACK sequence for difference check
+	// Update on BOTH full ACK and lite ACK
+	r.lastLightACKSeq = r.maxSeenSequenceNumber.Val()
 
 	return
 }

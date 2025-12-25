@@ -328,7 +328,7 @@ type Config struct {
 	// This is primarily for testing (e.g., simulating packet loss).
 	// Must be set BEFORE Dial()/Accept() - cannot be modified after connection starts.
 	// Default: nil (no filtering)
-	SendFilter func(p packet.Packet) bool
+	SendFilter func(p packet.Packet) bool `json:"-"` // Not serializable
 
 	// --- Lock-Free Ring Buffer (Phase 3: Lockless Design) ---
 
@@ -395,6 +395,17 @@ type Config struct {
 	// in the event loop. Higher values = lower CPU, less responsive.
 	// Default: 1ms
 	BackoffMaxSleep time.Duration
+
+	// --- ACK Optimization Configuration (Phase 5: ACK Optimization) ---
+
+	// LightACKDifference controls how often Light ACK packets are sent.
+	// A Light ACK is sent when the contiguous sequence has advanced by
+	// at least this many packets since the last Light ACK.
+	// RFC recommends 64, but higher values reduce overhead at high bitrates.
+	// Default: 64 (RFC recommendation)
+	// Suggested for high bitrate (200Mb/s+): 256
+	// Range: 1-5000
+	LightACKDifference uint32
 
 	// --- Debug Configuration ---
 
@@ -491,6 +502,9 @@ var defaultConfig Config = Config{
 	BackoffColdStartPkts:  1000,                  // 1000 packets before backoff engages
 	BackoffMinSleep:       10 * time.Microsecond, // 10µs minimum sleep
 	BackoffMaxSleep:       1 * time.Millisecond,  // 1ms maximum sleep
+
+	// ACK optimization defaults (Phase 5)
+	LightACKDifference: 64, // RFC recommendation: send Light ACK every 64 packets
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
@@ -1168,6 +1182,15 @@ func (c *Config) Validate() error {
 	// Validate FastNAK threshold when enabled
 	if c.FastNakEnabled && c.FastNakThresholdMs == 0 {
 		return fmt.Errorf("config: FastNakThresholdMs must be > 0 when FastNakEnabled (default: 50)")
+	}
+
+	// Validate LightACKDifference (Phase 5: ACK Optimization)
+	// Default to 64 if not set, enforce maximum of 5000
+	if c.LightACKDifference == 0 {
+		c.LightACKDifference = 64 // RFC recommendation
+	}
+	if c.LightACKDifference > 5000 {
+		return fmt.Errorf("config: LightACKDifference must be <= 5000, got %d", c.LightACKDifference)
 	}
 
 	return nil

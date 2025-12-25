@@ -858,7 +858,7 @@ func mockNakBtreeRecv(onSendNAK func(list []circular.Number)) *receiver {
 //
 // Scenario:
 // 1. Packets 100-109 arrive and are added to btree
-// 2. Tick triggers NAK scan, sets nakScanStartPoint=109
+// 2. Tick triggers NAK scan, sets contiguousPoint=109 (Phase 14: unified scan)
 // 3. Packets 100-109 are DELIVERED (removed from btree)
 // 4. Packets 120-129 arrive (note: no 110-119, simulating a gap)
 // 5. Tick triggers NAK scan
@@ -1077,7 +1077,7 @@ func TestNakBtree_EmptyBtreeAfterDelivery(t *testing.T) {
 		recv.Push(p)
 	}
 
-	// First scan to set nakScanStartPoint
+	// First scan to set contiguousPoint (Phase 14: unified scan)
 	recv.Tick(baseNow)
 
 	// Manually remove all packets
@@ -1608,7 +1608,7 @@ func TestNakBtree_RealisticStream_DeliveryBetweenArrivals(t *testing.T) {
 	// Phase 2: Run NAK scan (should find no gaps - batch 1 is contiguous)
 	currentTimeUs := cfg.StartTimeUs + cfg.TsbpdDelayUs + 100_000
 	recv.Tick(currentTimeUs)
-	t.Logf("After batch 1 NAK scan: nakScanStartPoint should be around %d", batch1.TotalPackets)
+	t.Logf("After batch 1 NAK scan: contiguousPoint should be around %d", batch1.TotalPackets)
 
 	// Phase 3: Simulate delivery of all batch 1 packets
 	// In real operation, this happens via Tick() delivery when TSBPD time passes
@@ -2085,7 +2085,8 @@ func mockNakBtreeRecvWithTsbpd(onSendNAK func(list []circular.Number), tsbpdDela
 }
 
 // TestNakBtree_FirstPacketSetsBaseline tests that the first packet found
-// in the btree becomes the baseline for gap detection, not nakScanStartPoint.
+// in the btree becomes the baseline for gap detection, using contiguousPoint.
+// Phase 14: Updated to use unified contiguousPoint instead of nakScanStartPoint.
 func TestNakBtree_FirstPacketSetsBaseline(t *testing.T) {
 	var nakedSequences []uint32
 
@@ -2096,17 +2097,22 @@ func TestNakBtree_FirstPacketSetsBaseline(t *testing.T) {
 	})
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	// mockNakBtreeRecv uses: TsbpdDelay=1000, NakRecentPercent=0.5
+	// So tooRecentThreshold = now + 500
+	// For gap detection, packets need PktTsbpdTime in range (now, now+500]
 	baseNow := uint64(1000)
 
-	// Add packets 100-104 with PktTsbpdTime in scan range (now, now+500]
+	// Add packets 100-104 with PktTsbpdTime in scan range
+	// At Tick(baseNow=1000), tooRecentThreshold=1500
+	// PktTsbpdTime should be <= 1500 to be scanned
 	for i := uint32(100); i < 105; i++ {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(i, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = baseNow + 100 + uint64(i) // 1200-1204
+		p.Header().PktTsbpdTime = baseNow + 200 + uint64(i) // 1300-1304 (in scan range)
 		recv.Push(p)
 	}
 
-	// First scan to establish nakScanStartPoint
+	// First scan to establish contiguousPoint (Phase 14: unified scan)
 	recv.Tick(baseNow)
 
 	// Manually remove packets 100-102 (simulate partial delivery)
@@ -2117,20 +2123,21 @@ func TestNakBtree_FirstPacketSetsBaseline(t *testing.T) {
 	}
 
 	// Add packet 108 (creates actual gap at 105, 106, 107)
+	// At Tick(10000), tooRecentThreshold=10500
+	// PktTsbpdTime should be <= 10500 to be scanned
 	p := packet.NewPacket(addr)
 	p.Header().PacketSequenceNumber = circular.New(108, packet.MAX_SEQUENCENUMBER)
-	p.Header().PktTsbpdTime = baseNow + 100 + 108 // 1208
+	p.Header().PktTsbpdTime = 10000 + 200 + 108 // 10308 (in scan range at Tick(10000))
 	recv.Push(p)
 
 	// btree now contains: 103, 104, 108
 	require.Equal(t, 3, recv.packetStore.Len(), "btree should have 3 packets")
 
-	// Second scan
-	// The scan should:
-	// 1. Find first packet (103), use as baseline (NOT nakScanStartPoint from cycle 1)
-	// 2. Detect gap from 105-107 (between 104 and 108)
+	// Second scan - use time that includes all packets in scan range
+	// tooRecentThreshold = 10000 + 500 = 10500
+	// Packet 108's PktTsbpdTime (10308) < 10500 ✓
 	nakedSequences = nil
-	recv.Tick(2000)
+	recv.Tick(10000)
 
 	// NAK list uses range encoding [start, end]
 	// Gap 105-107 should be encoded as [105, 107]
@@ -2172,18 +2179,22 @@ func TestNakBtree_Wraparound_SimpleGap(t *testing.T) {
 		baseSeq + 5, // MAX-5
 	}
 
+	// PktTsbpdTime must be > now but <= tooRecentThreshold for gap detection
+	// mockNakBtreeRecvWithTsbpd uses: TsbpdDelay=1_000_000, NakRecentPercent=0.5
+	// So tooRecentThreshold = tickTime + 500_000
+	tickTime := baseTime + 2_000_000 // 3 seconds
 	for i, seq := range presentSeqs {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		// Set PktTsbpdTime properly for TSBPD check
-		p.Header().PktTsbpdTime = baseTime + uint64(i*100_000) // 100ms between packets
+		// Set PktTsbpdTime in valid range: (tickTime, tickTime+500_000]
+		p.Header().PktTsbpdTime = tickTime + uint64(100+i*100)
 		recv.Push(p)
 	}
 
 	t.Logf("After push: btree size = %d", recv.packetStore.Len())
 
-	// Run NAK scan - time must be past TSBPD threshold
-	recv.Tick(baseTime + 2_000_000) // 2 seconds later
+	// Run NAK scan - packets have valid PktTsbpdTime > now
+	recv.Tick(tickTime)
 
 	t.Logf("NAKed sequences: %v", nakedSequences)
 
@@ -2226,10 +2237,16 @@ func TestNakBtree_Wraparound_AcrossBoundary(t *testing.T) {
 		2, // 2
 	}
 
+	// PktTsbpdTime must be > now but <= tooRecentThreshold for gap detection
+	// mockNakBtreeRecvWithTsbpd uses: TsbpdDelay=1_000_000, NakRecentPercent=0.5
+	// So tooRecentThreshold = tickTime + 500_000
+	// Packets need: tickTime < PktTsbpdTime <= tickTime + 500_000
+	tickTime := baseTime + 2_000_000
 	for i, seq := range presentSeqs {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = baseTime + uint64(i*100_000)
+		// Set PktTsbpdTime in valid range: (tickTime, tickTime+500_000]
+		p.Header().PktTsbpdTime = tickTime + uint64(100+i*100) // Just after tickTime
 		recv.Push(p)
 	}
 
@@ -2243,13 +2260,12 @@ func TestNakBtree_Wraparound_AcrossBoundary(t *testing.T) {
 		return true
 	})
 
-	// Run NAK scan
-	tickTime := baseTime + 2_000_000
+	// Run NAK scan - packets have valid PktTsbpdTime > now
 	t.Logf("Tick at time=%d", tickTime)
 	recv.Tick(tickTime)
 
 	t.Logf("NAKed sequences: %v", nakedSequences)
-	t.Logf("nakScanStartPoint = %d", recv.nakScanStartPoint.Load())
+	t.Logf("contiguousPoint = %d", recv.contiguousPoint.Load())
 
 	// Should NAK exactly 0
 	require.Contains(t, nakedSequences, uint32(0),
@@ -2284,17 +2300,20 @@ func TestNakBtree_Wraparound_GapAfterWrap(t *testing.T) {
 		4, // 4
 	}
 
+	// PktTsbpdTime must be > now but <= tooRecentThreshold for gap detection
+	tickTime := baseTime + 2_000_000
 	for i, seq := range presentSeqs {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = baseTime + uint64(i*100_000)
+		// Set PktTsbpdTime in valid range: (tickTime, tickTime+500_000]
+		p.Header().PktTsbpdTime = tickTime + uint64(100+i*100)
 		recv.Push(p)
 	}
 
 	t.Logf("After push: btree size = %d", recv.packetStore.Len())
 
-	// Run NAK scan
-	recv.Tick(baseTime + 2_000_000)
+	// Run NAK scan - packets have valid PktTsbpdTime > now
+	recv.Tick(tickTime)
 
 	t.Logf("NAKed sequences: %v", nakedSequences)
 
@@ -2712,7 +2731,7 @@ func TestNakBtree_LargeStream_LargeBurstLoss(t *testing.T) {
 
 	// Run multiple NAK cycles with time well past the burst
 	// Run at end of stream + TSBPD delay to ensure all packets are "old enough"
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	currentTimeUs := uint64(5_000_000) // Use time where gap packets are in valid NAK scan window
 	for i := 0; i < 100; i++ {
 		recv.Tick(currentTimeUs + uint64(i*20_000))
 	}
@@ -2792,7 +2811,7 @@ func TestNakBtree_LargeStream_HighLossWindow(t *testing.T) {
 	}
 
 	// Run NAK cycles with time well past stream end + TSBPD
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	currentTimeUs := uint64(5_000_000) // Use time where gap packets are in valid NAK scan window
 	for i := 0; i < 100; i++ {
 		recv.Tick(currentTimeUs + uint64(i*20_000))
 	}
@@ -2887,7 +2906,7 @@ func TestNakBtree_LargeStream_MultipleBursts(t *testing.T) {
 	}
 
 	// Run NAK cycles with time well past stream + TSBPD
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	currentTimeUs := uint64(5_000_000) // Use time where gap packets are in valid NAK scan window
 	for i := 0; i < 150; i++ {
 		recv.Tick(currentTimeUs + uint64(i*20_000))
 	}
@@ -3011,7 +3030,7 @@ func TestNakBtree_LargeStream_CorrelatedLoss(t *testing.T) {
 	}
 
 	// Run NAK cycles with time well past stream + TSBPD
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	currentTimeUs := uint64(5_000_000) // Use time where gap packets are in valid NAK scan window
 	for i := 0; i < 100; i++ {
 		recv.Tick(currentTimeUs + uint64(i*20_000))
 	}
@@ -3131,7 +3150,7 @@ func TestNakBtree_LargeStream_VeryLongStream(t *testing.T) {
 	}
 
 	// Run many NAK cycles with time well past stream + TSBPD
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	currentTimeUs := uint64(5_000_000) // Use time where gap packets are in valid NAK scan window
 	for i := 0; i < 200; i++ {
 		recv.Tick(currentTimeUs + uint64(i*20_000))
 	}
@@ -3218,7 +3237,7 @@ func TestNakBtree_LargeStream_ExtremeBurstLoss(t *testing.T) {
 	}
 
 	// Run NAK cycles with time well past stream + TSBPD
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	currentTimeUs := uint64(5_000_000) // Use time where gap packets are in valid NAK scan window
 	for i := 0; i < 100; i++ {
 		recv.Tick(currentTimeUs + uint64(i*20_000))
 	}
@@ -3277,7 +3296,7 @@ func mockNakBtreeRecvWithMergeGap(onSendNAK func(list []circular.Number), tsbpdD
 		PacketReorderAlgorithm: "btree",
 		UseNakBtree:            true,
 		TsbpdDelay:             tsbpdDelayUs,
-		NakRecentPercent:       0.10,
+		NakRecentPercent:       0.50,   // Large window for gap detection tests (Phase 14)
 		NakConsolidationBudget: 20_000, // 20ms budget
 		NakMergeGap:            mergeGap,
 	})
@@ -3335,7 +3354,13 @@ func TestNakMergeGap_ZeroMeansStrictlyContiguous(t *testing.T) {
 		recv.Push(p)
 	}
 
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	// Tick time must be BEFORE packets' TSBPD time to avoid TSBPD skip
+	// Gap packets (101-102, 105-106) have PktTsbpdTime ≈ StartTime + 100*pktInterval + TsbpdDelay
+	// With pktInterval ≈ 11200µs: arrival ≈ 2,120,000, PktTsbpdTime ≈ 5,120,000
+	// NakRecentPercent=0.10 → scan window = now + 300,000
+	// For packets to be in window: now < PktTsbpdTime <= now + 300,000
+	// Use now = 5,000,000: packets with PktTsbpdTime ≈ 5,120,000 are in window
+	currentTimeUs := uint64(5_000_000)
 	recv.Tick(currentTimeUs)
 
 	nakLock.Lock()
@@ -3403,7 +3428,8 @@ func TestNakMergeGap_DefaultMergesSmallGaps(t *testing.T) {
 		recv.Push(p)
 	}
 
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	// Use Tick time where gap packets are in valid NAK scan window (not TSBPD expired)
+	currentTimeUs := uint64(5_000_000)
 	recv.Tick(currentTimeUs)
 
 	nakLock.Lock()
@@ -3469,7 +3495,8 @@ func TestNakMergeGap_LargeGapNotMerged(t *testing.T) {
 		recv.Push(p)
 	}
 
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	// Use Tick time where gap packets are in valid NAK scan window (not TSBPD expired)
+	currentTimeUs := uint64(5_000_000)
 	recv.Tick(currentTimeUs)
 
 	nakLock.Lock()
@@ -3537,7 +3564,7 @@ func TestNakMergeGap_AggressiveMerging(t *testing.T) {
 		recv.Push(p)
 	}
 
-	currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+	currentTimeUs := uint64(5_000_000) // Use time where gap packets are in valid NAK scan window
 	recv.Tick(currentTimeUs)
 
 	nakLock.Lock()
@@ -3615,7 +3642,7 @@ func TestNakMergeGap_TradeoffAnalysis(t *testing.T) {
 				recv.Push(p)
 			}
 
-			currentTimeUs := cfg.StartTimeUs + uint64(cfg.DurationSec*1_000_000) + cfg.TsbpdDelayUs
+			currentTimeUs := uint64(5_000_000) // Use time where gap packets are in valid NAK scan window
 			recv.Tick(currentTimeUs)
 
 			nakLock.Lock()

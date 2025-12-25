@@ -7,6 +7,9 @@ import (
 )
 
 // MetricsHandler returns an HTTP handler that serves Prometheus-formatted metrics
+// Performance is optimized by using a sync.Pool for strings.Builder and a scratch buffer for number formatting.
+// Remember - when adding metrics, also update handler_test.go
+// Remember to also run "make audit-metrics" to verify all metrics are defined, used, and exported to Prometheus
 func MetricsHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -82,6 +85,20 @@ func MetricsHandler() http.Handler {
 			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
 				metrics.PktSentACKSuccess.Load(),
 				"socket_id", socketIdStr, "instance", instanceName, "type", "ack", "status", "success")
+
+			// ACK packets - Light vs Full breakdown (Phase 5: ACK Optimization)
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentACKLiteSuccess.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "type", "ack_lite", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_sent_total",
+				metrics.PktSentACKFullSuccess.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "type", "ack_full", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvACKLiteSuccess.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "type", "ack_lite", "status", "success")
+			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",
+				metrics.PktRecvACKFullSuccess.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "type", "ack_full", "status", "success")
 
 			// ACKACK packets - received/sent (success only)
 			writeCounterIfNonZero(b, "gosrt_connection_packets_received_total",

@@ -451,3 +451,89 @@ func TestConnectionAnalysis_RangePktRatioZeroNAKs(t *testing.T) {
 	require.Equal(t, float64(1.0), conn.NAKDeliveryRate, "NAKDeliveryRate should be 1.0 when no NAKs")
 	require.Equal(t, float64(1.0), conn.NAKFulfillmentRate, "NAKFulfillmentRate should be 1.0 when no NAKs")
 }
+
+// ============================================================================
+// Phase 12: ACK Rate Validation Tests (ACK Optimization)
+// ============================================================================
+
+// TestValidateACKRates_EventLoop_Default tests ACK validation in EventLoop mode
+// with default LightACKDifference=64
+func TestValidateACKRates_EventLoop_Default(t *testing.T) {
+	// Scenario: 10 second test, 90000 packets, LightACKDifference=64
+	// Expected Light ACKs: 90000 / 64 = 1406
+	dm := DerivedMetrics{
+		ACKLiteSent: 1400, // Within ±20% of 1406
+		ACKFullSent: 10,   // Some Full ACKs from massive jumps
+	}
+
+	result := ValidateACKRates(dm, 10.0, 64, 90000, true) // EventLoop mode
+
+	require.True(t, result.Passed, "ACK rates should be valid: LightACKError=%s, FullACKError=%s",
+		result.LightACKError, result.FullACKError)
+	require.True(t, result.IsEventLoopMode, "Should be EventLoop mode")
+	require.Equal(t, int64(1406), result.ExpectedLightACKs, "Expected Light ACKs")
+}
+
+// TestValidateACKRates_EventLoop_TooFewLightACKs tests detection of insufficient Light ACKs
+func TestValidateACKRates_EventLoop_TooFewLightACKs(t *testing.T) {
+	// Scenario: 10 second test, 90000 packets, LightACKDifference=64
+	// Expected Light ACKs: 90000 / 64 = 1406
+	// But only 100 sent - way too few
+	dm := DerivedMetrics{
+		ACKLiteSent: 100,
+		ACKFullSent: 10,
+	}
+
+	result := ValidateACKRates(dm, 10.0, 64, 90000, true) // EventLoop mode
+
+	require.False(t, result.Passed, "Should fail with too few Light ACKs")
+	require.Contains(t, result.LightACKError, "expected", "Should have Light ACK error")
+}
+
+// TestValidateACKRates_Tick_Default tests ACK validation in Tick mode
+// with expected Full ACKs at 10ms interval
+func TestValidateACKRates_Tick_Default(t *testing.T) {
+	// Scenario: 10 second test, Full ACKs at 10ms = 100/sec
+	// Expected Full ACKs: 10 * 100 = 1000
+	dm := DerivedMetrics{
+		ACKLiteSent: 0,    // No Light ACKs in Tick mode
+		ACKFullSent: 1000, // Within expected range
+	}
+
+	result := ValidateACKRates(dm, 10.0, 64, 90000, false) // Tick mode
+
+	require.True(t, result.Passed, "ACK rates should be valid: FullACKError=%s", result.FullACKError)
+	require.False(t, result.IsEventLoopMode, "Should be Tick mode")
+	require.Equal(t, int64(1000), result.ExpectedFullACKs, "Expected Full ACKs")
+}
+
+// TestValidateACKRates_Tick_TooFewFullACKs tests detection of insufficient Full ACKs
+func TestValidateACKRates_Tick_TooFewFullACKs(t *testing.T) {
+	// Scenario: 10 second test, expected ~1000 Full ACKs
+	// But only 500 sent - too few
+	dm := DerivedMetrics{
+		ACKLiteSent: 0,
+		ACKFullSent: 500,
+	}
+
+	result := ValidateACKRates(dm, 10.0, 64, 90000, false) // Tick mode
+
+	require.False(t, result.Passed, "Should fail with too few Full ACKs")
+	require.Contains(t, result.FullACKError, "expected", "Should have Full ACK error")
+}
+
+// TestValidateACKRates_HighBitrate tests with high bitrate and custom LightACKDifference
+func TestValidateACKRates_HighBitrate(t *testing.T) {
+	// Scenario: 10 second test at 200Mbps, LightACKDifference=256 (high bitrate optimization)
+	// ~1400 byte packets = ~180000 packets
+	// Expected Light ACKs: 180000 / 256 = 703
+	dm := DerivedMetrics{
+		ACKLiteSent: 700,
+		ACKFullSent: 5,
+	}
+
+	result := ValidateACKRates(dm, 10.0, 256, 180000, true) // EventLoop mode
+
+	require.True(t, result.Passed, "ACK rates should be valid for high bitrate")
+	require.Equal(t, int64(256), result.LightACKDifference, "Should use configured LightACKDifference")
+}
