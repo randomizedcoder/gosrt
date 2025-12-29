@@ -118,7 +118,22 @@ func (r *receiver) checkFastNakRecent(currentSeq uint32, now time.Time) {
 	// Use threshold to avoid false positives from io_uring reordering
 	const minGapThreshold = uint32(10) // At least 10 packets gap
 
-	if actualGap > minGapThreshold && actualGap < expectedGap*2 {
+	// Upper bound: max(expectedGap*2, minUpperBound) but capped at maxAbsoluteGap
+	// - minUpperBound prevents filtering legit gaps when pps estimate is stale/low
+	// - maxAbsoluteGap prevents runaway insertions from sequence corruption
+	// DISC-008 FIX: Original was just expectedGap*2 which filtered at wraparound
+	const minUpperBound = uint32(1000)    // At least 1000 packets before filtering
+	const maxAbsoluteGap = uint32(100000) // Never insert more than 100k NAKs
+
+	upperBound := expectedGap * 2
+	if upperBound < minUpperBound {
+		upperBound = minUpperBound
+	}
+	if upperBound > maxAbsoluteGap {
+		upperBound = maxAbsoluteGap
+	}
+
+	if actualGap > minGapThreshold && actualGap < upperBound {
 		// Add missing range to NAK btree (as singles)
 		seq := circular.SeqAdd(lastSeq, 1)
 		for circular.SeqLess(seq, currentSeq) {

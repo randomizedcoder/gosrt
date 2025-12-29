@@ -99,16 +99,57 @@ func SeqGreaterOrEqual(a, b uint32) bool {
 	return !SeqLess(a, b)
 }
 
-// SeqDiff returns the signed difference (a - b), handling wraparound.
-// Positive if a > b, negative if a < b, zero if a == b.
+// SeqDiff returns the signed difference (a - b), handling 31-bit wraparound.
+// Positive if a > b (in circular terms), negative if a < b, zero if a == b.
 //
-// The result is the shortest distance between the two sequence numbers,
-// which may involve wrapping around the sequence space.
+// The result represents the shortest path from b to a in the circular sequence space.
+// This correctly handles wraparound: when a=10 and b=MaxSeqNumber31, the result
+// is positive (~10, not negative ~-2 billion) because 10 is "after" MAX.
+//
+// Uses threshold-based comparison (same as SeqLess) rather than int32(a-b) which
+// fails for 31-bit sequences because int32(MAX - 0) doesn't overflow.
+//
+// Examples:
+//   - SeqDiff(10, 5) = 5          (normal: 10 is 5 after 5)
+//   - SeqDiff(5, 10) = -5         (normal: 5 is 5 before 10)
+//   - SeqDiff(0, MAX) = 1         (wraparound: 0 is 1 after MAX)
+//   - SeqDiff(MAX, 0) = -1        (wraparound: MAX is 1 before 0)
+//   - SeqDiff(50, MAX-100) = 151  (wraparound: 50 is 151 after MAX-100)
 func SeqDiff(a, b uint32) int32 {
 	a = a & MaxSeqNumber31
 	b = b & MaxSeqNumber31
 
-	return int32(a - b)
+	if a == b {
+		return 0
+	}
+
+	// Calculate unsigned distance
+	var d uint32
+	aGreaterRaw := a > b
+	if aGreaterRaw {
+		d = a - b
+	} else {
+		d = b - a
+	}
+
+	// If distance exceeds threshold, we're in wraparound territory
+	// The "true" distance is the complement: MaxSeqNumber31 + 1 - d
+	if d > seqThreshold31 {
+		// Wraparound case: invert the sign
+		complement := MaxSeqNumber31 + 1 - d
+		if aGreaterRaw {
+			// Raw says a > b, but wraparound means a is actually BEFORE b
+			return -int32(complement)
+		}
+		// Raw says a < b, but wraparound means a is actually AFTER b
+		return int32(complement)
+	}
+
+	// Normal case: use raw comparison
+	if aGreaterRaw {
+		return int32(d)
+	}
+	return -int32(d)
 }
 
 // SeqDistance returns the unsigned distance between two sequence numbers.

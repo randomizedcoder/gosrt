@@ -8,6 +8,11 @@ import (
 	"github.com/datarhei/gosrt/metrics"
 )
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Fast NAK Tests - UNIQUE TESTS ONLY
+// Duplicated tests moved to fast_nak_table_test.go
+// ═══════════════════════════════════════════════════════════════════════════
+
 // createTestReceiverForFastNak creates a receiver with FastNAK enabled for testing.
 func createTestReceiverForFastNak(t *testing.T) *receiver {
 	t.Helper()
@@ -30,6 +35,10 @@ func createTestReceiverForFastNak(t *testing.T) *receiver {
 
 	return r
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AtomicTime Tests (unique - tests AtomicTime type)
+// ═══════════════════════════════════════════════════════════════════════════
 
 func TestAtomicTime_LoadStore(t *testing.T) {
 	var at AtomicTime
@@ -75,160 +84,9 @@ func TestAtomicTime_ConcurrentAccess(t *testing.T) {
 	// If we get here without race, test passes
 }
 
-func TestCheckFastNak_Disabled(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-	r.fastNakEnabled = false
-
-	// Should not panic and not trigger
-	r.checkFastNak(time.Now())
-
-	if r.metrics.NakFastTriggers.Load() != 0 {
-		t.Error("FastNAK should not trigger when disabled")
-	}
-}
-
-func TestCheckFastNak_NoNakBtree(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-	r.useNakBtree = false
-
-	// Should not panic and not trigger
-	r.checkFastNak(time.Now())
-
-	if r.metrics.NakFastTriggers.Load() != 0 {
-		t.Error("FastNAK should not trigger when NAK btree disabled")
-	}
-}
-
-func TestCheckFastNak_NoPreviousPacket(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-
-	// lastPacketArrivalTime is zero
-	r.checkFastNak(time.Now())
-
-	if r.metrics.NakFastTriggers.Load() != 0 {
-		t.Error("FastNAK should not trigger with no previous packet")
-	}
-}
-
-func TestCheckFastNak_ShortSilence(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-
-	// Set last arrival to recent time
-	now := time.Now()
-	r.lastPacketArrivalTime.Store(now.Add(-10 * time.Millisecond))
-
-	r.checkFastNak(now)
-
-	if r.metrics.NakFastTriggers.Load() != 0 {
-		t.Error("FastNAK should not trigger for short silence")
-	}
-}
-
-// Note: Testing actual FastNAK triggering is complex because it requires:
-// - Setting up packet store with packets
-// - Having gaps in the NAK btree
-// - Mocking sendNAK callback
-// For now, we test the threshold detection logic
-
-func TestCheckFastNakRecent_Disabled(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-	r.fastNakRecentEnabled = false
-
-	// Should not panic
-	r.checkFastNakRecent(1000, time.Now())
-
-	if r.metrics.NakFastRecentInserts.Load() != 0 {
-		t.Error("FastNAKRecent should not insert when disabled")
-	}
-}
-
-func TestCheckFastNakRecent_NoNakBtree(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-	r.nakBtree = nil
-
-	// Should not panic
-	r.checkFastNakRecent(1000, time.Now())
-}
-
-func TestCheckFastNakRecent_NoPreviousPacket(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-
-	// lastPacketArrivalTime is zero
-	r.checkFastNakRecent(1000, time.Now())
-
-	if r.metrics.NakFastRecentInserts.Load() != 0 {
-		t.Error("FastNAKRecent should not insert with no previous packet")
-	}
-}
-
-func TestCheckFastNakRecent_ShortSilence(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-
-	// Set up previous packet arrival
-	now := time.Now()
-	r.lastPacketArrivalTime.Store(now.Add(-10 * time.Millisecond))
-	r.lastDataPacketSeq.Store(100)
-
-	// Short silence - should not trigger
-	r.checkFastNakRecent(105, now)
-
-	if r.metrics.NakFastRecentInserts.Load() != 0 {
-		t.Error("FastNAKRecent should not insert for short silence")
-	}
-}
-
-func TestCheckFastNakRecent_NoSequenceJump(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-
-	// Set up with long silence but no sequence jump
-	now := time.Now()
-	r.lastPacketArrivalTime.Store(now.Add(-100 * time.Millisecond)) // Long silence
-	r.lastDataPacketSeq.Store(100)
-
-	// Next packet is sequential (no jump)
-	r.checkFastNakRecent(101, now)
-
-	if r.metrics.NakFastRecentInserts.Load() != 0 {
-		t.Error("FastNAKRecent should not insert for no sequence jump")
-	}
-}
-
-func TestCheckFastNakRecent_SignificantJump(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-
-	// Set up with long silence and significant sequence jump
-	now := time.Now()
-	r.lastPacketArrivalTime.Store(now.Add(-100 * time.Millisecond))
-	r.lastDataPacketSeq.Store(100)
-
-	// Significant jump matching outage
-	// 100ms at 500pps = 50 packets, so jump from 100 to 150 is reasonable
-	r.checkFastNakRecent(150, now)
-
-	// Should have inserted ~49 sequences (101-149)
-	if r.metrics.NakFastRecentInserts.Load() == 0 {
-		t.Error("FastNAKRecent should insert for significant jump after outage")
-	}
-
-	// Verify sequences were added to NAK btree
-	if r.nakBtree.Len() == 0 {
-		t.Error("NAK btree should have entries after FastNAKRecent")
-	}
-
-	// Check specific sequences
-	if !r.nakBtree.Has(101) {
-		t.Error("NAK btree should have sequence 101")
-	}
-	if !r.nakBtree.Has(149) {
-		t.Error("NAK btree should have sequence 149")
-	}
-	if r.nakBtree.Has(100) {
-		t.Error("NAK btree should NOT have sequence 100 (last received)")
-	}
-	if r.nakBtree.Has(150) {
-		t.Error("NAK btree should NOT have sequence 150 (just arrived)")
-	}
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// PacketsPerSecondEstimate Test (unique - tests pps estimate function)
+// ═══════════════════════════════════════════════════════════════════════════
 
 func TestPacketsPerSecondEstimate(t *testing.T) {
 	r := createTestReceiverForFastNak(t)
@@ -242,177 +100,9 @@ func TestPacketsPerSecondEstimate(t *testing.T) {
 	}
 }
 
-func TestBuildNakListLocked_Empty(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-
-	list := r.buildNakListLocked()
-
-	if len(list) != 0 {
-		t.Errorf("Expected empty list for empty NAK btree, got %d entries", len(list))
-	}
-}
-
-func TestBuildNakListLocked_NoNakBtree(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-	r.nakBtree = nil
-
-	list := r.buildNakListLocked()
-
-	if list != nil {
-		t.Error("Expected nil for nil NAK btree")
-	}
-}
-
-func TestBuildNakListLocked_WithEntries(t *testing.T) {
-	r := createTestReceiverForFastNak(t)
-
-	r.nakBtree.Insert(100)
-	r.nakBtree.Insert(101)
-	r.nakBtree.Insert(102)
-
-	list := r.buildNakListLocked()
-
-	if len(list) != 2 { // Should consolidate to single range
-		t.Errorf("Expected 2 entries (one range), got %d", len(list))
-	}
-}
-
-// ============================================================================
-// Large Burst Loss Tests - Simulating Starlink Outages (~60ms)
-// ============================================================================
-
-func TestCheckFastNakRecent_LargeBurstLoss_5Mbps(t *testing.T) {
-	// Scenario: 5 Mbps video stream, 60ms outage
-	// Packets: ~5000 pps (1000 byte packets) * 0.06s = ~300 packets
-	r := createTestReceiverForFastNak(t)
-	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(5000.0))
-
-	now := time.Now()
-	r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond)) // 60ms outage
-	r.lastDataPacketSeq.Store(10000)
-
-	// After outage, receive packet with large sequence jump
-	// Expected gap: ~300 packets (60ms * 5000pps)
-	newSeq := uint32(10300)
-	r.checkFastNakRecent(newSeq, now)
-
-	// Verify metrics
-	inserts := r.metrics.NakFastRecentInserts.Load()
-	t.Logf("FastNAKRecent inserted %d entries for 60ms outage at 5Mbps", inserts)
-
-	if inserts < 200 || inserts > 400 {
-		t.Errorf("Expected ~300 inserts (60ms * 5000pps), got %d", inserts)
-	}
-
-	// Verify NAK btree has all the missing sequences
-	btreeLen := r.nakBtree.Len()
-	if btreeLen != int(inserts) {
-		t.Errorf("NAK btree length %d doesn't match inserts %d", btreeLen, inserts)
-	}
-
-	// Verify specific boundary sequences
-	if !r.nakBtree.Has(10001) {
-		t.Error("NAK btree should have first missing sequence 10001")
-	}
-	if !r.nakBtree.Has(newSeq - 1) {
-		t.Errorf("NAK btree should have last missing sequence %d", newSeq-1)
-	}
-	if r.nakBtree.Has(10000) {
-		t.Error("NAK btree should NOT have last received sequence 10000")
-	}
-	if r.nakBtree.Has(newSeq) {
-		t.Errorf("NAK btree should NOT have just-arrived sequence %d", newSeq)
-	}
-}
-
-func TestCheckFastNakRecent_LargeBurstLoss_20Mbps(t *testing.T) {
-	// Scenario: 20 Mbps video stream, 60ms outage
-	// Packets: ~20000 pps * 0.06s = ~1200 packets
-	m := &metrics.ConnectionMetrics{}
-	r := &receiver{
-		nakBtree:               newNakBtree(32),
-		useNakBtree:            true,
-		fastNakEnabled:         true,
-		fastNakThreshold:       50 * time.Millisecond,
-		fastNakRecentEnabled:   true,
-		periodicNAKInterval:    20000,
-		nakMergeGap:            3,
-		nakConsolidationBudget: 5 * time.Second, // Extended for large burst
-		metrics:                m,
-	}
-	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(20000.0))
-
-	now := time.Now()
-	r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond))
-	r.lastDataPacketSeq.Store(50000)
-
-	newSeq := uint32(51200)
-	r.checkFastNakRecent(newSeq, now)
-
-	inserts := r.metrics.NakFastRecentInserts.Load()
-	t.Logf("FastNAKRecent inserted %d entries for 60ms outage at 20Mbps", inserts)
-
-	if inserts < 1000 || inserts > 1400 {
-		t.Errorf("Expected ~1200 inserts (60ms * 20000pps), got %d", inserts)
-	}
-
-	// Verify consolidation produces a single range
-	list := r.consolidateNakBtree()
-	entries := len(list) / 2
-
-	if entries != 1 {
-		t.Errorf("Large burst should consolidate to 1 range, got %d entries", entries)
-	}
-
-	// Verify the range is correct
-	if len(list) >= 2 {
-		start := list[0].Val()
-		end := list[1].Val()
-		t.Logf("Consolidated range: %d-%d (%d packets)", start, end, end-start+1)
-
-		if start != 50001 {
-			t.Errorf("Range start should be 50001, got %d", start)
-		}
-		if end != newSeq-1 {
-			t.Errorf("Range end should be %d, got %d", newSeq-1, end)
-		}
-	}
-}
-
-func TestCheckFastNakRecent_LargeBurstLoss_100Mbps(t *testing.T) {
-	// Scenario: 100 Mbps high-bandwidth stream, 60ms outage
-	// Packets: ~100000 pps * 0.06s = ~6000 packets
-	// This tests the overflow cap logic
-	r := createTestReceiverForFastNak(t)
-	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(100000.0))
-
-	now := time.Now()
-	r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond))
-	r.lastDataPacketSeq.Store(100000)
-
-	newSeq := uint32(106000)
-	r.checkFastNakRecent(newSeq, now)
-
-	inserts := r.metrics.NakFastRecentInserts.Load()
-	overflow := r.metrics.NakFastRecentOverflow.Load()
-
-	t.Logf("FastNAKRecent: %d inserts, %d overflow for 60ms outage at 100Mbps", inserts, overflow)
-
-	// Should have hit the overflow cap (maxFastNakRecentGap = 10000)
-	if overflow == 0 && inserts > 10000 {
-		t.Log("Warning: May need to verify overflow cap is being applied")
-	}
-
-	// Consolidation should still work
-	list := r.consolidateNakBtree()
-	entries := len(list) / 2
-
-	t.Logf("Consolidated to %d entries", entries)
-
-	if entries < 1 {
-		t.Error("Should have at least 1 consolidated entry")
-	}
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Complex Scenario Tests (unique - multi-burst, consolidation integration)
+// ═══════════════════════════════════════════════════════════════════════════
 
 func TestCheckFastNakRecent_MultipleBurstLosses(t *testing.T) {
 	// Scenario: Multiple short outages with gaps between them (Starlink pattern)
@@ -591,73 +281,44 @@ func TestCheckFastNakRecent_VeryLongOutage(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// Benchmarks for Large Burst Scenarios
-// ============================================================================
+// ═══════════════════════════════════════════════════════════════════════════
+// Benchmarks
+// ═══════════════════════════════════════════════════════════════════════════
 
 func BenchmarkFastNakRecent_SmallBurst(b *testing.B) {
-	// 50 packet burst
 	benchmarkFastNakRecentBurst(b, 50)
 }
 
 func BenchmarkFastNakRecent_MediumBurst(b *testing.B) {
-	// 300 packet burst (60ms at 5Mbps)
 	benchmarkFastNakRecentBurst(b, 300)
 }
 
 func BenchmarkFastNakRecent_LargeBurst(b *testing.B) {
-	// 1200 packet burst (60ms at 20Mbps)
 	benchmarkFastNakRecentBurst(b, 1200)
 }
 
 func BenchmarkFastNakRecent_VeryLargeBurst(b *testing.B) {
-	// 5000 packet burst (60ms at 100Mbps)
 	benchmarkFastNakRecentBurst(b, 5000)
 }
 
 func benchmarkFastNakRecentBurst(b *testing.B, burstSize int) {
-	b.ReportAllocs()
-
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
+		m := &metrics.ConnectionMetrics{}
 		r := &receiver{
 			nakBtree:             newNakBtree(32),
 			useNakBtree:          true,
 			fastNakEnabled:       true,
 			fastNakThreshold:     50 * time.Millisecond,
 			fastNakRecentEnabled: true,
-			metrics:              &metrics.ConnectionMetrics{},
+			periodicNAKInterval:  20000,
+			metrics:              m,
 		}
-		r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(float64(burstSize) / 0.06)) // Calculate pps for 60ms burst
+		r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(5000.0))
 
 		now := time.Now()
 		r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond))
 		r.lastDataPacketSeq.Store(10000)
 
-		b.StartTimer()
 		r.checkFastNakRecent(uint32(10000+burstSize), now)
 	}
 }
-
-// BenchmarkCheckFastNakRecent tests the performance of the FastNAKRecent check.
-func BenchmarkCheckFastNakRecent(b *testing.B) {
-	r := &receiver{
-		nakBtree:             newNakBtree(32),
-		useNakBtree:          true,
-		fastNakEnabled:       true,
-		fastNakThreshold:     50 * time.Millisecond,
-		fastNakRecentEnabled: true,
-		metrics:              &metrics.ConnectionMetrics{},
-	}
-	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(500.0))
-
-	now := time.Now()
-	r.lastPacketArrivalTime.Store(now.Add(-10 * time.Millisecond)) // Short silence
-	r.lastDataPacketSeq.Store(100)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		r.checkFastNakRecent(uint32(101+i%10), now)
-	}
-}
-

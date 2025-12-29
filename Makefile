@@ -3,8 +3,17 @@ SHORTCOMMIT := $(shell echo $(COMMIT) | head -c 7)
 
 all: build
 
-## test: Run all tests
-test:
+## check: Run all static analysis checks (seq-audit, lint)
+## This prevents unsafe sequence arithmetic patterns from being introduced
+check: audit-seq
+	@echo "✅ All static checks passed"
+
+## test: Run all tests (includes static checks first)
+test: check
+	go test -race -coverprofile=/dev/null -covermode=atomic -v ./...
+
+## test-quick: Run tests without static checks (for development)
+test-quick:
 	go test -race -coverprofile=/dev/null -covermode=atomic -v ./...
 
 ## test-flags: Run flags integration tests (bash script)
@@ -16,6 +25,81 @@ test-flags: client server
 ## Uses AST analysis to find discrepancies between metrics.go, usage, and handler.go
 audit-metrics:
 	@go run tools/metrics-audit/main.go
+
+## audit-tests: Analyze test files for table-driven conversion opportunities
+## Uses AST analysis to identify patterns and suggest table structures
+## Options: make audit-tests ARGS="-suggest" or ARGS="-file=congestion/live/send_test.go"
+audit-tests:
+	@go run ./tools/test-table-audit/... $(ARGS)
+
+## audit-combinations: Analyze test case structs for combinatorial coverage
+## Uses reflection/AST to discover struct fields and suggest combinations
+## Example: make audit-combinations FILE=congestion/live/loss_recovery_table_test.go STRUCT=LossRecoveryTestCase
+audit-combinations:
+	@go build -o /tmp/test-combinatorial-gen ./tools/test-combinatorial-gen/...
+	@/tmp/test-combinatorial-gen $(FILE) $(STRUCT)
+
+## audit-corners: Check corner case coverage for a table-driven test file
+## Verifies that defined corner cases are actually tested
+## Example: make audit-corners FILE=congestion/live/loss_recovery_table_test.go
+audit-corners:
+	@go build -o /tmp/test-combinatorial-gen ./tools/test-combinatorial-gen/...
+	@/tmp/test-combinatorial-gen -coverage $(FILE)
+
+## audit-corners-all: Check corner case coverage for ALL table-driven test files
+audit-corners-all:
+	@go build -o /tmp/test-combinatorial-gen ./tools/test-combinatorial-gen/...
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "CORNER CASE COVERAGE AUDIT - ALL TABLE-DRIVEN TESTS"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@for f in congestion/live/*_table_test.go; do \
+		echo ""; \
+		echo "━━━ $$f ━━━"; \
+		/tmp/test-combinatorial-gen -coverage "$$f" 2>/dev/null | grep -E "(SUMMARY|Total|Covered|Missing|Critical|✅|❌)" || echo "  (no corner cases defined for this struct)"; \
+	done
+
+## ═══════════════════════════════════════════════════════════════════════════
+## UNIFIED TEST AUDIT TOOL (recommended)
+## ═══════════════════════════════════════════════════════════════════════════
+
+## audit: Full audit of test files (unified tool)
+## Usage: make audit [FILE=path/to/test.go]
+audit:
+	@go run ./tools/test-audit/... audit $(if $(FILE),-file $(FILE),)
+
+## audit-classify: Classify test struct fields vs production code
+## Usage: make audit-classify FILE=congestion/live/loss_recovery_table_test.go
+audit-classify:
+ifndef FILE
+	$(error FILE is required. Usage: make audit-classify FILE=congestion/live/loss_recovery_table_test.go)
+endif
+	@go run ./tools/test-audit/... -file $(FILE) classify
+
+## audit-coverage: Check corner case coverage (unified tool)
+## Usage: make audit-coverage FILE=congestion/live/loss_recovery_table_test.go
+audit-coverage:
+ifndef FILE
+	$(error FILE is required. Usage: make audit-coverage FILE=congestion/live/loss_recovery_table_test.go)
+endif
+	@go run ./tools/test-audit/... -file $(FILE) coverage
+
+## audit-suggest: Get table-driven structure suggestions
+## Usage: make audit-suggest FILE=congestion/live/nak_consolidate_test.go
+audit-suggest:
+ifndef FILE
+	$(error FILE is required. Usage: make audit-suggest FILE=congestion/live/nak_consolidate_test.go)
+endif
+	@go run ./tools/test-audit/... -file $(FILE) suggest
+
+## audit-seq: AST-based analysis for unsafe sequence arithmetic patterns
+## Detects int32(a-b), direct comparisons, raw arithmetic on sequence numbers
+## Usage: make audit-seq [PATH=./congestion/live]
+audit-seq:
+	@go run ./tools/seq-audit/... $(if $(PATH),$(PATH),./congestion/live ./circular)
+
+## audit-all: Run full audit on all congestion/live test files
+audit-all:
+	@go run ./tools/test-audit/... audit -dir congestion/live
 
 ## test-integration: Run integration tests (context cancellation, graceful shutdown, etc.)
 test-integration: client server client-generator

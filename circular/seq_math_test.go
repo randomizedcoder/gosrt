@@ -90,6 +90,29 @@ func TestSeqDiff(t *testing.T) {
 		{"1000000 - 1001000", 1000000, 1001000, -1000},
 		{"quarter - 0", MaxSeqNumber31 / 4, 0, int32(MaxSeqNumber31 / 4)},
 		{"0 - quarter", 0, MaxSeqNumber31 / 4, -int32(MaxSeqNumber31 / 4)},
+
+		// =================================================================
+		// WRAPAROUND TESTS - These test 31-bit sequence number wraparound
+		// =================================================================
+		// When MAX wraps to 0, MAX is "before" 0 in circular space
+		// So SeqDiff(0, MAX) should be positive (0 is "after" MAX)
+		// And SeqDiff(MAX, 0) should be negative (MAX is "before" 0)
+
+		// MAX is "before" small numbers (negative diff)
+		{"MAX - 0", MaxSeqNumber31, 0, -1},
+		{"MAX - 1", MaxSeqNumber31, 1, -2},
+		{"MAX - 50", MaxSeqNumber31, 50, -51},
+		{"MAX-10 - 5", MaxSeqNumber31 - 10, 5, -16}, // (MAX-10) to 5 is 16 steps forward
+
+		// Small numbers are "after" MAX (positive diff)
+		{"0 - MAX", 0, MaxSeqNumber31, 1},
+		{"1 - MAX", 1, MaxSeqNumber31, 2},
+		{"50 - MAX", 50, MaxSeqNumber31, 51},
+		{"5 - MAX-10", 5, MaxSeqNumber31 - 10, 16}, // 5 is 16 steps after (MAX-10)
+
+		// Symmetric around MAX→0 boundary
+		{"MAX-100 - 50", MaxSeqNumber31 - 100, 50, -151},
+		{"50 - MAX-100", 50, MaxSeqNumber31 - 100, 151},
 	}
 
 	for _, tt := range tests {
