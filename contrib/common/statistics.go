@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	srt "github.com/datarhei/gosrt"
+	srt "github.com/randomizedcoder/gosrt"
 )
 
 // ThroughputGetter is a function that returns current bytes, packets, gaps, NAKs, skips, and retransmits

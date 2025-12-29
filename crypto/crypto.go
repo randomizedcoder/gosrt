@@ -10,8 +10,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/datarhei/gosrt/packet"
-	"github.com/datarhei/gosrt/rand"
+	"github.com/randomizedcoder/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/rand"
 
 	"github.com/benburkert/openpgp/aes/keywrap"
 )
@@ -80,8 +80,10 @@ func New(keyLength int) (Crypto, error) {
 }
 
 func (c *crypto) GenerateSEK(key packet.PacketEncryption) error {
-	if !key.IsValid() {
-		return fmt.Errorf("crypto: unknown key type")
+	// Only EvenKeyEncrypted and OddKeyEncrypted are valid for SEK generation.
+	// UnencryptedPacket and EvenAndOddKey are not valid here.
+	if key != packet.EvenKeyEncrypted && key != packet.OddKeyEncrypted {
+		return fmt.Errorf("crypto: invalid key type for SEK generation, must be even or odd")
 	}
 
 	sek, err := c.generateSEK(c.keyLength)
@@ -116,6 +118,9 @@ var ErrInvalidKey = errors.New("crypto: invalid key for encryption. Must be even
 // ErrInvalidWrap is returned when the packet encryption indicates a different length of the wrapped key
 var ErrInvalidWrap = errors.New("crypto: the un/wrapped key has the wrong length")
 
+// ErrDecryptionFailed is returned when key unwrapping fails, typically due to wrong passphrase
+var ErrDecryptionFailed = errors.New("crypto: decryption failed, likely wrong passphrase")
+
 func (c *crypto) UnmarshalKM(km *packet.CIFKeyMaterialExtension, passphrase string) error {
 	if km.KeyBasedEncryption == packet.UnencryptedPacket || !km.KeyBasedEncryption.IsValid() {
 		return ErrInvalidKey
@@ -143,7 +148,11 @@ func (c *crypto) UnmarshalKM(km *packet.CIFKeyMaterialExtension, passphrase stri
 
 	unwrap, err := keywrap.Unwrap(kek, km.Wrap)
 	if err != nil {
-		return err
+		// Wrap the keywrap error with our semantic error for better error handling
+		if errors.Is(err, keywrap.ErrUnwrapFailed) {
+			return fmt.Errorf("%w: %v", ErrDecryptionFailed, err)
+		}
+		return fmt.Errorf("crypto: key unwrap error: %w", err)
 	}
 
 	if len(unwrap) != wrapLength {

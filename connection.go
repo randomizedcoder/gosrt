@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/datarhei/gosrt/circular"
-	"github.com/datarhei/gosrt/congestion"
-	"github.com/datarhei/gosrt/congestion/live"
-	"github.com/datarhei/gosrt/crypto"
-	"github.com/datarhei/gosrt/metrics"
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/congestion"
+	"github.com/randomizedcoder/gosrt/congestion/live"
+	"github.com/randomizedcoder/gosrt/crypto"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // controlPacketHandler is the function signature for control packet handlers
@@ -697,6 +697,17 @@ func (c *srtConn) WritePacket(p packet.Packet) error {
 }
 
 func (c *srtConn) Write(b []byte) (int, error) {
+	// Check context cancellation FIRST, before any operations.
+	// This follows the context_and_cancellation_new_design.md pattern where
+	// context cancellation signals shutdown. Go's select is non-deterministic
+	// when multiple channels are ready, so we must check ctx.Done() separately
+	// to ensure Write() returns io.EOF after Close() is called.
+	select {
+	case <-c.ctx.Done():
+		return 0, io.EOF
+	default:
+	}
+
 	c.writeBuffer.Write(b)
 
 	for {
@@ -713,7 +724,9 @@ func (c *srtConn) Write(b []byte) (int, error) {
 		// Give the packet a deliver timestamp
 		p.Header().PktTsbpdTime = c.getTimestamp()
 
-		// Non-blocking write to the write queue
+		// Non-blocking write to the write queue.
+		// The ctx.Done() check here catches Close() during long writes.
+		// The writeLoop goroutine also checks ctx.Done() before sending.
 		select {
 		case <-c.ctx.Done():
 			return 0, io.EOF
@@ -2268,7 +2281,7 @@ func (c *srtConn) printCloseStatistics() {
 		output["accumulated"].(map[string]interface{})["pkt_retrans_percent"] = *retransPercent
 	}
 
-	jsonData, err := json.MarshalIndent(output, "", "  ")
+	jsonData, err := json.Marshal(output)
 	if err != nil {
 		c.log("connection:close:error", func() string {
 			return fmt.Sprintf("failed to encode close statistics: %v", err)
@@ -2276,7 +2289,7 @@ func (c *srtConn) printCloseStatistics() {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "\n%s\n", string(jsonData))
+	fmt.Fprintf(os.Stderr, "%s\n", string(jsonData))
 }
 
 func (c *srtConn) SetDeadline(t time.Time) error      { return nil }

@@ -3,7 +3,7 @@ package metrics
 import (
 	"testing"
 
-	"github.com/datarhei/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

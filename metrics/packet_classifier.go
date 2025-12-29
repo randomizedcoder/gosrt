@@ -1,7 +1,7 @@
 package metrics
 
 import (
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // IncrementRecvMetrics increments the appropriate receive metrics based on packet type and outcome

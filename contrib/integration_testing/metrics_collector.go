@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/datarhei/gosrt/contrib/common"
-	"github.com/datarhei/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/contrib/common"
+	"github.com/randomizedcoder/gosrt/metrics"
 )
 
 // MetricsSnapshot represents a single snapshot of Prometheus metrics

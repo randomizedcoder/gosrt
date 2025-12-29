@@ -11,9 +11,9 @@ import (
 
 	"net"
 
-	"github.com/datarhei/gosrt/circular"
-	"github.com/datarhei/gosrt/metrics"
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
 	"github.com/stretchr/testify/require"
 )
 

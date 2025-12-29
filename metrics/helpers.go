@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // metricsBuilderPool is a sync.Pool for strings.Builder objects to reduce allocations

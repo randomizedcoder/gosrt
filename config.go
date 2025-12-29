@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 const (

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/datarhei/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/metrics"
 )
 
 // StartMetricsServers starts Prometheus metrics endpoint(s) based on the provided flags.

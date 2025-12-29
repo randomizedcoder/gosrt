@@ -4,7 +4,7 @@
 package live
 
 import (
-	"github.com/datarhei/gosrt/congestion"
+	"github.com/randomizedcoder/gosrt/congestion"
 )
 
 // TestReceiverInternals exposes receiver internals for testing.

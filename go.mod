@@ -1,4 +1,4 @@
-module github.com/datarhei/gosrt
+module github.com/randomizedcoder/gosrt
 
 go 1.25.4
 

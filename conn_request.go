@@ -5,10 +5,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/datarhei/gosrt/crypto"
-	"github.com/datarhei/gosrt/metrics"
-	"github.com/datarhei/gosrt/packet"
-	"github.com/datarhei/gosrt/rand"
+	"github.com/randomizedcoder/gosrt/crypto"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/rand"
 )
 
 // ConnRequest is an incoming connection request

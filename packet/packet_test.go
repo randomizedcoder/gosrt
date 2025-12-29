@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/datarhei/gosrt/circular"
-	srtnet "github.com/datarhei/gosrt/net"
+	"github.com/randomizedcoder/gosrt/circular"
+	srtnet "github.com/randomizedcoder/gosrt/net"
 
 	"github.com/stretchr/testify/require"
 )

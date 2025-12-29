@@ -1317,6 +1317,99 @@ No changes to CLI flags. The `--shutdowndelay` flag still works as before.
 
 ---
 
+---
+
+## Bug Found: Write After Close Race Condition (BUG-001)
+
+**Date Found:** 2025-12-29
+**Severity:** HIGH
+**File:** `connection.go`
+
+### The Problem
+
+A race condition was discovered where `conn.Write()` could return success (`nil`) even after `conn.Close()` was called.
+
+### Root Cause
+
+Go's `select` statement is **non-deterministic** when multiple channels are ready. The original code checked `ctx.Done()` and the write channel in the same select:
+
+```go
+// BUGGY CODE - DO NOT USE
+select {
+case <-c.ctx.Done():       // (A) Context cancelled
+    return 0, io.EOF
+case c.writeQueue <- p:    // (B) Write to queue
+default:
+    return 0, io.EOF
+}
+```
+
+**Race scenario:**
+1. Thread 1 calls `Write()`
+2. Thread 2 calls `Close()` → cancels `c.ctx`
+3. Both `ctx.Done()` and `writeQueue` become ready
+4. Go randomly chooses (B) → Write succeeds after Close!
+
+### The Fix
+
+Check context cancellation **FIRST**, before any other operations:
+
+```go
+// CORRECT - Check context FIRST
+func (c *srtConn) Write(b []byte) (int, error) {
+    // Check context cancellation FIRST, before any operations.
+    // This follows the context_and_cancellation_new_design.md pattern where
+    // context cancellation signals shutdown.
+    select {
+    case <-c.ctx.Done():
+        return 0, io.EOF
+    default:
+    }
+
+    // Now proceed with write operations...
+    c.writeBuffer.Write(b)
+    // ...
+}
+```
+
+### Why This Aligns With The Design
+
+This fix follows the design principles in this document:
+
+1. **Uses context for cancellation** - No additional atomics or mutexes needed
+2. **Respects shutdown hierarchy** - When context cancels, operations return errors
+3. **Clean shutdown flow** - Write returns `io.EOF`, caller knows connection is closed
+
+### Shutdown Flow With Fix
+
+```
+Close() called
+    │
+    ▼
+c.cancel() cancels context
+    │
+    ▼
+c.ctx.Done() channel closes
+    │
+    ├──► Write() checks ctx.Done() FIRST → returns io.EOF immediately
+    │
+    ├──► writeLoop checks ctx.Done() → stops sending packets
+    │
+    └──► Other goroutines detect ctx.Done() → clean exit via waitgroup
+```
+
+### Verification
+
+The fix was verified by running the test 10 times:
+- **Before fix:** 5/10 passes (flaky)
+- **After fix:** 10/10 passes (consistent)
+
+### Key Lesson
+
+**Never combine context cancellation check with other channel operations in a single select when the context check must take priority.** Always check `ctx.Done()` first in a separate select with a `default` case.
+
+---
+
 ## Summary
 
 This improved design simplifies context and cancellation handling by:
@@ -1327,6 +1420,7 @@ This improved design simplifies context and cancellation handling by:
 4. **Clear shutdown flow** - Linear, easy-to-follow shutdown sequence
 5. **Context as first argument** - Follows Go convention for all functions accepting context
 6. **NewServer constructor** - Follows Go idiom of `New*` functions for object creation
+7. **Check ctx.Done() first** - Always check context cancellation before other channel operations
 
 The result is cleaner, more maintainable code that follows Go idioms and ensures all goroutines are properly tracked and shut down gracefully.
 

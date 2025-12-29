@@ -1,12 +1,52 @@
 COMMIT := $(shell if [ -d .git ]; then git rev-parse HEAD; else echo "unknown"; fi)
 SHORTCOMMIT := $(shell echo $(COMMIT) | head -c 7)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPERIMENTAL GO FEATURES (Go 1.25+)
+# ═══════════════════════════════════════════════════════════════════════════════
+# These experiments are ENABLED BY DEFAULT for better performance.
+# They are experimental in Go 1.25 but expected to become stable in future releases.
+# When Go 1.26+ stabilizes these, this variable can be removed.
+#
+# jsonv2: New JSON implementation - encoding at parity, decoding substantially faster
+#   See: https://go.dev/doc/go1.25#encoding-json-v2
+#
+# greenteagc: New garbage collector - 10-40% less GC overhead
+#   Better locality and CPU scalability for small objects
+#
+# To disable: make build GOEXPERIMENT=
+# ═══════════════════════════════════════════════════════════════════════════════
+GOEXPERIMENT ?= jsonv2,greenteagc
+export GOEXPERIMENT
+
+.PHONY: all check code-audit code-audit-seq code-audit-metrics code-audit-test test test-quick audit-metrics
+.PHONY: coverage coverage-html coverage-check coverage-by-package
+
 all: build
 
-## check: Run all static analysis checks (seq-audit, lint)
-## This prevents unsafe sequence arithmetic patterns from being introduced
-check: audit-seq
+## check: Run all static analysis checks (code-audit, lint)
+## This prevents unsafe patterns from being introduced
+check: code-audit-seq
 	@echo "✅ All static checks passed"
+
+## code-audit: Unified comprehensive code quality audit
+## Runs: sequence analysis, metrics verification, test coverage
+## Usage: make code-audit
+code-audit:
+	@go run ./tools/code-audit/... all
+
+## code-audit-seq: Sequence arithmetic analysis only (fast)
+code-audit-seq:
+	@go run ./tools/code-audit/... seq ./congestion/live ./circular
+
+## code-audit-metrics: Prometheus metrics alignment check
+code-audit-metrics:
+	@go run ./tools/code-audit/... metrics
+
+## code-audit-test: Test structure and coverage analysis
+## Usage: make code-audit-test [FILE=path/to/test.go]
+code-audit-test:
+	@go run ./tools/code-audit/... test $(if $(FILE),-file $(FILE),) audit
 
 ## test: Run all tests (includes static checks first)
 test: check
@@ -344,6 +384,93 @@ test-race-eventloop:
 	@echo "=== EventLoop Race Detection Tests ==="
 	go test -race -v ./congestion/live -run 'TestRace_EventLoop' -timeout 60s
 
+## ci-race: Run comprehensive race detection for CI (fails on any race)
+## This target is designed for CI pipelines - exits non-zero if races found.
+ci-race:
+	@echo "=== CI Race Detection (Full Suite) ==="
+	@echo "Running race detection on all packages..."
+	@go test -race -timeout 5m ./... 2>&1 | tee /tmp/race_results.txt; \
+	if grep -q "WARNING: DATA RACE" /tmp/race_results.txt; then \
+		echo ""; \
+		echo "❌ DATA RACE DETECTED - CI build should fail"; \
+		echo "Review /tmp/race_results.txt for details"; \
+		exit 1; \
+	else \
+		echo "";
+
+## ═══════════════════════════════════════════════════════════════════════════
+## CODE COVERAGE ENFORCEMENT
+## ═══════════════════════════════════════════════════════════════════════════
+
+## coverage: Generate coverage report (summary only, excludes tools/)
+coverage:
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "                    CODE COVERAGE ANALYSIS"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@go test -coverprofile=coverage.out -covermode=atomic $$(go list ./... | grep -v /tools/) 2>&1 | grep -E "coverage:|no test files"
+	@echo "───────────────────────────────────────────────────────────────────"
+	@go tool cover -func=coverage.out | tail -1
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "Run 'make coverage-html' for detailed HTML report"
+	@echo "Run 'make coverage-by-package' for per-package breakdown"
+
+## coverage-html: Generate HTML coverage report (excludes tools/)
+coverage-html:
+	@go test -coverprofile=coverage.out -covermode=atomic $$(go list ./... | grep -v /tools/) > /dev/null 2>&1
+	@go tool cover -html=coverage.out -o coverage.html
+	@echo "✅ Coverage report generated: coverage.html"
+
+## coverage-check: Enforce minimum coverage threshold (blocks on failure)
+## Usage: make coverage-check [THRESHOLD=30]
+## Note: Excludes tools/ from coverage calculation
+coverage-check:
+	@echo "=== Code Coverage Check ==="
+	@go test -coverprofile=coverage.out -covermode=atomic $$(go list ./... | grep -v /tools/) > /dev/null 2>&1 || true
+	@COVERAGE=$$(go tool cover -func=coverage.out | tail -1 | awk '{print $$3}' | sed 's/%//'); \
+	THRESHOLD=$${THRESHOLD:-30}; \
+	echo "Coverage: $$COVERAGE% (threshold: $$THRESHOLD%)"; \
+	if [ $$(echo "$$COVERAGE < $$THRESHOLD" | bc -l) -eq 1 ]; then \
+		echo "❌ Coverage below threshold"; \
+		exit 1; \
+	else \
+		echo "✅ Coverage meets threshold"; \
+	fi
+
+## coverage-by-package: Show coverage by package (excludes tools/)
+coverage-by-package:
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@echo "                  COVERAGE BY PACKAGE"
+	@echo "═══════════════════════════════════════════════════════════════════"
+	@go test -coverprofile=coverage.out -covermode=atomic $$(go list ./... | grep -v /tools/) 2>&1 | \
+		grep -E "^ok.*coverage:" | \
+		sed 's/github.com\/randomizedcoder\/gosrt/./g' | \
+		awk '{for(i=1;i<=NF;i++) if($$i ~ /coverage:/) print $$2, $$(i+1)}' | \
+		sort | \
+		awk '{printf "  %-45s %s\n", $$1, $$2}'
+	@echo "───────────────────────────────────────────────────────────────────"
+	@go tool cover -func=coverage.out | tail -1 | awk '{printf "  %-45s %s\n", "TOTAL", $$3}'
+	@echo "═══════════════════════════════════════════════════════════════════"
+
+## ═══════════════════════════════════════════════════════════════════════════
+## UNIFIED CI PIPELINE
+## ═══════════════════════════════════════════════════════════════════════════
+
+## ci: Full CI pipeline (static checks + tests + race detection)
+ci: check test ci-race
+	@echo ""
+	@echo "════════════════════════════════════════"
+	@echo "✅ CI Pipeline Passed"
+	@echo "════════════════════════════════════════"
+
+## ci-full: Extended CI pipeline (includes coverage check)
+ci-full: ci coverage-check
+	@echo ""
+	@echo "════════════════════════════════════════"
+	@echo "✅ Full CI Pipeline Passed"
+	@echo "════════════════════════════════════════" \
+		echo "✅ No races detected - CI passed"; \
+	fi
+
 ## bench-receiver: Run receiver benchmarks (config comparison)
 bench-receiver:
 	@echo "=== Receiver Configuration Benchmarks ==="
@@ -484,11 +611,6 @@ clean-all: clean
 ## rebuild: Clean and rebuild all binaries
 rebuild: clean client server client-generator
 
-## coverage: Generate code coverage analysis
-coverage:
-	go test -race -coverprofile=cover.out -timeout 60s -v ./...
-	go tool cover -html=cover.out -o cover.html
-
 ## commit: Prepare code for commit (vet, fmt, test)
 commit: vet fmt lint test
 	@echo "No errors found. Ready for a commit."
@@ -509,7 +631,7 @@ nixshell:
 .PHONY: test test-flags test-flags-integration test-integration test-integration-all test-integration-config test-integration-list test-congestion-live test-packet-pool test-packet fuzz coverage
 # Receiver stream testing targets (table-driven unit tests)
 .PHONY: test-stream-tier1 test-stream-tier2 test-stream-tier3 test-stream-all test-stream-race
-.PHONY: test-race test-race-wraparound test-race-eventloop test-circular test-packet-store
+.PHONY: test-race test-race-wraparound test-race-eventloop ci-race test-circular test-packet-store
 # Network impairment testing targets (require root)
 .PHONY: test-network-list test-network test-network-all test-network-quick network-setup network-cleanup network-status
 # Parallel comparison testing targets (require root)

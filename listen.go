@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/datarhei/gosrt/metrics"
-	srtnet "github.com/datarhei/gosrt/net"
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/metrics"
+	srtnet "github.com/randomizedcoder/gosrt/net"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // ConnType represents the kind of connection as returned

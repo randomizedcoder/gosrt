@@ -13,11 +13,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/datarhei/gosrt/circular"
-	"github.com/datarhei/gosrt/crypto"
-	"github.com/datarhei/gosrt/metrics"
-	"github.com/datarhei/gosrt/packet"
-	"github.com/datarhei/gosrt/rand"
+	"github.com/randomizedcoder/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/crypto"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/rand"
 )
 
 // ErrClientClosed is returned when the client connection has

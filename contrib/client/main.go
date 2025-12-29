@@ -18,9 +18,9 @@ import (
 	"syscall"
 	"time"
 
-	srt "github.com/datarhei/gosrt"
-	"github.com/datarhei/gosrt/contrib/common"
-	"github.com/datarhei/gosrt/metrics"
+	srt "github.com/randomizedcoder/gosrt"
+	"github.com/randomizedcoder/gosrt/contrib/common"
+	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/pkg/profile"
 )
 

@@ -1,6 +1,6 @@
 package metrics
 
-import "github.com/datarhei/gosrt/circular"
+import "github.com/randomizedcoder/gosrt/circular"
 
 // NAKCounterType specifies which counter set to increment.
 type NAKCounterType int

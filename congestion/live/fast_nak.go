@@ -4,8 +4,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/datarhei/gosrt/circular"
-	"github.com/datarhei/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/metrics"
 )
 
 // checkFastNak triggers immediate NAK if silent period exceeded.

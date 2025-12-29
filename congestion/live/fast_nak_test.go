@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/datarhei/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/metrics"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════

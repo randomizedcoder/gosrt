@@ -4,7 +4,7 @@ import (
 	"flag"
 	"time"
 
-	srt "github.com/datarhei/gosrt"
+	srt "github.com/randomizedcoder/gosrt"
 )
 
 var (

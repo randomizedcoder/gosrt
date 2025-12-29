@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/datarhei/gosrt/circular"
-	srtnet "github.com/datarhei/gosrt/net"
+	"github.com/randomizedcoder/gosrt/circular"
+	srtnet "github.com/randomizedcoder/gosrt/net"
 )
 
 const MAX_SEQUENCENUMBER uint32 = 0b01111111_11111111_11111111_11111111

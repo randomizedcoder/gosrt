@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/datarhei/gosrt/metrics"
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // ============================================================================
@@ -121,9 +121,9 @@ func (r NakRange) Count() int {
 // ConsolidateTestCase defines a single NAK consolidation test scenario.
 type ConsolidateTestCase struct {
 	Name           string
-	NakMergeGap    uint32 // Gap threshold for merging (default 3)
-	SetMergeGapTo0 bool   // Explicitly set NakMergeGap=0 (since 0 is valid corner case)
-	Pattern     SeqPattern // How to generate sequences
+	NakMergeGap    uint32     // Gap threshold for merging (default 3)
+	SetMergeGapTo0 bool       // Explicitly set NakMergeGap=0 (since 0 is valid corner case)
+	Pattern        SeqPattern // How to generate sequences
 
 	// Expected output - specify ONE of these:
 	ExpectedRanges []NakRange // Explicit expected ranges

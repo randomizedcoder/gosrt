@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/datarhei/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/metrics"
 )
 
 // ServerConfig contains configuration for creating a new SRT server.

@@ -6,7 +6,7 @@ package srt
 import (
 	"context"
 
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // initializeIoUring is a stub for non-Linux platforms

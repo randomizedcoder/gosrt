@@ -10,8 +10,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/datarhei/gosrt/metrics"
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
 	"github.com/randomizedcoder/giouring"
 )
 

@@ -5,7 +5,7 @@ package live
 import (
 	"sync"
 
-	"github.com/datarhei/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/google/btree"
 )
 

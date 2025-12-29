@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/datarhei/gosrt/metrics"
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

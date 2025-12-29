@@ -15,9 +15,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/datarhei/gosrt/circular"
-	"github.com/datarhei/gosrt/metrics"
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // ============================================================================
@@ -40,11 +40,15 @@ type DropPattern interface {
 type DropEveryN struct {
 	N      int
 	Offset int // Start offset (0 = first at index N-1)
+	Max    int // Max index to drop at (0 = no limit, drop until end)
 }
 
 func (d DropEveryN) ShouldDrop(i int, totalPackets int) bool {
 	if d.N <= 0 {
 		return false
+	}
+	if d.Max > 0 && i > d.Max {
+		return false // Don't drop beyond Max
 	}
 	return (i+1-d.Offset)%d.N == 0 && i >= d.Offset
 }
@@ -265,7 +269,13 @@ func (tc *LossRecoveryTestCase) applyDerivedDefaults() {
 		}
 	}
 	if tc.PacketSpreadUs == 0 {
-		tc.PacketSpreadUs = int(tc.TsbpdDelayUs / 100) // 1% of TSBPD
+		// CRITICAL: PacketSpreadUs must scale with TotalPackets to ensure
+		// all packets fit within the TSBPD window (use 80% to leave buffer)
+		if tc.TotalPackets > 1 {
+			tc.PacketSpreadUs = int(tc.TsbpdDelayUs * 80 / uint64(tc.TotalPackets*100))
+		} else {
+			tc.PacketSpreadUs = int(tc.TsbpdDelayUs / 100) // Default for single packet
+		}
 		if tc.PacketSpreadUs < 50 {
 			tc.PacketSpreadUs = 50 // minimum 50us
 		}
@@ -383,7 +393,7 @@ func runLossRecoveryTableTest(t *testing.T, tc LossRecoveryTestCase) {
 
 		allPackets = append(allPackets, p)
 
-		if tc.DropPattern.ShouldDrop(i, tc.TotalPackets) {
+		if tc.DropPattern != nil && tc.DropPattern.ShouldDrop(i, tc.TotalPackets) {
 			droppedPackets = append(droppedPackets, p)
 			droppedSeqs = append(droppedSeqs, seq)
 			isDropped[i] = true
@@ -396,8 +406,12 @@ func runLossRecoveryTableTest(t *testing.T, tc LossRecoveryTestCase) {
 	t.Logf("Test: %s", tc.Name)
 	t.Logf("  Config: TSBPD=%dms, NakRecent=%.0f%%, NakCycles=%d, DeliveryCycles=%d",
 		tc.TsbpdDelayUs/1000, tc.NakRecentPct*100, tc.NakCycles, tc.DeliveryCycles)
+	patternDesc := "none"
+	if tc.DropPattern != nil {
+		patternDesc = tc.DropPattern.Description()
+	}
 	t.Logf("  Pattern: %s, Dropped: %d/%d (%.1f%%)",
-		tc.DropPattern.Description(),
+		patternDesc,
 		len(droppedSeqs), tc.TotalPackets,
 		float64(len(droppedSeqs))/float64(tc.TotalPackets)*100)
 
@@ -820,6 +834,46 @@ var LossRecoveryTableTests = []LossRecoveryTestCase{
 		TotalPackets:       100,
 		StartSeq:           1,
 		NakRecentPct:       0.25, // 25% - conservative NAKing (larger recent window)
+		DropPattern:        DropSpecific{Indices: []int{20, 40, 60, 80}},
+		DoRetransmit:       true,
+		NakCycles:          80,
+		DeliveryCycles:     30,
+		ExpectFullRecovery: true,
+		MinNakPct:          100,
+	},
+
+	// TotalPackets corners (stress testing)
+	{
+		Name:               "Corner_TotalPackets_Single",
+		TotalPackets:       1, // Minimum - single packet
+		StartSeq:           1,
+		DropPattern:        nil, // No drops - just test single packet handling
+		DoRetransmit:       true,
+		ExpectFullRecovery: true,
+	},
+	{
+		Name:         "Corner_TotalPackets_Large",
+		TotalPackets: 1000, // Stress test - large packet count
+		StartSeq:     1,
+		TsbpdDelayUs: 500_000,                       // Standard 500ms TSBPD
+		DropPattern:  DropEveryN{N: 50, Offset: 50}, // Drop every 50th (19 drops)
+		DoRetransmit: true,
+		// IMPORTANT: With 1000 packets spread over TSBPD window, later drops
+		// may have TSBPD expire before retransmit can arrive. This is CORRECT
+		// behavior per contiguous_point_tsbpd_advancement_design.md:
+		// "If TSBPD has expired → definitely lost, advance"
+		// Allow 95%+ NAK rate (18/19 = 94.7%) and 99%+ recovery
+		ExpectFullRecovery: false, // Edge case: last drop may TSBPD-expire
+		MinDeliveryPct:     99.0,  // At least 99% delivered
+		MinNakPct:          90,    // Allow some drops to TSBPD-expire before NAK
+	},
+
+	// NakRecentPct typical value (ensures 10% is covered)
+	{
+		Name:               "Corner_NakRecent_10pct_Typical",
+		TotalPackets:       100,
+		StartSeq:           1,
+		NakRecentPct:       0.10, // 10% - typical default value
 		DropPattern:        DropSpecific{Indices: []int{20, 40, 60, 80}},
 		DoRetransmit:       true,
 		NakCycles:          80,
