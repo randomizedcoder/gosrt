@@ -524,3 +524,16 @@ The HighPerf (btree + io_uring + EventLoop) pipeline demonstrates:
 - **Phase 9**: Identified and fixed EventLoop time base mismatch
 - **Phase 10**: Integration test shows 0 drops - SUCCESS!
 
+### 2025-12-29
+
+- **BUGFIX**: Fixed EventLoop NAK time base consistency (`periodicNAK` using `time.Now()` instead of `r.nowFn()`)
+- Added `TestEventLoop_NAK_TimeBase_Consistency` to verify NAKs respect "too recent" threshold
+- Added comprehensive `TestLossRecovery_Full` test that verifies end-to-end recovery:
+  - Simulates 4 dropped packets (seq 21, 41, 61, 81)
+  - Verifies all 4 dropped packets are NAKed
+  - Simulates interleaved NAK/retransmit cycle (like real network)
+  - Verifies 100% packet delivery (100/100 packets)
+  - Verifies 100% loss recovery (all 4 dropped packets recovered)
+  - Tracks ACKs, NAKs, and delivery metrics via `TestMetricsCollector`
+- Added `TestMetricsCollector` helper for comprehensive test metric tracking
+

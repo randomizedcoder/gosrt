@@ -254,6 +254,12 @@ test-race-wraparound:
 	@echo "=== Wraparound Race Detection Test ==="
 	go test -race -v ./congestion/live -run 'TestRace_SequenceWraparound'
 
+## test-race-eventloop: Run EventLoop race tests (real goroutines + tickers)
+## These are particularly valuable because EventLoop runs with real concurrency.
+test-race-eventloop:
+	@echo "=== EventLoop Race Detection Tests ==="
+	go test -race -v ./congestion/live -run 'TestRace_EventLoop' -timeout 60s
+
 ## bench-receiver: Run receiver benchmarks (config comparison)
 bench-receiver:
 	@echo "=== Receiver Configuration Benchmarks ==="
@@ -419,7 +425,7 @@ nixshell:
 .PHONY: test test-flags test-flags-integration test-integration test-integration-all test-integration-config test-integration-list test-congestion-live test-packet-pool test-packet fuzz coverage
 # Receiver stream testing targets (table-driven unit tests)
 .PHONY: test-stream-tier1 test-stream-tier2 test-stream-tier3 test-stream-all test-stream-race
-.PHONY: test-race test-race-wraparound test-circular test-packet-store
+.PHONY: test-race test-race-wraparound test-race-eventloop test-circular test-packet-store
 # Network impairment testing targets (require root)
 .PHONY: test-network-list test-network test-network-all test-network-quick network-setup network-cleanup network-status
 # Parallel comparison testing targets (require root)

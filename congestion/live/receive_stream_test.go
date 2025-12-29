@@ -835,15 +835,15 @@ type TestMetricsCollector struct {
 	mu sync.Mutex
 
 	// ACK tracking
-	ACKCount      int
-	ACKLiteCount  int
-	ACKFullCount  int
-	ACKSequences  []uint32
+	ACKCount     int
+	ACKLiteCount int
+	ACKFullCount int
+	ACKSequences []uint32
 
 	// NAK tracking
-	NAKCount        int
-	NAKedSequences  map[uint32]int // seq -> count (to detect over-NAKing)
-	UniqueNAKCount  int
+	NAKCount       int
+	NAKedSequences map[uint32]int // seq -> count (to detect over-NAKing)
+	UniqueNAKCount int
 
 	// Delivery tracking
 	DeliveredCount     int
@@ -883,7 +883,7 @@ func (c *TestMetricsCollector) OnSendNAK(list []circular.Number) {
 	defer c.mu.Unlock()
 	c.NAKCount++
 	// Parse NAK ranges: [start, end, start, end, ...]
-	for i := 0; i + 1 < len(list); i += 2 {
+	for i := 0; i+1 < len(list); i += 2 {
 		start := list[i].Val()
 		end := list[i+1].Val()
 		for seq := start; ; seq = circular.SeqAdd(seq, 1) {
@@ -1790,14 +1790,14 @@ func TestLossRecovery_Full(t *testing.T) {
 	testMetrics.HeaderSize.Store(44)
 
 	recvConfig := ReceiveConfig{
-		InitialSequenceNumber: circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
-		PeriodicACKInterval:   ackIntervalUs,
-		PeriodicNAKInterval:   nakIntervalUs,
-		OnSendACK:             collector.OnSendACK,
-		OnSendNAK:             collector.OnSendNAK,
-		OnDeliver:             collector.OnDeliver,
-		ConnectionMetrics:     testMetrics,
-		TsbpdDelay:            tsbpdDelayUs,
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
 		PacketReorderAlgorithm: "btree",
 		UseNakBtree:            true,
 		NakRecentPercent:       0.10,
@@ -1872,7 +1872,7 @@ func TestLossRecovery_Full(t *testing.T) {
 	firstTsbpd := allPackets[0].Header().PktTsbpdTime
 	lastTsbpd := allPackets[totalPackets-1].Header().PktTsbpdTime
 	tooRecentWindow := uint64(float64(tsbpdDelayUs) * 0.10) // 50ms
-	nakWindow := tsbpdDelayUs - tooRecentWindow              // 450ms
+	nakWindow := tsbpdDelayUs - tooRecentWindow             // 450ms
 
 	t.Logf("  First packet TSBPD=%d, Last packet TSBPD=%d", firstTsbpd, lastTsbpd)
 	t.Logf("  NAK window: tsbpdDelay=%d, nakWindow=%d, tooRecentWindow=%d",
@@ -1888,7 +1888,7 @@ func TestLossRecovery_Full(t *testing.T) {
 	// We need to stay BEFORE the dropped packet's TSBPD expires (1,600,000)
 	// NAK window for seq 21: [1,155,000, 1,600,000)
 	//
-	droppedSeq21Tsbpd := droppedPackets[0].Header().PktTsbpdTime // 1,600,000
+	droppedSeq21Tsbpd := droppedPackets[0].Header().PktTsbpdTime   // 1,600,000
 	nextPacketTsbpd := baseTime + tsbpdDelayUs + 21*packetSpreadUs // 1,605,000 (seq 22)
 	nakStartTime := nextPacketTsbpd - nakWindow                    // 1,605,000 - 450,000 = 1,155,000
 
@@ -2054,4 +2054,2350 @@ func TestLossRecovery_Full(t *testing.T) {
 		}
 		t.Errorf("Not all dropped packets recovered: %v not delivered", notRecovered)
 	}
+}
+
+// ============================================================================
+// TestLossRecovery_Wraparound verifies loss recovery across the 31-bit
+// sequence number wraparound boundary.
+//
+// This is critical because all sequence arithmetic must use circular math.
+// A bug here would cause:
+// - Incorrect gap detection (treating high seqs as "already received")
+// - Incorrect NAK generation
+// - Incorrect contiguousPoint advancement
+// ============================================================================
+func TestLossRecovery_Wraparound(t *testing.T) {
+	const (
+		totalPackets   = 100
+		tsbpdDelayUs   = uint64(500_000) // 500ms
+		ackIntervalUs  = uint64(10_000)  // 10ms
+		nakIntervalUs  = uint64(20_000)  // 20ms
+		packetSpreadUs = uint64(5_000)   // 5ms between packets
+	)
+
+	// Start near the 31-bit wraparound point
+	// MAX_SEQUENCENUMBER = 0x7FFFFFFF = 2147483647
+	startSeq := packet.MAX_SEQUENCENUMBER - 50 // Start 50 before max
+
+	// Collector
+	collector := NewTestMetricsCollector()
+
+	// Create receiver
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	// Mock time
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Generate packets with wraparound
+	// Seqs: MAX-50, MAX-49, ..., MAX-1, MAX, 0, 1, ..., 49
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// Drop positions: 30 (before wrap), 60 (after wrap)
+	dropIndices := map[int]bool{20: true, 40: true, 60: true, 80: true}
+
+	for i := 0; i < totalPackets; i++ {
+		seq := circular.SeqAdd(startSeq, uint32(i))
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if dropIndices[i] {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+			t.Logf("Dropping packet i=%d, seq=%d (0x%08X)", i, seq, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Sequence range: start=0x%08X (%d), end=0x%08X (%d)",
+		startSeq, startSeq,
+		circular.SeqAdd(startSeq, uint32(totalPackets-1)),
+		circular.SeqAdd(startSeq, uint32(totalPackets-1)))
+	t.Logf("Wraparound occurs between seq 0x%08X and 0x%08X",
+		packet.MAX_SEQUENCENUMBER, uint32(0))
+
+	// Phase 1: Push non-dropped packets
+	for i, p := range allPackets {
+		if !dropIndices[i] {
+			recv.Push(p)
+		}
+	}
+
+	t.Logf("Phase 1: Pushed %d packets, dropped %d", totalPackets-len(droppedSeqs), len(droppedSeqs))
+
+	// Phase 2: Generate NAKs
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	lastTsbpd := allPackets[totalPackets-1].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90) // 450ms
+	nakStartTime := firstTsbpd - nakWindow
+
+	for tick := 0; tick < 15; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Phase 2: NAKed %d unique sequences", collector.UniqueNAKCount)
+
+	// Phase 3: Interleaved NAK/Retransmit
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 50; tick++ {
+		mockTime = nakStartTime + uint64((15+tick)*10_000)
+		r.Tick(mockTime)
+
+		// Retransmit NAKed packets
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						// Use circular comparison!
+						if circular.SeqGreater(seq, cp) {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+							t.Logf("  tick %d: Retransmit seq=%d (0x%08X)", tick, seq, seq)
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	t.Logf("Phase 3: NAKed %d, Retransmitted %d", collector.UniqueNAKCount, collector.RetransmittedCount)
+
+	// Phase 4: Delivery
+	for tick := 0; tick < 20; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Phase 4: Final mockTime=%d, last TSBPD=%d", mockTime, lastTsbpd)
+
+	// Verify
+	finalCP := r.contiguousPoint.Load()
+	expectedFinalCP := circular.SeqAdd(startSeq, uint32(totalPackets-1))
+
+	t.Logf("Final: CP=0x%08X (%d), expected=0x%08X (%d)",
+		finalCP, finalCP, expectedFinalCP, expectedFinalCP)
+	t.Logf("Delivered: %d/%d", collector.DeliveredCount, totalPackets)
+
+	// Assertions
+	if collector.UniqueNAKCount < len(droppedSeqs) {
+		t.Errorf("Not all dropped packets NAKed: got %d, expected %d",
+			collector.UniqueNAKCount, len(droppedSeqs))
+	}
+
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered: got %d, expected %d",
+			collector.DeliveredCount, totalPackets)
+	}
+
+	// Verify CP advanced correctly using circular comparison
+	if !circular.SeqGreaterOrEqual(finalCP, expectedFinalCP) {
+		t.Errorf("contiguousPoint stuck: got 0x%08X, expected >= 0x%08X",
+			finalCP, expectedFinalCP)
+	}
+}
+
+// ============================================================================
+// TestLossRecovery_BurstLoss verifies recovery from consecutive packet loss,
+// a common pattern during network congestion.
+// ============================================================================
+func TestLossRecovery_BurstLoss(t *testing.T) {
+	const (
+		totalPackets   = 100
+		burstStart     = 45
+		burstSize      = 10 // Drop packets 45-54
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// Drop burst: indices burstStart to burstStart+burstSize-1
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if i >= burstStart && i < burstStart+burstSize {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Burst loss: packets %d-%d (seqs %d-%d)",
+		burstStart, burstStart+burstSize-1,
+		droppedSeqs[0], droppedSeqs[len(droppedSeqs)-1])
+
+	// Phase 1: Push non-dropped
+	for i, p := range allPackets {
+		if i < burstStart || i >= burstStart+burstSize {
+			recv.Push(p)
+		}
+	}
+
+	t.Logf("Phase 1: Pushed %d, dropped %d (burst)", totalPackets-burstSize, burstSize)
+
+	// Phase 2: NAK generation
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	for tick := 0; tick < 15; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Phase 2: NAKed %d unique sequences (expected %d for burst)",
+		collector.UniqueNAKCount, burstSize)
+
+	// Phase 3: Retransmit burst
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 50; tick++ {
+		mockTime = nakStartTime + uint64((15+tick)*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	t.Logf("Phase 3: Retransmitted %d/%d burst packets",
+		collector.RetransmittedCount, burstSize)
+
+	// Phase 4: Delivery
+	for tick := 0; tick < 20; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	// Verify
+	t.Logf("Final: CP=%d, delivered=%d/%d",
+		r.contiguousPoint.Load(), collector.DeliveredCount, totalPackets)
+
+	// All burst packets should be NAKed
+	for _, seq := range droppedSeqs {
+		if collector.NAKedSequences[seq] == 0 {
+			t.Errorf("Burst packet %d NOT NAKed", seq)
+		}
+	}
+
+	// 100% delivery expected
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered: got %d, expected %d",
+			collector.DeliveredCount, totalPackets)
+	}
+
+	// Verify recovery rate
+	recoveredCount := 0
+	deliveredSet := make(map[uint32]bool)
+	for _, seq := range collector.DeliveredSequences {
+		deliveredSet[seq] = true
+	}
+	for _, seq := range droppedSeqs {
+		if deliveredSet[seq] {
+			recoveredCount++
+		}
+	}
+	t.Logf("Burst recovery: %d/%d (%.1f%%)",
+		recoveredCount, burstSize, float64(recoveredCount)/float64(burstSize)*100)
+
+	if recoveredCount < burstSize {
+		t.Errorf("Not all burst packets recovered: got %d, expected %d",
+			recoveredCount, burstSize)
+	}
+}
+
+// ============================================================================
+// TestLossRecovery_TSBPD_Expiry verifies contiguousPoint advancement when
+// packets are PERMANENTLY lost (no retransmit arrives).
+//
+// This is the core test for the ContiguousPoint TSBPD-Based Advancement design.
+// ============================================================================
+func TestLossRecovery_TSBPD_Expiry(t *testing.T) {
+	const (
+		totalPackets   = 100
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(200_000) // Shorter TSBPD for faster test
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	droppedIndices := map[int]bool{20: true, 40: true, 60: true, 80: true}
+	var droppedSeqs []uint32
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if droppedIndices[i] {
+			droppedSeqs = append(droppedSeqs, seq)
+			t.Logf("Permanently dropping seq=%d (TSBPD=%d)", seq, p.Header().PktTsbpdTime)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	// Phase 1: Push non-dropped
+	for i, p := range allPackets {
+		if !droppedIndices[i] {
+			recv.Push(p)
+		}
+	}
+
+	t.Logf("Phase 1: Pushed %d, permanently dropped %d (NO retransmit)",
+		totalPackets-len(droppedSeqs), len(droppedSeqs))
+
+	// Phase 2: Advance time to generate NAKs (but within NAK window)
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	t.Logf("Phase 2: Generating NAKs (before TSBPD expiry)")
+	for tick := 0; tick < 10; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("  NAKed %d unique sequences", collector.UniqueNAKCount)
+	initialNakCount := collector.UniqueNAKCount
+
+	// Phase 3: Advance time PAST TSBPD for ALL dropped packets
+	// NO RETRANSMIT - packets are permanently lost
+	t.Logf("Phase 3: Advancing time past TSBPD expiry (NO retransmit)")
+
+	// Track CP advancement
+	cpHistory := make(map[uint64]uint32)
+
+	for tick := 0; tick < 100; tick++ {
+		// Advance aggressively past all TSBPD times
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*10_000)
+		r.Tick(mockTime)
+
+		cp := r.contiguousPoint.Load()
+		cpHistory[mockTime] = cp
+
+		// Log when CP advances past a dropped packet
+		for _, seq := range droppedSeqs {
+			if cp == seq && cpHistory[mockTime-10_000] < seq {
+				t.Logf("  time=%d: CP advanced past dropped seq=%d (TSBPD expired)",
+					mockTime, seq)
+			}
+		}
+	}
+
+	// Phase 4: Final verification
+	finalCP := r.contiguousPoint.Load()
+	expectedCP := startSeq + uint32(totalPackets) - 1
+	expectedDelivered := totalPackets - len(droppedSeqs) // 96 packets
+
+	t.Logf("Final results:")
+	t.Logf("  contiguousPoint: %d (expected: %d)", finalCP, expectedCP)
+	t.Logf("  Delivered: %d (expected: %d)", collector.DeliveredCount, expectedDelivered)
+	t.Logf("  NAKs sent: %d (initial: %d)", collector.UniqueNAKCount, initialNakCount)
+
+	// Assertions
+	// 1. NAKs should have been sent for dropped packets (may happen in Phase 2 or 3)
+	finalNakCount := collector.UniqueNAKCount
+	if finalNakCount == 0 {
+		t.Errorf("No NAKs ever sent for dropped packets!")
+	} else {
+		t.Logf("✓ NAKs sent for %d sequences (may arrive after TSBPD expiry)", finalNakCount)
+	}
+
+	// 2. CP should advance to the end despite permanent loss
+	if finalCP < expectedCP {
+		t.Errorf("contiguousPoint stuck at %d, expected %d (TSBPD advancement failed)",
+			finalCP, expectedCP)
+	}
+
+	// 3. Delivered count should be total - permanent losses
+	// Allow small tolerance for timing edge cases at end
+	minExpected := expectedDelivered - 2
+	if collector.DeliveredCount < minExpected {
+		t.Errorf("Too few packets delivered: got %d, expected at least %d",
+			collector.DeliveredCount, minExpected)
+	}
+
+	// 4. Permanently dropped packets should NOT be delivered
+	deliveredSet := make(map[uint32]bool)
+	for _, seq := range collector.DeliveredSequences {
+		deliveredSet[seq] = true
+	}
+
+	for _, seq := range droppedSeqs {
+		if deliveredSet[seq] {
+			t.Errorf("Permanently dropped packet %d was somehow delivered!", seq)
+		}
+	}
+
+	// 5. Store should be empty (all packets either delivered or expired)
+	storeSize := r.packetStore.Len()
+	if storeSize > 0 {
+		t.Errorf("Packet store not empty: %d packets remaining", storeSize)
+	}
+
+	t.Logf("✓ TSBPD-based advancement working correctly")
+	t.Logf("✓ Permanent losses handled: %d packets skipped, CP advanced to end",
+		len(droppedSeqs))
+}
+
+// ============================================================================
+// PHASE 2 TESTS: Important Edge Cases
+// ============================================================================
+
+// TestLossRecovery_HeadLoss verifies recovery when the FIRST packets are lost.
+// This is critical for connection startup scenarios where initial packets
+// may be dropped before the connection is fully established.
+func TestLossRecovery_HeadLoss(t *testing.T) {
+	const (
+		totalPackets   = 100
+		headLossCount  = 5 // Drop first 5 packets (seq 1-5)
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		// Drop first N packets (head loss)
+		if i < headLossCount {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Head loss: first %d packets dropped (seq %d-%d)",
+		headLossCount, droppedSeqs[0], droppedSeqs[len(droppedSeqs)-1])
+
+	// Phase 1: Push non-dropped (skip first headLossCount)
+	for i, p := range allPackets {
+		if i >= headLossCount {
+			recv.Push(p)
+		}
+	}
+
+	// Note: contiguousPoint starts at startSeq-1 = 0
+	// First received packet is seq 6, so there's a gap 1-5
+	t.Logf("Phase 1: Pushed %d packets (starting at seq %d), CP=%d",
+		totalPackets-headLossCount, startSeq+uint32(headLossCount), r.contiguousPoint.Load())
+
+	// Phase 2: Generate NAKs
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	for tick := 0; tick < 15; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Phase 2: NAKed %d unique sequences, CP=%d",
+		collector.UniqueNAKCount, r.contiguousPoint.Load())
+
+	// Phase 3: Retransmit head packets
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 50; tick++ {
+		mockTime = nakStartTime + uint64((15+tick)*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+							t.Logf("  tick %d: Retransmit head packet seq=%d", tick, seq)
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	t.Logf("Phase 3: Retransmitted %d/%d head packets", collector.RetransmittedCount, headLossCount)
+
+	// Phase 4: Delivery
+	for tick := 0; tick < 20; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	// Verify
+	finalCP := r.contiguousPoint.Load()
+	t.Logf("Final: CP=%d, delivered=%d/%d", finalCP, collector.DeliveredCount, totalPackets)
+
+	// Key assertion: CP should advance from 0 to 100 after head recovery
+	expectedCP := startSeq + uint32(totalPackets) - 1
+	if finalCP < expectedCP {
+		t.Errorf("contiguousPoint stuck at %d, expected %d", finalCP, expectedCP)
+	}
+
+	// All packets should be delivered
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered: got %d, expected %d",
+			collector.DeliveredCount, totalPackets)
+	}
+
+	// Verify head packets were recovered
+	deliveredSet := make(map[uint32]bool)
+	for _, seq := range collector.DeliveredSequences {
+		deliveredSet[seq] = true
+	}
+	recoveredCount := 0
+	for _, seq := range droppedSeqs {
+		if deliveredSet[seq] {
+			recoveredCount++
+		}
+	}
+	t.Logf("Head packet recovery: %d/%d (%.1f%%)",
+		recoveredCount, headLossCount, float64(recoveredCount)/float64(headLossCount)*100)
+
+	if recoveredCount < headLossCount {
+		t.Errorf("Not all head packets recovered: got %d, expected %d",
+			recoveredCount, headLossCount)
+	}
+
+	t.Logf("✓ Head loss recovery successful")
+}
+
+// TestLossRecovery_TailLoss verifies recovery when packets near the END are lost.
+//
+// Note: Pure "tail loss" (last packets missing, nothing after) cannot trigger NAKs
+// because the NAK mechanism detects gaps by seeing packets AFTER the gap.
+// In real systems, subsequent packets or stream-end signaling triggers recovery.
+//
+// This test simulates a realistic scenario: packets 91-95 are lost, but packets
+// 96-105 arrive, triggering NAK for the gap.
+func TestLossRecovery_TailLoss(t *testing.T) {
+	const (
+		totalPackets   = 105 // Extra packets after the gap
+		tailLossStart  = 90  // Drop packets 91-95 (indices 90-94)
+		tailLossEnd    = 95
+		tailLossCount  = 5
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		// Drop packets 91-95 (indices 90-94)
+		if i >= tailLossStart && i < tailLossEnd {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Near-tail loss: packets %d-%d dropped (seq %d-%d)",
+		tailLossStart, tailLossEnd-1, droppedSeqs[0], droppedSeqs[len(droppedSeqs)-1])
+	t.Logf("Packets %d-%d arrive after gap (triggers NAK)", tailLossEnd, totalPackets-1)
+
+	// Phase 1: Push packets before gap (1-90) and after gap (96-105)
+	for i, p := range allPackets {
+		if i < tailLossStart || i >= tailLossEnd {
+			recv.Push(p)
+		}
+	}
+
+	// Run initial Ticks to advance CP through contiguous packets before gap
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	for tick := 0; tick < 10; tick++ {
+		mockTime = baseTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Phase 1: Pushed %d packets (with gap at %d-%d), CP=%d",
+		totalPackets-tailLossCount, tailLossStart+1, tailLossEnd, r.contiguousPoint.Load())
+
+	// CP should be at tailLossStart (90) since 1-90 are contiguous
+	expectedCPAfterPhase1 := uint32(tailLossStart)
+	if r.contiguousPoint.Load() < expectedCPAfterPhase1-5 {
+		t.Logf("Note: CP=%d, expected near %d before gap",
+			r.contiguousPoint.Load(), expectedCPAfterPhase1)
+	}
+
+	// Phase 2: Generate NAKs for gap packets
+	// Packets 96-105 exist in btree, which triggers NAK for gap 91-95
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	t.Logf("Phase 2: Advancing time to trigger NAKs for gap")
+	t.Logf("  Gap packets TSBPD range: %d - %d",
+		allPackets[tailLossStart].Header().PktTsbpdTime,
+		allPackets[tailLossEnd-1].Header().PktTsbpdTime)
+
+	// Advance time into the NAK window
+	for tick := 0; tick < 30; tick++ {
+		mockTime = nakStartTime + uint64(tick*20_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Phase 2: NAKed %d unique sequences", collector.UniqueNAKCount)
+
+	// Phase 3: Retransmit tail packets
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 30; tick++ {
+		mockTime = nakStartTime + uint64((20+tick)*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+							t.Logf("  tick %d: Retransmit tail packet seq=%d", tick, seq)
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	t.Logf("Phase 3: Retransmitted %d/%d tail packets", collector.RetransmittedCount, tailLossCount)
+
+	// Phase 4: Delivery
+	lastTsbpd := allPackets[totalPackets-1].Header().PktTsbpdTime
+	for tick := 0; tick < 20; tick++ {
+		mockTime = lastTsbpd + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	// Verify
+	finalCP := r.contiguousPoint.Load()
+	expectedCP := startSeq + uint32(totalPackets) - 1 // seq 105
+	t.Logf("Final: CP=%d (expected %d), delivered=%d/%d",
+		finalCP, expectedCP, collector.DeliveredCount, totalPackets)
+
+	// Key assertion: CP should reach the end
+	if finalCP < expectedCP {
+		t.Errorf("contiguousPoint stuck at %d, expected %d (near-tail not recovered)",
+			finalCP, expectedCP)
+	}
+
+	// All packets should be delivered
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered: got %d, expected %d",
+			collector.DeliveredCount, totalPackets)
+	}
+
+	// Verify gap packets were recovered
+	deliveredSet := make(map[uint32]bool)
+	for _, seq := range collector.DeliveredSequences {
+		deliveredSet[seq] = true
+	}
+	recoveredCount := 0
+	for _, seq := range droppedSeqs {
+		if deliveredSet[seq] {
+			recoveredCount++
+		}
+	}
+	t.Logf("Near-tail gap recovery: %d/%d (%.1f%%)",
+		recoveredCount, tailLossCount, float64(recoveredCount)/float64(tailLossCount)*100)
+
+	if recoveredCount < tailLossCount {
+		t.Errorf("Not all gap packets recovered: got %d, expected %d",
+			recoveredCount, tailLossCount)
+	}
+
+	t.Logf("✓ Near-tail loss recovery successful")
+}
+
+// TestLossRecovery_LateRetransmit verifies behavior when retransmits arrive
+// AFTER TSBPD expiry. Late packets should be rejected (seq <= contiguousPoint).
+func TestLossRecovery_LateRetransmit(t *testing.T) {
+	const (
+		totalPackets   = 100
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(200_000) // Short TSBPD for faster test
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	droppedIndices := map[int]bool{20: true, 40: true, 60: true, 80: true}
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if droppedIndices[i] {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Dropping packets: %v", droppedSeqs)
+	t.Logf("Test scenario: Let TSBPD expire, THEN send retransmits (too late)")
+
+	// Phase 1: Push non-dropped
+	for i, p := range allPackets {
+		if !droppedIndices[i] {
+			recv.Push(p)
+		}
+	}
+
+	t.Logf("Phase 1: Pushed %d packets", totalPackets-len(droppedSeqs))
+
+	// Phase 2: Generate NAKs (within window)
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+
+	for tick := 0; tick < 10; tick++ {
+		mockTime = firstTsbpd - nakWindow + uint64(tick*10_000)
+		r.Tick(mockTime)
+	}
+
+	nakCount := collector.UniqueNAKCount
+	t.Logf("Phase 2: Generated %d NAKs", nakCount)
+
+	// Phase 3: ADVANCE TIME PAST ALL TSBPD (let packets expire)
+	// This is the key difference from other tests - we let packets TSBPD-expire
+	lastTsbpd := allPackets[totalPackets-1].Header().PktTsbpdTime
+
+	t.Logf("Phase 3: Advancing time past ALL TSBPD deadlines")
+	t.Logf("  Last packet TSBPD: %d", lastTsbpd)
+
+	for tick := 0; tick < 50; tick++ {
+		mockTime = lastTsbpd + uint64(tick*10_000)
+		r.Tick(mockTime)
+	}
+
+	// At this point, all dropped packets should have TSBPD-expired
+	// and contiguousPoint should have advanced past them
+	cpAfterExpiry := r.contiguousPoint.Load()
+	deliveredAfterExpiry := collector.DeliveredCount
+
+	t.Logf("After TSBPD expiry: CP=%d, delivered=%d", cpAfterExpiry, deliveredAfterExpiry)
+
+	// Verify CP advanced past dropped packets
+	expectedCP := startSeq + uint32(totalPackets) - 1
+	if cpAfterExpiry < expectedCP {
+		t.Errorf("CP didn't advance past expired packets: got %d, expected %d",
+			cpAfterExpiry, expectedCP)
+	}
+
+	// Phase 4: NOW send late retransmits (should be rejected)
+	t.Logf("Phase 4: Sending LATE retransmits (after TSBPD expiry)")
+
+	lateRetransmitCount := 0
+	for _, p := range droppedPackets {
+		seq := p.Header().PacketSequenceNumber.Val()
+		cp := r.contiguousPoint.Load()
+
+		// Check if retransmit would be rejected
+		// Per circular arithmetic: if seq <= cp, packet is "already ACKed"
+		if circular.SeqLessOrEqual(seq, cp) {
+			t.Logf("  Late retransmit seq=%d will be rejected (CP=%d)", seq, cp)
+		}
+
+		retransP := packet.NewPacket(addr)
+		retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+		retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+		retransP.Header().Timestamp = p.Header().Timestamp
+		retransP.Header().RetransmittedPacketFlag = true
+		recv.Push(retransP)
+		lateRetransmitCount++
+	}
+
+	t.Logf("Sent %d late retransmits", lateRetransmitCount)
+
+	// Run more ticks to process
+	for tick := 0; tick < 10; tick++ {
+		mockTime = lastTsbpd + uint64((50+tick)*10_000)
+		r.Tick(mockTime)
+	}
+
+	// Verify
+	finalDelivered := collector.DeliveredCount
+	expectedDelivered := totalPackets - len(droppedSeqs) // 96 packets
+
+	t.Logf("Final results:")
+	t.Logf("  CP: %d", r.contiguousPoint.Load())
+	t.Logf("  Delivered: %d (expected: %d)", finalDelivered, expectedDelivered)
+	t.Logf("  Late retransmits should NOT increase delivery count")
+
+	// Key assertion: Late retransmits should NOT be delivered
+	// Delivery count should match what was delivered before late retransmits
+	if finalDelivered > expectedDelivered+1 { // Allow +1 for timing edge case
+		t.Errorf("Late retransmits were incorrectly delivered: got %d, expected max %d",
+			finalDelivered, expectedDelivered)
+	}
+
+	// Dropped packets should NOT appear in delivered list
+	deliveredSet := make(map[uint32]bool)
+	for _, seq := range collector.DeliveredSequences {
+		deliveredSet[seq] = true
+	}
+
+	incorrectlyDelivered := 0
+	for _, seq := range droppedSeqs {
+		if deliveredSet[seq] {
+			t.Logf("WARNING: Late retransmit seq=%d was delivered (unexpected)", seq)
+			incorrectlyDelivered++
+		}
+	}
+
+	if incorrectlyDelivered > 0 {
+		t.Errorf("%d late retransmits were incorrectly delivered", incorrectlyDelivered)
+	} else {
+		t.Logf("✓ Late retransmits correctly rejected")
+	}
+
+	t.Logf("✓ Late retransmit handling correct: %d packets expired, %d delivered",
+		len(droppedSeqs), finalDelivered)
+}
+
+// ============================================================================
+// PHASE 3 TESTS: Comprehensive/Stress Tests
+// ============================================================================
+
+// TestLossRecovery_PartialRecovery verifies mixed scenarios where some gaps
+// are recovered (retransmit arrives in time) and others expire (no retransmit).
+//
+// This tests the realistic case where network conditions vary and not all
+// retransmits succeed.
+func TestLossRecovery_PartialRecovery(t *testing.T) {
+	const (
+		totalPackets   = 100
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(300_000) // 300ms - moderate window
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+
+	// Drop 4 packets: seq 21, 41, 61, 81
+	// We will recover 21 and 41, but let 61 and 81 TSBPD-expire
+	droppedIndices := map[int]bool{20: true, 40: true, 60: true, 80: true}
+	recoveredIndices := map[int]bool{20: true, 40: true} // Only recover first two
+	expiredIndices := map[int]bool{60: true, 80: true}   // Let these expire
+
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+	var recoveredSeqs []uint32
+	var expiredSeqs []uint32
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if droppedIndices[i] {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+			if recoveredIndices[i] {
+				recoveredSeqs = append(recoveredSeqs, seq)
+			}
+			if expiredIndices[i] {
+				expiredSeqs = append(expiredSeqs, seq)
+			}
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Partial recovery scenario:")
+	t.Logf("  Dropped: %v", droppedSeqs)
+	t.Logf("  Will recover: %v", recoveredSeqs)
+	t.Logf("  Will expire: %v", expiredSeqs)
+
+	// Phase 1: Push non-dropped
+	for i, p := range allPackets {
+		if !droppedIndices[i] {
+			recv.Push(p)
+		}
+	}
+
+	t.Logf("Phase 1: Pushed %d packets", totalPackets-len(droppedSeqs))
+
+	// Phase 2: Generate NAKs and selectively retransmit
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 80; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+
+		// Only retransmit recoveredSeqs, NOT expiredSeqs
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				// Check if this seq should be recovered
+				shouldRecover := false
+				for _, rSeq := range recoveredSeqs {
+					if seq == rSeq {
+						shouldRecover = true
+						break
+					}
+				}
+
+				if shouldRecover {
+					for _, p := range droppedPackets {
+						if p.Header().PacketSequenceNumber.Val() == seq {
+							cp := r.contiguousPoint.Load()
+							if seq > cp {
+								retransP := packet.NewPacket(addr)
+								retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+								retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+								retransP.Header().Timestamp = p.Header().Timestamp
+								retransP.Header().RetransmittedPacketFlag = true
+								recv.Push(retransP)
+								collector.RetransmittedCount++
+								t.Logf("  tick %d: Retransmit seq=%d (WILL RECOVER)", tick, seq)
+							}
+							break
+						}
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	t.Logf("Phase 2: NAKed %d, Retransmitted %d (partial)",
+		collector.UniqueNAKCount, collector.RetransmittedCount)
+
+	// Phase 3: Let remaining packets TSBPD-expire
+	t.Logf("Phase 3: Advancing time to let unrecovered packets expire")
+	lastTsbpd := allPackets[totalPackets-1].Header().PktTsbpdTime
+
+	for tick := 0; tick < 30; tick++ {
+		mockTime = lastTsbpd + uint64(tick*20_000)
+		r.Tick(mockTime)
+	}
+
+	// Verify results
+	finalCP := r.contiguousPoint.Load()
+	expectedCP := startSeq + uint32(totalPackets) - 1
+	expectedDelivered := totalPackets - len(expiredSeqs) // 100 - 2 = 98
+
+	t.Logf("Final results:")
+	t.Logf("  CP: %d (expected: %d)", finalCP, expectedCP)
+	t.Logf("  Delivered: %d (expected: %d)", collector.DeliveredCount, expectedDelivered)
+
+	// CP should advance to end (TSBPD handles expired packets)
+	if finalCP < expectedCP {
+		t.Errorf("CP stuck at %d, expected %d", finalCP, expectedCP)
+	}
+
+	// Build delivered set
+	deliveredSet := make(map[uint32]bool)
+	for _, seq := range collector.DeliveredSequences {
+		deliveredSet[seq] = true
+	}
+
+	// Verify recovered packets ARE delivered
+	for _, seq := range recoveredSeqs {
+		if !deliveredSet[seq] {
+			t.Errorf("Recovered packet seq=%d was NOT delivered", seq)
+		} else {
+			t.Logf("  ✓ Recovered seq=%d delivered", seq)
+		}
+	}
+
+	// Verify expired packets are NOT delivered
+	for _, seq := range expiredSeqs {
+		if deliveredSet[seq] {
+			t.Errorf("Expired packet seq=%d was incorrectly delivered", seq)
+		} else {
+			t.Logf("  ✓ Expired seq=%d correctly skipped", seq)
+		}
+	}
+
+	// Delivery count check
+	minExpected := expectedDelivered - 2 // Allow small tolerance
+	if collector.DeliveredCount < minExpected {
+		t.Errorf("Too few packets delivered: got %d, expected at least %d",
+			collector.DeliveredCount, minExpected)
+	}
+
+	t.Logf("✓ Partial recovery: %d recovered, %d expired, %d delivered",
+		len(recoveredSeqs), len(expiredSeqs), collector.DeliveredCount)
+}
+
+// TestLossRecovery_MultipleBursts verifies recovery from multiple separate
+// burst losses - a common pattern in congested networks.
+func TestLossRecovery_MultipleBursts(t *testing.T) {
+	const (
+		totalPackets   = 100
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// Two bursts: indices 20-24 (seq 21-25) and 60-64 (seq 61-65)
+	burst1Start, burst1End := 20, 25
+	burst2Start, burst2End := 60, 65
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		// Drop if in either burst
+		if (i >= burst1Start && i < burst1End) || (i >= burst2Start && i < burst2End) {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Multiple bursts:")
+	t.Logf("  Burst 1: seq %d-%d (%d packets)", startSeq+uint32(burst1Start), startSeq+uint32(burst1End-1), burst1End-burst1Start)
+	t.Logf("  Burst 2: seq %d-%d (%d packets)", startSeq+uint32(burst2Start), startSeq+uint32(burst2End-1), burst2End-burst2Start)
+	t.Logf("  Total dropped: %d packets", len(droppedSeqs))
+
+	// Phase 1: Push non-dropped
+	for i, p := range allPackets {
+		isBurst1 := i >= burst1Start && i < burst1End
+		isBurst2 := i >= burst2Start && i < burst2End
+		if !isBurst1 && !isBurst2 {
+			recv.Push(p)
+		}
+	}
+
+	t.Logf("Phase 1: Pushed %d packets", totalPackets-len(droppedSeqs))
+
+	// Phase 2: NAK and retransmit
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 60; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	t.Logf("Phase 2: NAKed %d, Retransmitted %d", collector.UniqueNAKCount, collector.RetransmittedCount)
+
+	// Phase 3: Delivery
+	for tick := 0; tick < 20; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	// Verify
+	finalCP := r.contiguousPoint.Load()
+	expectedCP := startSeq + uint32(totalPackets) - 1
+
+	t.Logf("Final: CP=%d (expected %d), delivered=%d/%d", finalCP, expectedCP, collector.DeliveredCount, totalPackets)
+
+	// All packets should be recovered
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered: got %d, expected %d", collector.DeliveredCount, totalPackets)
+	}
+
+	// Verify both bursts recovered
+	deliveredSet := make(map[uint32]bool)
+	for _, seq := range collector.DeliveredSequences {
+		deliveredSet[seq] = true
+	}
+
+	burst1Recovered := 0
+	burst2Recovered := 0
+	for _, seq := range droppedSeqs {
+		if deliveredSet[seq] {
+			if seq >= startSeq+uint32(burst1Start) && seq < startSeq+uint32(burst1End) {
+				burst1Recovered++
+			}
+			if seq >= startSeq+uint32(burst2Start) && seq < startSeq+uint32(burst2End) {
+				burst2Recovered++
+			}
+		}
+	}
+
+	t.Logf("Burst 1 recovery: %d/%d", burst1Recovered, burst1End-burst1Start)
+	t.Logf("Burst 2 recovery: %d/%d", burst2Recovered, burst2End-burst2Start)
+
+	if burst1Recovered < burst1End-burst1Start {
+		t.Errorf("Burst 1 not fully recovered: %d/%d", burst1Recovered, burst1End-burst1Start)
+	}
+	if burst2Recovered < burst2End-burst2Start {
+		t.Errorf("Burst 2 not fully recovered: %d/%d", burst2Recovered, burst2End-burst2Start)
+	}
+
+	t.Logf("✓ Multiple burst recovery successful: %d total recovered", burst1Recovered+burst2Recovered)
+}
+
+// TestLossRecovery_HeavyLoss verifies recovery under heavy packet loss (20%).
+// This stress tests the NAK mechanism and btree handling with many gaps.
+func TestLossRecovery_HeavyLoss(t *testing.T) {
+	const (
+		totalPackets   = 200
+		lossRate       = 0.20 // 20% loss
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(3_000) // Faster stream
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// Deterministic "random" loss pattern - drop every 5th packet
+	// This gives exactly 20% loss
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		// Drop every 5th packet (20% loss)
+		if i > 0 && i%5 == 0 {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	actualLossRate := float64(len(droppedSeqs)) / float64(totalPackets) * 100
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Heavy loss test:")
+	t.Logf("  Total packets: %d", totalPackets)
+	t.Logf("  Dropped: %d (%.1f%%)", len(droppedSeqs), actualLossRate)
+	t.Logf("  Sample dropped seqs: %v...", droppedSeqs[:min(10, len(droppedSeqs))])
+
+	// Phase 1: Push non-dropped
+	for i, p := range allPackets {
+		if i == 0 || i%5 != 0 {
+			recv.Push(p)
+		}
+	}
+
+	t.Logf("Phase 1: Pushed %d packets", totalPackets-len(droppedSeqs))
+
+	// Phase 2: Extended NAK/retransmit cycle (more iterations for heavy loss)
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 100; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+
+		// Log progress every 25 ticks
+		if tick > 0 && tick%25 == 0 {
+			t.Logf("  tick %d: NAKed=%d, Retrans=%d, CP=%d",
+				tick, collector.UniqueNAKCount, collector.RetransmittedCount, r.contiguousPoint.Load())
+		}
+	}
+
+	t.Logf("Phase 2: NAKed %d, Retransmitted %d", collector.UniqueNAKCount, collector.RetransmittedCount)
+
+	// Phase 3: Final delivery
+	for tick := 0; tick < 30; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	// Verify
+	finalCP := r.contiguousPoint.Load()
+	expectedCP := startSeq + uint32(totalPackets) - 1
+
+	t.Logf("Final results:")
+	t.Logf("  CP: %d (expected: %d)", finalCP, expectedCP)
+	t.Logf("  Delivered: %d/%d (%.1f%%)", collector.DeliveredCount, totalPackets,
+		float64(collector.DeliveredCount)/float64(totalPackets)*100)
+	t.Logf("  NAKed unique: %d/%d dropped", collector.UniqueNAKCount, len(droppedSeqs))
+	t.Logf("  Retransmitted: %d/%d dropped", collector.RetransmittedCount, len(droppedSeqs))
+
+	// Under heavy loss, we should still achieve 100% delivery
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered under heavy loss: got %d, expected %d",
+			collector.DeliveredCount, totalPackets)
+	}
+
+	// Verify recovery rate
+	deliveredSet := make(map[uint32]bool)
+	for _, seq := range collector.DeliveredSequences {
+		deliveredSet[seq] = true
+	}
+
+	recoveredCount := 0
+	for _, seq := range droppedSeqs {
+		if deliveredSet[seq] {
+			recoveredCount++
+		}
+	}
+	recoveryRate := float64(recoveredCount) / float64(len(droppedSeqs)) * 100
+
+	t.Logf("Recovery: %d/%d dropped packets recovered (%.1f%%)",
+		recoveredCount, len(droppedSeqs), recoveryRate)
+
+	if recoveryRate < 100 {
+		t.Errorf("Not all dropped packets recovered: %.1f%%", recoveryRate)
+	}
+
+	t.Logf("✓ Heavy loss (%.1f%%) recovery successful: %d packets recovered",
+		actualLossRate, recoveredCount)
+}
+
+// ============================================================================
+// PHASE 4 TESTS: Additional Patterns & Configuration Variants
+// ============================================================================
+
+// TestLossRecovery_PeriodicLoss verifies recovery from regular periodic loss
+// (every Nth packet). This pattern is common with certain network equipment
+// rate limiting.
+//
+// Note: We use 105 packets to avoid the "tail loss" edge case where the last
+// dropped packet has no subsequent packet to trigger NAK detection.
+func TestLossRecovery_PeriodicLoss(t *testing.T) {
+	const (
+		totalPackets   = 105 // Extra packets after last drop
+		dropEvery      = 10  // Drop every 10th packet (seq 10,20,30,40,50,60,70,80,90,100)
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		// Drop every Nth packet (indices 9, 19, 29, ... → seq 10, 20, 30, ...)
+		if (i+1)%dropEvery == 0 {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Periodic loss: every %dth packet dropped", dropEvery)
+	t.Logf("  Dropped seqs: %v", droppedSeqs)
+	t.Logf("  Total: %d dropped (%.1f%%)", len(droppedSeqs), float64(len(droppedSeqs))/float64(totalPackets)*100)
+
+	// Phase 1: Push non-dropped
+	for i, p := range allPackets {
+		if (i+1)%dropEvery != 0 {
+			recv.Push(p)
+		}
+	}
+
+	// Standard NAK/retransmit cycle
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 60; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	// Delivery
+	for tick := 0; tick < 20; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Results: NAKed=%d, Retrans=%d, Delivered=%d/%d",
+		collector.UniqueNAKCount, collector.RetransmittedCount, collector.DeliveredCount, totalPackets)
+
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered: got %d, expected %d", collector.DeliveredCount, totalPackets)
+	}
+
+	t.Logf("✓ Periodic loss recovery successful")
+}
+
+// TestLossRecovery_ClusteredLoss verifies recovery from clustered loss patterns
+// where small groups of packets are lost near each other (common in bursty networks).
+func TestLossRecovery_ClusteredLoss(t *testing.T) {
+	const (
+		totalPackets   = 100
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// Clustered loss: groups of 2-3 near each other
+	// Cluster 1: seq 30-32 (indices 29-31)
+	// Cluster 2: seq 35-37 (indices 34-36) - close to cluster 1
+	// Cluster 3: seq 70-71 (indices 69-70)
+	dropIndices := map[int]bool{
+		29: true, 30: true, 31: true, // seq 30, 31, 32
+		34: true, 35: true, 36: true, // seq 35, 36, 37
+		69: true, 70: true, // seq 70, 71
+	}
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if dropIndices[i] {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Clustered loss pattern:")
+	t.Logf("  Cluster 1: seq 30-32 (3 packets)")
+	t.Logf("  Cluster 2: seq 35-37 (3 packets, close to cluster 1)")
+	t.Logf("  Cluster 3: seq 70-71 (2 packets)")
+	t.Logf("  Total: %d dropped", len(droppedSeqs))
+
+	// Push non-dropped
+	for i, p := range allPackets {
+		if !dropIndices[i] {
+			recv.Push(p)
+		}
+	}
+
+	// NAK/retransmit cycle
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 60; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	// Delivery
+	for tick := 0; tick < 20; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Results: NAKed=%d, Retrans=%d, Delivered=%d/%d",
+		collector.UniqueNAKCount, collector.RetransmittedCount, collector.DeliveredCount, totalPackets)
+
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered: got %d, expected %d", collector.DeliveredCount, totalPackets)
+	}
+
+	t.Logf("✓ Clustered loss recovery successful")
+}
+
+// TestLossRecovery_LargeStream verifies recovery scales to larger streams (1000 packets).
+func TestLossRecovery_LargeStream(t *testing.T) {
+	const (
+		totalPackets   = 1000
+		lossRate       = 0.05 // 5% loss
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(1_000) // 1ms between packets (faster stream)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// Drop every 20th packet (5% loss)
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if i > 0 && i%20 == 0 {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Large stream test:")
+	t.Logf("  Total packets: %d", totalPackets)
+	t.Logf("  Dropped: %d (%.1f%%)", len(droppedSeqs), float64(len(droppedSeqs))/float64(totalPackets)*100)
+
+	// Push non-dropped
+	for i, p := range allPackets {
+		if i == 0 || i%20 != 0 {
+			recv.Push(p)
+		}
+	}
+
+	t.Logf("Pushed %d packets", totalPackets-len(droppedSeqs))
+
+	// Extended NAK/retransmit cycle for large stream
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90)
+	nakStartTime := firstTsbpd - nakWindow
+
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 150; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+
+		if tick > 0 && tick%50 == 0 {
+			t.Logf("  tick %d: NAKed=%d, Retrans=%d, CP=%d",
+				tick, collector.UniqueNAKCount, collector.RetransmittedCount, r.contiguousPoint.Load())
+		}
+	}
+
+	// Delivery
+	for tick := 0; tick < 30; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Final: NAKed=%d, Retrans=%d, Delivered=%d/%d",
+		collector.UniqueNAKCount, collector.RetransmittedCount, collector.DeliveredCount, totalPackets)
+
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered: got %d, expected %d", collector.DeliveredCount, totalPackets)
+	}
+
+	t.Logf("✓ Large stream (%d packets) recovery successful", totalPackets)
+}
+
+// TestLossRecovery_SmallTSBPD verifies recovery with a tight TSBPD window (100ms).
+// This tests the system under time pressure where retransmits must arrive quickly.
+func TestLossRecovery_SmallTSBPD(t *testing.T) {
+	const (
+		totalPackets   = 100
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(100_000) // Only 100ms TSBPD window!
+		ackIntervalUs  = uint64(5_000)   // Faster ACKs
+		nakIntervalUs  = uint64(10_000)  // Faster NAKs
+		packetSpreadUs = uint64(2_000)   // 2ms between packets
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10, // 10ms too-recent window
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// Drop packets 21, 41, 61, 81
+	droppedIndices := map[int]bool{20: true, 40: true, 60: true, 80: true}
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if droppedIndices[i] {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	t.Logf("Small TSBPD test:")
+	t.Logf("  TSBPD delay: %dms (tight window!)", tsbpdDelayUs/1000)
+	t.Logf("  Dropped: %v", droppedSeqs)
+
+	// Push non-dropped
+	for i, p := range allPackets {
+		if !droppedIndices[i] {
+			recv.Push(p)
+		}
+	}
+
+	// Fast NAK/retransmit cycle (must complete before TSBPD expires)
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakWindow := uint64(float64(tsbpdDelayUs) * 0.90) // 90ms NAK window
+	nakStartTime := firstTsbpd - nakWindow
+
+	retransmitted := make(map[uint32]bool)
+
+	// Faster tick rate for small TSBPD
+	for tick := 0; tick < 40; tick++ {
+		mockTime = nakStartTime + uint64(tick*5_000) // 5ms per tick
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	// Delivery
+	for tick := 0; tick < 20; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*20_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Results: NAKed=%d, Retrans=%d, Delivered=%d/%d",
+		collector.UniqueNAKCount, collector.RetransmittedCount, collector.DeliveredCount, totalPackets)
+
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered with small TSBPD: got %d, expected %d",
+			collector.DeliveredCount, totalPackets)
+	}
+
+	t.Logf("✓ Small TSBPD (%dms) recovery successful", tsbpdDelayUs/1000)
+}
+
+// TestLossRecovery_HighNakPercent verifies recovery with a larger "too recent" window
+// (nakRecentPercent = 0.30, meaning 30% of TSBPD is "too recent" to NAK).
+func TestLossRecovery_HighNakPercent(t *testing.T) {
+	const (
+		totalPackets   = 100
+		startSeq       = uint32(1)
+		tsbpdDelayUs   = uint64(500_000)
+		ackIntervalUs  = uint64(10_000)
+		nakIntervalUs  = uint64(20_000)
+		packetSpreadUs = uint64(5_000)
+		nakRecentPct   = 0.30 // 30% too-recent window (150ms)
+	)
+
+	collector := NewTestMetricsCollector()
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    ackIntervalUs,
+		PeriodicNAKInterval:    nakIntervalUs,
+		OnSendACK:              collector.OnSendACK,
+		OnSendNAK:              collector.OnSendNAK,
+		OnDeliver:              collector.OnDeliver,
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       nakRecentPct, // Larger too-recent window
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	baseTime := uint64(1_000_000)
+	mockTime := baseTime
+	r.nowFn = func() uint64 { return mockTime }
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	droppedIndices := map[int]bool{20: true, 40: true, 60: true, 80: true}
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = baseTime + tsbpdDelayUs + uint64(i)*packetSpreadUs
+		p.Header().Timestamp = uint32(uint64(i) * packetSpreadUs)
+
+		allPackets = append(allPackets, p)
+
+		if droppedIndices[i] {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	collector.ExpectedPackets = totalPackets
+	collector.DroppedPackets = droppedSeqs
+
+	nakWindow := uint64(float64(tsbpdDelayUs) * (1.0 - nakRecentPct)) // 350ms NAK window
+	tooRecentWindow := uint64(float64(tsbpdDelayUs) * nakRecentPct)   // 150ms too-recent
+
+	t.Logf("High NAK percent test:")
+	t.Logf("  nakRecentPercent: %.0f%%", nakRecentPct*100)
+	t.Logf("  NAK window: %dms, Too-recent: %dms", nakWindow/1000, tooRecentWindow/1000)
+	t.Logf("  Dropped: %v", droppedSeqs)
+
+	// Push non-dropped
+	for i, p := range allPackets {
+		if !droppedIndices[i] {
+			recv.Push(p)
+		}
+	}
+
+	// NAK/retransmit cycle
+	firstTsbpd := allPackets[0].Header().PktTsbpdTime
+	nakStartTime := firstTsbpd - nakWindow
+
+	retransmitted := make(map[uint32]bool)
+
+	for tick := 0; tick < 80; tick++ {
+		mockTime = nakStartTime + uint64(tick*10_000)
+		r.Tick(mockTime)
+
+		collector.mu.Lock()
+		for seq := range collector.NAKedSequences {
+			if !retransmitted[seq] {
+				for _, p := range droppedPackets {
+					if p.Header().PacketSequenceNumber.Val() == seq {
+						cp := r.contiguousPoint.Load()
+						if seq > cp {
+							retransP := packet.NewPacket(addr)
+							retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+							retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+							retransP.Header().Timestamp = p.Header().Timestamp
+							retransP.Header().RetransmittedPacketFlag = true
+							recv.Push(retransP)
+							collector.RetransmittedCount++
+						}
+						break
+					}
+				}
+				retransmitted[seq] = true
+			}
+		}
+		collector.mu.Unlock()
+	}
+
+	// Delivery
+	for tick := 0; tick < 20; tick++ {
+		mockTime = baseTime + tsbpdDelayUs + uint64(tick*50_000)
+		r.Tick(mockTime)
+	}
+
+	t.Logf("Results: NAKed=%d, Retrans=%d, Delivered=%d/%d",
+		collector.UniqueNAKCount, collector.RetransmittedCount, collector.DeliveredCount, totalPackets)
+
+	if collector.DeliveredCount < totalPackets {
+		t.Errorf("Not all packets delivered with high NAK percent: got %d, expected %d",
+			collector.DeliveredCount, totalPackets)
+	}
+
+	t.Logf("✓ High NAK percent (%.0f%%) recovery successful", nakRecentPct*100)
 }

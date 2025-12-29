@@ -25,7 +25,7 @@ github.com/pmezard/go-difflib/difflib
 # github.com/randomizedcoder/giouring v1.0.1
 ## explicit; go 1.25
 github.com/randomizedcoder/giouring
-# github.com/randomizedcoder/go-lock-free-ring v1.0.2
+# github.com/randomizedcoder/go-lock-free-ring v1.0.3
 ## explicit; go 1.25.4
 github.com/randomizedcoder/go-lock-free-ring
 # github.com/stretchr/testify v1.11.1

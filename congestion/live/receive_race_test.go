@@ -654,3 +654,353 @@ func TestRace_SequenceWraparound(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// EVENTLOOP RACE TESTS
+// ============================================================================
+// EventLoop tests are particularly valuable for race detection because:
+// 1. Real concurrent goroutine - EventLoop runs continuously with real tickers
+// 2. Multiple timers fire asynchronously (ACK, NAK, rate)
+// 3. Ring buffer contention - Push from test goroutine while EventLoop drains
+// 4. Shared state access - btree, metrics, delivery callbacks
+
+// TestRace_EventLoop_PushWithLoop tests concurrent Push() with EventLoop running.
+func TestRace_EventLoop_PushWithLoop(t *testing.T) {
+	var delivered atomic.Int64
+	var pushed atomic.Int64
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(1, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    10_000,  // 10ms
+		PeriodicNAKInterval:    20_000,  // 20ms
+		OnSendACK:              func(seq circular.Number, light bool) {},
+		OnSendNAK:              func(list []circular.Number) {},
+		OnDeliver:              func(p packet.Packet) { delivered.Add(1) },
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             500_000,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+		UsePacketRing:          true,
+		PacketRingSize:         1024,
+		UseEventLoop:           true,
+		TsbpdTimeBase:          0,
+		StartTime:              time.Now(),
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Start EventLoop goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r.EventLoop(ctx)
+	}()
+
+	// Multiple producers pushing concurrently
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	numProducers := 4
+	packetsPerProducer := 500
+
+	for p := 0; p < numProducers; p++ {
+		wg.Add(1)
+		go func(producerID int) {
+			defer wg.Done()
+			for i := 0; i < packetsPerProducer; i++ {
+				seq := uint32(producerID*packetsPerProducer + i + 1)
+				pkt := packet.NewPacket(addr)
+				pkt.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+				pkt.Header().PktTsbpdTime = uint64(50_000 + i*100) // Quick delivery
+				pkt.Header().Timestamp = uint32(i * 100)
+				recv.Push(pkt)
+				pushed.Add(1)
+			}
+		}(p)
+	}
+
+	wg.Wait()
+
+	t.Logf("EventLoop race: pushed=%d, delivered=%d", pushed.Load(), delivered.Load())
+}
+
+// TestRace_EventLoop_HighContention tests EventLoop under high contention.
+func TestRace_EventLoop_HighContention(t *testing.T) {
+	var nakCount atomic.Int64
+	var ackCount atomic.Int64
+	var delivered atomic.Int64
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber: circular.New(1, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:   5_000, // 5ms - more frequent for contention
+		PeriodicNAKInterval:   5_000, // 5ms
+		OnSendACK:             func(seq circular.Number, light bool) { ackCount.Add(1) },
+		OnSendNAK: func(list []circular.Number) {
+			nakCount.Add(int64(len(list)))
+		},
+		OnDeliver:              func(p packet.Packet) { delivered.Add(1) },
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             200_000, // 200ms - shorter for faster cycling
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+		UsePacketRing:          true,
+		PacketRingSize:         512,
+		PacketRingShards:       8, // More shards for contention
+		UseEventLoop:           true,
+		TsbpdTimeBase:          0,
+		StartTime:              time.Now(),
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r.EventLoop(ctx)
+	}()
+
+	// High-frequency producers
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	numProducers := 8
+	var pushed atomic.Int64
+
+	for p := 0; p < numProducers; p++ {
+		wg.Add(1)
+		go func(producerID int) {
+			defer wg.Done()
+			seq := uint32(producerID * 10000)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					pkt := packet.NewPacket(addr)
+					pkt.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+					pkt.Header().PktTsbpdTime = uint64(20_000 + (seq%100)*1000)
+					pkt.Header().Timestamp = seq * 100
+					recv.Push(pkt)
+					pushed.Add(1)
+					seq++
+				}
+			}
+		}(p)
+	}
+
+	wg.Wait()
+
+	t.Logf("High contention race: pushed=%d, delivered=%d, ACKs=%d, NAKs=%d",
+		pushed.Load(), delivered.Load(), ackCount.Load(), nakCount.Load())
+}
+
+// TestRace_EventLoop_Wraparound tests EventLoop during 31-bit sequence wraparound.
+func TestRace_EventLoop_Wraparound(t *testing.T) {
+	var delivered atomic.Int64
+	var pushed atomic.Int64
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	// Start near MAX_SEQUENCENUMBER
+	startSeq := packet.MAX_SEQUENCENUMBER - 1000
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber:  circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:    10_000,
+		PeriodicNAKInterval:    20_000,
+		OnSendACK:              func(seq circular.Number, light bool) {},
+		OnSendNAK:              func(list []circular.Number) {},
+		OnDeliver:              func(p packet.Packet) { delivered.Add(1) },
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             500_000,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+		UsePacketRing:          true,
+		PacketRingSize:         2048, // Larger ring to prevent backpressure timeout
+		UseEventLoop:           true,
+		TsbpdTimeBase:          0,
+		StartTime:              time.Now(),
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r.EventLoop(ctx)
+	}()
+
+	// Producer that wraps around - paced to avoid overwhelming the ring
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		seq := startSeq
+		i := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				pkt := packet.NewPacket(addr)
+				pkt.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+				pkt.Header().PktTsbpdTime = uint64(50_000 + (i%100)*5000)
+				pkt.Header().Timestamp = uint32(i * 5000)
+				recv.Push(pkt)
+				pushed.Add(1)
+				seq = circular.SeqAdd(seq, 1)
+				i++
+				// Small pace to prevent ring overflow
+				if i%100 == 0 {
+					time.Sleep(100 * time.Microsecond)
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	t.Logf("EventLoop wraparound race: pushed=%d, delivered=%d (started at seq 0x%08X)",
+		pushed.Load(), delivered.Load(), startSeq)
+}
+
+// TestRace_EventLoop_LossRecovery tests EventLoop race during loss recovery.
+func TestRace_EventLoop_LossRecovery(t *testing.T) {
+	var nakCount atomic.Int64
+	var delivered atomic.Int64
+	var retransmits atomic.Int64
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber: circular.New(1, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:   10_000,
+		PeriodicNAKInterval:   20_000,
+		OnSendACK:             func(seq circular.Number, light bool) {},
+		OnSendNAK: func(list []circular.Number) {
+			nakCount.Add(int64(len(list)))
+		},
+		OnDeliver:              func(p packet.Packet) { delivered.Add(1) },
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             500_000,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+		UsePacketRing:          true,
+		PacketRingSize:         2048, // Larger ring to prevent backpressure timeout
+		UseEventLoop:           true,
+		TsbpdTimeBase:          0,
+		StartTime:              time.Now(),
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r.EventLoop(ctx)
+	}()
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	var pushed atomic.Int64
+
+	// Producer with simulated loss (drop every 10th packet) - paced
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		seq := uint32(1)
+		i := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if i%10 != 0 { // Drop every 10th
+					pkt := packet.NewPacket(addr)
+					pkt.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+					pkt.Header().PktTsbpdTime = uint64(50_000 + (i%100)*2000)
+					pkt.Header().Timestamp = uint32(i * 2000)
+					recv.Push(pkt)
+					pushed.Add(1)
+				}
+				seq++
+				i++
+				// Small pace to prevent ring overflow
+				if i%100 == 0 {
+					time.Sleep(100 * time.Microsecond)
+				}
+			}
+		}
+	}()
+
+	// Retransmit producer (simulates sender responding to NAKs)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(100 * time.Millisecond) // Wait for NAKs
+		seq := uint32(10)                  // Start from first dropped packet
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				pkt := packet.NewPacket(addr)
+				pkt.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+				pkt.Header().PktTsbpdTime = uint64(50_000)
+				pkt.Header().RetransmittedPacketFlag = true
+				recv.Push(pkt)
+				retransmits.Add(1)
+				seq += 10 // Next dropped packet
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	t.Logf("EventLoop loss recovery race: pushed=%d, retransmits=%d, delivered=%d, NAKs=%d",
+		pushed.Load(), retransmits.Load(), delivered.Load(), nakCount.Load())
+}
+

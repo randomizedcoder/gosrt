@@ -1535,3 +1535,442 @@ func TestEventLoop_NAK_TimeBase_Consistency(t *testing.T) {
 
 	t.Logf("PASS: No spurious NAKs for gaps leading to 'too recent' packets. nakCount=%d", nakCount)
 }
+
+// ============================================================================
+// EVENTLOOP LOSS RECOVERY TESTS
+// These complement the Tick()-based loss recovery tests in receive_stream_test.go
+// to ensure EventLoop mode correctly handles all loss recovery scenarios.
+// ============================================================================
+
+// TestEventLoop_LossRecovery_Wraparound verifies loss recovery across 31-bit
+// sequence number wraparound in EventLoop mode.
+func TestEventLoop_LossRecovery_Wraparound(t *testing.T) {
+	const (
+		totalPackets     = 100
+		tsbpdDelayUs     = uint64(500_000) // 500ms
+		packetIntervalUs = uint64(5_000)   // 5ms between packets
+	)
+
+	// Start near the 31-bit wraparound point
+	startSeq := packet.MAX_SEQUENCENUMBER - 50
+
+	// Track NAKs and deliveries
+	var nakMu sync.Mutex
+	nakSeqs := make(map[uint32]int)
+	var deliveryMu sync.Mutex
+	deliveredSeqs := make(map[uint32]bool)
+	deliveredCount := 0
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	startTime := time.Now()
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber: circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:   10_000, // 10ms
+		PeriodicNAKInterval:   20_000, // 20ms
+		OnSendACK:             func(seq circular.Number, light bool) {},
+		OnSendNAK: func(list []circular.Number) {
+			nakMu.Lock()
+			defer nakMu.Unlock()
+			for i := 0; i+1 < len(list); i += 2 {
+				start, end := list[i].Val(), list[i+1].Val()
+				for seq := start; ; seq = circular.SeqAdd(seq, 1) {
+					nakSeqs[seq]++
+					if seq == end {
+						break
+					}
+				}
+			}
+		},
+		OnDeliver: func(p packet.Packet) {
+			deliveryMu.Lock()
+			defer deliveryMu.Unlock()
+			seq := p.Header().PacketSequenceNumber.Val()
+			if !deliveredSeqs[seq] {
+				deliveredSeqs[seq] = true
+				deliveredCount++
+			}
+		},
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+		UsePacketRing:          true,
+		PacketRingSize:         256,
+		UseEventLoop:           true,
+		TsbpdTimeBase:          0, // nowFn returns elapsed time from 0
+		StartTime:              startTime,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	// Prepare packets with wraparound
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	var allPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// Drop packets at indices 20, 40, 60, 80 (spans wraparound)
+	dropIndices := map[int]bool{20: true, 40: true, 60: true, 80: true}
+
+	// Use small PktTsbpdTime values (relative to nowFn starting at 0)
+	// Packets become deliverable after 50ms-250ms
+	for i := 0; i < totalPackets; i++ {
+		seq := circular.SeqAdd(startSeq, uint32(i))
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		// PktTsbpdTime: 50ms-550ms (well within test duration)
+		p.Header().PktTsbpdTime = uint64(50_000 + i*5_000)
+		p.Header().Timestamp = uint32(uint64(i) * packetIntervalUs)
+
+		allPackets = append(allPackets, p)
+		if dropIndices[i] {
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	t.Logf("Wraparound test: start=0x%08X, dropped=%d packets", startSeq, len(droppedSeqs))
+
+	// Push non-dropped packets
+	for i, p := range allPackets {
+		if !dropIndices[i] {
+			recv.Push(p)
+		}
+	}
+
+	// Start EventLoop
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+
+	go r.EventLoop(ctx)
+
+	// Wait for NAKs to be generated
+	time.Sleep(100 * time.Millisecond)
+
+	// Push retransmits
+	for _, seq := range droppedSeqs {
+		for _, p := range allPackets {
+			if p.Header().PacketSequenceNumber.Val() == seq {
+				retransP := packet.NewPacket(addr)
+				retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+				retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+				retransP.Header().Timestamp = p.Header().Timestamp
+				retransP.Header().RetransmittedPacketFlag = true
+				recv.Push(retransP)
+				break
+			}
+		}
+	}
+
+	// Wait for delivery
+	time.Sleep(600 * time.Millisecond)
+	cancel()
+
+	// Verify
+	nakMu.Lock()
+	nakCount := len(nakSeqs)
+	nakMu.Unlock()
+
+	deliveryMu.Lock()
+	finalDelivered := deliveredCount
+	deliveryMu.Unlock()
+
+	t.Logf("Results: NAKed=%d, Delivered=%d/%d", nakCount, finalDelivered, totalPackets)
+
+	require.GreaterOrEqual(t, nakCount, len(droppedSeqs)-1,
+		"Should NAK most dropped packets (allowing for timing)")
+	require.GreaterOrEqual(t, finalDelivered, totalPackets-2,
+		"Should deliver most packets (allowing for timing edge cases)")
+
+	t.Logf("✓ EventLoop wraparound recovery successful")
+}
+
+// TestEventLoop_LossRecovery_HeavyLoss verifies EventLoop handles 20% packet loss.
+func TestEventLoop_LossRecovery_HeavyLoss(t *testing.T) {
+	const (
+		totalPackets     = 200
+		tsbpdDelayUs     = uint64(500_000) // 500ms
+		packetIntervalUs = uint64(3_000)   // 3ms between packets
+	)
+
+	startSeq := uint32(1)
+
+	var nakMu sync.Mutex
+	nakSeqs := make(map[uint32]int)
+	var deliveryMu sync.Mutex
+	deliveredCount := 0
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	startTime := time.Now()
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber: circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:   10_000,
+		PeriodicNAKInterval:   20_000,
+		OnSendACK:             func(seq circular.Number, light bool) {},
+		OnSendNAK: func(list []circular.Number) {
+			nakMu.Lock()
+			defer nakMu.Unlock()
+			for i := 0; i+1 < len(list); i += 2 {
+				start, end := list[i].Val(), list[i+1].Val()
+				for seq := start; ; seq = circular.SeqAdd(seq, 1) {
+					nakSeqs[seq]++
+					if seq == end {
+						break
+					}
+				}
+			}
+		},
+		OnDeliver: func(p packet.Packet) {
+			deliveryMu.Lock()
+			deliveredCount++
+			deliveryMu.Unlock()
+		},
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+		UsePacketRing:          true,
+		PacketRingSize:         512,
+		UseEventLoop:           true,
+		TsbpdTimeBase:          0, // nowFn returns elapsed time from 0
+		StartTime:              startTime,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+	var droppedSeqs []uint32
+
+	// 20% loss: drop every 5th packet
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		// Small PktTsbpdTime values (50ms-650ms) for test duration
+		p.Header().PktTsbpdTime = uint64(50_000 + i*3_000)
+		p.Header().Timestamp = uint32(uint64(i) * packetIntervalUs)
+
+		allPackets = append(allPackets, p)
+		if i > 0 && i%5 == 0 {
+			droppedPackets = append(droppedPackets, p)
+			droppedSeqs = append(droppedSeqs, seq)
+		}
+	}
+
+	actualLoss := float64(len(droppedSeqs)) / float64(totalPackets) * 100
+	t.Logf("Heavy loss test: %d packets, %.1f%% loss (%d dropped)",
+		totalPackets, actualLoss, len(droppedSeqs))
+
+	// Push non-dropped
+	for i, p := range allPackets {
+		if i == 0 || i%5 != 0 {
+			recv.Push(p)
+		}
+	}
+
+	// Start EventLoop
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	go r.EventLoop(ctx)
+
+	// Wait for NAKs
+	time.Sleep(150 * time.Millisecond)
+
+	// Push retransmits
+	for _, p := range droppedPackets {
+		retransP := packet.NewPacket(addr)
+		retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+		retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+		retransP.Header().Timestamp = p.Header().Timestamp
+		retransP.Header().RetransmittedPacketFlag = true
+		recv.Push(retransP)
+	}
+
+	// Wait for delivery
+	time.Sleep(650 * time.Millisecond)
+	cancel()
+
+	nakMu.Lock()
+	nakCount := len(nakSeqs)
+	nakMu.Unlock()
+
+	deliveryMu.Lock()
+	finalDelivered := deliveredCount
+	deliveryMu.Unlock()
+
+	t.Logf("Results: NAKed=%d/%d, Delivered=%d/%d",
+		nakCount, len(droppedSeqs), finalDelivered, totalPackets)
+
+	// Allow some tolerance for timing
+	minNaks := len(droppedSeqs) * 80 / 100  // 80% of dropped
+	minDelivered := totalPackets * 90 / 100 // 90% delivery
+
+	require.GreaterOrEqual(t, nakCount, minNaks,
+		"Should NAK most dropped packets")
+	require.GreaterOrEqual(t, finalDelivered, minDelivered,
+		"Should deliver most packets under heavy loss")
+
+	t.Logf("✓ EventLoop heavy loss (%.1f%%) recovery successful", actualLoss)
+}
+
+// TestEventLoop_LossRecovery_MultipleBursts verifies EventLoop handles multiple burst losses.
+func TestEventLoop_LossRecovery_MultipleBursts(t *testing.T) {
+	const (
+		totalPackets     = 100
+		tsbpdDelayUs     = uint64(500_000)
+		packetIntervalUs = uint64(5_000)
+	)
+
+	startSeq := uint32(1)
+
+	var nakMu sync.Mutex
+	nakSeqs := make(map[uint32]int)
+	var deliveryMu sync.Mutex
+	deliveredCount := 0
+
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	startTime := time.Now()
+
+	recvConfig := ReceiveConfig{
+		InitialSequenceNumber: circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:   10_000,
+		PeriodicNAKInterval:   20_000,
+		OnSendACK:             func(seq circular.Number, light bool) {},
+		OnSendNAK: func(list []circular.Number) {
+			nakMu.Lock()
+			defer nakMu.Unlock()
+			for i := 0; i+1 < len(list); i += 2 {
+				start, end := list[i].Val(), list[i+1].Val()
+				for seq := start; ; seq = circular.SeqAdd(seq, 1) {
+					nakSeqs[seq]++
+					if seq == end {
+						break
+					}
+				}
+			}
+		},
+		OnDeliver: func(p packet.Packet) {
+			deliveryMu.Lock()
+			deliveredCount++
+			deliveryMu.Unlock()
+		},
+		ConnectionMetrics:      testMetrics,
+		TsbpdDelay:             tsbpdDelayUs,
+		PacketReorderAlgorithm: "btree",
+		UseNakBtree:            true,
+		NakRecentPercent:       0.10,
+		UsePacketRing:          true,
+		PacketRingSize:         256,
+		UseEventLoop:           true,
+		TsbpdTimeBase:          0, // nowFn returns elapsed time from 0
+		StartTime:              startTime,
+	}
+
+	recv := NewReceiver(recvConfig)
+	r := recv.(*receiver)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	var allPackets []packet.Packet
+	var droppedPackets []packet.Packet
+
+	// Two bursts: indices 20-24 and 60-64
+	burst1Start, burst1End := 20, 25
+	burst2Start, burst2End := 60, 65
+
+	for i := 0; i < totalPackets; i++ {
+		seq := startSeq + uint32(i)
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+		// Small PktTsbpdTime values (50ms-550ms) for test duration
+		p.Header().PktTsbpdTime = uint64(50_000 + i*5_000)
+		p.Header().Timestamp = uint32(uint64(i) * packetIntervalUs)
+
+		allPackets = append(allPackets, p)
+		if (i >= burst1Start && i < burst1End) || (i >= burst2Start && i < burst2End) {
+			droppedPackets = append(droppedPackets, p)
+		}
+	}
+
+	t.Logf("Multiple bursts: seq %d-%d and seq %d-%d (%d total dropped)",
+		startSeq+uint32(burst1Start), startSeq+uint32(burst1End-1),
+		startSeq+uint32(burst2Start), startSeq+uint32(burst2End-1),
+		len(droppedPackets))
+
+	// Push non-dropped
+	for i, p := range allPackets {
+		isBurst1 := i >= burst1Start && i < burst1End
+		isBurst2 := i >= burst2Start && i < burst2End
+		if !isBurst1 && !isBurst2 {
+			recv.Push(p)
+		}
+	}
+
+	// Start EventLoop
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+
+	go r.EventLoop(ctx)
+
+	// Wait for NAKs
+	time.Sleep(100 * time.Millisecond)
+
+	// Push retransmits
+	for _, p := range droppedPackets {
+		retransP := packet.NewPacket(addr)
+		retransP.Header().PacketSequenceNumber = p.Header().PacketSequenceNumber
+		retransP.Header().PktTsbpdTime = p.Header().PktTsbpdTime
+		retransP.Header().Timestamp = p.Header().Timestamp
+		retransP.Header().RetransmittedPacketFlag = true
+		recv.Push(retransP)
+	}
+
+	// Wait for delivery
+	time.Sleep(600 * time.Millisecond)
+	cancel()
+
+	nakMu.Lock()
+	nakCount := len(nakSeqs)
+	nakMu.Unlock()
+
+	deliveryMu.Lock()
+	finalDelivered := deliveredCount
+	deliveryMu.Unlock()
+
+	t.Logf("Results: NAKed=%d/%d, Delivered=%d/%d",
+		nakCount, len(droppedPackets), finalDelivered, totalPackets)
+
+	minNaks := len(droppedPackets) * 70 / 100 // 70% of burst
+	minDelivered := totalPackets * 90 / 100   // 90% delivery
+
+	require.GreaterOrEqual(t, nakCount, minNaks,
+		"Should NAK most of both bursts")
+	require.GreaterOrEqual(t, finalDelivered, minDelivered,
+		"Should deliver most packets")
+
+	t.Logf("✓ EventLoop multiple bursts recovery successful")
+}
