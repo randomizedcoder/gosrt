@@ -217,7 +217,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		common.RunThroughputDisplayWithLabel(ctx, *common.StatsPeriod, instanceLabel, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
+		common.RunThroughputDisplayWithLabelAndColor(ctx, *common.StatsPeriod, instanceLabel, *common.OutputColor, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
 			// Get gaps, NAKs, skips, and retransmit counts from the actual connection's metrics
 			var gaps, naks, skips, retrans uint64
 			if socketId := connSocketId.Load(); socketId != 0 {

@@ -193,10 +193,10 @@ func printConnectionSummary(connName string, receiverMetrics, senderMetrics Deri
 	fmt.Printf("      Receiver: recv=%d, gaps=%d (%.2f%%), true_loss=%d, recovery=%.1f%%\n",
 		receiverMetrics.TotalPacketsRecv, receiverMetrics.TotalGapsDetected, gapPct,
 		trueLosses, recoveryRate)
-	fmt.Printf("        Drops: %d (too_late=%d, already_ack=%d, dupes=%d), Skips: %d\n",
+	fmt.Printf("        Drops: %d (too_old=%d, already_ack=%d, dupes=%d, store_fail=%d), Skips: %d\n",
 		receiverMetrics.TotalPacketsDropped,
 		receiverMetrics.TotalDropsTooLate, receiverMetrics.TotalDropsAlreadyAck, receiverMetrics.TotalDropsDuplicate,
-		receiverMetrics.TotalPacketsSkippedTSBPD)
+		receiverMetrics.TotalDropsStoreInsertFailed, receiverMetrics.TotalPacketsSkippedTSBPD)
 	fmt.Printf("      NAKs: sent=%d, recv=%d | ACKs: sent=%d, recv=%d\n",
 		receiverMetrics.TotalNAKsSent, senderMetrics.TotalNAKsRecv,
 		receiverMetrics.TotalACKsSent, senderMetrics.TotalACKsRecv)
@@ -231,12 +231,15 @@ type DerivedMetrics struct {
 	// TotalPacketsDropped: Packets that arrived but were discarded (too late, duplicate, etc.)
 	TotalPacketsDropped int64
 	// Granular drop reasons - for debugging which type of drops are occurring
-	TotalDropsTooLate    int64 // Arrived after TSBPD expired
-	TotalDropsAlreadyAck int64 // Arrived after ACK advanced past them
-	TotalDropsDuplicate  int64 // Already in buffer (duplicate packet)
+	TotalDropsTooLate           int64 // Arrived after TSBPD expired (reason="too_old")
+	TotalDropsAlreadyAck        int64 // Arrived after ACK advanced past them
+	TotalDropsDuplicate         int64 // Already in buffer (duplicate packet)
+	TotalDropsStoreInsertFailed int64 // btree Set() returned false
 	// TotalPacketsSkippedTSBPD: Packets that NEVER arrived - skipped when ACK advanced past TSBPD time
 	// This is the TRUE unrecoverable loss - distinct from "drops" which track packets that ARRIVED
 	TotalPacketsSkippedTSBPD int64
+	// ContiguousPointTSBPDAdvancements: Count of times contiguousPoint advanced due to TSBPD expiry
+	ContiguousPointTSBPDAdvancements int64
 	// TotalPacketsUnrecoverable: Sum of drops + TSBPD skips = all packets NOT delivered to application
 	TotalPacketsUnrecoverable int64
 	// TotalPacketsLost: Alias for TotalGapsDetected for backward compatibility
@@ -359,17 +362,24 @@ func ComputeDerivedMetrics(ts MetricsTimeSeries) DerivedMetrics {
 		getSumByPrefix(first, "gosrt_connection_congestion_send_data_drop_total"))
 
 	// Granular drop reasons - for understanding WHY packets were dropped
+	// Note: Prometheus labels use "too_old" not "too_late", and "store_insert_failed" not "buffer_full"
 	dm.TotalDropsTooLate = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"too_old\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"too_old\""))
 	dm.TotalDropsAlreadyAck = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"already_acked\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"already_acked\""))
 	dm.TotalDropsDuplicate = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"duplicate\"") -
 		getSumByPrefixContaining(first, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"duplicate\""))
+	dm.TotalDropsStoreInsertFailed = int64(getSumByPrefixContaining(last, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"store_insert_failed\"") -
+		getSumByPrefixContaining(first, "gosrt_connection_congestion_recv_data_drop_total", "reason=\"store_insert_failed\""))
 
 	// TSBPD skipped - packets that NEVER arrived (skipped when ACK advanced past TSBPD time)
 	// This is the TRUE unrecoverable loss counter
 	dm.TotalPacketsSkippedTSBPD = int64(getSumByPrefix(last, "gosrt_connection_congestion_recv_pkt_skipped_tsbpd_total") -
 		getSumByPrefix(first, "gosrt_connection_congestion_recv_pkt_skipped_tsbpd_total"))
+
+	// ContiguousPoint TSBPD advancements - times contiguousPoint advanced due to TSBPD expiry
+	dm.ContiguousPointTSBPDAdvancements = int64(getSumByPrefix(last, "gosrt_connection_contiguous_point_tsbpd_advancements_total") -
+		getSumByPrefix(first, "gosrt_connection_contiguous_point_tsbpd_advancements_total"))
 
 	// Total unrecoverable = drops (arrived but discarded) + TSBPD skips (never arrived)
 	dm.TotalPacketsUnrecoverable = dm.TotalPacketsDropped + dm.TotalPacketsSkippedTSBPD
@@ -1182,19 +1192,20 @@ type ACKRateValidation struct {
 	LightACKError string
 	FullACKError  string
 	// Observed values for reporting
-	LightACKsSent         int64
-	FullACKsSent          int64
-	ExpectedLightACKs     int64
-	ExpectedFullACKs      int64
-	LightACKDifference    int64
-	TestDurationSec       float64
-	IsEventLoopMode       bool // True if EventLoop is enabled (affects expectations)
+	LightACKsSent      int64
+	FullACKsSent       int64
+	ExpectedLightACKs  int64
+	ExpectedFullACKs   int64
+	LightACKDifference int64
+	TestDurationSec    float64
+	IsEventLoopMode    bool // True if EventLoop is enabled (affects expectations)
 }
 
 // ValidateACKRates checks that Light and Full ACK rates are within expected bounds
 // For EventLoop mode:
 //   - Light ACKs: ≈ packets_sent / LightACKDifference
 //   - Full ACKs: ≈ 0 (Full ACKs only sent on massive jumps in EventLoop)
+//
 // For Tick mode:
 //   - Light ACKs: ≈ 0 (Light ACKs not triggered in Tick mode)
 //   - Full ACKs: ≈ test_duration_sec * 100 (10ms interval = 100/sec)
@@ -2166,15 +2177,16 @@ type ConnectionAnalysis struct {
 	NAKPktsReceived int64 // Total = NAKSinglesRecv + NAKRangesRecv
 
 	// === FROM RECEIVER SIDE ===
-	PacketsRecv       int64 // congestion_packets_total{direction="recv"}
-	PacketsRecvUnique int64 // congestion_packets_unique_total{direction="recv"} (excl. dupes)
-	GapsDetected      int64 // congestion_packets_lost_total{direction="recv"}
-	RetransRecv       int64 // congestion_retransmissions_total{direction="recv"}
-	NAKsSent          int64 // packets_sent_total{type="nak"}
-	ACKsSent          int64 // packets_sent_total{type="ack"}
-	RecvDrops         int64 // congestion_recv_data_drop_total (arrived but discarded)
-	RecvSkippedTSBPD  int64 // congestion_recv_pkt_skipped_tsbpd_total (NEVER arrived)
-	RecvUnrecoverable int64 // RecvDrops + RecvSkippedTSBPD = true unrecoverable
+	PacketsRecv                      int64 // congestion_packets_total{direction="recv"}
+	PacketsRecvUnique                int64 // congestion_packets_unique_total{direction="recv"} (excl. dupes)
+	GapsDetected                     int64 // congestion_packets_lost_total{direction="recv"}
+	RetransRecv                      int64 // congestion_retransmissions_total{direction="recv"}
+	NAKsSent                         int64 // packets_sent_total{type="nak"}
+	ACKsSent                         int64 // packets_sent_total{type="ack"}
+	RecvDrops                        int64 // congestion_recv_data_drop_total (arrived but discarded)
+	RecvSkippedTSBPD                 int64 // congestion_recv_pkt_skipped_tsbpd_total (NEVER arrived)
+	ContiguousPointTSBPDAdvancements int64 // contiguous_point_tsbpd_advancements_total
+	RecvUnrecoverable                int64 // RecvDrops + RecvSkippedTSBPD = true unrecoverable
 
 	// === TIMER HEALTH ===
 	PeriodicACKRuns int64 // periodic_ack_runs_total (~100/sec expected)
@@ -2628,12 +2640,13 @@ func computeObservedStatistics(ts *TestMetricsTimeSeries) ObservedStatistics {
 		NAKRangesRecv:   cgMetrics.NAKRangesRecv,
 		NAKPktsReceived: cgMetrics.NAKPktsReceived,
 		// From Server (receiver role for Connection 1)
-		PacketsRecv:      serverMetrics.TotalPacketsRecv,
-		GapsDetected:     serverMetrics.TotalGapsDetected,
-		NAKsSent:         serverMetrics.TotalNAKsSent,
-		ACKsSent:         serverMetrics.TotalACKsSent,
-		RecvDrops:        serverMetrics.TotalPacketsDropped,
-		RecvSkippedTSBPD: serverMetrics.TotalPacketsSkippedTSBPD,
+		PacketsRecv:                      serverMetrics.TotalPacketsRecv,
+		GapsDetected:                     serverMetrics.TotalGapsDetected,
+		NAKsSent:                         serverMetrics.TotalNAKsSent,
+		ACKsSent:                         serverMetrics.TotalACKsSent,
+		RecvDrops:                        serverMetrics.TotalPacketsDropped,
+		RecvSkippedTSBPD:                 serverMetrics.TotalPacketsSkippedTSBPD,
+		ContiguousPointTSBPDAdvancements: serverMetrics.ContiguousPointTSBPDAdvancements,
 		// Timer health
 		PeriodicACKRuns: serverMetrics.PeriodicACKRuns,
 		PeriodicNAKRuns: serverMetrics.PeriodicNAKRuns,
@@ -2658,12 +2671,13 @@ func computeObservedStatistics(ts *TestMetricsTimeSeries) ObservedStatistics {
 		NAKRangesRecv:   serverMetrics.NAKRangesRecv,
 		NAKPktsReceived: serverMetrics.NAKPktsReceived,
 		// From Client (receiver role)
-		PacketsRecv:      clientMetrics.TotalPacketsRecv,
-		GapsDetected:     clientMetrics.TotalGapsDetected,
-		NAKsSent:         clientMetrics.TotalNAKsSent,
-		ACKsSent:         clientMetrics.TotalACKsSent,
-		RecvDrops:        clientMetrics.TotalPacketsDropped,
-		RecvSkippedTSBPD: clientMetrics.TotalPacketsSkippedTSBPD,
+		PacketsRecv:                      clientMetrics.TotalPacketsRecv,
+		GapsDetected:                     clientMetrics.TotalGapsDetected,
+		NAKsSent:                         clientMetrics.TotalNAKsSent,
+		ACKsSent:                         clientMetrics.TotalACKsSent,
+		RecvDrops:                        clientMetrics.TotalPacketsDropped,
+		RecvSkippedTSBPD:                 clientMetrics.TotalPacketsSkippedTSBPD,
+		ContiguousPointTSBPDAdvancements: clientMetrics.ContiguousPointTSBPDAdvancements,
 		// Timer health
 		PeriodicACKRuns: clientMetrics.PeriodicACKRuns,
 		PeriodicNAKRuns: clientMetrics.PeriodicNAKRuns,

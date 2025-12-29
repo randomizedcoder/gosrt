@@ -17,19 +17,29 @@ import (
 	"github.com/randomizedcoder/giouring"
 )
 
-// ioUringPollInterval is the interval between io_uring completion queue polls
-// when no completions are immediately available (EAGAIN).
+// ioUringWaitTimeout is the timeout for WaitCQETimeout when waiting for completions.
+// The kernel blocks until either:
+//  1. A completion arrives (returns immediately - zero latency!)
+//  2. Timeout expires (returns ETIME, allows ctx.Done() check)
 //
-// Trade-offs:
-//   - Lower values (1ms): Faster shutdown detection, but ~1000 wakeups/sec when idle
-//   - Higher values (100ms): Lower CPU usage when idle, but slower shutdown response
-//
-// 10ms provides a good balance: ~100 wakeups/sec when idle, and shutdown
-// response time that feels instant to users (<10ms added latency).
-//
-// Note: This only affects idle polling. During active data flow, completions
-// are immediately available and PeekCQE() returns without sleeping.
-const ioUringPollInterval = 10 * time.Millisecond
+// 10ms provides good balance: responsive to completions AND shutdown signals.
+// Unlike polling+sleep, this has ZERO latency when completions arrive.
+var ioUringWaitTimeout = syscall.NsecToTimespec((10 * time.Millisecond).Nanoseconds())
+
+const (
+	// ioUringRetryBackoff is the sleep duration between retries when GetSQE()
+	// or Submit() fails transiently. Short enough to be responsive, long enough
+	// to allow completions to free ring slots.
+	ioUringRetryBackoff = 100 * time.Microsecond
+
+	// ioUringMaxGetSQERetries is the maximum number of retries when GetSQE()
+	// returns nil (ring temporarily full). After this, the packet is dropped.
+	ioUringMaxGetSQERetries = 3
+
+	// ioUringMaxSubmitRetries is the maximum number of retries when Submit()
+	// returns a transient error (EINTR, EAGAIN). After this, the packet is dropped.
+	ioUringMaxSubmitRetries = 3
+)
 
 // initializeIoUring initializes the io_uring send ring for the connection
 func (c *srtConn) initializeIoUring(config srtConnConfig) {
@@ -88,40 +98,56 @@ func (c *srtConn) initializeIoUring(config srtConnConfig) {
 }
 
 // cleanupIoUring cleans up the io_uring send ring for the connection
+// Following context_and_cancellation_design.md pattern:
+// 1. Cancel context (signals handler to exit)
+// 2. Wait for WaitGroup (handler has exited)
+// 3. Only then clean up resources (QueueExit)
 func (c *srtConn) cleanupIoUring() {
 	if c.sendRing == nil {
 		return
 	}
 
-	// Stop completion handler
+	// Step 1: Cancel the completion handler's context
+	// This signals the handler to exit on its next ctx.Done() check
 	if c.sendCompCancel != nil {
 		c.sendCompCancel()
 	}
 
-	// IMPORTANT: Close the ring FIRST to wake up blocked WaitCQE()
-	// WaitCQE() will return EBADF when the ring is closed, allowing
-	// the completion handler to exit cleanly. If we wait before closing,
-	// the handler stays blocked in WaitCQE() and we timeout.
-	ring, ok := c.sendRing.(*giouring.Ring)
-	if ok {
-		ring.QueueExit()
-	}
-
-	// Wait for completion handler to finish (with timeout)
+	// Step 2: Wait for completion handler to exit BEFORE calling QueueExit()
+	// The handler checks ctx.Done() at the top of each loop iteration.
+	// With a 10ms WaitCQETimeout, the handler will exit within ~10ms.
+	//
+	// We MUST wait for the handler to exit completely because:
+	// 1. QueueExit() unmaps the ring memory
+	// 2. If handler is inside WaitCQETimeout(), the syscall will return
+	// 3. The giouring library then tries to peek at the CQ -> SIGSEGV!
 	done := make(chan struct{})
 	go func() {
 		c.sendCompWg.Wait()
 		close(done)
 	}()
 
+	handlerExited := false
 	select {
 	case <-done:
-		// Completion handler finished
+		handlerExited = true
 	case <-time.After(2 * time.Second):
-		// Timeout - log warning but continue (reduced from 5s since QueueExit should wake it)
+		// CRITICAL: Handler did not exit - DO NOT call QueueExit
+		// Minor resource leak is better than SIGSEGV crash
 		c.log("connection:io_uring:cleanup", func() string {
-			return "timeout waiting for completion handler"
+			return "CRITICAL: completion handler did not exit within 2s - skipping QueueExit to prevent SIGSEGV"
 		})
+	}
+
+	// Step 3: Only close ring if handler has exited
+	if handlerExited {
+		ring, ok := c.sendRing.(*giouring.Ring)
+		if ok {
+			ring.QueueExit()
+		}
+		// Set sendRing to nil so any late sends fail gracefully
+		// (type assertion in sendIoUring will fail)
+		c.sendRing = nil
 	}
 
 	// Note: drainCompletions() is NOT called here because the ring is already closed.
@@ -142,6 +168,8 @@ func (c *srtConn) cleanupIoUring() {
 // sendIoUring implements the Linux-specific io_uring send path
 func (c *srtConn) sendIoUring(p packet.Packet) {
 	// Type assert to *giouring.Ring (only available on Linux)
+	// Note: If sendRing is nil (set by cleanupIoUring after QueueExit),
+	// this type assertion will fail and we'll handle gracefully below
 	ring, ok := c.sendRing.(*giouring.Ring)
 	if !ok {
 		// This shouldn't happen if io_uring is enabled, but handle gracefully
@@ -224,16 +252,20 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 
 	// Get SQE from ring with retry loop (ring may be temporarily full)
 	var sqe *giouring.SubmissionQueueEntry
-	const maxRetries = 3
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < ioUringMaxGetSQERetries; i++ {
 		sqe = ring.GetSQE()
 		if sqe != nil {
 			break // Got an SQE, proceed
 		}
 
+		// Track retry (ring temporarily full)
+		if c.metrics != nil {
+			c.metrics.IoUringSendGetSQERetries.Add(1)
+		}
+
 		// Ring full - wait a bit and retry (completions may free up space)
-		if i < maxRetries-1 {
-			time.Sleep(100 * time.Microsecond)
+		if i < ioUringMaxGetSQERetries-1 {
+			time.Sleep(ioUringRetryBackoff)
 		}
 	}
 
@@ -248,6 +280,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 
 		// Track ring full error (packet dropped)
 		if c.metrics != nil {
+			c.metrics.IoUringSendSubmitRingFull.Add(1)
 			// Use packetForMetrics if available, otherwise nil (will track as generic error)
 			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, metrics.DropReasonRingFull)
 		}
@@ -269,8 +302,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	// Submit to ring with retry loop (may be temporarily unavailable)
 	// Retry for transient errors (EINTR, EAGAIN) similar to GetSQE retry logic
 	var err error
-	const maxSubmitRetries = 3
-	for i := 0; i < maxSubmitRetries; i++ {
+	for i := 0; i < ioUringMaxSubmitRetries; i++ {
 		_, err = ring.Submit()
 		if err == nil {
 			break // Submission successful
@@ -282,9 +314,14 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 			break
 		}
 
+		// Track retry (transient error)
+		if c.metrics != nil {
+			c.metrics.IoUringSendSubmitRetries.Add(1)
+		}
+
 		// Transient error - wait and retry
-		if i < maxSubmitRetries-1 {
-			time.Sleep(100 * time.Microsecond) // Same delay as GetSQE retry
+		if i < ioUringMaxSubmitRetries-1 {
+			time.Sleep(ioUringRetryBackoff)
 		}
 	}
 
@@ -299,6 +336,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 
 		// Track submit error
 		if c.metrics != nil {
+			c.metrics.IoUringSendSubmitError.Add(1)
 			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, metrics.DropReasonSubmit)
 		}
 
@@ -308,10 +346,10 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		return
 	}
 
-	// Request submitted successfully - track submission
-	// This counter helps detect packets that are submitted but never complete
+	// Request submitted successfully - track submission metrics
 	if c.metrics != nil {
-		c.metrics.PktSentSubmitted.Add(1)
+		c.metrics.IoUringSendSubmitSuccess.Add(1)
+		c.metrics.PktSentSubmitted.Add(1) // Legacy counter for compatibility
 	}
 
 	// Request submitted successfully - track success
@@ -333,9 +371,14 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	// Errors in completion handler will be tracked separately
 }
 
-// sendCompletionHandler processes io_uring send completions using polling (not blocking WaitCQE).
-// This allows the handler to check ctx.Done() regularly and exit promptly when
-// the context is cancelled, without waiting for QueueExit() to be called.
+// sendCompletionHandler processes io_uring send completions using blocking wait with timeout.
+// WaitCQETimeout blocks in the kernel until either:
+//  1. A completion arrives (returns immediately - zero latency!)
+//  2. Timeout expires (returns ETIME, allows ctx.Done() check)
+//  3. Ring is closed (returns EBADF, normal shutdown)
+//
+// This replaces the inefficient polling+sleep approach where we could sleep
+// for up to 10ms AFTER a completion arrived.
 func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 	defer c.sendCompWg.Done()
 
@@ -345,45 +388,59 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 	}
 
 	for {
-		// Check for context cancellation first
+		// Check for context cancellation at top of loop (non-blocking)
+		// This is the standard Go pattern - no atomic flag needed
+		// Ring is guaranteed to stay mapped because cleanupIoUring waits for us to exit
 		select {
 		case <-ctx.Done():
-			// Connection closing - exit immediately
-			// Note: Do NOT call drainCompletions() here - the ring may already be closed
-			// by QueueExit() in cleanupIoUring(), which would cause a SIGSEGV.
+			// Context cancelled - exit gracefully
+			if c.metrics != nil {
+				c.metrics.IoUringSendCompletionCtxCancelled.Add(1)
+			}
 			return
 		default:
 		}
 
-		// Use non-blocking PeekCQE instead of blocking WaitCQE
-		// This allows us to check ctx.Done() regularly and exit promptly
-		cqe, err := ring.PeekCQE()
+		// Block waiting for completion OR timeout (kernel wakes us immediately on completion)
+		cqe, err := ring.WaitCQETimeout(&ioUringWaitTimeout)
 		if err != nil {
 			// EBADF means ring was closed via QueueExit()
 			if err == syscall.EBADF {
+				if c.metrics != nil {
+					c.metrics.IoUringSendCompletionEBADF.Add(1)
+				}
 				return // Ring closed - normal shutdown
 			}
 
-			// EAGAIN means no completions available - sleep and retry
-			if err == syscall.EAGAIN {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(ioUringPollInterval):
-					continue
+			// ETIME means timeout expired - loop back to check ctx.Done()
+			if err == syscall.ETIME {
+				if c.metrics != nil {
+					c.metrics.IoUringSendCompletionTimeout.Add(1)
 				}
+				continue
 			}
 
 			// EINTR is normal (interrupted by signal) - retry immediately
 			if err == syscall.EINTR {
+				if c.metrics != nil {
+					c.metrics.IoUringSendCompletionEINTR.Add(1)
+				}
 				continue
 			}
 
 			// Other errors - log and continue
+			if c.metrics != nil {
+				c.metrics.IoUringSendCompletionError.Add(1)
+			}
 			c.log("connection:send:completion:error", func() string {
-				return fmt.Sprintf("error peeking completion: %v", err)
+				return fmt.Sprintf("error waiting for completion: %v", err)
 			})
 			continue
+		}
+
+		// Success - completion received
+		if c.metrics != nil {
+			c.metrics.IoUringSendCompletionSuccess.Add(1)
 		}
 
 		// Get request ID from completion user data
@@ -442,6 +499,8 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 		ring.CQESeen(cqe)
 		buffer.Reset()
 		c.sendBufferPool.Put(buffer)
+		// No extra flag check needed here - ctx.Done() at top of loop is sufficient
+		// With 10ms WaitCQETimeout, we'll check context within 10ms anyway
 	}
 }
 

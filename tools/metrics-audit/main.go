@@ -353,7 +353,7 @@ func findIncrementCalls(rootDir string) (map[string][]IncrementLocation, int) {
 	return increments, fileCount
 }
 
-// findExportedMetrics finds all .Load() calls in the Prometheus handler
+// findExportedMetrics finds all .Load() calls and getter method calls in the Prometheus handler
 func findExportedMetrics(path string) map[string]bool {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
@@ -363,6 +363,19 @@ func findExportedMetrics(path string) map[string]bool {
 	}
 
 	exported := make(map[string]bool)
+
+	// Map of getter method names to the underlying field names they access
+	// These are methods on ConnectionMetrics that call .Load() internally
+	getterToField := map[string]string{
+		"GetRecvRatePacketsPerSec":  "RecvRatePacketsPerSec",
+		"GetRecvRateBytesPerSec":    "RecvRateBytesPerSec",
+		"GetRecvRateMbps":           "RecvRateBytesPerSec", // Derived from bytes/sec
+		"GetRecvRateRetransPercent": "RecvRatePktRetransRate",
+		"GetSendRateEstInputBW":     "SendRateEstInputBW",
+		"GetSendRateEstSentBW":      "SendRateEstSentBW",
+		"GetSendRateMbps":           "SendRateEstSentBW", // Derived from sent BW
+		"GetSendRateRetransPercent": "SendRatePktRetransRate",
+	}
 
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -375,8 +388,16 @@ func findExportedMetrics(path string) map[string]bool {
 			return true
 		}
 
+		methodName := sel.Sel.Name
+
+		// Check for getter method calls: metrics.GetXxx()
+		if fieldName, isGetter := getterToField[methodName]; isGetter {
+			exported[fieldName] = true
+			return true
+		}
+
 		// Look for .Load() calls
-		if sel.Sel.Name != "Load" {
+		if methodName != "Load" {
 			return true
 		}
 

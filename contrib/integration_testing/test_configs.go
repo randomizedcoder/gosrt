@@ -1405,6 +1405,232 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		CollectInterval: 2 * time.Second,
 		ProfileDuration: 5 * time.Minute,
 	},
+
+	// ========== EventLoop with RTT Variation Tests (Phase 4: Network Latency) ==========
+
+	// EventLoop with 60ms RTT (cross-continental)
+	{
+		Name:        "Parallel-Starlink-20M-R60-Base-vs-FullEL",
+		Description: "Phase 4: EventLoop with 60ms RTT (cross-continental)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "continental",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// EventLoop with 130ms RTT (intercontinental)
+	{
+		Name:        "Parallel-Starlink-20M-R130-Base-vs-FullEL",
+		Description: "Phase 4: EventLoop with 130ms RTT (intercontinental)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "intercontinental",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    120 * time.Second, // Longer for high RTT
+		ConnectionWait:  5 * time.Second,   // Longer connection wait
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// EventLoop with 300ms RTT (GEO satellite)
+	{
+		Name:        "Parallel-Starlink-20M-R300-Base-vs-FullEL",
+		Description: "Phase 4: EventLoop with 300ms RTT (GEO satellite)",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "geo_satellite",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    150 * time.Second, // Longer for GEO RTT
+		ConnectionWait:  10 * time.Second,  // Much longer connection wait
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// ========== EventLoop with Loss Impairment Tests (Phase 4: Loss Recovery) ==========
+
+	// EventLoop with 5% packet loss at 5 Mb/s (basic test)
+	{
+		Name:        "Parallel-Loss-L5-5M-Base-vs-FullEL",
+		Description: "Phase 4: EventLoop with 5% packet loss at 5 Mb/s (basic test)",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "regional",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         5_000_000, // 5 Mb/s - lower throughput basic test
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// EventLoop with 5% packet loss at 20 Mb/s
+	{
+		Name:        "Parallel-Loss-L5-20M-Base-vs-FullEL",
+		Description: "Phase 4: EventLoop with 5% packet loss at 20 Mb/s",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "regional",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// EventLoop with 10% packet loss (stress test)
+	{
+		Name:        "Parallel-Loss-L10-20M-Base-vs-FullEL",
+		Description: "Phase 4: EventLoop with 10% packet loss (stress test)",
+		Impairment: NetworkImpairment{
+			LossRate:       0.10,
+			LatencyProfile: "regional",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// EventLoop: FullRing (Phase 3) vs FullEL (Phase 4) under Starlink + 5% loss
+	{
+		Name:        "Parallel-Starlink-L5-20M-FullRing-vs-FullEL",
+		Description: "Phase 4: Compare Ring (Tick) vs EventLoop under Starlink + 5% loss",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LossRate:       0.05,
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigFullRing), // Phase 3: Full + Ring (Tick mode)
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop), // Phase 4: Full + EventLoop
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
 }
 
 // GetParallelTestConfigByName finds a parallel test configuration by name
@@ -1839,11 +2065,56 @@ var IsolationTestConfigs = []IsolationTestConfig{
 	// Debug: Full lockless pipeline with verbose metrics (short duration)
 	{
 		Name:           "Isolation-5M-FullEventLoop-Debug",
-		Description:    "DEBUG: Full EventLoop with verbose metrics, receiver debug logging, short duration",
+		Description:    "DEBUG: Full EventLoop with verbose metrics, ACK/ACKACK debug logging, short duration",
 		ControlCG:      ControlSRTConfig,
 		ControlServer:  ControlSRTConfig,
-		TestCG:         GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithReceiverDebug().WithLogTopics("receiver"),
-		TestServer:     GetSRTConfig(ConfigFullEventLoop).WithReceiverDebug().WithLogTopics("receiver"),
+		TestCG:         GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithReceiverDebug().WithLogTopics("receiver,control:send:ACK,control:recv:ACKACK"),
+		TestServer:     GetSRTConfig(ConfigFullEventLoop).WithReceiverDebug().WithLogTopics("receiver,control:send:ACK,control:recv:ACKACK"),
+		TestDuration:   10 * time.Second,
+		Bitrate:        5_000_000,
+		StatsPeriod:    2 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// Test: Server-only EventLoop to diagnose RTT issue
+	// Hypothesis: CG's EventLoop is delaying ACK processing, causing high RTT
+	{
+		Name:           "Isolation-5M-ServerEventLoop-Only",
+		Description:    "DEBUG: EventLoop ONLY on server (not CG) to diagnose RTT issue",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         ControlSRTConfig.WithHonorNakOrder().WithLogTopics("control:send:ACK,control:recv:ACKACK"), // Standard config, NO EventLoop
+		TestServer:     GetSRTConfig(ConfigFullEventLoop).WithReceiverDebug().WithLogTopics("receiver,control:send:ACK,control:recv:ACKACK"),
+		TestDuration:   10 * time.Second,
+		Bitrate:        5_000_000,
+		StatsPeriod:    2 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// Test: CG-only EventLoop to diagnose RTT issue
+	// If Server-only has good RTT but CG-only has bad RTT → Problem is on CG side
+	{
+		Name:           "Isolation-5M-CGEventLoop-Only",
+		Description:    "DEBUG: EventLoop ONLY on CG (not server) to diagnose RTT issue",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithLogTopics("control:send:ACK,control:recv:ACKACK"), // EventLoop enabled
+		TestServer:     ControlSRTConfig.WithReceiverDebug().WithLogTopics("receiver,control:send:ACK,control:recv:ACKACK"),         // Standard config, NO EventLoop
+		TestDuration:   10 * time.Second,
+		Bitrate:        5_000_000,
+		StatsPeriod:    2 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// Test: EventLoop WITHOUT io_uring - isolate io_uring as RTT cause
+	// Hypothesis: io_uring send batching may be causing RTT inflation
+	{
+		Name:           "Isolation-5M-EventLoop-NoIOUring",
+		Description:    "DEBUG: EventLoop enabled but io_uring disabled - test if io_uring causes RTT",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         ControlSRTConfig.WithHonorNakOrder(),                                           // No EventLoop, no io_uring
+		TestServer:     ControlSRTConfig.WithBtree(32).WithNakBtree().WithPacketRing().WithEventLoop(), // EventLoop but NO io_uring
 		TestDuration:   10 * time.Second,
 		Bitrate:        5_000_000,
 		StatsPeriod:    2 * time.Second,
@@ -1980,6 +2251,89 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		TestDuration:  60 * time.Second,
 		Bitrate:       300_000_000,
 		StatsPeriod:   10 * time.Second,
+	},
+
+	// ============================================================================
+	// Phase 5: Ring Retry Strategy Tests
+	// Compare different retry strategies to find optimal for io_uring throughput
+	// ============================================================================
+
+	// Baseline: SleepBackoff (current default)
+	{
+		Name:          "Isolation-5M-Strategy-Sleep",
+		Description:   "Ring Strategy: SleepBackoff (baseline, current default)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithRetryStrategy("sleep"),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop).WithRetryStrategy("sleep"),
+		TestDuration:  12 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// NextShard: Try all shards before sleeping
+	{
+		Name:          "Isolation-5M-Strategy-Next",
+		Description:   "Ring Strategy: NextShard (try all shards before sleeping)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithRetryStrategy("next"),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop).WithRetryStrategy("next"),
+		TestDuration:  12 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// RandomShard: Random shard selection (fastest in ring benchmarks!)
+	{
+		Name:          "Isolation-5M-Strategy-Random",
+		Description:   "Ring Strategy: RandomShard (fastest in ring benchmarks)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithRetryStrategy("random"),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop).WithRetryStrategy("random"),
+		TestDuration:  12 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// AdaptiveBackoff: Exponential backoff with jitter
+	{
+		Name:          "Isolation-5M-Strategy-Adaptive",
+		Description:   "Ring Strategy: AdaptiveBackoff (exponential backoff with jitter)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithRetryStrategy("adaptive"),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop).WithRetryStrategy("adaptive"),
+		TestDuration:  12 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// SpinThenYield: Yield CPU instead of sleep (lowest latency, highest CPU)
+	{
+		Name:          "Isolation-5M-Strategy-Spin",
+		Description:   "Ring Strategy: SpinThenYield (lowest latency, highest CPU)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithRetryStrategy("spin"),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop).WithRetryStrategy("spin"),
+		TestDuration:  12 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Hybrid: NextShard + AdaptiveBackoff
+	{
+		Name:          "Isolation-5M-Strategy-Hybrid",
+		Description:   "Ring Strategy: Hybrid (NextShard + AdaptiveBackoff)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullEventLoop).WithHonorNakOrder().WithRetryStrategy("hybrid"),
+		TestServer:    GetSRTConfig(ConfigFullEventLoop).WithRetryStrategy("hybrid"),
+		TestDuration:  12 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
 	},
 }
 

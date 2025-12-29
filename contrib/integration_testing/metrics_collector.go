@@ -540,9 +540,9 @@ func (tm *TestMetrics) PrintVerboseMetricsDelta(prevIndex, currIndex int) {
 	delta.Conn1.ReceiverDrops = getDelta(serverCurr, serverPrev,
 		"gosrt_connection_congestion_recv_data_drop_total", "")
 	delta.Conn1.ReceiverDropsTooLate = getDelta(serverCurr, serverPrev,
-		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"too_late\"")
+		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"too_old\"") // Fixed: was "too_late"
 	delta.Conn1.ReceiverDropsBufFull = getDelta(serverCurr, serverPrev,
-		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"buffer_full\"")
+		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"store_insert_failed\"") // Fixed: was "buffer_full"
 	delta.Conn1.ReceiverDropsDupes = getDelta(serverCurr, serverPrev,
 		"gosrt_connection_congestion_recv_data_drop_total", "reason=\"duplicate\"")
 	delta.Conn1.ReceiverDropsAlreadyAck = getDelta(serverCurr, serverPrev,
@@ -586,10 +586,11 @@ func (tm *TestMetrics) PrintVerboseMetricsDelta(prevIndex, currIndex int) {
 		fmt.Printf("      NAK detail: +%d singles, +%d ranges, requesting %d pkts\n",
 			delta.Conn1.ReceiverNAKSingleSent, delta.Conn1.ReceiverNAKRangeSent, delta.Conn1.ReceiverNAKPktsSent)
 	}
-	if delta.Conn1.ReceiverDrops > 0 || delta.Conn1.ReceiverDropsDupes > 0 || delta.Conn1.ReceiverDropsAlreadyAck > 0 {
-		fmt.Printf("      ⚠ DROPS: +%d (too_late: %d, already_ack: %d, dupes: %d)\n",
+	if delta.Conn1.ReceiverDrops > 0 || delta.Conn1.ReceiverDropsDupes > 0 || delta.Conn1.ReceiverDropsAlreadyAck > 0 || delta.Conn1.ReceiverDropsBufFull > 0 {
+		fmt.Printf("      ⚠ DROPS: +%d (too_old: %d, already_ack: %d, dupes: %d, store_fail: %d)\n",
 			delta.Conn1.ReceiverDrops, delta.Conn1.ReceiverDropsTooLate,
-			delta.Conn1.ReceiverDropsAlreadyAck, delta.Conn1.ReceiverDropsDupes)
+			delta.Conn1.ReceiverDropsAlreadyAck, delta.Conn1.ReceiverDropsDupes,
+			delta.Conn1.ReceiverDropsBufFull)
 	}
 
 	fmt.Printf("    Balance Check:\n")

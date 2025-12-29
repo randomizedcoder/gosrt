@@ -287,7 +287,7 @@ func TestRingVsLegacyEquivalence(t *testing.T) {
 	// Results should be identical
 	require.Equal(t, deliveredLegacy, deliveredRing, "ring and legacy should deliver same packets")
 	require.Equal(t, recvLegacy.lastACKSequenceNumber.Val(), recvRing.lastACKSequenceNumber.Val())
-	require.Equal(t, recvLegacy.lastDeliveredSequenceNumber.Val(), recvRing.lastDeliveredSequenceNumber.Val())
+	require.Equal(t, recvLegacy.contiguousPoint.Load(), recvRing.contiguousPoint.Load()) // Phase 4
 }
 
 // TestRingConcurrentPush verifies concurrent pushes work correctly
@@ -396,7 +396,7 @@ func TestRingTooOldPacketHandling(t *testing.T) {
 	}
 	recv.Tick(10) // Deliver packets 0-4
 
-	require.Equal(t, uint32(4), recv.lastDeliveredSequenceNumber.Val())
+	require.Equal(t, uint32(4), recv.contiguousPoint.Load()) // Phase 4
 
 	// Now push an old packet (seq 2, already delivered)
 	pOld := packet.NewPacket(addr)

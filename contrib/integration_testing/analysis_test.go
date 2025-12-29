@@ -537,3 +537,98 @@ func TestValidateACKRates_HighBitrate(t *testing.T) {
 	require.True(t, result.Passed, "ACK rates should be valid for high bitrate")
 	require.Equal(t, int64(256), result.LightACKDifference, "Should use configured LightACKDifference")
 }
+
+// =============================================================================
+// Tests for normalizeMetricKey (parallel pipeline comparison)
+// =============================================================================
+
+func TestNormalizeMetricKey_StripSocketId(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "socket_id only",
+			input:    `gosrt_connection_packets_total{socket_id="0x12345678"}`,
+			expected: `gosrt_connection_packets_total`,
+		},
+		{
+			name:     "socket_id first with other labels",
+			input:    `gosrt_connection_packets_received_total{socket_id="0x12345678",type="ack"}`,
+			expected: `gosrt_connection_packets_received_total{type="ack"}`,
+		},
+		{
+			name:     "socket_id last with other labels",
+			input:    `gosrt_connection_packets_received_total{type="ack",socket_id="0x12345678"}`,
+			expected: `gosrt_connection_packets_received_total{type="ack"}`,
+		},
+		{
+			name:     "socket_id middle with other labels",
+			input:    `gosrt_connection_nak_entries_total{direction="sent",socket_id="0x12345678",type="range"}`,
+			expected: `gosrt_connection_nak_entries_total{direction="sent",type="range"}`,
+		},
+		{
+			name:     "no labels",
+			input:    `gosrt_connection_rtt_ms`,
+			expected: `gosrt_connection_rtt_ms`,
+		},
+		{
+			name:     "no socket_id",
+			input:    `gosrt_connection_packets_received_total{type="ack"}`,
+			expected: `gosrt_connection_packets_received_total{type="ack"}`,
+		},
+		{
+			name:     "multiple labels no socket_id",
+			input:    `gosrt_connection_recv_data_drop_total{direction="recv",reason="too_old"}`,
+			expected: `gosrt_connection_recv_data_drop_total{direction="recv",reason="too_old"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := normalizeMetricKey(tt.input)
+			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestNormalizeMetricKey_ParallelComparison(t *testing.T) {
+	// This test demonstrates the bug fix: baseline and highperf have different socket_ids
+	// but should match on the normalized key
+
+	baselineMetric := `gosrt_connection_packets_received_total{socket_id="0xAAAAAAAA",type="ack"}`
+	highperfMetric := `gosrt_connection_packets_received_total{socket_id="0xBBBBBBBB",type="ack"}`
+
+	baselineNorm := normalizeMetricKey(baselineMetric)
+	highperfNorm := normalizeMetricKey(highperfMetric)
+
+	require.Equal(t, baselineNorm, highperfNorm, "Normalized keys should match despite different socket_ids")
+	require.Equal(t, `gosrt_connection_packets_received_total{type="ack"}`, baselineNorm)
+}
+
+func TestCompareMetricGroup_SumsMultipleSocketIds(t *testing.T) {
+	// Scenario: Server has 2 connections (e.g., from CG and to Client)
+	// Each connection has its own socket_id
+	// The comparison should SUM values across socket_ids
+
+	baseline := map[string]float64{
+		`gosrt_connection_packets_received_total{socket_id="0xAAA",type="ack"}`: 5000,
+		`gosrt_connection_packets_received_total{socket_id="0xBBB",type="ack"}`: 3000,
+	}
+	highperf := map[string]float64{
+		`gosrt_connection_packets_received_total{socket_id="0xCCC",type="ack"}`: 10000,
+		`gosrt_connection_packets_received_total{socket_id="0xDDD",type="ack"}`: 2000,
+	}
+
+	prefixes := []string{"gosrt_connection_packets_received_total"}
+	comparisons := compareMetricGroup(baseline, highperf, prefixes)
+
+	// Should have exactly ONE comparison (summed across socket_ids)
+	require.Len(t, comparisons, 1, "Should have exactly one comparison after summing socket_ids")
+
+	// Values should be summed
+	comp := comparisons[0]
+	require.Equal(t, float64(8000), comp.BaselineVal, "Baseline should be sum: 5000 + 3000")
+	require.Equal(t, float64(12000), comp.HighPerfVal, "HighPerf should be sum: 10000 + 2000")
+}

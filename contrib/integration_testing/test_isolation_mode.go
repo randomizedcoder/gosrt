@@ -358,6 +358,55 @@ func printIsolationComparison(testName string, controlServer, testServer, contro
 			getMetricSum(testServer, "gosrt_connection_packets_sent_total", "type=\"nak\"")},
 		{"Drops", getMetricSum(controlServer, "gosrt_connection_congestion_recv_data_drop_total", ""),
 			getMetricSum(testServer, "gosrt_connection_congestion_recv_data_drop_total", "")},
+		{"ACKs Sent", getMetricSum(controlServer, "gosrt_connection_packets_sent_total", "type=\"ack\""),
+			getMetricSum(testServer, "gosrt_connection_packets_sent_total", "type=\"ack\"")},
+		{"ACKACKs Recv", getMetricSum(controlServer, "gosrt_connection_packets_received_total", "type=\"ackack\""),
+			getMetricSum(testServer, "gosrt_connection_packets_received_total", "type=\"ackack\"")},
+		// RTT metrics (microseconds) - key diagnostic for EventLoop
+		{"RTT (us)", getMetricSum(controlServer, "gosrt_rtt_microseconds", ""),
+			getMetricSum(testServer, "gosrt_rtt_microseconds", "")},
+		{"RTT Var (us)", getMetricSum(controlServer, "gosrt_rtt_var_microseconds", ""),
+			getMetricSum(testServer, "gosrt_rtt_var_microseconds", "")},
+		// EventLoop metrics (only test server has these when using EventLoop)
+		{"EL Iterations", getMetricSum(controlServer, "gosrt_eventloop_iterations_total", ""),
+			getMetricSum(testServer, "gosrt_eventloop_iterations_total", "")},
+		{"EL FullACK Fires", getMetricSum(controlServer, "gosrt_eventloop_fullack_fires_total", ""),
+			getMetricSum(testServer, "gosrt_eventloop_fullack_fires_total", "")},
+		{"EL Default Runs", getMetricSum(controlServer, "gosrt_eventloop_default_runs_total", ""),
+			getMetricSum(testServer, "gosrt_eventloop_default_runs_total", "")},
+		{"EL Idle Backoffs", getMetricSum(controlServer, "gosrt_eventloop_idle_backoffs_total", ""),
+			getMetricSum(testServer, "gosrt_eventloop_idle_backoffs_total", "")},
+		// ACK btree health
+		{"ACK Btree Size", getMetricSum(controlServer, "gosrt_ack_btree_size", ""),
+			getMetricSum(testServer, "gosrt_ack_btree_size", "")},
+		{"ACK Btree Expired", getMetricSum(controlServer, "gosrt_ack_btree_expired_total", ""),
+			getMetricSum(testServer, "gosrt_ack_btree_expired_total", "")},
+		// io_uring submission metrics (Phase 5: WaitCQETimeout)
+		{"IOU SndSub Success", getMetricSum(controlServer, "gosrt_iouring_send_submit_success_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_send_submit_success_total", "")},
+		{"IOU SndSub RingFull", getMetricSum(controlServer, "gosrt_iouring_send_submit_ring_full_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_send_submit_ring_full_total", "")},
+		{"IOU SndSub Error", getMetricSum(controlServer, "gosrt_iouring_send_submit_error_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_send_submit_error_total", "")},
+		{"IOU RcvSub Success", getMetricSum(controlServer, "gosrt_iouring_listener_recv_submit_success_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_listener_recv_submit_success_total", "")},
+		{"IOU RcvSub RingFull", getMetricSum(controlServer, "gosrt_iouring_listener_recv_submit_ring_full_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_listener_recv_submit_ring_full_total", "")},
+		{"IOU RcvSub Error", getMetricSum(controlServer, "gosrt_iouring_listener_recv_submit_error_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_listener_recv_submit_error_total", "")},
+		// io_uring completion metrics (Phase 5: WaitCQETimeout)
+		{"IOU SndCmp Success", getMetricSum(controlServer, "gosrt_iouring_send_completion_success_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_send_completion_success_total", "")},
+		{"IOU SndCmp Timeout", getMetricSum(controlServer, "gosrt_iouring_send_completion_timeout_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_send_completion_timeout_total", "")},
+		{"IOU SndCmp Error", getMetricSum(controlServer, "gosrt_iouring_send_completion_error_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_send_completion_error_total", "")},
+		{"IOU RcvCmp Success", getMetricSum(controlServer, "gosrt_iouring_listener_recv_completion_success_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_listener_recv_completion_success_total", "")},
+		{"IOU RcvCmp Timeout", getMetricSum(controlServer, "gosrt_iouring_listener_recv_completion_timeout_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_listener_recv_completion_timeout_total", "")},
+		{"IOU RcvCmp Error", getMetricSum(controlServer, "gosrt_iouring_listener_recv_completion_error_total", ""),
+			getMetricSum(testServer, "gosrt_iouring_listener_recv_completion_error_total", "")},
 	}
 
 	// CG metrics
@@ -368,6 +417,10 @@ func printIsolationComparison(testName string, controlServer, testServer, contro
 			getMetricSum(testCG, "gosrt_connection_congestion_retransmissions_total", "direction=\"send\"")},
 		{"NAKs Received", getMetricSum(controlCG, "gosrt_connection_packets_received_total", "type=\"nak\""),
 			getMetricSum(testCG, "gosrt_connection_packets_received_total", "type=\"nak\"")},
+		{"ACKs Recv", getMetricSum(controlCG, "gosrt_connection_packets_received_total", "type=\"ack\""),
+			getMetricSum(testCG, "gosrt_connection_packets_received_total", "type=\"ack\"")},
+		{"ACKACKs Sent", getMetricSum(controlCG, "gosrt_connection_packets_sent_total", "type=\"ackack\""),
+			getMetricSum(testCG, "gosrt_connection_packets_sent_total", "type=\"ackack\"")},
 	}
 
 	fmt.Printf("║ %-28s %12s %12s %12s ║\n", "SERVER METRICS", "Control", "Test", "Diff")

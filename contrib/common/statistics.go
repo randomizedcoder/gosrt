@@ -38,16 +38,25 @@ type ThroughputGetter func() (bytes uint64, pkts uint64, gapsPkts uint64, naksPk
 //   - 100% = all gaps recovered via retransmission (no true losses)
 //   - <100% = some packets never arrived before TSBPD timeout (true losses)
 func RunThroughputDisplay(ctx context.Context, period time.Duration, getter ThroughputGetter) {
-	RunThroughputDisplayWithLabel(ctx, period, "", getter)
+	RunThroughputDisplayWithLabelAndColor(ctx, period, "", "", getter)
 }
 
 // RunThroughputDisplayWithLabel runs a throughput display loop with a component label
 func RunThroughputDisplayWithLabel(ctx context.Context, period time.Duration, label string, getter ThroughputGetter) {
+	RunThroughputDisplayWithLabelAndColor(ctx, period, label, "", getter)
+}
+
+// RunThroughputDisplayWithLabelAndColor runs a throughput display loop with a component label and color
+// Color can be: red, green, yellow, blue, magenta, cyan, white (or empty for no color)
+func RunThroughputDisplayWithLabelAndColor(ctx context.Context, period time.Duration, label, color string, getter ThroughputGetter) {
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 
 	var prevBytes, prevPkts uint64
 	last := time.Now()
+
+	// Pre-compute color codes for efficiency
+	colorCode := ColorCode(color)
 
 	for {
 		select {
@@ -88,9 +97,9 @@ func RunThroughputDisplayWithLabel(ctx context.Context, period time.Duration, la
 			if label != "" {
 				labelStr = fmt.Sprintf("[%-16s] ", label)
 			}
-			// Use newline instead of carriage return so both [PUB] and [SUB] lines are visible
-			// when running multiple applications simultaneously
-			fmt.Fprintf(os.Stderr, "%s%s | %7.1f pkt/s | %7.2f MB | %6.3f Mb/s | %6.1fk ok / %5d gaps / %5d NAKs / %5d retx | recovery=%5.1f%%\n",
+
+			// Format the output line
+			line := fmt.Sprintf("%s%s | %7.1f pkt/s | %7.2f MB | %6.3f Mb/s | %6.1fk ok / %5d gaps / %5d NAKs / %5d retx | recovery=%5.1f%%\n",
 				labelStr,
 				timeStr,
 				pps,
@@ -101,6 +110,11 @@ func RunThroughputDisplayWithLabel(ctx context.Context, period time.Duration, la
 				naksPkts,
 				retransPkts,
 				recoveryPct)
+
+			// Apply color if specified
+			// Use newline instead of carriage return so both [PUB] and [SUB] lines are visible
+			// when running multiple applications simultaneously
+			fmt.Fprint(os.Stderr, ColorizeCode(line, colorCode))
 
 			prevBytes, prevPkts = currentBytes, currentPkts
 			last = now

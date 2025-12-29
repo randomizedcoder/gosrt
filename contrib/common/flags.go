@@ -96,6 +96,15 @@ var (
 	PacketRingMaxRetries      = flag.Int("packetringmaxretries", -1, "Maximum immediate retries before backoff when ring is full (default: 10, -1 = not set)")
 	PacketRingBackoffDuration = flag.Duration("packetringbackoffduration", 0, "Delay between backoff retries when ring is full (default: 100µs)")
 	PacketRingMaxBackoffs     = flag.Int("packetringmaxbackoffs", -1, "Maximum backoff iterations before dropping packet (0 = unlimited, -1 = not set)")
+	PacketRingRetryStrategy   = flag.String("packetringretrystrategy", "",
+		"Ring write retry strategy when shard is full: "+
+			"'sleep' (default, retry same shard then sleep 100µs), "+
+			"'next' (try all shards before sleeping - avoids blocking), "+
+			"'random' (try random shards - best load distribution), "+
+			"'adaptive' (exponential backoff with jitter), "+
+			"'spin' (yield CPU instead of sleep - lowest latency, highest CPU), "+
+			"'hybrid' (next + adaptive). "+
+			"Empty string uses default 'sleep' strategy.")
 
 	// Event loop configuration flags (Phase 4: Lockless Design)
 	UseEventLoop          = flag.Bool("useeventloop", false, "Enable continuous event loop (requires -usepacketring, replaces timer-driven Tick)")
@@ -139,6 +148,12 @@ var (
 	StatsPeriod = flag.Duration("statsperiod", 1*time.Second,
 		"Period for throughput display updates (e.g., 1s, 10s). "+
 			"Controls how often the [PUB]/[SUB] lines are printed to stderr.")
+
+	// Output color flag for terminal display
+	// This is application-level configuration, NOT part of srt.Config
+	OutputColor = flag.String("color", "",
+		"ANSI color for terminal output (red, green, yellow, blue, magenta, cyan). "+
+			"Useful for distinguishing between baseline and highperf pipelines in parallel tests.")
 
 	// Prometheus metrics endpoint flags
 	// These are application-level configuration, NOT part of srt.Config
@@ -372,6 +387,9 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["packetringmaxbackoffs"] && *PacketRingMaxBackoffs >= 0 {
 		config.PacketRingMaxBackoffs = *PacketRingMaxBackoffs
+	}
+	if FlagSet["packetringretrystrategy"] {
+		config.PacketRingRetryStrategy = *PacketRingRetryStrategy
 	}
 
 	// Event loop flags (Phase 4: Lockless Design)

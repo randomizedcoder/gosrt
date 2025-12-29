@@ -228,8 +228,10 @@ type ConnectionMetrics struct {
 
 	// TSBPD skip counters - Packets that NEVER arrived and were skipped when ACK advanced
 	// These are distinct from "drops" which track packets that ARRIVED but were discarded
-	CongestionRecvPktSkippedTSBPD  atomic.Uint64 // Packets skipped at TSBPD time (never arrived)
-	CongestionRecvByteSkippedTSBPD atomic.Uint64 // Bytes skipped (estimated from avgPayloadSize)
+	CongestionRecvPktSkippedTSBPD        atomic.Uint64 // Packets skipped at TSBPD time (never arrived)
+	CongestionRecvByteSkippedTSBPD       atomic.Uint64 // Bytes skipped (estimated from avgPayloadSize)
+	ContiguousPointTSBPDAdvancements     atomic.Uint64 // Count of times contiguousPoint advanced due to TSBPD expiry
+	ContiguousPointTSBPDSkippedPktsTotal atomic.Uint64 // Total packets skipped across all TSBPD advancements
 
 	// Periodic timer tick counters - Track that timer routines are running
 	// Used for health monitoring: should grow linearly with test duration
@@ -330,6 +332,96 @@ type ConnectionMetrics struct {
 	// Light ACK threshold counter - replaces nPackets in receiver
 	// Used to determine when to send a "light" ACK vs full ACK
 	RecvLightACKCounter atomic.Uint64 // Packets since last ACK (for light ACK threshold)
+
+	// ========================================================================
+	// EventLoop Metrics (Phase 4: ACK/ACKACK Redesign)
+	// ========================================================================
+	// Tracks EventLoop behavior for diagnosing ticker starvation issues.
+	// Key diagnostic: DefaultRuns / FullACKFires ratio (expected ~1000)
+
+	EventLoopIterations   atomic.Uint64 // Total loop iterations
+	EventLoopFullACKFires atomic.Uint64 // Times fullACKTicker.C case executed
+	EventLoopNAKFires     atomic.Uint64 // Times nakTicker.C case executed
+	EventLoopRateFires    atomic.Uint64 // Times rateTicker.C case executed
+	EventLoopDefaultRuns  atomic.Uint64 // Times default case executed
+	EventLoopIdleBackoffs atomic.Uint64 // Times idle backoff sleep triggered
+
+	// ========================================================================
+	// ACK Btree Metrics (Phase 4: ACK/ACKACK Redesign)
+	// ========================================================================
+	// Tracks the ACK btree used for RTT calculation (stores sent Full ACKs awaiting ACKACK)
+
+	AckBtreeSize           atomic.Uint64 // Current size of ack btree (gauge)
+	AckBtreeEntriesExpired atomic.Uint64 // Entries expired by ExpireOlderThan
+	AckBtreeUnknownACKACK  atomic.Uint64 // ACKACK received for unknown ackNum
+
+	// ========================================================================
+	// RTT Metrics (Phase 4: ACK/ACKACK Redesign)
+	// ========================================================================
+	// Current RTT values as gauges (stored as microseconds)
+
+	RTTMicroseconds    atomic.Uint64 // Current RTT value in microseconds
+	RTTVarMicroseconds atomic.Uint64 // Current RTT variance in microseconds
+
+	// ========================================================================
+	// io_uring Submission Metrics (Phase 5: WaitCQETimeout Implementation)
+	// ========================================================================
+	// Tracks each code path in the io_uring submission functions.
+	// Key diagnostic: Success should match packet counts
+	//                 RingFull/SubmitError should always be 0 (indicates ring sizing issue)
+
+	// Send submission paths (connection_linux.go:sendIoUring)
+	IoUringSendSubmitSuccess  atomic.Uint64 // Submit() succeeded
+	IoUringSendSubmitRingFull atomic.Uint64 // GetSQE returned nil after retries (ring full)
+	IoUringSendSubmitError    atomic.Uint64 // Submit() failed after retries
+	IoUringSendGetSQERetries  atomic.Uint64 // GetSQE required retry (transient ring full)
+	IoUringSendSubmitRetries  atomic.Uint64 // Submit() required retry (EINTR/EAGAIN)
+
+	// Recv submission paths - Listener (listen_linux.go:submitRecvRequest)
+	IoUringListenerRecvSubmitSuccess  atomic.Uint64 // Submit() succeeded
+	IoUringListenerRecvSubmitRingFull atomic.Uint64 // GetSQE returned nil after retries
+	IoUringListenerRecvSubmitError    atomic.Uint64 // Submit() failed after retries
+	IoUringListenerRecvGetSQERetries  atomic.Uint64 // GetSQE required retry
+	IoUringListenerRecvSubmitRetries  atomic.Uint64 // Submit() required retry
+
+	// Recv submission paths - Dialer (dial_linux.go:submitRecvRequest)
+	IoUringDialerRecvSubmitSuccess  atomic.Uint64 // Submit() succeeded
+	IoUringDialerRecvSubmitRingFull atomic.Uint64 // GetSQE returned nil after retries
+	IoUringDialerRecvSubmitError    atomic.Uint64 // Submit() failed after retries
+	IoUringDialerRecvGetSQERetries  atomic.Uint64 // GetSQE required retry
+	IoUringDialerRecvSubmitRetries  atomic.Uint64 // Submit() required retry
+
+	// ========================================================================
+	// io_uring Completion Handler Metrics (Phase 5: WaitCQETimeout Implementation)
+	// ========================================================================
+	// Tracks each code path in the io_uring completion handlers.
+	// Key diagnostic: Success should match packet counts
+	//                 Timeout indicates healthy timeout behavior
+	//                 Error should always be 0
+
+	// Send completion handler paths (connection_linux.go:sendCompletionHandler)
+	IoUringSendCompletionSuccess      atomic.Uint64 // WaitCQETimeout returned a completion
+	IoUringSendCompletionTimeout      atomic.Uint64 // ETIME: timeout expired (healthy)
+	IoUringSendCompletionEBADF        atomic.Uint64 // Ring closed (normal shutdown)
+	IoUringSendCompletionEINTR        atomic.Uint64 // Interrupted by signal
+	IoUringSendCompletionError        atomic.Uint64 // Other unexpected errors
+	IoUringSendCompletionCtxCancelled atomic.Uint64 // Context cancelled (shutdown)
+
+	// Recv completion handler paths - Listener (listen_linux.go:getRecvCompletion)
+	IoUringListenerRecvCompletionSuccess      atomic.Uint64 // WaitCQETimeout returned a completion
+	IoUringListenerRecvCompletionTimeout      atomic.Uint64 // ETIME: timeout expired (healthy)
+	IoUringListenerRecvCompletionEBADF        atomic.Uint64 // Ring closed (normal shutdown)
+	IoUringListenerRecvCompletionEINTR        atomic.Uint64 // Interrupted by signal
+	IoUringListenerRecvCompletionError        atomic.Uint64 // Other unexpected errors
+	IoUringListenerRecvCompletionCtxCancelled atomic.Uint64 // Context cancelled (shutdown)
+
+	// Recv completion handler paths - Dialer (dial_linux.go:getRecvCompletion)
+	IoUringDialerRecvCompletionSuccess      atomic.Uint64 // WaitCQETimeout returned a completion
+	IoUringDialerRecvCompletionTimeout      atomic.Uint64 // ETIME: timeout expired (healthy)
+	IoUringDialerRecvCompletionEBADF        atomic.Uint64 // Ring closed (normal shutdown)
+	IoUringDialerRecvCompletionEINTR        atomic.Uint64 // Interrupted by signal
+	IoUringDialerRecvCompletionError        atomic.Uint64 // Other unexpected errors
+	IoUringDialerRecvCompletionCtxCancelled atomic.Uint64 // Context cancelled (shutdown)
 }
 
 // ============================================================================

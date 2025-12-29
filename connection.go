@@ -89,48 +89,61 @@ type Conn interface {
 	GetPeerIdleTimeoutRemaining() time.Duration
 }
 
+// rtt implements lock-free RTT tracking using atomic operations.
+// ACK-10: Replaced lock-based implementation with atomics for 8x better performance.
+// See rtt_benchmark_test.go for benchmarks showing:
+//   - Reads: 50-800x faster
+//   - Mixed workload: 8x faster
 type rtt struct {
-	rtt    float64 // microseconds
-	rttVar float64 // microseconds
-
-	lock sync.RWMutex
+	rttBits          atomic.Uint64 // float64 stored as bits
+	rttVarBits       atomic.Uint64 // float64 stored as bits
+	minNakIntervalUs atomic.Uint64 // minimum NAK interval in microseconds (from config)
 }
 
+// Recalculate updates RTT using EWMA smoothing (RFC 4.10).
+// Uses atomic CAS to avoid locks.
 func (r *rtt) Recalculate(rtt time.Duration) {
-	// 4.10.  Round-Trip Time Estimation
 	lastRTT := float64(rtt.Microseconds())
 
-	r.lock.Lock()
-	defer r.lock.Unlock()
+	for {
+		oldRTTBits := r.rttBits.Load()
+		oldRTT := math.Float64frombits(oldRTTBits)
+		oldRTTVar := math.Float64frombits(r.rttVarBits.Load())
 
-	r.rtt = r.rtt*0.875 + lastRTT*0.125
-	r.rttVar = r.rttVar*0.75 + math.Abs(r.rtt-lastRTT)*0.25
+		// RFC 4.10: EWMA smoothing
+		newRTTVal := oldRTT*0.875 + lastRTT*0.125
+		newRTTVarVal := oldRTTVar*0.75 + math.Abs(newRTTVal-lastRTT)*0.25
+
+		// CAS the RTT value
+		if r.rttBits.CompareAndSwap(oldRTTBits, math.Float64bits(newRTTVal)) {
+			// RTT updated, now update RTTVar (slight race window acceptable for EWMA)
+			r.rttVarBits.Store(math.Float64bits(newRTTVarVal))
+			break
+		}
+		// CAS failed - another goroutine updated RTT, retry with new value
+	}
 }
 
 func (r *rtt) RTT() float64 {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
-	return r.rtt
+	return math.Float64frombits(r.rttBits.Load())
 }
 
 func (r *rtt) RTTVar() float64 {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
-	return r.rttVar
+	return math.Float64frombits(r.rttVarBits.Load())
 }
 
 func (r *rtt) NAKInterval() float64 {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
 	// 4.8.2.  Packet Retransmission (NAKs)
-	nakInterval := (r.rtt + 4*r.rttVar) / 2
-	if nakInterval < 20000 {
-		nakInterval = 20000 // 20ms
-	}
+	rttVal := math.Float64frombits(r.rttBits.Load())
+	rttVarVal := math.Float64frombits(r.rttVarBits.Load())
+	// Use multiplication instead of division (faster: ~3-4 cycles vs ~15-20 cycles)
+	nakInterval := (rttVal + 4*rttVarVal) * 0.5
 
+	// Use configured minimum NAK interval (from Config.PeriodicNakIntervalMs)
+	minNakInterval := float64(r.minNakIntervalUs.Load())
+	if nakInterval < minNakInterval {
+		nakInterval = minNakInterval
+	}
 	return nakInterval
 }
 
@@ -168,8 +181,8 @@ type srtConn struct {
 	rtt rtt // microseconds
 
 	ackLock       sync.RWMutex
-	ackNumbers    map[uint32]time.Time
-	nextACKNumber circular.Number
+	ackNumbers    *ackEntryBtree // ACK-5: btree for O(log n) lookup + efficient cleanup
+	nextACKNumber atomic.Uint32  // ACK number counter, incremented atomically (ACK-3)
 
 	initialPacketSequenceNumber circular.Number
 
@@ -360,17 +373,17 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		c.onShutdown = func(socketId uint32) {}
 	}
 
-	c.nextACKNumber = circular.New(1, packet.MAX_TIMESTAMP)
-	c.ackNumbers = make(map[uint32]time.Time)
+	c.nextACKNumber.Store(1)           // ACK numbers start at 1 (0 is reserved for Light ACK)
+	c.ackNumbers = newAckEntryBtree(4) // ACK-5: btree with degree 4 (optimal for ~10 entries)
 
 	c.kmPreAnnounceCountdown = c.config.KMRefreshRate - c.config.KMPreAnnounce
 	c.kmRefreshCountdown = c.config.KMRefreshRate
 
-	// 4.10.  Round-Trip Time Estimation
-	c.rtt = rtt{
-		rtt:    float64((100 * time.Millisecond).Microseconds()),
-		rttVar: float64((50 * time.Millisecond).Microseconds()),
-	}
+	// 4.10.  Round-Trip Time Estimation (ACK-10: atomic initialization)
+	c.rtt.rttBits.Store(math.Float64bits(float64((100 * time.Millisecond).Microseconds())))
+	c.rtt.rttVarBits.Store(math.Float64bits(float64((50 * time.Millisecond).Microseconds())))
+	// Set minimum NAK interval from config (convert ms to µs)
+	c.rtt.minNakIntervalUs.Store(c.config.PeriodicNakIntervalMs * 1000)
 
 	// Determine channel buffer sizes (default: 1024 if not configured)
 	networkQueueSize := c.config.NetworkQueueSize
@@ -452,6 +465,12 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		BackoffColdStartPkts:  c.config.BackoffColdStartPkts,
 		BackoffMinSleep:       c.config.BackoffMinSleep,
 		BackoffMaxSleep:       c.config.BackoffMaxSleep,
+
+		// Time base configuration (Phase 10: EventLoop Time Fix)
+		// Pass connection's time base so receiver's nowFn matches PktTsbpdTime calculation.
+		// Without this, EventLoop uses absolute Unix time while PktTsbpdTime is relative.
+		TsbpdTimeBase: c.tsbpdTimeBase,
+		StartTime:     c.start,
 
 		// Light ACK configuration (Phase 5: ACK Optimization)
 		LightACKDifference: c.config.LightACKDifference,
@@ -1189,33 +1208,77 @@ func (c *srtConn) GetExtendedStatistics() *ExtendedStatistics {
 }
 
 // handleACKACK updates the RTT and NAK interval for the congestion control.
+//
+// RFC: https://datatracker.ietf.org/doc/html/draft-sharabayko-srt-01#section-3.2.5
+//
+// ACKACK is sent by the sender in response to a Full ACK (not Light ACK).
+// It echoes the ACK Number (TypeSpecific field) from the original ACK.
+//
+// RTT Calculation (RFC Section 4.10):
+//
+//	RTT = time_now - time_when_ack_was_sent
+//	Where time_when_ack_was_sent is stored in ackNumbers[ACK_Number]
+//
+// The receiver uses EWMA (Exponential Weighted Moving Average) smoothing:
+//
+//	RTT = RTT * 0.875 + lastRTT * 0.125
+//	RTTVar = RTTVar * 0.75 + |RTT - lastRTT| * 0.25
+//
+// NAK interval is derived from RTT:
+//
+//	NAKInterval = (RTT + 4*RTTVar) / 2   (minimum 20ms)
+//
+// Cleanup: Entries in ackNumbers older than the current ACKACK are deleted
+// to prevent unbounded map growth from lost ACKACKs.
 func (c *srtConn) handleACKACK(p packet.Packet) {
-	c.ackLock.Lock()
+	c.log("control:recv:ACKACK:dump", func() string { return p.Dump() })
 
 	// Note: ACKACK metrics are tracked via packet classifier in recv path
 	// No need to increment here - metrics already tracked
 
-	c.log("control:recv:ACKACK:dump", func() string { return p.Dump() })
+	ackNum := p.Header().TypeSpecific
 
-	// p.typeSpecific is the ACKNumber
-	if ts, ok := c.ackNumbers[p.Header().TypeSpecific]; ok {
+	// ACK-5: Use btree for O(log n) lookup
+	now := time.Now()
+	c.ackLock.Lock()
+	entry := c.ackNumbers.Get(ackNum)
+	btreeLen := c.ackNumbers.Len()
+	if entry != nil {
 		// 4.10.  Round-Trip Time Estimation
-		c.recalculateRTT(time.Since(ts))
-		delete(c.ackNumbers, p.Header().TypeSpecific)
+		rttDuration := now.Sub(entry.timestamp)
+		c.recalculateRTT(rttDuration)
+
+		// DEBUG: Track ACKACK RTT calculation
+		c.log("control:recv:ACKACK:rtt:debug", func() string {
+			return fmt.Sprintf("ACKACK RTT: ackNum=%d, entryTimestamp=%s, now=%s, rtt=%v, btreeLen=%d",
+				ackNum, entry.timestamp.Format("15:04:05.000000"), now.Format("15:04:05.000000"),
+				rttDuration, btreeLen)
+		})
+
+		c.ackNumbers.Delete(ackNum)
+		PutAckEntry(entry) // Return to pool
 	} else {
-		c.log("control:recv:ACKACK:error", func() string { return fmt.Sprintf("got unknown ACKACK (%d)", p.Header().TypeSpecific) })
+		c.log("control:recv:ACKACK:error", func() string { return fmt.Sprintf("got unknown ACKACK (%d), btreeLen=%d", ackNum, btreeLen) })
 		if c.metrics != nil {
 			c.metrics.PktRecvInvalid.Add(1)
+			c.metrics.AckBtreeUnknownACKACK.Add(1) // Phase 4: Track unknown ACKACK specifically
 		}
 	}
 
-	for i := range c.ackNumbers {
-		if i < p.Header().TypeSpecific {
-			delete(c.ackNumbers, i)
-		}
-	}
-
+	// ACK-5: Use ExpireOlderThan for efficient bulk cleanup
+	// Remove all entries with ACK number < current (they're stale)
+	expiredCount, expired := c.ackNumbers.ExpireOlderThan(ackNum)
+	btreeLenAfter := c.ackNumbers.Len()
 	c.ackLock.Unlock()
+
+	// Update ACK btree metrics (outside lock)
+	if c.metrics != nil {
+		c.metrics.AckBtreeEntriesExpired.Add(uint64(expiredCount))
+		c.metrics.AckBtreeSize.Store(uint64(btreeLenAfter))
+	}
+
+	// Return expired entries to pool (outside lock)
+	PutAckEntries(expired)
 
 	c.recv.SetNAKInterval(uint64(c.rtt.NAKInterval()))
 }
@@ -1224,9 +1287,35 @@ func (c *srtConn) handleACKACK(p packet.Packet) {
 func (c *srtConn) recalculateRTT(rtt time.Duration) {
 	c.rtt.Recalculate(rtt)
 
+	// Update RTT metrics (Phase 4: ACK/ACKACK Redesign)
+	if c.metrics != nil {
+		c.metrics.RTTMicroseconds.Store(uint64(c.rtt.RTT()))
+		c.metrics.RTTVarMicroseconds.Store(uint64(c.rtt.RTTVar()))
+	}
+
 	c.log("connection:rtt", func() string {
 		return fmt.Sprintf("RTT=%.0fus RTTVar=%.0fus NAKInterval=%.0fms", c.rtt.RTT(), c.rtt.RTTVar(), c.rtt.NAKInterval()/1000)
 	})
+}
+
+// getNextACKNumber returns the next ACK number using atomic CAS.
+// ACK numbers are monotonically increasing 32-bit counters, starting at 1.
+// Value 0 is reserved for Light ACKs (which don't trigger ACKACK).
+//
+// This is lock-free and safe for concurrent use.
+// Reference: ack_optimization_implementation.md → "### Improvement #2: Atomic nextACKNumber with CAS"
+func (c *srtConn) getNextACKNumber() uint32 {
+	for {
+		current := c.nextACKNumber.Load()
+		next := current + 1
+		if next == 0 {
+			next = 1 // Skip 0 (reserved for Light ACK)
+		}
+		if c.nextACKNumber.CompareAndSwap(current, next) {
+			return current
+		}
+		// CAS failed, another goroutine incremented - retry
+	}
 }
 
 // handleHSRequest handles the HSv4 handshake extension request and sends the response
@@ -1719,6 +1808,24 @@ func (c *srtConn) sendNAK(list []circular.Number) {
 }
 
 // sendACK sends an ACK to the peer with the given sequence number.
+//
+// RFC: https://datatracker.ietf.org/doc/html/draft-sharabayko-srt-01#section-3.2.4
+//
+// ACK Packet Types (Section 3.2.4):
+//   - Full ACK: Sent every 10ms, includes RTT/RTTVar fields, triggers ACKACK for RTT calculation
+//   - Light ACK: Sent more frequently at high data rates, includes only sequence number
+//   - Small ACK: Includes fields up to Available Buffer Size (not commonly used)
+//
+// Last Acknowledged Packet Sequence Number (seq parameter): 32 bits.
+// Contains the sequence number of the last data packet being acknowledged plus one.
+// In other words, it is the sequence number of the first unacknowledged packet.
+//
+// TypeSpecific field:
+//   - Full ACK: Contains ACK Number (monotonic counter), echoed in ACKACK for RTT calculation
+//   - Light ACK: Set to 0, does NOT trigger ACKACK, does NOT contribute to RTT calculation
+//
+// The ACK Number (nextACKNumber) is a monotonically increasing 32-bit counter separate
+// from packet sequence numbers. It's used solely for matching ACK→ACKACK pairs.
 func (c *srtConn) sendACK(seq circular.Number, lite bool) {
 	p := packet.NewPacket(c.remoteAddr)
 
@@ -1731,15 +1838,13 @@ func (c *srtConn) sendACK(seq circular.Number, lite bool) {
 		LastACKPacketSequenceNumber: seq,
 	}
 
-	c.ackLock.Lock()
-	defer c.ackLock.Unlock()
-
 	if lite {
+		// Light ACK: no lock needed (no btree access)
 		cif.IsLite = true
-
 		p.Header().TypeSpecific = 0
 		c.metrics.PktSentACKLiteSuccess.Add(1) // Phase 5: Track Light ACK
 	} else {
+		// Full ACK: prepare data outside lock
 		pps, bps, capacity := c.recv.PacketRate()
 
 		cif.RTT = uint32(c.rtt.RTT())
@@ -1749,16 +1854,36 @@ func (c *srtConn) sendACK(seq circular.Number, lite bool) {
 		cif.EstimatedLinkCapacity = uint32(capacity) // estimated link capacity (packets/s), not relevant for live mode
 		cif.ReceivingRate = uint32(bps)              // receiving rate (bytes/s), not relevant for live mode
 
-		p.Header().TypeSpecific = c.nextACKNumber.Val()
+		// ACK-3: Use atomic CAS to get next ACK number (lock-free)
+		ackNum := c.getNextACKNumber()
+		p.Header().TypeSpecific = ackNum
 
-		c.ackNumbers[p.Header().TypeSpecific] = time.Now()
-		c.nextACKNumber = c.nextACKNumber.Inc()
-		if c.nextACKNumber.Val() == 0 {
-			c.nextACKNumber = c.nextACKNumber.Inc()
+		// ACK-5: Use btree + pool for efficient storage
+		entry := GetAckEntry()
+		entry.ackNum = ackNum
+		entry.timestamp = time.Now()
+
+		// ACK-8: Minimal lock scope - only for btree insert
+		c.ackLock.Lock()
+		if old := c.ackNumbers.Insert(entry); old != nil {
+			PutAckEntry(old) // Return replaced entry to pool (shouldn't happen normally)
 		}
+		btreeLen := c.ackNumbers.Len()
+		c.ackLock.Unlock()
+
+		// Update ACK btree size metric (gauge)
+		c.metrics.AckBtreeSize.Store(uint64(btreeLen))
+
+		// DEBUG: Track Full ACK send timing
+		c.log("control:send:ACK:fullack:debug", func() string {
+			return fmt.Sprintf("Full ACK: ackNum=%d, timestamp=%s, btreeLen=%d, seq=%d",
+				ackNum, entry.timestamp.Format("15:04:05.000000"), btreeLen, seq.Val())
+		})
+
 		c.metrics.PktSentACKFullSuccess.Add(1) // Phase 5: Track Full ACK
 	}
 
+	// ACK-8: MarshalCIF outside lock
 	p.MarshalCIF(&cif)
 
 	c.log("control:send:ACK:dump", func() string { return p.Dump() })

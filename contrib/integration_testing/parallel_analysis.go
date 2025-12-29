@@ -105,36 +105,109 @@ func categorizeAndCompareMetrics(baseline, highperf map[string]float64) []Metric
 	return nonEmpty
 }
 
+// normalizeMetricKey strips socket_id from metric key for comparison
+// e.g., `foo{socket_id="0x123",type="bar"}` -> `foo{type="bar"}`
+func normalizeMetricKey(name string) string {
+	// Find the label section
+	idx := strings.Index(name, "{")
+	if idx < 0 {
+		return name // No labels
+	}
+
+	basePart := name[:idx]
+	labelPart := name[idx:]
+
+	// Remove socket_id label using regex-like replacement
+	// Handle both `socket_id="...",` and `,socket_id="..."`
+	for {
+		// Try to find socket_id="..."
+		socketIdx := strings.Index(labelPart, `socket_id="`)
+		if socketIdx < 0 {
+			break
+		}
+
+		// Find the end of the socket_id value
+		valueStart := socketIdx + len(`socket_id="`)
+		valueEnd := strings.Index(labelPart[valueStart:], `"`)
+		if valueEnd < 0 {
+			break
+		}
+		valueEnd += valueStart + 1 // Include the closing quote
+
+		// Determine if we need to remove a comma
+		removeStart := socketIdx
+		removeEnd := valueEnd
+
+		// Check if there's a comma after
+		if removeEnd < len(labelPart) && labelPart[removeEnd] == ',' {
+			removeEnd++
+		} else if removeStart > 1 && labelPart[removeStart-1] == ',' {
+			// Comma before
+			removeStart--
+		}
+
+		labelPart = labelPart[:removeStart] + labelPart[removeEnd:]
+	}
+
+	// Handle empty labels case: `{}`
+	if labelPart == "{}" {
+		return basePart
+	}
+
+	return basePart + labelPart
+}
+
 // compareMetricGroup compares a group of metrics by prefix
 func compareMetricGroup(baseline, highperf map[string]float64, prefixes []string) []MetricComparison {
 	var comparisons []MetricComparison
 
+	// Build normalized value maps - SUM values across all socket_ids for each normalized key
+	// This handles multiple connections (each with different socket_id) within a pipeline
+	baselineSums := make(map[string]float64)
+	highperfSums := make(map[string]float64)
+
+	for name, value := range baseline {
+		normKey := normalizeMetricKey(name)
+		baselineSums[normKey] += value
+	}
+	for name, value := range highperf {
+		normKey := normalizeMetricKey(name)
+		highperfSums[normKey] += value
+	}
+
+	// Track which normalized keys we've processed
+	processed := make(map[string]bool)
+
 	for _, prefix := range prefixes {
-		// Find all metrics matching this prefix
-		for name := range baseline {
-			if !strings.HasPrefix(name, prefix) {
+		// Find all metrics matching this prefix in baseline
+		for normKey, baseVal := range baselineSums {
+			if !strings.HasPrefix(normKey, prefix) {
 				continue
 			}
+			if processed[normKey] {
+				continue
+			}
+			processed[normKey] = true
 
-			baseVal := baseline[name]
-			highVal := highperf[name]
+			highVal := highperfSums[normKey] // 0 if not present
 
-			comp := createComparison(name, baseVal, highVal)
+			comp := createComparison(normKey, baseVal, highVal)
 			if comp.BaselineVal != 0 || comp.HighPerfVal != 0 {
 				comparisons = append(comparisons, comp)
 			}
 		}
 
 		// Also check highperf for metrics not in baseline
-		for name := range highperf {
-			if !strings.HasPrefix(name, prefix) {
+		for normKey, highVal := range highperfSums {
+			if !strings.HasPrefix(normKey, prefix) {
 				continue
 			}
-			if _, exists := baseline[name]; exists {
+			if processed[normKey] {
 				continue // Already handled above
 			}
+			processed[normKey] = true
 
-			comp := createComparison(name, 0, highperf[name])
+			comp := createComparison(normKey, 0, highVal)
 			if comp.HighPerfVal != 0 {
 				comparisons = append(comparisons, comp)
 			}

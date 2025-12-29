@@ -241,6 +241,13 @@ run_test "PacketRingShards flag" "-usepacketring -packetringshards 8" '"PacketRi
 run_test "PacketRingMaxRetries flag" "-usepacketring -packetringmaxretries 20" '"PacketRingMaxRetries" *: *20' "$SERVER_BIN"
 run_test "PacketRingBackoffDuration flag" "-usepacketring -packetringbackoffduration 200us" '"PacketRingBackoffDuration" *: *200000' "$SERVER_BIN"
 run_test "PacketRingMaxBackoffs flag" "-usepacketring -packetringmaxbackoffs 5" '"PacketRingMaxBackoffs" *: *5' "$SERVER_BIN"
+# Test PacketRingRetryStrategy - all 6 strategies
+run_test "PacketRingRetryStrategy sleep" "-usepacketring -packetringretrystrategy sleep" '"PacketRingRetryStrategy" *: *"sleep"' "$SERVER_BIN"
+run_test "PacketRingRetryStrategy next" "-usepacketring -packetringretrystrategy next" '"PacketRingRetryStrategy" *: *"next"' "$SERVER_BIN"
+run_test "PacketRingRetryStrategy random" "-usepacketring -packetringretrystrategy random" '"PacketRingRetryStrategy" *: *"random"' "$SERVER_BIN"
+run_test "PacketRingRetryStrategy adaptive" "-usepacketring -packetringretrystrategy adaptive" '"PacketRingRetryStrategy" *: *"adaptive"' "$SERVER_BIN"
+run_test "PacketRingRetryStrategy spin" "-usepacketring -packetringretrystrategy spin" '"PacketRingRetryStrategy" *: *"spin"' "$SERVER_BIN"
+run_test "PacketRingRetryStrategy hybrid" "-usepacketring -packetringretrystrategy hybrid" '"PacketRingRetryStrategy" *: *"hybrid"' "$SERVER_BIN"
 run_test "Lock-free ring full config" "-usepacketring -packetringsize 4096 -packetringshards 4 -packetringmaxretries 15" '"UsePacketRing" *: *true.*"PacketRingSize" *: *4096.*"PacketRingShards" *: *4.*"PacketRingMaxRetries" *: *15' "$SERVER_BIN"
 
 # Test 43-48: Event loop flags (Phase 4: Lockless Design)
@@ -294,6 +301,11 @@ run_test "LightACKDifference default (64)" "-useeventloop -usepacketring" '"Ligh
 run_test "LightACKDifference flag (128)" "-lightackdifference 128" '"LightACKDifference" *: *128' "$SERVER_BIN"
 run_test "LightACKDifference flag (256)" "-lightackdifference 256" '"LightACKDifference" *: *256' "$SERVER_BIN"
 run_test "LightACKDifference with event loop" "-usepacketring -useeventloop -lightackdifference 256" '"UseEventLoop" *: *true.*"LightACKDifference" *: *256' "$SERVER_BIN"
+
+# Test 64-66: Output color flag (for parallel test differentiation)
+test_help_flag "Client -color flag exists" "-color" "$CLIENT_BIN"
+test_help_flag "Server -color flag exists" "-color" "$SERVER_BIN"
+test_help_flag "Client-generator -color flag exists" "-color" "$CLIENTGEN_BIN"
 
 echo ""
 echo "--- Component-Specific Flags (Help Output) ---"

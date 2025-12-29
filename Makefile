@@ -61,6 +61,10 @@ test-network-quick: client server client-generator
 test-parallel-list:
 	@cd contrib/integration_testing && go run . list-parallel-configs
 
+## integration-testing: Build the integration testing tool
+integration-testing:
+	cd contrib/integration_testing && go build -o integration_testing .
+
 ## test-parallel: Run parallel comparison test (root, CONFIG=Parallel-Starlink-5Mbps)
 ## sudo make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo make test-parallel CONFIG=Parallel-Starlink-5Mbps VERBOSE=1
@@ -69,14 +73,14 @@ test-parallel-list:
 ## sudo PROFILES=cpu,mutex make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo PROFILES=all make test-parallel CONFIG=Parallel-Starlink-5Mbps
 # When PROFILES is set, use debug builds (with symbols) for better profile output
-test-parallel: $(if $(PROFILES),client-debug server-debug client-generator-debug,client server client-generator)
+test-parallel: integration-testing $(if $(PROFILES),client-debug server-debug client-generator-debug,client server client-generator)
 	@echo "NOTE: Parallel tests require root privileges for network namespace creation"
-	@cd contrib/integration_testing && PROFILES=$(PROFILES) go run . parallel-test $(CONFIG) $(if $(VERBOSE),--verbose,)
+	@cd contrib/integration_testing && PROFILES=$(PROFILES) ./integration_testing parallel-test $(CONFIG) $(if $(VERBOSE),--verbose,)
 
 ## test-parallel-all: Run all parallel comparison tests (requires root)
-test-parallel-all: client server client-generator
+test-parallel-all: integration-testing client server client-generator
 	@echo "NOTE: Parallel tests require root privileges for network namespace creation"
-	@cd contrib/integration_testing && go run . parallel-test-all
+	@cd contrib/integration_testing && ./integration_testing parallel-test-all
 
 ## test-isolation-list: List available isolation test configurations
 test-isolation-list:
@@ -91,6 +95,7 @@ test-isolation-list:
 ## sudo PROFILES=cpu make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
 ## sudo PROFILES=cpu,mutex make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
 ## sudo PROFILES=all make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
+## sudo PRINT_PROM=true make test-isolation CONFIG=Isolation-5M-EventLoop-NoIOUring
 # When PROFILES is set, use debug builds (with symbols) for better profile output
 test-isolation: $(if $(PROFILES),server-debug client-generator-debug,server client-generator)
 	@echo "NOTE: Isolation tests require root privileges for network namespace creation"
@@ -102,6 +107,21 @@ test-isolation-all: server client-generator
 	@echo "NOTE: Isolation tests require root privileges for network namespace creation"
 	@chmod +x contrib/integration_testing/run_isolation_tests.sh
 	@contrib/integration_testing/run_isolation_tests.sh
+
+## test-isolation-strategies: Run all 6 ring retry strategy tests (~72s total)
+## Compares Sleep, Next, Random, Adaptive, Spin, Hybrid strategies
+## sudo make test-isolation-strategies
+test-isolation-strategies: server client-generator
+	@echo "=== Ring Retry Strategy Comparison Tests ==="
+	@echo "Running 6 strategy tests (12s each = ~72s total)"
+	@for strategy in Sleep Next Random Adaptive Spin Hybrid; do \
+		echo ""; \
+		echo "=== Testing Strategy: $$strategy ==="; \
+		(cd contrib/integration_testing && go run . isolation-test Isolation-5M-Strategy-$$strategy); \
+	done
+	@echo ""
+	@echo "=== Strategy Comparison Complete ==="
+	@echo "Compare RTT (us) and Drops columns to find best strategy"
 
 ## test-matrix-list: List all matrix-generated tests (64 tests)
 test-matrix-list:
@@ -403,9 +423,9 @@ nixshell:
 # Network impairment testing targets (require root)
 .PHONY: test-network-list test-network test-network-all test-network-quick network-setup network-cleanup network-status
 # Parallel comparison testing targets (require root)
-.PHONY: test-parallel-list test-parallel test-parallel-all
+.PHONY: test-parallel-list test-parallel test-parallel-all integration-testing
 # Isolation testing targets (require root)
-.PHONY: test-isolation-list test-isolation test-isolation-all
+.PHONY: test-isolation-list test-isolation test-isolation-all test-isolation-strategies
 # Matrix-generated testing targets (parallel, require root)
 .PHONY: test-matrix-list test-matrix-summary test-matrix-tier1-list test-matrix-tier2-list
 .PHONY: test-matrix-tier1 test-matrix-tier2 test-matrix-all

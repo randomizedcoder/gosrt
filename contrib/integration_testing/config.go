@@ -401,6 +401,7 @@ type SRTConfig struct {
 	PacketRingMaxRetries      int           // -packetringmaxretries (default: 10)
 	PacketRingBackoffDuration time.Duration // -packetringbackoffduration (default: 100µs)
 	PacketRingMaxBackoffs     int           // -packetringmaxbackoffs (default: 0)
+	PacketRingRetryStrategy   string        // -packetringretrystrategy (sleep, next, random, adaptive, spin, hybrid)
 
 	// Event loop configuration (Phase 4: Lockless Design)
 	UseEventLoop          bool          // -useeventloop (requires -usepacketring)
@@ -559,6 +560,9 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 	if c.PacketRingMaxBackoffs > 0 {
 		flags = append(flags, "-packetringmaxbackoffs", strconv.Itoa(c.PacketRingMaxBackoffs))
+	}
+	if c.PacketRingRetryStrategy != "" {
+		flags = append(flags, "-packetringretrystrategy", c.PacketRingRetryStrategy)
 	}
 
 	// Event loop configuration (Phase 4: Lockless Design)
@@ -918,12 +922,28 @@ func (c *ParallelTestConfig) GetHighPerfServerFlags(testID string) []string {
 	return c.getServerFlags(c.HighPerf, "highperf", testID)
 }
 
+// getPipelineColor returns the terminal color for a pipeline label
+// Baseline = blue (cold/control), HighPerf = green (success/optimized)
+func getPipelineColor(label string) string {
+	switch label {
+	case "baseline":
+		return "blue"
+	case "highperf":
+		return "green"
+	default:
+		return ""
+	}
+}
+
 func (c *ParallelTestConfig) getServerFlags(p PipelineConfig, label, testID string) []string {
 	udsPath := fmt.Sprintf("/tmp/srt_server_%s_%s.sock", label, testID)
 	flags := []string{
 		"-addr", p.GetServerAddr(),
 		"-promuds", udsPath,
 		"-name", label + "-server",
+	}
+	if color := getPipelineColor(label); color != "" {
+		flags = append(flags, "-color", color)
 	}
 	flags = append(flags, p.SRT.ToCliFlags()...)
 	return flags
@@ -949,6 +969,9 @@ func (c *ParallelTestConfig) getClientGeneratorFlags(p PipelineConfig, label, te
 		"-promuds", udsPath,
 		"-name", label + "-cg",
 	}
+	if color := getPipelineColor(label); color != "" {
+		flags = append(flags, "-color", color)
+	}
 	flags = append(flags, p.SRT.ToCliFlags()...)
 	return flags
 }
@@ -972,6 +995,9 @@ func (c *ParallelTestConfig) getClientFlags(p PipelineConfig, label, testID stri
 		"-localaddr", p.SubscriberIP,
 		"-promuds", udsPath,
 		"-name", label + "-client",
+	}
+	if color := getPipelineColor(label); color != "" {
+		flags = append(flags, "-color", color)
 	}
 	if ioUringOutput {
 		flags = append(flags, "-iouringoutput")
@@ -1239,6 +1265,17 @@ func (c SRTConfig) WithEventLoopCustom(rateInterval time.Duration, coldStartPkts
 // WithoutEventLoop disables the event loop (uses timer-driven Tick).
 func (c SRTConfig) WithoutEventLoop() SRTConfig {
 	c.UseEventLoop = false
+	return c
+}
+
+// ============================================================================
+// RING RETRY STRATEGY HELPERS
+// ============================================================================
+
+// WithRetryStrategy sets the ring retry strategy.
+// Valid strategies: "sleep", "next", "random", "adaptive", "spin", "hybrid"
+func (c SRTConfig) WithRetryStrategy(strategy string) SRTConfig {
+	c.PacketRingRetryStrategy = strategy
 	return c
 }
 

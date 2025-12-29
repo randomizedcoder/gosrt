@@ -154,44 +154,52 @@ func (ln *listener) initializeIoUringRecv() error {
 }
 
 // cleanupIoUringRecv cleans up the io_uring receive ring for the listener
+// Following context_and_cancellation_design.md pattern:
+// 1. Context is cancelled by parent (ln.ctx via server shutdown)
+// 2. Wait for handler to exit (via WaitGroup)
+// 3. Only then clean up resources (QueueExit)
 func (ln *listener) cleanupIoUringRecv() {
 	if ln.recvRing == nil {
 		return // Nothing to clean up
 	}
 
-	// Note: Completion handler will exit when ln.ctx is cancelled (via server context cancellation)
-	// No need to call recvCompCancel() - it was a no-op anyway since we use ln.ctx directly
+	// Step 1: Context should already be cancelled by parent (server context cancellation)
+	// The handler checks ln.ctx.Done() at top of loop and will exit within ~10ms
 
-	// IMPORTANT: Close the ring FIRST to wake up blocked WaitCQE()
-	// WaitCQE() will return EBADF when the ring is closed, allowing
-	// the completion handler to exit cleanly. If we wait before closing,
-	// the handler stays blocked in WaitCQE() and we timeout.
-	ring, ok := ln.recvRing.(*giouring.Ring)
-	if ok {
-		ring.QueueExit()
-	}
-
-	// Wait for completion handler to finish (with timeout)
+	// Step 2: Wait for completion handler to exit BEFORE calling QueueExit()
+	// We MUST wait because QueueExit() unmaps ring memory - if handler is still
+	// inside WaitCQETimeout(), the giouring library will SIGSEGV when it tries
+	// to peek at the unmapped CQ.
 	done := make(chan struct{})
 	go func() {
 		ln.recvCompWg.Wait()
 		close(done)
 	}()
 
+	handlerExited := false
 	select {
 	case <-done:
-		// Completion handler finished
+		handlerExited = true
 	case <-time.After(2 * time.Second):
-		// Timeout - log warning but continue (reduced from 5s since QueueExit should wake it)
-		// Use safe logging (won't panic if logger is closed)
+		// CRITICAL: Handler did not exit - DO NOT call QueueExit
+		// Minor resource leak is better than SIGSEGV crash
 		if ln.config.Logger != nil {
 			ln.config.Logger.Print("listen:io_uring:recv:cleanup", 0, 2, func() string {
-				return "timeout waiting for completion handler"
+				return "CRITICAL: completion handler did not exit within 2s - skipping QueueExit to prevent SIGSEGV"
 			})
 		}
 	}
 
-	// Clean up completion map and return all buffers to pool
+	// Step 3: Only close ring if handler has exited
+	if handlerExited {
+		ring, ok := ln.recvRing.(*giouring.Ring)
+		if ok {
+			ring.QueueExit()
+		}
+		ln.recvRing = nil // Fail gracefully if any late accesses
+	}
+
+	// Step 4: Clean up completion map and return all buffers to pool
 	ln.recvCompLock.Lock()
 	for _, compInfo := range ln.recvCompletions {
 		GetRecvBufferPool().Put(compInfo.buffer)
@@ -252,16 +260,18 @@ func (ln *listener) submitRecvRequest() {
 
 	// Get SQE from ring with retry loop (same pattern as send path)
 	var sqe *giouring.SubmissionQueueEntry
-	const maxRetries = 3
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < ioUringMaxGetSQERetries; i++ {
 		sqe = ring.GetSQE()
 		if sqe != nil {
 			break // Got an SQE, proceed
 		}
 
+		// Track retry (ring temporarily full)
+		ln.incrementListenerRecvGetSQERetries()
+
 		// Ring full - wait a bit and retry (completions may free up space)
-		if i < maxRetries-1 {
-			time.Sleep(100 * time.Microsecond)
+		if i < ioUringMaxGetSQERetries-1 {
+			time.Sleep(ioUringRetryBackoff)
 		}
 	}
 
@@ -272,6 +282,9 @@ func (ln *listener) submitRecvRequest() {
 		ln.recvCompLock.Unlock()
 
 		GetRecvBufferPool().Put(bufferPtr)
+
+		// Track ring full error
+		ln.incrementListenerRecvSubmitRingFull()
 
 		ln.log("listen:recv:error", func() string {
 			return "io_uring ring full after retries"
@@ -288,8 +301,7 @@ func (ln *listener) submitRecvRequest() {
 
 	// Submit to ring with retry loop (same pattern as send path)
 	var err error
-	const maxSubmitRetries = 3
-	for i := 0; i < maxSubmitRetries; i++ {
+	for i := 0; i < ioUringMaxSubmitRetries; i++ {
 		_, err = ring.Submit()
 		if err == nil {
 			break // Submission successful
@@ -301,9 +313,12 @@ func (ln *listener) submitRecvRequest() {
 			break
 		}
 
+		// Track retry (transient error)
+		ln.incrementListenerRecvSubmitRetries()
+
 		// Transient error - wait and retry
-		if i < maxSubmitRetries-1 {
-			time.Sleep(100 * time.Microsecond) // Same delay as GetSQE retry
+		if i < ioUringMaxSubmitRetries-1 {
+			time.Sleep(ioUringRetryBackoff)
 		}
 	}
 
@@ -315,13 +330,18 @@ func (ln *listener) submitRecvRequest() {
 
 		GetRecvBufferPool().Put(bufferPtr)
 
+		// Track submit error
+		ln.incrementListenerRecvSubmitError()
+
 		ln.log("listen:recv:error", func() string {
 			return fmt.Sprintf("failed to submit receive request: %v", err)
 		})
 		return
 	}
 
-	// Request submitted successfully
+	// Request submitted successfully - track success
+	ln.incrementListenerRecvSubmitSuccess()
+
 	// Completion will be handled asynchronously by completion handler
 }
 
@@ -538,24 +558,26 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 	// Always resubmit to maintain constant pending count (handled by caller)
 }
 
-// getRecvCompletion gets a single completion using polling (no blocking WaitCQE).
-// This allows the handler to check ctx.Done() regularly and exit promptly when
-// the context is cancelled, without waiting for QueueExit() to be called.
+// getRecvCompletion gets a single completion using blocking wait with timeout.
+// WaitCQETimeout blocks in the kernel until either:
+//  1. A completion arrives (returns immediately - zero latency!)
+//  2. Timeout expires (returns ETIME, allows ctx.Done() check)
+//  3. Ring is closed (returns EBADF, normal shutdown)
 func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) (*giouring.CompletionQueueEvent, *recvCompletionInfo) {
-	// Use polling with PeekCQE instead of blocking WaitCQE
-	// This allows us to check ctx.Done() regularly and exit promptly
 	for {
-		// Check context first
+		// Check context first (non-blocking)
 		select {
 		case <-ctx.Done():
+			ln.incrementListenerRecvCompletionCtxCancelled()
 			return nil, nil
 		default:
 		}
 
-		// Try non-blocking peek
-		cqe, err := ring.PeekCQE()
+		// Block waiting for completion OR timeout
+		cqe, err := ring.WaitCQETimeout(&ioUringWaitTimeout)
 		if err == nil {
 			// Success - we have a completion, look it up and return
+			ln.incrementListenerRecvCompletionSuccess()
 			compInfo := ln.lookupAndRemoveRecvCompletion(cqe, ring)
 			if compInfo == nil {
 				return nil, nil // Unknown request ID, skip
@@ -565,31 +587,142 @@ func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) 
 
 		// EBADF means ring was closed via QueueExit()
 		if err == syscall.EBADF {
+			ln.incrementListenerRecvCompletionEBADF()
 			return nil, nil
 		}
 
-		// EAGAIN means no completions available - sleep and retry
-		if err == syscall.EAGAIN {
-			// Short sleep to avoid busy-spinning, but still responsive to ctx cancellation
-			select {
-			case <-ctx.Done():
-				return nil, nil
-			case <-time.After(ioUringPollInterval):
-				continue
-			}
+		// ETIME means timeout expired - loop back to check ctx.Done()
+		if err == syscall.ETIME {
+			ln.incrementListenerRecvCompletionTimeout()
+			continue
 		}
 
 		// EINTR is normal (interrupted by signal) - retry immediately
 		if err == syscall.EINTR {
+			ln.incrementListenerRecvCompletionEINTR()
 			continue
 		}
 
 		// Other errors - log and return nil
+		ln.incrementListenerRecvCompletionError()
 		ln.log("listen:recv:completion:error", func() string {
-			return fmt.Sprintf("error peeking completion: %v", err)
+			return fmt.Sprintf("error waiting for completion: %v", err)
 		})
 		return nil, nil
 	}
+}
+
+// Helper functions for incrementing listener recv completion metrics
+// These iterate through sync.Map connections and increment on the first one found with metrics
+func (ln *listener) incrementListenerRecvCompletionSuccess() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvCompletionSuccess.Add(1)
+			return false // Stop after first increment
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvCompletionTimeout() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvCompletionTimeout.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvCompletionEBADF() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvCompletionEBADF.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvCompletionEINTR() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvCompletionEINTR.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvCompletionError() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvCompletionError.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvCompletionCtxCancelled() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvCompletionCtxCancelled.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+// Helper functions for incrementing listener recv submission metrics
+func (ln *listener) incrementListenerRecvSubmitSuccess() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvSubmitSuccess.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvSubmitRingFull() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvSubmitRingFull.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvSubmitError() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvSubmitError.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvGetSQERetries() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvGetSQERetries.Add(1)
+			return false
+		}
+		return true
+	})
+}
+
+func (ln *listener) incrementListenerRecvSubmitRetries() {
+	ln.conns.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
+			conn.metrics.IoUringListenerRecvSubmitRetries.Add(1)
+			return false
+		}
+		return true
+	})
 }
 
 // submitRecvRequestBatch submits multiple receive requests in a batch

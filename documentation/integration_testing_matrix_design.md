@@ -23,7 +23,8 @@
 13. [CLI Support](#13-cli-support)
 14. [Migration Plan: Current → New Names](#14-migration-plan-current--new-names)
 15. [Implementation Plan](#15-implementation-plan)
-16. [Appendix: Full Test Matrix Tables](#appendix-full-test-matrix-tables)
+16. [EventLoop and Ring Integration Testing](#16-eventloop-and-ring-integration-testing)
+17. [Appendix: Full Test Matrix Tables](#appendix-full-test-matrix-tables)
 
 ---
 
@@ -101,6 +102,18 @@ Strategic Selection:    ~150 tests (good coverage, reasonable runtime)
 | `NakBtreeF` | NAK btree + FastNAK | NAK btree + FastNAK (no FastNAKRecent) |
 | `NakBtreeFr` | NAK btree + FastNAK + Recent | NAK btree + FastNAK + FastNAKRecent |
 | `Full` | Full Stack | btree + io_uring + NAK btree + FastNAK + FastNAKRecent + HonorNakOrder |
+| `Ring` | Ring buffer only | list + lock-free ring buffer (Phase 3) |
+| `FullRing` | Full Phase 3 | btree + io_uring + NAK btree + Ring + HonorNakOrder |
+| `EventLoop` | Event loop only | Ring + continuous event loop (Phase 4) |
+| `FullEL` | Full Phase 4 | btree + io_uring + NAK btree + Ring + EventLoop + HonorNakOrder |
+
+**Phase Progression**:
+```
+Phase 1: Btree                          - btree packet store
+Phase 2: NakBtree/NakBtreeF/NakBtreeFr  - NAK btree optimizations
+Phase 3: Ring/FullRing                  - Lock-free packet handoff
+Phase 4: EventLoop/FullEL               - Continuous event loop (replaces Tick)
+```
 
 ### Examples
 
@@ -199,6 +212,31 @@ This section documents ALL configuration options from `contrib/common/flags.go` 
 | Flag | Type | Default | Currently Tested | Matrix Dimension |
 |------|------|---------|------------------|------------------|
 | `-honornakorder` | bool | false | ✅ | Config variant |
+
+#### Lock-Free Ring Buffer Configuration (Phase 3: Lockless Design)
+
+| Flag | Type | Default | Currently Tested | Matrix Dimension |
+|------|------|---------|------------------|------------------|
+| `-usepacketring` | bool | false | ✅ | Config variant (Ring, FullRing, EventLoop) |
+| `-packetringsize` | int | 1024 | ✅ | Fixed at 1024 |
+| `-packetringshards` | int | 4 | ✅ | Fixed at 4 |
+| `-packetringmaxretries` | int | 10 | ❌ | Skip for now |
+| `-packetringbackoffduration` | duration | 100µs | ❌ | Skip for now |
+| `-packetringretrymethod` | string | "sleep" | ❌ | **TO ADD**: Strategy dimension |
+
+**Note**: Ring strategy testing exists as separate `Isolation-5M-Strategy-*` tests.
+
+#### Event Loop Configuration (Phase 4: Lockless Design)
+
+| Flag | Type | Default | Currently Tested | Matrix Dimension |
+|------|------|---------|------------------|------------------|
+| `-useeventloop` | bool | false | ✅ | Config variant (EventLoop, FullEventLoop) |
+| `-eventlooprateinterval` | duration | 1s | ✅ | Fixed at 1s |
+| `-backoffcoldstartpkts` | int | 1000 | ✅ | Fixed |
+| `-backoffminsleep` | duration | 10µs | ✅ | Fixed (or LowBackoff/HighBackoff) |
+| `-backoffmaxsleep` | duration | 1ms | ✅ | Fixed (or LowBackoff/HighBackoff) |
+
+**Note**: EventLoop backoff tuning exists as separate `Isolation-5M-EventLoop-LowBackoff` and `Isolation-5M-EventLoop-HighBackoff` tests.
 
 #### Timer Intervals ⚠️ HIGH PRIORITY
 
@@ -335,6 +373,28 @@ Clean network tests validate basic SRT functionality **without network impairmen
 | `Int-Clean-20M-5s-R130-Full` | Full config with 130ms RTT |
 | `Int-Clean-20M-5s-R300-Full` | Full config with GEO RTT |
 
+#### Phase 3-4 Tests: Ring Buffer and EventLoop (NEW)
+
+These tests validate the lock-free receive path (Phase 3) and continuous event loop (Phase 4):
+
+| New Name | What it Tests |
+|----------|---------------|
+| `Int-Clean-5M-3s-R0-Ring` | Lock-free ring buffer only |
+| `Int-Clean-5M-3s-R0-FullRing` | Full Phase 3: Ring + btree + io_uring + NAK btree |
+| `Int-Clean-5M-3s-R0-EventLoop` | EventLoop with default settings |
+| `Int-Clean-5M-3s-R0-FullEL` | Full Phase 4: EventLoop + all features |
+| `Int-Clean-20M-3s-R0-FullEL` | Full Phase 4 at 20 Mb/s |
+| `Int-Clean-50M-3s-R0-FullEL` | Full Phase 4 at 50 Mb/s stress test |
+| `Int-Clean-100M-3s-R0-FullEL` | Full Phase 4 at 100 Mb/s extreme test |
+
+#### EventLoop Backoff Tuning Tests
+
+| New Name | Backoff | What it Tests |
+|----------|---------|---------------|
+| `Int-Clean-5M-3s-R0-EL-LowBackoff` | 5µs-500µs | Low latency, higher CPU |
+| `Int-Clean-5M-3s-R0-EL-HighBackoff` | 50µs-5ms | CPU efficient, higher latency |
+| `Int-Clean-5M-3s-R0-EL-DefaultBackoff` | 10µs-1ms | Default balanced |
+
 #### Timer Interval Tests (Clean Network)
 
 | New Name | Timer Profile | What it Tests |
@@ -391,13 +451,26 @@ import "time"
 type ConfigVariant string
 
 const (
+    // Phase 0: Baseline
     ConfigBase       ConfigVariant = "Base"       // list, no io_uring, no NAK btree
+
+    // Phase 1: Btree packet store
     ConfigBtree      ConfigVariant = "Btree"      // btree packet store only
+
+    // Phase 2: io_uring and NAK optimizations
     ConfigIoUr       ConfigVariant = "IoUr"       // io_uring only
     ConfigNakBtree   ConfigVariant = "NakBtree"   // NAK btree only (no FastNAK)
     ConfigNakBtreeF  ConfigVariant = "NakBtreeF"  // NAK btree + FastNAK
     ConfigNakBtreeFr ConfigVariant = "NakBtreeFr" // NAK btree + FastNAK + FastNAKRecent
-    ConfigFull       ConfigVariant = "Full"       // Everything enabled
+    ConfigFull       ConfigVariant = "Full"       // btree + io_uring + NAK btree + HonorNakOrder
+
+    // Phase 3: Lock-free ring buffer
+    ConfigRing       ConfigVariant = "Ring"       // Lock-free ring buffer only
+    ConfigFullRing   ConfigVariant = "FullRing"   // Full Phase 3: btree + io_uring + NAK + Ring
+
+    // Phase 4: EventLoop (replaces timer-driven Tick)
+    ConfigEventLoop  ConfigVariant = "EventLoop"  // Ring + continuous event loop
+    ConfigFullEL     ConfigVariant = "FullEL"     // Full Phase 4: Full + Ring + EventLoop
 )
 
 // RTTProfile represents a network latency profile
@@ -1564,6 +1637,106 @@ make test-clean-matrix-tier2-list
 | Backwards compatibility | Old names still work |
 | CI integration | All tiers in pipeline |
 | Documentation | Complete and up-to-date |
+
+---
+
+## 16. EventLoop and Ring Integration Testing
+
+This section describes the comprehensive integration testing strategy for Phase 3 (Ring) and Phase 4 (EventLoop) features.
+
+### 16.1 Existing EventLoop Isolation Tests
+
+The following isolation tests already exist and cover EventLoop functionality:
+
+| Test Name | Description | Status |
+|-----------|-------------|--------|
+| `Isolation-5M-Server-Ring` | Ring buffer only | ✅ Implemented |
+| `Isolation-5M-Server-Ring-IoUr` | Ring + io_uring recv | ✅ Implemented |
+| `Isolation-5M-Server-Ring-NakBtree-IoUr` | Full lockless receiver | ✅ Implemented |
+| `Isolation-5M-FullRing` | Full Phase 3 | ✅ Implemented |
+| `Isolation-20M-FullRing` | Phase 3 at 20 Mb/s | ✅ Implemented |
+| `Isolation-5M-EventLoop` | EventLoop default | ✅ Implemented |
+| `Isolation-5M-FullEventLoop` | Full Phase 4 | ✅ Implemented |
+| `Isolation-5M-FullEventLoop-Debug` | Debug with verbose metrics | ✅ Implemented |
+| `Isolation-20M-FullEventLoop` | Phase 4 at 20 Mb/s | ✅ Implemented |
+| `Isolation-50M-FullEventLoop` | Phase 4 at 50 Mb/s | ✅ Implemented |
+| `Isolation-100M-FullEventLoop` | Phase 4 at 100 Mb/s | ✅ Implemented |
+| `Isolation-5M-EventLoop-LowBackoff` | Low latency backoff (5µs-500µs) | ✅ Implemented |
+| `Isolation-5M-EventLoop-HighBackoff` | CPU efficient backoff (50µs-5ms) | ✅ Implemented |
+| `Isolation-5M-EventLoop-NoIOUring` | EventLoop without io_uring | ✅ Implemented |
+| `Isolation-5M-Strategy-Sleep` | Ring sleep backoff | ✅ Implemented |
+| `Isolation-5M-Strategy-Next` | Ring NextShard strategy | ✅ Implemented |
+| `Isolation-5M-Strategy-Random` | Ring RandomShard strategy | ✅ Implemented |
+| `Isolation-5M-Strategy-Adaptive` | Ring AdaptiveBackoff strategy | ✅ Implemented |
+| `Isolation-5M-Strategy-Spin` | Ring SpinThenYield strategy | ✅ Implemented |
+| `Isolation-5M-Strategy-Hybrid` | Ring Hybrid strategy | ✅ Implemented |
+
+### 16.2 EventLoop Test Coverage Analysis
+
+**Time Base Fix Verification** (Added 2025-12-28):
+
+The EventLoop time base fix was verified with:
+1. Unit tests in `congestion/live/eventloop_test.go`:
+   - `TestEventLoop_TimeBase_TSBPD_NoEarlyDelivery` - Proves packets not delivered before TSBPD
+   - `TestEventLoop_TimeBase_ContiguousScan` - Proves gaps not skipped prematurely
+   - `TestEventLoop_TimeBase_GapScan` - Proves NAKs generated correctly
+2. Integration test: `Isolation-5M-FullEventLoop` showing **0 drops** (was 4395 before fix)
+
+**Coverage Matrix**:
+
+| Dimension | Covered? | Tests |
+|-----------|----------|-------|
+| Clean network | ✅ | `Isolation-5M-FullEventLoop`, `Isolation-20M-FullEventLoop` |
+| High throughput | ✅ | `Isolation-50M-FullEventLoop`, `Isolation-100M-FullEventLoop` |
+| Backoff tuning | ✅ | `LowBackoff`, `HighBackoff` variants |
+| Ring strategies | ✅ | 6 strategy-specific tests |
+| Without io_uring | ✅ | `Isolation-5M-EventLoop-NoIOUring` |
+| NAK generation | ✅ | Unit tests + integration tests |
+| TSBPD delivery | ✅ | Unit tests + integration tests |
+| Loss impairment | ⚠️ | **TO ADD** (see below) |
+| RTT variation | ⚠️ | **TO ADD** (see below) |
+
+### 16.3 New Tests to Add
+
+**EventLoop with Network Impairment**:
+
+| Test Name | What it Tests |
+|-----------|---------------|
+| `Parallel-Starlink-20M-5s-R60-Base-vs-FullEL` | EventLoop vs Baseline under Starlink |
+| `Net-Loss-L5-20M-5s-R60-FullEL` | EventLoop with 5% loss |
+| `Net-Loss-L10-20M-5s-R60-FullEL` | EventLoop with 10% loss |
+| `Parallel-Starlink-50M-5s-R60-Full-vs-FullEL` | FullRing vs FullEventLoop (Phase 3 vs 4) |
+
+**EventLoop with RTT Variation**:
+
+| Test Name | What it Tests |
+|-----------|---------------|
+| `Isolation-5M-FullEventLoop-R60` | EventLoop with 60ms RTT |
+| `Isolation-5M-FullEventLoop-R130` | EventLoop with 130ms RTT |
+| `Isolation-5M-FullEventLoop-R300` | EventLoop with GEO satellite RTT |
+
+### 16.4 Unit Test Coverage
+
+The following unit tests in `congestion/live/eventloop_test.go` cover EventLoop behavior:
+
+| Test | Description |
+|------|-------------|
+| `TestEventLoop_TimeBase_TSBPD_NoEarlyDelivery` | Verifies correct time base for TSBPD |
+| `TestEventLoop_TimeBase_ContiguousScan` | Verifies gap handling |
+| `TestEventLoop_TimeBase_GapScan` | Verifies NAK generation |
+| `TestEventLoop_ContextCancellation` | Verifies clean shutdown |
+| `TestEventLoop_MetricsIncrement` | Verifies metrics tracking |
+| `TestEventLoop_Basic_PacketDelivery` | Verifies packet delivery timing |
+| `TestEventLoop_ACK_Periodic` | Verifies periodic ACK generation |
+| `TestEventLoop_NAK_GapDetection` | Verifies NAK for gaps |
+| `TestEventLoop_IdleBackoff` | Verifies idle backoff behavior |
+| `TestEventLoop_Ring_BasicFlow` | Verifies ring → btree → delivery |
+| `TestEventLoop_Ring_OutOfOrder` | Verifies out-of-order reordering |
+| `TestEventLoop_Ring_HighThroughput` | Verifies 1000 packet burst |
+| `TestEventLoop_IoUring_SimulatedReorder` | Simulates io_uring CQE reordering |
+| `TestEventLoop_IoUring_LossRecovery` | Simulates NAK + retransmit flow |
+| `TestEventLoop_IoUring_BurstLoss` | Simulates burst loss NAK handling |
+| `TestEventLoop_IoUring_TSBPD_Expiry` | Simulates permanent loss TSBPD skip |
 
 ---
 

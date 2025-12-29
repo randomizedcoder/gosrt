@@ -208,25 +208,14 @@ func TestPrometheusExportsAllCounters(t *testing.T) {
 		"CongestionSendPktRetransRate": true,
 
 		// ========== Phase 1: Rate Metrics (float64 stored as uint64 bits) ==========
-		// These are gauge values exported separately via writeGauge() in handler.go
-		// Not included in the counter export loop - tested in TestRateMetricsExported
-		"RecvRatePeriodUs":       true, // Internal timing, not exported
-		"RecvRateLastUs":         true, // Internal timing, not exported
-		"RecvRatePackets":        true, // Raw counter for calculation, not exported
-		"RecvRateBytes":          true, // Raw counter for calculation, not exported
-		"RecvRateBytesRetrans":   true, // Raw counter for calculation, not exported
-		"RecvRatePacketsPerSec":  true, // Exported as gauge (tested separately)
-		"RecvRateBytesPerSec":    true, // Exported as gauge (tested separately)
-		"RecvRatePktRetransRate": true, // Exported as gauge (tested separately)
-		"SendRatePeriodUs":       true, // Internal timing, not exported
-		"SendRateLastUs":         true, // Internal timing, not exported
-		"SendRateBytes":          true, // Raw counter for calculation, not exported
-		"SendRateBytesSent":      true, // Raw counter for calculation, not exported
-		"SendRateBytesRetrans":   true, // Raw counter for calculation, not exported
-		"SendRateEstInputBW":     true, // Exported as gauge (tested separately)
-		"SendRateEstSentBW":      true, // Exported as gauge (tested separately)
-		"SendRatePktRetransRate": true, // Exported as gauge (tested separately)
-		"RecvLightACKCounter":    true, // Internal counter, not exported
+		// These are gauge values exported via getter helpers (tested in TestRateMetricsExported)
+		"RecvRatePacketsPerSec":  true, // Exported as gauge via GetRecvRatePacketsPerSec()
+		"RecvRateBytesPerSec":    true, // Exported as gauge via GetRecvRateBytesPerSec()
+		"RecvRatePktRetransRate": true, // Exported as gauge via GetRecvRateRetransPercent()
+		"SendRateEstInputBW":     true, // Exported as gauge via GetSendRateEstInputBW()
+		"SendRateEstSentBW":      true, // Exported as gauge via GetSendRateEstSentBW()
+		"SendRatePktRetransRate": true, // Exported as gauge via GetSendRateRetransPercent()
+		// Note: Raw rate counters are now exported as gosrt_*_rate_*_raw metrics
 	}
 
 	uniqueValue := uint64(1000000) // Start with a large unique base
@@ -299,6 +288,7 @@ func TestPrometheusLabels(t *testing.T) {
 	m.PktSentDataSuccess.Store(1)
 	m.CongestionRecvPkt.Store(1)
 	m.CongestionSendPkt.Store(1)
+	m.ByteRecvDataSuccess.Store(1) // Needed for bytes_received_total check
 
 	output := getPrometheusOutput(t)
 
@@ -592,6 +582,247 @@ func TestPrometheusRingBufferMetrics(t *testing.T) {
 
 	// Verify computed backlog gauge (10000 received - 9500 processed = 500 backlog)
 	require.Contains(t, output, `gosrt_ring_backlog_packets{socket_id="0xeeeeeeee",instance="default"} 500`)
+}
+
+// TestPrometheusEventLoopMetrics verifies EventLoop metrics are correctly exported
+// Phase 4: ACK/ACKACK Redesign - validates EventLoop diagnostic metrics
+func TestPrometheusEventLoopMetrics(t *testing.T) {
+	socketId := uint32(0xE0E01234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set EventLoop metrics
+	m.EventLoopIterations.Store(100000)
+	m.EventLoopFullACKFires.Store(100)  // 100 Full ACK fires in 1 second
+	m.EventLoopNAKFires.Store(50)       // 50 NAK fires in 1 second
+	m.EventLoopRateFires.Store(10)      // 10 rate fires in 10 seconds
+	m.EventLoopDefaultRuns.Store(99800) // Most iterations are default
+	m.EventLoopIdleBackoffs.Store(500)  // 500 idle backoffs
+
+	output := getPrometheusOutput(t)
+
+	// Verify EventLoop metrics are present
+	require.Contains(t, output,
+		`gosrt_eventloop_iterations_total{socket_id="0xe0e01234",instance="default"} 100000`,
+		"EventLoop iterations should be exported")
+	require.Contains(t, output,
+		`gosrt_eventloop_fullack_fires_total{socket_id="0xe0e01234",instance="default"} 100`,
+		"EventLoop fullACK fires should be exported")
+	require.Contains(t, output,
+		`gosrt_eventloop_nak_fires_total{socket_id="0xe0e01234",instance="default"} 50`,
+		"EventLoop NAK fires should be exported")
+	require.Contains(t, output,
+		`gosrt_eventloop_rate_fires_total{socket_id="0xe0e01234",instance="default"} 10`,
+		"EventLoop rate fires should be exported")
+	require.Contains(t, output,
+		`gosrt_eventloop_default_runs_total{socket_id="0xe0e01234",instance="default"} 99800`,
+		"EventLoop default runs should be exported")
+	require.Contains(t, output,
+		`gosrt_eventloop_idle_backoffs_total{socket_id="0xe0e01234",instance="default"} 500`,
+		"EventLoop idle backoffs should be exported")
+}
+
+// TestPrometheusAckBtreeMetrics verifies ACK btree metrics are correctly exported
+// Phase 4: ACK/ACKACK Redesign - validates ACK btree diagnostic metrics
+func TestPrometheusAckBtreeMetrics(t *testing.T) {
+	socketId := uint32(0xACB71234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set ACK btree metrics
+	m.AckBtreeSize.Store(5)            // 5 pending Full ACKs awaiting ACKACK
+	m.AckBtreeEntriesExpired.Store(10) // 10 entries expired
+	m.AckBtreeUnknownACKACK.Store(2)   // 2 unknown ACKACKs
+
+	output := getPrometheusOutput(t)
+
+	// Verify ACK btree metrics are present
+	require.Contains(t, output,
+		`gosrt_ack_btree_size{socket_id="0xacb71234",instance="default"} 5`,
+		"ACK btree size should be exported")
+	require.Contains(t, output,
+		`gosrt_ack_btree_expired_total{socket_id="0xacb71234",instance="default"} 10`,
+		"ACK btree expired entries should be exported")
+	require.Contains(t, output,
+		`gosrt_ack_btree_unknown_ackack_total{socket_id="0xacb71234",instance="default"} 2`,
+		"ACK btree unknown ACKACK should be exported")
+}
+
+// TestPrometheusRTTMetrics verifies RTT metrics are correctly exported
+// Phase 4: ACK/ACKACK Redesign - validates RTT gauge metrics
+func TestPrometheusRTTMetrics(t *testing.T) {
+	socketId := uint32(0xA7712345)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set RTT metrics (microseconds)
+	m.RTTMicroseconds.Store(150)   // 150 microseconds = 0.15ms RTT
+	m.RTTVarMicroseconds.Store(25) // 25 microseconds variance
+
+	output := getPrometheusOutput(t)
+
+	// Verify RTT metrics are present
+	require.Contains(t, output,
+		`gosrt_rtt_microseconds{socket_id="0xa7712345",instance="default"} 150`,
+		"RTT microseconds should be exported")
+	require.Contains(t, output,
+		`gosrt_rtt_var_microseconds{socket_id="0xa7712345",instance="default"} 25`,
+		"RTT variance microseconds should be exported")
+}
+
+// TestPrometheusIoUringSubmissionMetrics verifies io_uring submission metrics are correctly exported
+// Phase 5: WaitCQETimeout Implementation - validates submission path metrics
+func TestPrometheusIoUringSubmissionMetrics(t *testing.T) {
+	socketId := uint32(0xABCD1234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set submission metrics - success counters
+	m.IoUringSendSubmitSuccess.Store(5000)
+	m.IoUringListenerRecvSubmitSuccess.Store(10000)
+	m.IoUringDialerRecvSubmitSuccess.Store(5000)
+
+	// Set retry counters (occasional retries OK)
+	m.IoUringSendGetSQERetries.Store(3)
+	m.IoUringSendSubmitRetries.Store(1)
+
+	output := getPrometheusOutput(t)
+
+	// Verify submission success metrics are present
+	require.Contains(t, output,
+		`gosrt_iouring_send_submit_success_total{socket_id="0xabcd1234",instance="default"} 5000`,
+		"Send submit success should be exported")
+	require.Contains(t, output,
+		`gosrt_iouring_listener_recv_submit_success_total{socket_id="0xabcd1234",instance="default"} 10000`,
+		"Listener recv submit success should be exported")
+	require.Contains(t, output,
+		`gosrt_iouring_dialer_recv_submit_success_total{socket_id="0xabcd1234",instance="default"} 5000`,
+		"Dialer recv submit success should be exported")
+
+	// Verify retry metrics are present
+	require.Contains(t, output,
+		`gosrt_iouring_send_getsqe_retries_total{socket_id="0xabcd1234",instance="default"} 3`,
+		"GetSQE retries should be exported")
+	require.Contains(t, output,
+		`gosrt_iouring_send_submit_retries_total{socket_id="0xabcd1234",instance="default"} 1`,
+		"Submit retries should be exported")
+
+	// Error metrics should NOT appear (value is 0, writeCounterIfNonZero)
+	require.NotContains(t, output, "gosrt_iouring_send_submit_ring_full_total",
+		"Ring full should not appear when zero")
+	require.NotContains(t, output, "gosrt_iouring_send_submit_error_total",
+		"Submit error should not appear when zero")
+}
+
+// TestPrometheusIoUringCompletionMetrics verifies io_uring completion metrics are correctly exported
+// Phase 5: WaitCQETimeout Implementation - validates completion handler path metrics
+func TestPrometheusIoUringCompletionMetrics(t *testing.T) {
+	socketId := uint32(0xEFEF5678)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set completion metrics - success and healthy timeout
+	m.IoUringSendCompletionSuccess.Store(5000)
+	m.IoUringSendCompletionTimeout.Store(3000)   // Expected - healthy
+	m.IoUringSendCompletionEBADF.Store(1)        // Once at shutdown
+	m.IoUringSendCompletionCtxCancelled.Store(1) // Once at shutdown
+	m.IoUringListenerRecvCompletionSuccess.Store(10000)
+	m.IoUringListenerRecvCompletionTimeout.Store(3000)
+	m.IoUringListenerRecvCompletionEBADF.Store(1)
+	m.IoUringDialerRecvCompletionSuccess.Store(5000)
+	m.IoUringDialerRecvCompletionTimeout.Store(1500)
+	m.IoUringDialerRecvCompletionEBADF.Store(1)
+
+	output := getPrometheusOutput(t)
+
+	// Verify completion success metrics are present
+	require.Contains(t, output,
+		`gosrt_iouring_send_completion_success_total{socket_id="0xefef5678",instance="default"} 5000`,
+		"Send completion success should be exported")
+	require.Contains(t, output,
+		`gosrt_iouring_listener_recv_completion_success_total{socket_id="0xefef5678",instance="default"} 10000`,
+		"Listener recv completion success should be exported")
+	require.Contains(t, output,
+		`gosrt_iouring_dialer_recv_completion_success_total{socket_id="0xefef5678",instance="default"} 5000`,
+		"Dialer recv completion success should be exported")
+
+	// Verify timeout metrics (healthy behavior)
+	require.Contains(t, output,
+		`gosrt_iouring_send_completion_timeout_total{socket_id="0xefef5678",instance="default"} 3000`,
+		"Send completion timeout should be exported")
+	require.Contains(t, output,
+		`gosrt_iouring_listener_recv_completion_timeout_total{socket_id="0xefef5678",instance="default"} 3000`,
+		"Listener recv completion timeout should be exported")
+
+	// Verify shutdown metrics
+	require.Contains(t, output,
+		`gosrt_iouring_send_completion_ebadf_total{socket_id="0xefef5678",instance="default"} 1`,
+		"Send completion EBADF should be exported")
+	require.Contains(t, output,
+		`gosrt_iouring_send_completion_ctx_cancelled_total{socket_id="0xefef5678",instance="default"} 1`,
+		"Send completion ctx cancelled should be exported")
+
+	// Error metrics should NOT appear (value is 0)
+	require.NotContains(t, output, "gosrt_iouring_send_completion_error_total",
+		"Completion error should not appear when zero")
+	require.NotContains(t, output, "gosrt_iouring_send_completion_eintr_total",
+		"Completion EINTR should not appear when zero")
+}
+
+// TestPrometheusTSBPDAdvancementMetrics verifies TSBPD advancement metrics are correctly exported
+// Phase: ContiguousPoint TSBPD-Based Advancement Design
+func TestPrometheusTSBPDAdvancementMetrics(t *testing.T) {
+	socketId := uint32(0xBEEF1234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set TSBPD advancement metrics
+	m.CongestionRecvPktSkippedTSBPD.Store(150)        // 150 packets skipped
+	m.CongestionRecvByteSkippedTSBPD.Store(197400)    // 150 * 1316 bytes
+	m.ContiguousPointTSBPDAdvancements.Store(3)       // 3 advancement events
+	m.ContiguousPointTSBPDSkippedPktsTotal.Store(150) // Same as pkt skipped
+
+	output := getPrometheusOutput(t)
+
+	// Verify TSBPD skip counters are exported
+	require.Contains(t, output,
+		`gosrt_connection_congestion_recv_pkt_skipped_tsbpd_total{socket_id="0xbeef1234",instance="default"} 150`,
+		"TSBPD skipped packets should be exported")
+	require.Contains(t, output,
+		`gosrt_connection_congestion_recv_byte_skipped_tsbpd_total{socket_id="0xbeef1234",instance="default"} 197400`,
+		"TSBPD skipped bytes should be exported")
+
+	// Verify contiguousPoint advancement counters are exported
+	require.Contains(t, output,
+		`gosrt_connection_contiguous_point_tsbpd_advancements_total{socket_id="0xbeef1234",instance="default"} 3`,
+		"ContiguousPoint TSBPD advancements should be exported")
+	require.Contains(t, output,
+		`gosrt_connection_contiguous_point_tsbpd_skipped_pkts_total{socket_id="0xbeef1234",instance="default"} 150`,
+		"ContiguousPoint TSBPD skipped packets total should be exported")
+}
+
+// TestPrometheusTSBPDAdvancementMetricsZero verifies metrics don't appear when zero
+func TestPrometheusTSBPDAdvancementMetricsZero(t *testing.T) {
+	socketId := uint32(0xBEEF0000)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, m, "")
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// All TSBPD metrics are zero (default)
+
+	output := getPrometheusOutput(t)
+
+	// Verify TSBPD metrics don't appear when zero (writeCounterIfNonZero behavior)
+	require.NotContains(t, output, "gosrt_connection_congestion_recv_pkt_skipped_tsbpd_total",
+		"TSBPD skipped packets should not appear when zero")
+	require.NotContains(t, output, "gosrt_connection_contiguous_point_tsbpd_advancements_total",
+		"ContiguousPoint TSBPD advancements should not appear when zero")
 }
 
 // TestPrometheusRingBacklogZero verifies backlog is zero when caught up

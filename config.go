@@ -365,6 +365,17 @@ type Config struct {
 	// Default: 0
 	PacketRingMaxBackoffs int
 
+	// PacketRingRetryStrategy determines how ring writes handle full shards.
+	// Options:
+	//   "" or "sleep" - SleepBackoff: retry same shard, then sleep (default)
+	//   "next"        - NextShard: try all shards before sleeping
+	//   "random"      - RandomShard: try random shards (best load distribution)
+	//   "adaptive"    - AdaptiveBackoff: exponential backoff with jitter
+	//   "spin"        - SpinThenYield: yield CPU instead of sleep (lowest latency)
+	//   "hybrid"      - Hybrid: NextShard + AdaptiveBackoff
+	// Default: "" (uses SleepBackoff)
+	PacketRingRetryStrategy string
+
 	// --- Event Loop (Phase 4: Lockless Design) ---
 
 	// UseEventLoop enables continuous event loop processing instead of
@@ -495,6 +506,7 @@ var defaultConfig Config = Config{
 	PacketRingMaxRetries:      10,                     // Immediate retries before backoff
 	PacketRingBackoffDuration: 100 * time.Microsecond, // 100µs backoff delay
 	PacketRingMaxBackoffs:     0,                      // 0 = unlimited backoffs
+	PacketRingRetryStrategy:   "random",               // RandomShard - best RTT in benchmarks
 
 	// Event loop defaults (Phase 4)
 	UseEventLoop:          false,                 // Timer-driven Tick() by default
