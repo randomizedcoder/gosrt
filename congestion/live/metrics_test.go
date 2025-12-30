@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/randomizedcoder/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/congestion"
+	"github.com/randomizedcoder/gosrt/congestion/live"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
 	"github.com/stretchr/testify/require"
@@ -19,7 +21,7 @@ import (
 //   - With DropThreshold=10 and Tick(20): packets with time 1-10 are DROPPED (1+10=11 <= 20)
 //
 // For tests: use Tick(N) where N <= max(PktTsbpdTime) to avoid unexpected drops.
-func mockLiveSendWithMetrics(onDeliver func(p packet.Packet)) (*sender, *metrics.ConnectionMetrics) {
+func mockLiveSendWithMetrics(onDeliver func(p packet.Packet)) (congestion.Sender, *metrics.ConnectionMetrics) {
 	testMetrics := &metrics.ConnectionMetrics{
 		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
 		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
@@ -27,14 +29,14 @@ func mockLiveSendWithMetrics(onDeliver func(p packet.Packet)) (*sender, *metrics
 	}
 	testMetrics.HeaderSize.Store(44)
 
-	send := NewSender(SendConfig{
+	send := live.NewSender(live.SendConfig{
 		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
 		DropThreshold:         10,
 		OnDeliver:             onDeliver,
 		ConnectionMetrics:     testMetrics,
 	})
 
-	return send.(*sender), testMetrics
+	return send, testMetrics
 }
 
 // TestSenderRetransmitBehavior verifies that when NAK is received, the sender
@@ -129,7 +131,7 @@ func mockLiveRecvWithMetrics(onSendACK func(seq circular.Number, light bool), on
 	}
 	testMetrics.HeaderSize.Store(44)
 
-	recv := NewReceiver(ReceiveConfig{
+	recv := New(Config{
 		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:   10_000, // 10ms in microseconds
 		PeriodicNAKInterval:   20_000, // 20ms in microseconds

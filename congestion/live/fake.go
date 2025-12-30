@@ -8,6 +8,7 @@ import (
 
 	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/congestion"
+	"github.com/randomizedcoder/gosrt/congestion/live/receive"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
 )
@@ -40,7 +41,7 @@ type fakeLiveReceive struct {
 	lock sync.RWMutex
 }
 
-func NewFakeLiveReceive(recvConfig ReceiveConfig) congestion.Receiver {
+func NewFakeLiveReceive(recvConfig receive.Config) congestion.Receiver {
 	// Phase 1: Lockless - Create metrics for rate tracking (even for fake receiver)
 	m := metrics.NewConnectionMetrics()
 
