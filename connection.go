@@ -255,7 +255,11 @@ type srtConnConfig struct {
 // This should be called BEFORE newSRTConn() so that onSend closures can capture
 // the metrics reference, avoiding initialization race conditions.
 // The instanceName parameter is used for Prometheus metrics labeling.
-func createConnectionMetrics(localAddr net.Addr, socketId uint32, instanceName string) *metrics.ConnectionMetrics {
+// remoteAddr and streamId enable richer Prometheus labels for connection identification.
+// startTime is the time when the connection was initiated (for age metrics).
+// peerSocketId is the remote peer's socket ID (for cross-process connection correlation).
+func createConnectionMetrics(localAddr net.Addr, socketId uint32, instanceName string,
+	remoteAddr net.Addr, streamId string, peerSocketId uint32, startTime time.Time) *metrics.ConnectionMetrics {
 	// Calculate header size (needed for metrics initialization)
 	headerSize := uint64(8 + 16) // 8 bytes UDP + 16 bytes SRT
 	if strings.Count(localAddr.String(), ":") < 2 {
@@ -271,11 +275,41 @@ func createConnectionMetrics(localAddr net.Addr, socketId uint32, instanceName s
 	}
 	m.HeaderSize.Store(headerSize)
 
-	// Register with metrics registry
-	// Pass instance name for Prometheus labeling
-	metrics.RegisterConnection(socketId, m, instanceName)
+	// Derive peer type from stream ID for Prometheus labeling
+	peerType := derivePeerType(streamId)
+
+	// Build remote address string (handle nil case for early registration)
+	remoteAddrStr := ""
+	if remoteAddr != nil {
+		remoteAddrStr = remoteAddr.String()
+	}
+
+	// Register with metrics registry including connection metadata
+	info := &metrics.ConnectionInfo{
+		Metrics:      m,
+		InstanceName: instanceName,
+		RemoteAddr:   remoteAddrStr,
+		StreamId:     streamId,
+		PeerType:     peerType,
+		PeerSocketID: peerSocketId,
+		StartTime:    startTime,
+	}
+	metrics.RegisterConnection(socketId, info)
 
 	return m
+}
+
+// derivePeerType determines the peer type from the stream ID.
+// Returns "publisher" for publish streams, "subscriber" for subscribe streams,
+// or "unknown" if the stream type cannot be determined.
+func derivePeerType(streamId string) string {
+	streamIdLower := strings.ToLower(streamId)
+	if strings.HasPrefix(streamIdLower, "publish:") || strings.Contains(streamIdLower, "/publish") {
+		return "publisher"
+	} else if strings.HasPrefix(streamIdLower, "subscribe:") || strings.Contains(streamIdLower, "/subscribe") {
+		return "subscriber"
+	}
+	return "unknown"
 }
 
 func newSRTConn(config srtConnConfig) *srtConn {
@@ -587,8 +621,6 @@ func (c *srtConn) ticker(ctx context.Context) {
 
 // handleHSRequest, handleHSResponse, sendHSRequests, sendHSRequest - moved to connection_handshake.go
 
-
-
 // handleKMRequest, handleKMResponse, sendKMRequests, sendKMRequest - moved to connection_keymgmt.go
 
 // sendShutdown, splitNakList, sendNAK, sendACK, sendACKACK - moved to connection_send.go
@@ -597,4 +629,3 @@ func (c *srtConn) ticker(ctx context.Context) {
 // watchPeerIdleTimeout, close, log - moved to connection_lifecycle.go
 
 // Statistics, Stats, printCloseStatistics, SetDeadline, SetReadDeadline, SetWriteDeadline - moved to connection_stats.go
-

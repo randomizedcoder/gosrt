@@ -48,13 +48,14 @@ type StabilizationMetrics struct {
 // GetStabilizationMetrics extracts stabilization-relevant metrics from a ConnectionMetrics.
 // This aggregates across all connections in the registry.
 func GetStabilizationMetricsFromRegistry() StabilizationMetrics {
-	connections, _, _ := GetConnections()
+	connections := GetConnections()
 
 	var result StabilizationMetrics
-	for _, m := range connections {
-		if m == nil {
+	for _, info := range connections {
+		if info == nil || info.Metrics == nil {
 			continue
 		}
+		m := info.Metrics
 		result.DataSent += m.PktSentDataSuccess.Load()
 		result.DataRecv += m.PktRecvDataSuccess.Load()
 		result.AckSent += m.PktSentACKSuccess.Load()

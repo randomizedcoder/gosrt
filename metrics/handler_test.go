@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -24,12 +25,25 @@ func newTestConnectionMetrics() *ConnectionMetrics {
 	}
 }
 
+// newTestConnectionInfo creates a ConnectionInfo for testing with the given metrics and instance name
+func newTestConnectionInfo(m *ConnectionMetrics, instanceName string) *ConnectionInfo {
+	return &ConnectionInfo{
+		Metrics:      m,
+		InstanceName: instanceName,
+		RemoteAddr:   "127.0.0.1:1234",
+		StreamId:     "test-stream",
+		PeerType:     "unknown",
+		PeerSocketID: 0x87654321,
+		StartTime:    time.Now(),
+	}
+}
+
 // TestPrometheusOutputFormat verifies the Prometheus output is valid exposition format
 func TestPrometheusOutputFormat(t *testing.T) {
 	// Create a connection with known socket ID
 	socketId := uint32(0x12345678)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set some values
@@ -74,7 +88,7 @@ func TestPrometheusOutputFormat(t *testing.T) {
 func TestPrometheusCounterAccuracy(t *testing.T) {
 	socketId := uint32(0xABCD1234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set specific values
@@ -101,7 +115,7 @@ func TestPrometheusCounterAccuracy(t *testing.T) {
 func TestPrometheusACKLiteFullCounters(t *testing.T) {
 	socketId := uint32(0xACAC1234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set Light/Full ACK counters (Phase 5: ACK Optimization)
@@ -135,7 +149,7 @@ func TestPrometheusACKLiteFullCounters(t *testing.T) {
 func TestPrometheusExportsAllCounters(t *testing.T) {
 	socketId := uint32(0xDEADBEEF)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Use reflection to find all atomic.Uint64 and atomic.Int64 fields
@@ -278,7 +292,7 @@ func TestPrometheusExportsAllCounters(t *testing.T) {
 func TestPrometheusLabels(t *testing.T) {
 	socketId := uint32(0x99887766)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set values for different packet types
@@ -330,8 +344,8 @@ func TestPrometheusMultipleConnections(t *testing.T) {
 	m1 := newTestConnectionMetrics()
 	m2 := newTestConnectionMetrics()
 
-	RegisterConnection(socketId1, m1, "")
-	RegisterConnection(socketId2, m2, "")
+	RegisterConnection(socketId1, newTestConnectionInfo(m1, ""))
+	RegisterConnection(socketId2, newTestConnectionInfo(m2, ""))
 	defer UnregisterConnection(socketId1, CloseReasonGraceful)
 	defer UnregisterConnection(socketId2, CloseReasonGraceful)
 
@@ -354,7 +368,7 @@ func TestPrometheusMultipleConnections(t *testing.T) {
 func TestRateMetricsExported(t *testing.T) {
 	socketId := uint32(0xBA7E1234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "test-rate")
+	RegisterConnection(socketId, newTestConnectionInfo(m, "test-rate"))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set known rate values (stored as float64 bits)
@@ -388,7 +402,7 @@ func TestRateMetricsExported(t *testing.T) {
 func TestRateMetricsAccuracy(t *testing.T) {
 	socketId := uint32(0xACC01234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set precise rate values
@@ -411,7 +425,7 @@ func TestRateMetricsAccuracy(t *testing.T) {
 func TestRateMetricsZeroValues(t *testing.T) {
 	socketId := uint32(0xEE001234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Rate fields default to 0 (math.Float64bits(0) = 0)
@@ -464,11 +478,88 @@ func TestPrometheusRuntimeMetrics(t *testing.T) {
 	}
 }
 
+// TestProcessStartTimeMetric verifies process start time is exported
+func TestProcessStartTimeMetric(t *testing.T) {
+	output := getPrometheusOutput(t)
+
+	// Process start time should be present
+	require.Contains(t, output, "gosrt_process_start_time_seconds",
+		"Should export process start time metric")
+
+	// Value should be a Unix timestamp (recent)
+	// Extract the value and verify it's reasonable
+	startTime := GetProgramStartTime()
+	expectedValue := float64(startTime.Unix())
+
+	// The metric should contain a value close to the expected timestamp
+	// (within a reasonable range since tests might run for a while)
+	require.Contains(t, output, fmt.Sprintf("%.0f", expectedValue),
+		"Process start time should be the Unix timestamp of program start")
+
+	// Verify the timestamp is reasonable (within the last hour)
+	now := time.Now().Unix()
+	require.Less(t, int64(expectedValue), now+1,
+		"Process start time should not be in the future")
+	require.Greater(t, int64(expectedValue), now-3600,
+		"Process start time should be within the last hour")
+}
+
+// TestConnectionStartTimeMetric verifies connection start time is exported
+func TestConnectionStartTimeMetric(t *testing.T) {
+	socketId := uint32(0xABCDEF01)
+	m := newTestConnectionMetrics()
+
+	// Create connection info with a specific start time
+	connStartTime := time.Now().Add(-30 * time.Second) // Started 30 seconds ago
+	info := &ConnectionInfo{
+		Metrics:      m,
+		InstanceName: "test-instance",
+		RemoteAddr:   "192.168.1.100:5000",
+		StreamId:     "publish:/test-stream",
+		PeerType:     "publisher",
+		PeerSocketID: 0x12345678,
+		StartTime:    connStartTime,
+	}
+	RegisterConnection(socketId, info)
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	output := getPrometheusOutput(t)
+
+	// Connection start time metric should be present
+	require.Contains(t, output, "gosrt_connection_start_time_seconds",
+		"Should export connection start time metric")
+
+	// Should contain the socket ID
+	require.Contains(t, output, `socket_id="0xabcdef01"`,
+		"Connection start time should include socket_id label")
+
+	// Should contain the instance name
+	require.Contains(t, output, `instance="test-instance"`,
+		"Connection start time should include instance label")
+
+	// Should contain the remote address
+	require.Contains(t, output, `remote_addr="192.168.1.100:5000"`,
+		"Connection start time should include remote_addr label")
+
+	// Should contain the stream ID
+	require.Contains(t, output, `stream_id="publish:/test-stream"`,
+		"Connection start time should include stream_id label")
+
+	// Should contain the peer type
+	require.Contains(t, output, `peer_type="publisher"`,
+		"Connection start time should include peer_type label")
+
+	// The timestamp value should be approximately connStartTime.Unix()
+	expectedTimestamp := connStartTime.Unix()
+	require.Contains(t, output, fmt.Sprintf("%.0f", float64(expectedTimestamp)),
+		"Connection start time value should match the Unix timestamp")
+}
+
 // TestPrometheusZeroFiltering verifies that zero values are not exported
 func TestPrometheusZeroFiltering(t *testing.T) {
 	socketId := uint32(0x77777777)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set some counters to non-zero, leave others at zero
@@ -497,7 +588,7 @@ func TestPrometheusZeroFiltering(t *testing.T) {
 func TestPrometheusCongestionMetrics(t *testing.T) {
 	socketId := uint32(0xCCCCCCCC)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set congestion control values
@@ -526,7 +617,7 @@ func TestPrometheusCongestionMetrics(t *testing.T) {
 func TestPrometheusNAKDetailMetrics(t *testing.T) {
 	socketId := uint32(0xdddddddd)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set NAK detail values (receiver side - sends NAKs)
@@ -564,7 +655,7 @@ func TestPrometheusNAKDetailMetrics(t *testing.T) {
 func TestPrometheusRingBufferMetrics(t *testing.T) {
 	socketId := uint32(0xEEEEEEEE)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set ring buffer metrics
@@ -589,7 +680,7 @@ func TestPrometheusRingBufferMetrics(t *testing.T) {
 func TestPrometheusEventLoopMetrics(t *testing.T) {
 	socketId := uint32(0xE0E01234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set EventLoop metrics
@@ -628,7 +719,7 @@ func TestPrometheusEventLoopMetrics(t *testing.T) {
 func TestPrometheusAckBtreeMetrics(t *testing.T) {
 	socketId := uint32(0xACB71234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set ACK btree metrics
@@ -655,7 +746,7 @@ func TestPrometheusAckBtreeMetrics(t *testing.T) {
 func TestPrometheusRTTMetrics(t *testing.T) {
 	socketId := uint32(0xA7712345)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set RTT metrics (microseconds)
@@ -678,7 +769,7 @@ func TestPrometheusRTTMetrics(t *testing.T) {
 func TestPrometheusIoUringSubmissionMetrics(t *testing.T) {
 	socketId := uint32(0xABCD1234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set submission metrics - success counters
@@ -723,7 +814,7 @@ func TestPrometheusIoUringSubmissionMetrics(t *testing.T) {
 func TestPrometheusIoUringCompletionMetrics(t *testing.T) {
 	socketId := uint32(0xEFEF5678)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set completion metrics - success and healthy timeout
@@ -779,7 +870,7 @@ func TestPrometheusIoUringCompletionMetrics(t *testing.T) {
 func TestPrometheusTSBPDAdvancementMetrics(t *testing.T) {
 	socketId := uint32(0xBEEF1234)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set TSBPD advancement metrics
@@ -811,7 +902,7 @@ func TestPrometheusTSBPDAdvancementMetrics(t *testing.T) {
 func TestPrometheusTSBPDAdvancementMetricsZero(t *testing.T) {
 	socketId := uint32(0xBEEF0000)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// All TSBPD metrics are zero (default)
@@ -829,7 +920,7 @@ func TestPrometheusTSBPDAdvancementMetricsZero(t *testing.T) {
 func TestPrometheusRingBacklogZero(t *testing.T) {
 	socketId := uint32(0xFFFFFFFF)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// EventLoop caught up - processed == received
@@ -868,7 +959,7 @@ func TestPrometheusOutputSize(t *testing.T) {
 		for i := 0; i < numConn; i++ {
 			socketId := uint32(0x50000000 + i)
 			m := newTestConnectionMetrics()
-			RegisterConnection(socketId, m, "")
+			RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 			defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 			// Set realistic values
@@ -912,7 +1003,7 @@ func BenchmarkPrometheusHandlerNoConnections(b *testing.B) {
 func BenchmarkPrometheusHandlerSingleConnection(b *testing.B) {
 	socketId := uint32(0x12345678)
 	m := newTestConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set realistic counter values
@@ -946,7 +1037,7 @@ func BenchmarkPrometheusHandler10Connections(b *testing.B) {
 		socketId := uint32(0x10000000 + i)
 		m := newTestConnectionMetrics()
 		connections[i] = m
-		RegisterConnection(socketId, m, "")
+		RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		// Set realistic values
@@ -975,7 +1066,7 @@ func BenchmarkPrometheusHandler100Connections(b *testing.B) {
 		socketId := uint32(0x20000000 + i)
 		m := newTestConnectionMetrics()
 		connections[i] = m
-		RegisterConnection(socketId, m, "")
+		RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		m.PktRecvDataSuccess.Store(uint64(1000 * (i + 1)))
@@ -1012,7 +1103,7 @@ func BenchmarkPrometheusOutputSize(b *testing.B) {
 			for i := 0; i < sc.connections; i++ {
 				socketId := uint32(0x40000000 + i)
 				m := newTestConnectionMetrics()
-				RegisterConnection(socketId, m, "")
+				RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 				defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 				m.PktRecvDataSuccess.Store(uint64(100000 * (i + 1)))
@@ -1045,7 +1136,7 @@ func BenchmarkPrometheusHandlerParallel(b *testing.B) {
 	for i := 0; i < 5; i++ {
 		socketId := uint32(0x30000000 + i)
 		m := newTestConnectionMetrics()
-		RegisterConnection(socketId, m, "")
+		RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		m.PktRecvDataSuccess.Store(uint64(50000 * (i + 1)))

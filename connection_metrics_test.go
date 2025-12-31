@@ -134,10 +134,11 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 	require.NotEmpty(t, dataReader.String())
 
 	// Look up metrics by socket ID
-	connections, _, _ := metrics.GetConnections()
+	connections := metrics.GetConnections()
 
 	// Verify writer metrics (sender side)
-	if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
+	if connInfo, ok := connections[writerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		writerMetrics := connInfo.Metrics
 		sentData := writerMetrics.PktSentDataSuccess.Load()
 		t.Logf("Writer PktSentDataSuccess: %d", sentData)
 		require.Greater(t, sentData, uint64(0), "Should have sent data packets")
@@ -155,7 +156,8 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 	}
 
 	// Verify reader metrics (receiver side)
-	if readerMetrics, ok := connections[readerSocketId]; ok && readerMetrics != nil {
+	if connInfo, ok := connections[readerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		readerMetrics := connInfo.Metrics
 		recvData := readerMetrics.PktRecvDataSuccess.Load()
 		t.Logf("Reader PktRecvDataSuccess: %d", recvData)
 		require.Greater(t, recvData, uint64(0), "Should have received data packets")
@@ -281,10 +283,11 @@ func TestConnectionMetricsACKFlow(t *testing.T) {
 	<-readerDone
 
 	// Look up metrics
-	connections, _, _ := metrics.GetConnections()
+	connections := metrics.GetConnections()
 
 	// Writer should have received ACKs (and sent ACKACKs)
-	if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
+	if connInfo, ok := connections[writerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		writerMetrics := connInfo.Metrics
 		recvACK := writerMetrics.PktRecvACKSuccess.Load()
 		t.Logf("Writer PktRecvACKSuccess: %d", recvACK)
 		// Sender receives ACKs from receiver
@@ -297,7 +300,8 @@ func TestConnectionMetricsACKFlow(t *testing.T) {
 	}
 
 	// Reader should have sent ACKs (and received ACKACKs)
-	if readerMetrics, ok := connections[readerSocketId]; ok && readerMetrics != nil {
+	if connInfo, ok := connections[readerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		readerMetrics := connInfo.Metrics
 		sentACK := readerMetrics.PktSentACKSuccess.Load()
 		t.Logf("Reader PktSentACKSuccess: %d", sentACK)
 		// Receiver sends ACKs to sender
@@ -437,9 +441,10 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 	require.GreaterOrEqual(t, receivedMessages, 18, "Should receive at least 18 of 20 messages via retransmit")
 
 	// Verify NAK/retransmit counters
-	connections, _, _ := metrics.GetConnections()
+	connections := metrics.GetConnections()
 
-	if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
+	if connInfo, ok := connections[writerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		writerMetrics := connInfo.Metrics
 		recvNAK := writerMetrics.PktRecvNAKSuccess.Load()
 		t.Logf("Writer PktRecvNAKSuccess: %d", recvNAK)
 		require.Greater(t, recvNAK, uint64(0), "Sender should receive NAKs")
@@ -517,10 +522,11 @@ func TestConnectionMetricsControlPackets(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Check control packet metrics
-	connections, _, _ := metrics.GetConnections()
+	connections := metrics.GetConnections()
 
 	// Client metrics
-	if clientMetrics, ok := connections[clientSocketId]; ok && clientMetrics != nil {
+	if connInfo, ok := connections[clientSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		clientMetrics := connInfo.Metrics
 		// Handshake packets (sent during connection setup)
 		sentHandshake := clientMetrics.PktSentHandshakeSuccess.Load()
 		t.Logf("Client PktSentHandshakeSuccess: %d", sentHandshake)
@@ -542,7 +548,8 @@ func TestConnectionMetricsControlPackets(t *testing.T) {
 	}
 
 	// Server connection metrics
-	if serverMetrics, ok := connections[serverConnSocketId]; ok && serverMetrics != nil {
+	if connInfo, ok := connections[serverConnSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		serverMetrics := connInfo.Metrics
 		recvHandshake := serverMetrics.PktRecvHandshakeSuccess.Load()
 		t.Logf("Server PktRecvHandshakeSuccess: %d", recvHandshake)
 		require.Greater(t, recvHandshake, uint64(0), "Server should receive handshake packets")
@@ -687,11 +694,12 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 
 	// Verify the SERVER (listener) tracked sending NAKs
 	// This is the critical check that would have caught Bug 3!
-	connections, _, _ := metrics.GetConnections()
+	connections := metrics.GetConnections()
 
 	// The server-side receiver should have SENT NAKs (tracked as PktSentNAKSuccess)
 	serverMetricsChecked := false
-	if serverMetrics, ok := connections[serverReceiverSocketId]; ok && serverMetrics != nil {
+	if connInfo, ok := connections[serverReceiverSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		serverMetrics := connInfo.Metrics
 		sentNAK := serverMetrics.PktSentNAKSuccess.Load()
 		t.Logf("Server (listener) PktSentNAKSuccess: %d", sentNAK)
 		require.Greater(t, sentNAK, uint64(0),
@@ -701,7 +709,8 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 
 	// Also verify the client received the NAKs (existing behavior)
 	clientMetricsChecked := false
-	if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
+	if connInfo, ok := connections[writerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		writerMetrics := connInfo.Metrics
 		recvNAK := writerMetrics.PktRecvNAKSuccess.Load()
 		t.Logf("Client (dialer) PktRecvNAKSuccess: %d", recvNAK)
 		require.Greater(t, recvNAK, uint64(0),
@@ -821,9 +830,10 @@ func TestListenerSendMetricsACK(t *testing.T) {
 	<-readerDone
 
 	// Verify the SERVER (listener) tracked sending ACKs
-	connections, _, _ := metrics.GetConnections()
+	connections := metrics.GetConnections()
 
-	if serverMetrics, ok := connections[serverReceiverSocketId]; ok && serverMetrics != nil {
+	if connInfo, ok := connections[serverReceiverSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+		serverMetrics := connInfo.Metrics
 		sentACK := serverMetrics.PktSentACKSuccess.Load()
 		t.Logf("Server (listener) PktSentACKSuccess: %d", sentACK)
 		require.Greater(t, sentACK, uint64(0),
@@ -1058,11 +1068,12 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 	})
 
 	// ===== CLIENT-SIDE VERIFICATION (these use dialer path, should work) =====
-	connections, _, _ := metrics.GetConnections()
+	connections := metrics.GetConnections()
 
 	t.Run("ClientWriter_ReceivesNAKsFromServer", func(t *testing.T) {
 		// Verify client received the NAKs sent by server
-		if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
+		if connInfo, ok := connections[writerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+			writerMetrics := connInfo.Metrics
 			recvNAK := writerMetrics.PktRecvNAKSuccess.Load()
 			t.Logf("Client writer PktRecvNAKSuccess: %d", recvNAK)
 			require.Greater(t, recvNAK, uint64(0),
@@ -1072,7 +1083,8 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 
 	t.Run("ClientWriter_ReceivesACKsFromServer", func(t *testing.T) {
 		// Verify client received the ACKs sent by server
-		if writerMetrics, ok := connections[writerSocketId]; ok && writerMetrics != nil {
+		if connInfo, ok := connections[writerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+			writerMetrics := connInfo.Metrics
 			recvACK := writerMetrics.PktRecvACKSuccess.Load()
 			t.Logf("Client writer PktRecvACKSuccess: %d", recvACK)
 			require.Greater(t, recvACK, uint64(0),
@@ -1082,7 +1094,8 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 
 	t.Run("ClientReader_ReceivesACKACKsFromServer", func(t *testing.T) {
 		// Client reader sends ACKs and should receive ACKACKs from server
-		if readerMetrics, ok := connections[readerSocketId]; ok && readerMetrics != nil {
+		if connInfo, ok := connections[readerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+			readerMetrics := connInfo.Metrics
 			recvACKACK := readerMetrics.PktRecvACKACKSuccess.Load()
 			t.Logf("Client reader PktRecvACKACKSuccess: %d", recvACKACK)
 			require.Greater(t, recvACKACK, uint64(0),
@@ -1196,9 +1209,9 @@ func TestConnectionMetricsPrometheusMatch(t *testing.T) {
 		time.Sleep(1 * time.Second)
 
 		// Get internal metrics
-		connections, _, _ := metrics.GetConnections()
-		if m, ok := connections[writerSocketId]; ok && m != nil {
-			internalDataSent := m.PktSentDataSuccess.Load()
+		connections := metrics.GetConnections()
+		if connInfo, ok := connections[writerSocketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+			internalDataSent := connInfo.Metrics.PktSentDataSuccess.Load()
 			t.Logf("Internal PktSentDataSuccess: %d", internalDataSent)
 
 			// The Statistics() API should match

@@ -1631,6 +1631,228 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		CollectInterval: 2 * time.Second,
 		ProfileDuration: 5 * time.Minute,
 	},
+
+	// ============================================================================
+	// LATENCY PROFILE VARIATIONS
+	// ============================================================================
+	// Test loss recovery across different latency profiles (continental, intercontinental, GEO)
+
+	// Continental latency (60ms RTT) + 5% loss
+	{
+		Name:        "Parallel-Loss-L5-20M-Base-vs-FullEL-Continental",
+		Description: "EventLoop with 5% loss at continental latency (60ms RTT)",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "continental",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Continental latency (60ms RTT) + 10% loss
+	{
+		Name:        "Parallel-Loss-L10-20M-Base-vs-FullEL-Continental",
+		Description: "EventLoop with 10% loss at continental latency (60ms RTT)",
+		Impairment: NetworkImpairment{
+			LossRate:       0.10,
+			LatencyProfile: "continental",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Intercontinental latency (130ms RTT) + 5% loss
+	{
+		Name:        "Parallel-Loss-L5-20M-Base-vs-FullEL-Intercontinental",
+		Description: "EventLoop with 5% loss at intercontinental latency (130ms RTT)",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "intercontinental",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Intercontinental latency (130ms RTT) + 10% loss (stress test)
+	{
+		Name:        "Parallel-Loss-L10-20M-Base-vs-FullEL-Intercontinental",
+		Description: "EventLoop with 10% loss at intercontinental latency (130ms RTT) - stress test",
+		Impairment: NetworkImpairment{
+			LossRate:       0.10,
+			LatencyProfile: "intercontinental",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// GEO satellite latency (300ms RTT) + 2% loss (realistic satellite conditions)
+	{
+		Name:        "Parallel-Loss-L2-20M-Base-vs-FullEL-GEO",
+		Description: "EventLoop with 2% loss at GEO satellite latency (300ms RTT)",
+		Impairment: NetworkImpairment{
+			LossRate:       0.02,
+			LatencyProfile: "geo-satellite",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    120 * time.Second, // Longer for GEO due to high RTT
+		ConnectionWait:  5 * time.Second,   // Longer wait for GEO connections
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// GEO satellite latency (300ms RTT) + 5% loss (challenging satellite conditions)
+	{
+		Name:        "Parallel-Loss-L5-20M-Base-vs-FullEL-GEO",
+		Description: "EventLoop with 5% loss at GEO satellite latency (300ms RTT) - challenging",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "geo-satellite",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    120 * time.Second, // Longer for GEO due to high RTT
+		ConnectionWait:  5 * time.Second,   // Longer wait for GEO connections
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// No latency (0ms) + 10% loss - baseline comparison without latency effects
+	{
+		Name:        "Parallel-Loss-L10-20M-Base-vs-FullEL-NoLatency",
+		Description: "EventLoop with 10% loss at zero latency - isolates loss handling",
+		Impairment: NetworkImpairment{
+			LossRate:       0.10,
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
 }
 
 // GetParallelTestConfigByName finds a parallel test configuration by name

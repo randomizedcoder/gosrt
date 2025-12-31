@@ -256,7 +256,12 @@ func (r *receiver) EventLoop(ctx context.Context) {
 
 		case <-rateTicker.C:
 			r.metrics.EventLoopRateFires.Add(1)
-			now := uint64(time.Now().UnixMicro())
+			// Use r.nowFn() for consistent time base with rest of EventLoop
+			// BUG FIX: time.Now().UnixMicro() was absolute time (~1.7e12),
+			// causing RecvRateLastUs to be a massive number instead of
+			// relative connection time. This made rate calculations incorrect
+			// on first period (dividing by ~56 years instead of ~1 second).
+			now := r.nowFn()
 			r.updateRateStats(now)
 
 		default:

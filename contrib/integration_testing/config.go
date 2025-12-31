@@ -910,6 +910,7 @@ var HighPerfSRTConfig = SRTConfig{
 	FastNakEnabled:       true, // FastNAK for outage recovery
 	FastNakRecentEnabled: true, // FastNAKRecent for sequence jump detection
 	HonorNakOrder:        true, // Sender honors receiver priority in NAK order
+	NakRecentPercent:     0.10, // 10% of TSBPD delay for "too recent" window
 }
 
 // GetBaselineServerFlags returns CLI flags for the baseline server

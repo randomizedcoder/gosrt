@@ -18,10 +18,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pkg/profile"
 	srt "github.com/randomizedcoder/gosrt"
 	"github.com/randomizedcoder/gosrt/contrib/common"
 	"github.com/randomizedcoder/gosrt/metrics"
-	"github.com/pkg/profile"
 )
 
 const (
@@ -222,12 +222,12 @@ func main() {
 			var gaps, naks, skips, retrans uint64
 			if socketId := connSocketId.Load(); socketId != 0 {
 				// Query the actual connection metrics
-				conns, _, _ := metrics.GetConnections()
-				if connMetrics, ok := conns[socketId]; ok && connMetrics != nil {
-					gaps = connMetrics.CongestionRecvPktLoss.Load()          // Sequence gaps detected
-					naks = connMetrics.CongestionRecvNAKPktsTotal.Load()     // NAK packets sent
-					skips = connMetrics.CongestionRecvPktSkippedTSBPD.Load() // TRUE losses (TSBPD expired)
-					retrans = connMetrics.CongestionRecvPktRetrans.Load()
+				conns := metrics.GetConnections()
+				if connInfo, ok := conns[socketId]; ok && connInfo != nil && connInfo.Metrics != nil {
+					gaps = connInfo.Metrics.CongestionRecvPktLoss.Load()          // Sequence gaps detected
+					naks = connInfo.Metrics.CongestionRecvNAKPktsTotal.Load()     // NAK packets sent
+					skips = connInfo.Metrics.CongestionRecvPktSkippedTSBPD.Load() // TRUE losses (TSBPD expired)
+					retrans = connInfo.Metrics.CongestionRecvPktRetrans.Load()
 				}
 			}
 			return clientMetrics.ByteRecvDataSuccess.Load(),

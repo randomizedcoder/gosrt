@@ -6,8 +6,15 @@ import (
 	"time"
 )
 
-// Track program start time for GC timestamp conversion
+// Track program start time for GC timestamp conversion and uptime metrics.
+// This is captured at package initialization time.
 var programStartTime = time.Now()
+
+// GetProgramStartTime returns the time when the program started.
+// Useful for testing and external uptime calculations.
+func GetProgramStartTime() time.Time {
+	return programStartTime
+}
 
 // writeRuntimeMetrics writes Go runtime metrics to the strings.Builder
 // These metrics are compatible with prometheus/client_golang's promauto metrics
@@ -67,5 +74,22 @@ func writeRuntimeMetrics(b *strings.Builder) {
 
 	// CPU count
 	writeGauge(b, "go_cpu_count", float64(runtime.NumCPU()))
-}
 
+	// Process start time (Unix timestamp in seconds)
+	// Standard Prometheus metric for calculating process uptime:
+	//   uptime = current_time - process_start_time
+	// Useful for detecting process restarts during integration tests.
+	writeGauge(b, "gosrt_process_start_time_seconds", float64(programStartTime.Unix()))
+
+	// Process CPU time from /proc/self/stat (Linux only)
+	// Values in jiffies (1/100th second on most Linux systems)
+	// Allows comparing CPU efficiency between baseline and optimized code paths.
+	if stat, err := ReadProcStat(); err == nil && (stat.UserTime > 0 || stat.SystemTime > 0) {
+		// User mode CPU time (jiffies) - higher = more userland processing
+		writeGauge(b, "gosrt_process_cpu_user_jiffies_total", float64(stat.UserTime))
+
+		// Kernel mode CPU time (jiffies) - higher = more syscalls
+		// io_uring should reduce this vs traditional syscall-heavy code
+		writeGauge(b, "gosrt_process_cpu_system_jiffies_total", float64(stat.SystemTime))
+	}
+}

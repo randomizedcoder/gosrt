@@ -454,9 +454,8 @@ func testParallelModeWithConfig(config ParallelTestConfig) {
 
 	// Perform comparison analysis
 	if result.BaselineMetrics != nil && result.HighPerfMetrics != nil {
-		// Detailed comparison between pipelines
-		comparisons := CompareParallelPipelines(result.BaselineMetrics, result.HighPerfMetrics)
-		PrintDetailedComparison(comparisons)
+		// Enhanced comparison with stability checks, CPU efficiency, and connection validation
+		PrintEnhancedComparison(result.BaselineMetrics, result.HighPerfMetrics, config.TestDuration, config.Impairment.LossRate)
 	}
 
 	fmt.Println()
@@ -488,8 +487,7 @@ func testParallelModeAllConfigs() {
 		} else {
 			// Print detailed comparison
 			if result.BaselineMetrics != nil && result.HighPerfMetrics != nil {
-				comparisons := CompareParallelPipelines(result.BaselineMetrics, result.HighPerfMetrics)
-				PrintDetailedComparison(comparisons)
+				PrintEnhancedComparison(result.BaselineMetrics, result.HighPerfMetrics, config.TestDuration, config.Impairment.LossRate)
 			}
 			fmt.Printf("✓ Configuration %s PASSED\n", config.Name)
 			passed++
@@ -970,8 +968,7 @@ func runMatrixTestsByTier(maxTier TestTier) {
 		if result.Passed {
 			// Print detailed comparison
 			if result.BaselineMetrics != nil && result.HighPerfMetrics != nil {
-				comparisons := CompareParallelPipelines(result.BaselineMetrics, result.HighPerfMetrics)
-				PrintDetailedComparison(comparisons)
+				PrintEnhancedComparison(result.BaselineMetrics, result.HighPerfMetrics, t.Config.TestDuration, t.Config.Impairment.LossRate)
 			}
 			passed++
 			fmt.Printf("✓ PASSED: %s\n\n", t.Name)

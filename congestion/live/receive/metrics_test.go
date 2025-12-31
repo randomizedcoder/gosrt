@@ -1,6 +1,7 @@
 package receive
 
 import (
+	"math"
 	"net"
 	"testing"
 
@@ -369,4 +370,279 @@ func TestTSBPDSkipCounter(t *testing.T) {
 	// Verify byte skip counter is non-zero
 	require.Greater(t, testMetrics.CongestionRecvByteSkippedTSBPD.Load(), uint64(0),
 		"CongestionRecvByteSkippedTSBPD should be > 0")
+}
+
+// TestReceiverRateStats verifies that rate statistics are calculated correctly.
+// This test catches a bug where EventLoop used absolute Unix time for rate stats
+// instead of relative connection time, causing RecvRateLastUs to be ~1.7e12.
+func TestReceiverRateStats(t *testing.T) {
+	recv, testMetrics := mockLiveRecvWithMetrics(
+		func(seq circular.Number, light bool) {},
+		func(list []circular.Number) {},
+		func(p packet.Packet) {},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Push some packets
+	for i := 0; i < 100; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = uint64(10_000_000) // Well into future
+		recv.Push(p)
+	}
+
+	// Verify initial rate counters are accumulated
+	require.Equal(t, uint64(100), testMetrics.RecvRatePackets.Load(),
+		"RecvRatePackets should be 100 after pushing 100 packets")
+
+	// RecvRateLastUs should be 0 initially (not yet calculated)
+	require.Equal(t, uint64(0), testMetrics.RecvRateLastUs.Load(),
+		"RecvRateLastUs should be 0 before first rate calculation")
+
+	// Tick past rate period (default 1 second = 1_000_000 µs)
+	// Use a reasonable time value, NOT Unix timestamp
+	recv.Tick(1_500_000) // 1.5 seconds in microseconds
+
+	// RecvRateLastUs should now be set to the tick time
+	lastUs := testMetrics.RecvRateLastUs.Load()
+	require.Equal(t, uint64(1_500_000), lastUs,
+		"RecvRateLastUs should be 1.5M µs (1.5s), not a Unix timestamp")
+
+	// Verify this is NOT a Unix timestamp (which would be ~1.7e12 for 2025)
+	require.Less(t, lastUs, uint64(1_000_000_000_000),
+		"RecvRateLastUs should be relative time, not Unix timestamp")
+
+	// Verify rate counters were reset after calculation
+	require.Equal(t, uint64(0), testMetrics.RecvRatePackets.Load(),
+		"RecvRatePackets should be reset to 0 after rate calculation")
+
+	// Verify computed rate is reasonable (100 packets in ~1.5s ≈ 67 pkt/s)
+	packetsPerSec := math.Float64frombits(testMetrics.RecvRatePacketsPerSec.Load())
+	require.Greater(t, packetsPerSec, float64(50),
+		"RecvRatePacketsPerSec should be > 50 pkt/s")
+	require.Less(t, packetsPerSec, float64(100),
+		"RecvRatePacketsPerSec should be < 100 pkt/s (100 packets / 1.5s ≈ 67)")
+}
+
+// ============================================================================
+// NAK Btree / EventLoop Path Tests
+// ============================================================================
+//
+// IMPORTANT: The tests above (TestReceiverLossCounter, etc.) use the Legacy
+// Push path which increments CongestionRecvPktLoss directly.
+//
+// The EventLoop path with NAK btree uses DIFFERENT metrics:
+// - NakBtreeInserts: Unique gaps added to NAK btree (equivalent to CongestionRecvPktLoss)
+// - NakBtreeScanGaps: All gaps found during periodic scans (includes re-scans)
+// - NakBtreeDeletes: Gaps resolved when packet arrives
+// - NakFastRecentInserts: Immediate NAK inserts (FastNAK feature)
+//
+// See documentation/parallel_tests_defects.md "Metric Path Differences" section.
+// ============================================================================
+
+// mockLiveRecvWithNakBtree creates a receiver configured for NAK btree mode.
+// This simulates the EventLoop configuration used in HighPerf tests.
+func mockLiveRecvWithNakBtree(onSendACK func(seq circular.Number, light bool), onSendNAK func(list []circular.Number), onDeliver func(p packet.Packet)) (*receiver, *metrics.ConnectionMetrics) {
+	testMetrics := &metrics.ConnectionMetrics{
+		HandlePacketLockTiming: &metrics.LockTimingMetrics{},
+		ReceiverLockTiming:     &metrics.LockTimingMetrics{},
+		SenderLockTiming:       &metrics.LockTimingMetrics{},
+	}
+	testMetrics.HeaderSize.Store(44)
+
+	recv := New(Config{
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:   10_000, // 10ms in microseconds
+		PeriodicNAKInterval:   20_000, // 20ms in microseconds
+		OnSendACK:             onSendACK,
+		OnSendNAK:             onSendNAK,
+		OnDeliver:             onDeliver,
+		ConnectionMetrics:     testMetrics,
+		UseNakBtree:           true,      // Enable NAK btree (EventLoop mode)
+		BTreeDegree:           32,        // NAK btree uses same degree setting
+		TsbpdDelay:            3_000_000, // 3 seconds in microseconds (for scan window)
+		NakRecentPercent:      0.10,      // 10% of TSBPD for "too recent" threshold
+	})
+
+	return recv.(*receiver), testMetrics
+}
+
+// TestNakBtreeInsertOnPeriodicNAK verifies that when periodicNakBtree() detects gaps,
+// NakBtreeInserts is incremented for unique gaps and NakBtreeScanGaps for all gaps found.
+//
+// Key difference from Legacy path:
+// - Legacy: CongestionRecvPktLoss incremented on IMMEDIATE NAK in Push()
+// - EventLoop: NakBtreeInserts incremented on PERIODIC NAK scan
+func TestNakBtreeInsertOnPeriodicNAK(t *testing.T) {
+	nakLists := [][]circular.Number{}
+	recv, testMetrics := mockLiveRecvWithNakBtree(
+		func(seq circular.Number, light bool) {},
+		func(list []circular.Number) {
+			nakLists = append(nakLists, list)
+		},
+		func(p packet.Packet) {},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Push packets 0-4 (no gaps)
+	for i := 0; i < 5; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = uint64(1_000_000) // 1 second in the future
+		recv.Push(p)
+	}
+
+	// Skip packets 5, 6 and push packets 7-9 (creates gap)
+	for i := 7; i < 10; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = uint64(1_000_000) // 1 second in the future
+		recv.Push(p)
+	}
+
+	// NOTE: With NAK btree enabled, Push() does NOT immediately detect gaps.
+	// Gap detection happens in periodicNakBtree() during Tick().
+	// Verify CongestionRecvPktLoss is 0 (not used in NAK btree path)
+	require.Equal(t, uint64(0), testMetrics.CongestionRecvPktLoss.Load(),
+		"CongestionRecvPktLoss should be 0 in NAK btree mode (this is by design, not a bug)")
+
+	// Tick to trigger periodic NAK scan
+	recv.Tick(20_001) // Just past NAK interval
+
+	// Verify NAK btree metrics
+	// NakBtreeInserts: should count unique gaps (2 packets: seq 5 and 6)
+	inserts := testMetrics.NakBtreeInserts.Load()
+	require.Greater(t, inserts, uint64(0),
+		"NakBtreeInserts should be > 0 after periodic NAK detects gaps")
+
+	// NakBtreeScanGaps: should count all gaps found during scan
+	scanGaps := testMetrics.NakBtreeScanGaps.Load()
+	require.Equal(t, uint64(2), scanGaps,
+		"NakBtreeScanGaps should be 2 (packets 5 and 6 missing)")
+
+	// Verify NAK was sent
+	require.Len(t, nakLists, 1, "Should have sent one NAK")
+
+	// Key documentation point:
+	// In EventLoop mode, NakBtreeInserts is the EQUIVALENT of CongestionRecvPktLoss.
+	// Tests and analysis code should use NakBtreeInserts when comparing loss detection.
+	t.Logf("NAK btree mode: NakBtreeInserts=%d (equivalent to Legacy CongestionRecvPktLoss)", inserts)
+}
+
+// TestNakBtreeDeleteOnPacketArrival verifies that when a missing packet arrives,
+// it is removed from the NAK btree and NakBtreeDeletes is incremented.
+func TestNakBtreeDeleteOnPacketArrival(t *testing.T) {
+	recv, testMetrics := mockLiveRecvWithNakBtree(
+		func(seq circular.Number, light bool) {},
+		func(list []circular.Number) {},
+		func(p packet.Packet) {},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Push packets 0-4, skip 5, push 6 (creates gap at seq 5)
+	for i := 0; i < 5; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = uint64(1_000_000)
+		recv.Push(p)
+	}
+	// Skip 5, push 6
+	p6 := packet.NewPacket(addr)
+	p6.Header().PacketSequenceNumber = circular.New(6, packet.MAX_SEQUENCENUMBER)
+	p6.Header().PktTsbpdTime = uint64(1_000_000)
+	recv.Push(p6)
+
+	// Tick to trigger periodic NAK (adds seq 5 to NAK btree)
+	recv.Tick(20_001)
+
+	// Verify gap was detected and added to btree
+	inserts := testMetrics.NakBtreeInserts.Load()
+	require.Equal(t, uint64(1), inserts,
+		"NakBtreeInserts should be 1 (seq 5 missing)")
+
+	// Verify NakBtreeDeletes is 0 before missing packet arrives
+	require.Equal(t, uint64(0), testMetrics.NakBtreeDeletes.Load(),
+		"NakBtreeDeletes should be 0 before missing packet arrives")
+
+	// Now the missing packet 5 arrives (simulating retransmit)
+	p5 := packet.NewPacket(addr)
+	p5.Header().PacketSequenceNumber = circular.New(5, packet.MAX_SEQUENCENUMBER)
+	p5.Header().PktTsbpdTime = uint64(1_000_000)
+	p5.Header().RetransmittedPacketFlag = true
+	recv.Push(p5)
+
+	// Verify NakBtreeDeletes incremented (packet removed from NAK btree)
+	deletes := testMetrics.NakBtreeDeletes.Load()
+	require.Equal(t, uint64(1), deletes,
+		"NakBtreeDeletes should be 1 after missing packet arrives")
+
+	// Key insight: deletes should eventually equal inserts (all gaps resolved)
+	// In a healthy connection: NakBtreeInserts ≈ NakBtreeDeletes
+	t.Logf("NAK btree: inserts=%d, deletes=%d (should be equal when all gaps resolved)", inserts, deletes)
+}
+
+// TestNakBtreeScanGapsVsInserts demonstrates the difference between
+// NakBtreeScanGaps (cumulative) and NakBtreeInserts (unique).
+//
+// With high latency (300ms RTT) and 20ms NAK interval:
+// - Each gap is scanned ~15 times before retransmit arrives
+// - NakBtreeScanGaps counts ALL scans (high number)
+// - NakBtreeInserts counts UNIQUE gaps only (lower number)
+func TestNakBtreeScanGapsVsInserts(t *testing.T) {
+	recv, testMetrics := mockLiveRecvWithNakBtree(
+		func(seq circular.Number, light bool) {},
+		func(list []circular.Number) {},
+		func(p packet.Packet) {},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Create a gap: packets 0-4, skip 5-6, packet 7
+	for i := 0; i < 5; i++ {
+		p := packet.NewPacket(addr)
+		p.Header().PacketSequenceNumber = circular.New(uint32(i), packet.MAX_SEQUENCENUMBER)
+		p.Header().PktTsbpdTime = uint64(1_000_000)
+		recv.Push(p)
+	}
+	p7 := packet.NewPacket(addr)
+	p7.Header().PacketSequenceNumber = circular.New(7, packet.MAX_SEQUENCENUMBER)
+	p7.Header().PktTsbpdTime = uint64(1_000_000)
+	recv.Push(p7)
+
+	// First periodic NAK scan (20ms)
+	recv.Tick(20_001)
+	insertAfter1 := testMetrics.NakBtreeInserts.Load()
+	scanAfter1 := testMetrics.NakBtreeScanGaps.Load()
+
+	// Second periodic NAK scan (40ms) - same gaps scanned again
+	recv.Tick(40_001)
+	insertAfter2 := testMetrics.NakBtreeInserts.Load()
+	scanAfter2 := testMetrics.NakBtreeScanGaps.Load()
+
+	// Third periodic NAK scan (60ms) - same gaps scanned again
+	recv.Tick(60_001)
+	insertAfter3 := testMetrics.NakBtreeInserts.Load()
+	scanAfter3 := testMetrics.NakBtreeScanGaps.Load()
+
+	// Key insight: Inserts should stay constant (unique gaps)
+	// but ScanGaps increases each time (cumulative)
+	require.Equal(t, insertAfter1, insertAfter2,
+		"NakBtreeInserts should NOT increase on re-scan (already in btree)")
+	require.Equal(t, insertAfter2, insertAfter3,
+		"NakBtreeInserts should stay constant for same gaps")
+
+	// ScanGaps should increase each scan (assuming gaps still not resolved)
+	// Note: ScanGaps might not increase if tooRecentThreshold filtering kicks in
+	// This test documents the expected behavior
+	t.Logf("Scan 1: inserts=%d, scanGaps=%d", insertAfter1, scanAfter1)
+	t.Logf("Scan 2: inserts=%d, scanGaps=%d", insertAfter2, scanAfter2)
+	t.Logf("Scan 3: inserts=%d, scanGaps=%d", insertAfter3, scanAfter3)
+
+	// Key documentation point for analysis code:
+	// When comparing Baseline vs HighPerf:
+	// - Baseline.CongestionRecvPktLoss ≈ HighPerf.NakBtreeInserts (unique gaps)
+	// - HighPerf.NakBtreeScanGaps > HighPerf.NakBtreeInserts (includes re-scans)
 }

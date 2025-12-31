@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"sync"
+	"time"
 )
 
 // CloseReason indicates why a connection was closed.
@@ -15,16 +16,26 @@ const (
 	CloseReasonError                            // Error during operation
 )
 
+// ConnectionInfo holds metadata for a registered connection.
+// This enables richer Prometheus labels for connection identification.
+type ConnectionInfo struct {
+	Metrics      *ConnectionMetrics
+	InstanceName string    // Instance name for Prometheus labeling (e.g., "baseline-server")
+	RemoteAddr   string    // Remote IP:port (e.g., "10.1.1.2:45678")
+	StreamId     string    // Stream ID (e.g., "publish:/test-stream")
+	PeerType     string    // "publisher", "subscriber", or "unknown"
+	PeerSocketID uint32    // Remote peer's socket ID (for cross-process connection correlation)
+	StartTime    time.Time // When connection was established (for age metrics)
+}
+
 // MetricsRegistry holds all connection metrics
 type MetricsRegistry struct {
-	connections   map[uint32]*ConnectionMetrics
-	instanceNames map[uint32]string // socketId -> instance name
-	mu            sync.RWMutex
+	connections map[uint32]*ConnectionInfo
+	mu          sync.RWMutex
 }
 
 var globalRegistry = &MetricsRegistry{
-	connections:   make(map[uint32]*ConnectionMetrics),
-	instanceNames: make(map[uint32]string),
+	connections: make(map[uint32]*ConnectionInfo),
 }
 
 // globalListenerMetrics holds listener-level metrics (not per-connection).
@@ -37,12 +48,11 @@ func GetListenerMetrics() *ListenerMetrics {
 	return globalListenerMetrics
 }
 
-// RegisterConnection registers a connection's metrics with an optional instance name
-// The instance name is used as a label in Prometheus metrics output
-func RegisterConnection(socketId uint32, metrics *ConnectionMetrics, instanceName string) {
+// RegisterConnection registers a connection's metrics with metadata.
+// The ConnectionInfo contains all information needed for Prometheus labeling.
+func RegisterConnection(socketId uint32, info *ConnectionInfo) {
 	globalRegistry.mu.Lock()
-	globalRegistry.connections[socketId] = metrics
-	globalRegistry.instanceNames[socketId] = instanceName
+	globalRegistry.connections[socketId] = info
 	globalRegistry.mu.Unlock()
 
 	// Increment lifecycle counters (lock-free atomics)
@@ -55,7 +65,6 @@ func RegisterConnection(socketId uint32, metrics *ConnectionMetrics, instanceNam
 func UnregisterConnection(socketId uint32, reason CloseReason) {
 	globalRegistry.mu.Lock()
 	delete(globalRegistry.connections, socketId)
-	delete(globalRegistry.instanceNames, socketId)
 	globalRegistry.mu.Unlock()
 
 	// Decrement active count and increment close counters (lock-free atomics)
@@ -74,25 +83,17 @@ func UnregisterConnection(socketId uint32, reason CloseReason) {
 	}
 }
 
-// GetConnections returns a snapshot of all registered connections
-// Returns: connections map, socket IDs list, and instance names map
-// This is safe to call concurrently
-func GetConnections() (map[uint32]*ConnectionMetrics, []uint32, map[uint32]string) {
+// GetConnections returns a snapshot of all registered connections with their metadata.
+// Returns: map of socketId -> ConnectionInfo (contains metrics + metadata)
+// This is safe to call concurrently (uses RLock for concurrent reads).
+func GetConnections() map[uint32]*ConnectionInfo {
 	globalRegistry.mu.RLock()
 	defer globalRegistry.mu.RUnlock()
 
-	connections := make(map[uint32]*ConnectionMetrics, len(globalRegistry.connections))
-	socketIds := make([]uint32, 0, len(globalRegistry.connections))
-	instanceNames := make(map[uint32]string, len(globalRegistry.instanceNames))
-
-	for socketId, metrics := range globalRegistry.connections {
-		connections[socketId] = metrics
-		socketIds = append(socketIds, socketId)
+	connections := make(map[uint32]*ConnectionInfo, len(globalRegistry.connections))
+	for socketId, info := range globalRegistry.connections {
+		connections[socketId] = info
 	}
 
-	for socketId, name := range globalRegistry.instanceNames {
-		instanceNames[socketId] = name
-	}
-
-	return connections, socketIds, instanceNames
+	return connections
 }

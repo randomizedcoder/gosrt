@@ -3,9 +3,23 @@ package metrics
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// newTestConnectionInfoForListener creates a ConnectionInfo for listener tests
+func newTestConnectionInfoForListener(m *ConnectionMetrics, instanceName string) *ConnectionInfo {
+	return &ConnectionInfo{
+		Metrics:      m,
+		InstanceName: instanceName,
+		RemoteAddr:   "127.0.0.1:1234",
+		StreamId:     "test-stream",
+		PeerType:     "unknown",
+		PeerSocketID: 0x87654321,
+		StartTime:    time.Now(),
+	}
+}
 
 // TestListenerMetricsNew verifies NewListenerMetrics creates zero-initialized struct
 func TestListenerMetricsNew(t *testing.T) {
@@ -165,7 +179,7 @@ func TestConnectionLifecycleCounters(t *testing.T) {
 	socketId := uint32(0x11111111)
 
 	// Register connection - should increment active and established
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfoForListener(m, ""))
 
 	require.Equal(t, origActive+1, lm.ConnectionsActive.Load())
 	require.Equal(t, origEstablished+1, lm.ConnectionsEstablished.Load())
@@ -180,7 +194,7 @@ func TestConnectionLifecycleCounters(t *testing.T) {
 	// Test peer idle timeout close reason
 	socketId2 := uint32(0x22222222)
 	m2 := NewConnectionMetrics()
-	RegisterConnection(socketId2, m2, "")
+	RegisterConnection(socketId2, newTestConnectionInfoForListener(m2, ""))
 	UnregisterConnection(socketId2, CloseReasonPeerIdle)
 
 	require.Equal(t, origClosedPeerIdle+1, lm.ConnectionsClosedPeerIdle.Load())
@@ -205,7 +219,7 @@ func TestConnectionLifecycleBalance(t *testing.T) {
 	for i, reason := range reasons {
 		socketId := uint32(0x30000000 + i)
 		m := NewConnectionMetrics()
-		RegisterConnection(socketId, m, "")
+		RegisterConnection(socketId, newTestConnectionInfoForListener(m, ""))
 		UnregisterConnection(socketId, reason)
 	}
 
@@ -230,7 +244,7 @@ func TestConnectionLifecyclePrometheusExport(t *testing.T) {
 	// Register and unregister a connection
 	socketId := uint32(0x44444444)
 	m := NewConnectionMetrics()
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfoForListener(m, ""))
 	UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Write to builder
@@ -250,4 +264,3 @@ func TestConnectionLifecyclePrometheusExport(t *testing.T) {
 	require.Equal(t, origClosedTotal+1, lm.ConnectionsClosedTotal.Load())
 	require.Equal(t, origClosedGraceful+1, lm.ConnectionsClosedGraceful.Load())
 }
-

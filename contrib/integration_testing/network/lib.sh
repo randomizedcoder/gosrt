@@ -22,6 +22,78 @@
 set -euo pipefail
 
 #=============================================================================
+# SHELLCHECK SELF-VALIDATION
+#=============================================================================
+# Run shellcheck on all scripts at startup to prevent regressions.
+# Set SRT_SKIP_SHELLCHECK=1 to bypass (for production/CI environments).
+
+_srt_shellcheck_validate() {
+    # Skip if explicitly disabled
+    if [[ "${SRT_SKIP_SHELLCHECK:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    # Skip if shellcheck is not installed (use env for portability)
+    if ! env shellcheck --version &>/dev/null; then
+        # Only warn once per session
+        if [[ -z "${_SRT_SHELLCHECK_WARNED:-}" ]]; then
+            echo "[WARN] shellcheck not installed - skipping script validation" >&2
+            echo "[WARN] Install with: apt install shellcheck / brew install shellcheck" >&2
+            export _SRT_SHELLCHECK_WARNED=1
+        fi
+        return 0
+    fi
+
+    # Get the directory containing lib.sh
+    local lib_dir
+    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # List of scripts to validate
+    local scripts=(
+        "${lib_dir}/lib.sh"
+        "${lib_dir}/setup.sh"
+        "${lib_dir}/cleanup.sh"
+        "${lib_dir}/set_latency.sh"
+        "${lib_dir}/set_loss.sh"
+        "${lib_dir}/starlink_pattern.sh"
+        "${lib_dir}/status.sh"
+    )
+
+    local failed=0
+    local errors=""
+
+    for script in "${scripts[@]}"; do
+        if [[ -f "${script}" ]]; then
+            local output
+            # Run shellcheck with common excludes for intentional patterns
+            # SC2034: Unused variables (we export some for other scripts)
+            # SC1090: Can't follow non-constant source (we use dynamic paths)
+            if ! output=$(env shellcheck --severity=warning --exclude=SC2034,SC1090 "${script}" 2>&1); then
+                failed=1
+                errors+=$'\n=== '"${script}"' ===\n'"${output}"
+            fi
+        fi
+    done
+
+    if [[ "${failed}" -eq 1 ]]; then
+        echo "" >&2
+        echo "╔════════════════════════════════════════════════════════════════════╗" >&2
+        echo "║  SHELLCHECK VALIDATION FAILED                                      ║" >&2
+        echo "║  Fix the following issues before running these scripts:            ║" >&2
+        echo "╚════════════════════════════════════════════════════════════════════╝" >&2
+        echo "${errors}" >&2
+        echo "" >&2
+        echo "To bypass shellcheck validation (not recommended):" >&2
+        echo "  export SRT_SKIP_SHELLCHECK=1" >&2
+        echo "" >&2
+        exit 1
+    fi
+}
+
+# Run validation when lib.sh is sourced
+_srt_shellcheck_validate
+
+#=============================================================================
 # CONFIGURATION - Human-readable variable names
 #=============================================================================
 

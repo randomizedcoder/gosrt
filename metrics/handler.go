@@ -30,19 +30,40 @@ func MetricsHandler() http.Handler {
 		writeListenerMetrics(b)
 
 		// Write application-specific metrics
-		connections, socketIds, instanceNames := GetConnections()
+		connections := GetConnections()
 
 		// Write metrics for each connection
-		for _, socketId := range socketIds {
-			metrics := connections[socketId]
-			if metrics == nil {
+		for socketId, info := range connections {
+			if info == nil || info.Metrics == nil {
 				continue
 			}
+			metrics := info.Metrics
 
 			socketIdStr := fmt.Sprintf("0x%08x", socketId)
-			instanceName := instanceNames[socketId]
+			instanceName := info.InstanceName
 			if instanceName == "" {
 				instanceName = "default"
+			}
+			peerType := info.PeerType
+			if peerType == "" {
+				peerType = "unknown"
+			}
+
+			// Connection start time (Unix timestamp in seconds)
+			// Allows calculating connection age: current_time - start_time
+			// Useful for detecting connection reconnections during integration tests.
+			// This is the "identity metric" with full connection details - other metrics
+			// only need socket_id, then use this metric to look up peer_type, etc.
+			if !info.StartTime.IsZero() {
+				peerSocketIdStr := fmt.Sprintf("0x%08x", info.PeerSocketID)
+				writeGauge(b, "gosrt_connection_start_time_seconds",
+					float64(info.StartTime.Unix()),
+					"socket_id", socketIdStr,
+					"instance", instanceName,
+					"remote_addr", info.RemoteAddr,
+					"stream_id", info.StreamId,
+					"peer_type", peerType,
+					"peer_socket_id", peerSocketIdStr)
 			}
 
 			// Single success counter (for peer idle timeout)

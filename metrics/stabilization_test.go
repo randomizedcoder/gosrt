@@ -11,6 +11,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newTestConnectionInfoForStab creates a ConnectionInfo for stabilization tests
+func newTestConnectionInfoForStab(m *ConnectionMetrics, instanceName string) *ConnectionInfo {
+	return &ConnectionInfo{
+		Metrics:      m,
+		InstanceName: instanceName,
+		RemoteAddr:   "127.0.0.1:1234",
+		StreamId:     "test-stream",
+		PeerType:     "unknown",
+		PeerSocketID: 0x87654321,
+		StartTime:    time.Now(),
+	}
+}
+
 func TestStabilizationMetricsEqual(t *testing.T) {
 	m1 := StabilizationMetrics{
 		DataSent: 100,
@@ -98,7 +111,7 @@ func TestStabilizationHandler(t *testing.T) {
 	m.PktRecvNAKSuccess.Store(3)
 
 	socketId := uint32(12345)
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfoForStab(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Create test server
@@ -359,7 +372,7 @@ func BenchmarkStabilizationHandlerNoConnections(b *testing.B) {
 func BenchmarkStabilizationHandlerSingleConnection(b *testing.B) {
 	socketId := uint32(0x12345678)
 	m := &ConnectionMetrics{}
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfoForStab(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set realistic counter values
@@ -387,7 +400,7 @@ func BenchmarkStabilizationHandler10Connections(b *testing.B) {
 	for i := 0; i < 10; i++ {
 		socketId := uint32(0x10000000 + i)
 		m := &ConnectionMetrics{}
-		RegisterConnection(socketId, m, "")
+		RegisterConnection(socketId, newTestConnectionInfoForStab(m, ""))
 		defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 		// Set realistic values
@@ -434,7 +447,7 @@ func BenchmarkStabilizationVsMetrics(b *testing.B) {
 	// Setup a connection with realistic values
 	socketId := uint32(0xABCDEF00)
 	m := &ConnectionMetrics{}
-	RegisterConnection(socketId, m, "")
+	RegisterConnection(socketId, newTestConnectionInfoForStab(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	m.PktSentDataSuccess.Store(100000)
