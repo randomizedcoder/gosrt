@@ -212,6 +212,9 @@ func (s *sender) checkNakBeforeACK(sequenceNumbers []circular.Number) {
 
 Both `nakLockedOriginal()` and `nakLockedHonorOrder()` now call `s.checkNakBeforeACK(sequenceNumbers)`.
 
+**Note:** `send.go` was subsequently refactored into the `congestion/live/send/` subpackage.
+See `documentation/large_file_refactoring_plan_send.md` for details.
+
 ---
 
 ## 5. Testing
@@ -418,13 +421,16 @@ BenchmarkMixedPacketPoolReturn-24        2.0M ops/sec  590 ns/op  233 B/op   3 a
 |------|---------|
 | `metrics/metrics.go` | Added 8 new atomic counters |
 | `metrics/handler.go` | Added Prometheus exports |
-| `congestion/live/send.go` | Added `lastACKedSequence` field, refactored NAK-before-ACK to testable functions |
-| `congestion/live/send_test.go` | Added 12 tests for `isNakBeforeACK` and `checkNakBeforeACK` (incl. wraparound) |
+| `congestion/live/send/` | **NEW PACKAGE** - refactored from `send.go` |
+| `congestion/live/send/nak.go` | `isNakBeforeACK()`, `checkNakBeforeACK()` functions |
+| `congestion/live/send/ack.go` | `lastACKedSequence` tracking in `ackLocked()` |
+| `congestion/live/send/sender_test.go` | 12+ tests for NAK-before-ACK (incl. wraparound) |
 | `congestion/live/receive/packet_store_btree.go` | Single-traversal duplicate handling |
 | `congestion/live/receive/receiver.go` | Fixed duplicate packet pool return |
 | `congestion/live/receive/push.go` | Defensive duplicate handling in `pushLockedOriginal` |
 | `congestion/live/receive/utility_test.go` | Added 5 tests + 2 benchmarks |
 | `Makefile` | Added `test-memory-pool` and `bench-memory-pool` targets |
+| `connection.go` | Updated import to `send.NewSender(send.SendConfig{...})` |
 
 ---
 
@@ -434,9 +440,13 @@ BenchmarkMixedPacketPoolReturn-24        2.0M ops/sec  590 ns/op  233 B/op   3 a
 - [x] Add Prometheus export to `metrics/handler.go`
 - [x] Fix btree `Insert()` for single traversal
 - [x] Fix `insertAndUpdateMetrics()` to release correct packet
-- [x] Add NAK-before-ACK check to `send.go`
+- [x] Add NAK-before-ACK check
   - [x] Refactored to testable functions: `isNakBeforeACK()`, `checkNakBeforeACK()`
-  - [x] Added 12 unit tests in `send_test.go` (incl. wraparound edge cases)
+  - [x] Added 12 unit tests (incl. wraparound edge cases)
+- [x] Refactor `send.go` → `send/` subpackage
+  - [x] 6 source files (620 lines total)
+  - [x] 92.2% test coverage
+  - [x] See `large_file_refactoring_plan_send.md`
 - [x] Add memory stability tests
 - [x] Add benchmarks
 - [x] Add Makefile targets

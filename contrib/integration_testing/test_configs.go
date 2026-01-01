@@ -1853,6 +1853,106 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		CollectInterval: 2 * time.Second,
 		ProfileDuration: 5 * time.Minute,
 	},
+
+	// ============================================================================
+	// NAK SUPPRESSION DEBUG TESTS (Section 6 of retransmission_and_nak_suppression_design.md)
+	// ============================================================================
+	// These tests are designed to isolate and observe NAK suppression behavior.
+	// Low bitrate (1 Mb/s) for easier packet-level analysis.
+	// High RTT (130ms) causes multiple NAKs per gap (130ms / 20ms NAK interval = 6.5 NAKs/gap).
+
+	// Debug: 1 Mb/s, 130ms RTT, 5% loss - observe excessive retransmissions
+	{
+		Name:        "Parallel-Debug-L5-1M-R130-Base-vs-FullEL",
+		Description: "DEBUG: 1 Mb/s with 130ms RTT and 5% loss - observe NAK/retrans ratio",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "intercontinental", // 130ms RTT (closest to design's 100ms)
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         1_000_000, // 1 Mb/s - low rate for easier analysis
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  5 * time.Second,
+		CollectInterval: 5 * time.Second, // 5s stats period for cleaner output
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Debug: 1 Mb/s, 300ms RTT, 5% loss - extreme case (300ms / 20ms = 15 NAKs/gap)
+	{
+		Name:        "Parallel-Debug-L5-1M-R300-Base-vs-FullEL",
+		Description: "DEBUG: 1 Mb/s with 300ms RTT and 5% loss - extreme NAK/retrans ratio",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "geo-satellite", // 300ms RTT
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         1_000_000,
+		TestDuration:    90 * time.Second, // Longer for GEO latency
+		ConnectionWait:  10 * time.Second,
+		CollectInterval: 5 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Debug: 1 Mb/s, no latency, 5% loss - isolate loss from RTT effects
+	{
+		Name:        "Parallel-Debug-L5-1M-NoRTT-Base-vs-FullEL",
+		Description: "DEBUG: 1 Mb/s with 0ms RTT and 5% loss - isolate loss handling",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "none", // 0ms RTT
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		Bitrate:         1_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 5 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
 }
 
 // GetParallelTestConfigByName finds a parallel test configuration by name
