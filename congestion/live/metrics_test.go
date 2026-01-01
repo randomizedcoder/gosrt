@@ -6,6 +6,7 @@ import (
 
 	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/congestion"
+	"github.com/randomizedcoder/gosrt/congestion/live/send"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
 	"github.com/stretchr/testify/require"
@@ -28,14 +29,14 @@ func mockLiveSendWithMetrics(onDeliver func(p packet.Packet)) (congestion.Sender
 	}
 	testMetrics.HeaderSize.Store(44)
 
-	send := NewSender(SendConfig{
+	snd := send.NewSender(send.SendConfig{
 		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
 		DropThreshold:         10,
 		OnDeliver:             onDeliver,
 		ConnectionMetrics:     testMetrics,
 	})
 
-	return send, testMetrics
+	return snd, testMetrics
 }
 
 // TestSenderRetransmitBehavior verifies that when NAK is received, the sender

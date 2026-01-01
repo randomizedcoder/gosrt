@@ -527,6 +527,17 @@ bench-packet-pool:
 	@echo "=== Packet Pooling Benchmarks ==="
 	go test -bench=BenchmarkNewPacket -benchmem -count=5 ./packet | tee /tmp/bench-packet-pool.txt
 
+## test-memory-pool: Test memory stability with duplicate packets (verifies sync.Pool works)
+test-memory-pool:
+	@echo "=== Memory Pool Stability Tests ==="
+	@echo "Testing that duplicate packets are correctly returned to sync.Pool..."
+	go test -v ./congestion/live/receive -run 'TestMemoryStability|TestBtreeInsertDuplicate|TestListVsBtree' -count=1
+
+## bench-memory-pool: Benchmark duplicate packet handling and memory pool return
+bench-memory-pool:
+	@echo "=== Memory Pool Benchmarks (Duplicate Packet Handling) ==="
+	go test -bench='BenchmarkDuplicatePacketPoolReturn|BenchmarkMixedPacketPoolReturn' -benchmem -count=3 ./congestion/live/receive -run='^$$'
+
 ## bench-circular: Benchmark circular number comparison functions (Lt vs LtBranchless)
 bench-circular:
 	@echo "=== Circular Number Comparison Benchmarks ==="

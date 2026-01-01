@@ -257,10 +257,20 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
 	}
 
+	// Metrics already updated above in this function
 	m.CongestionRecvPktBuf.Add(1)
 	m.CongestionRecvPktUnique.Add(1)
 	m.CongestionRecvByteBuf.Add(uint64(pktLen))
 	m.CongestionRecvByteUnique.Add(uint64(pktLen))
 
-	r.packetStore.Insert(pkt) // Ignore return - metrics already updated above
+	// Insert into packet store
+	// Note: Duplicates should not occur here - in-order packets aren't in store yet,
+	// and out-of-order packets check Has() before reaching this point
+	inserted, dupPkt := r.packetStore.Insert(pkt)
+	if !inserted && dupPkt != nil {
+		// Defensive: If somehow a duplicate slipped through, release it
+		m.CongestionRecvPktDuplicate.Add(1)
+		m.CongestionRecvByteDuplicate.Add(uint64(pktLen))
+		r.releasePacketFully(dupPkt)
+	}
 }

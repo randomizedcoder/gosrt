@@ -672,6 +672,37 @@ func MetricsHandler() http.Handler {
 			writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
 				metrics.NakBtreeNilWhenEnabled.Load(),
 				"socket_id", socketIdStr, "type", "nak_btree_nil_when_enabled")
+			writeCounterIfNonZero(b, "gosrt_connection_congestion_internal_total",
+				metrics.NakBeforeACKCount.Load(),
+				"socket_id", socketIdStr, "type", "nak_before_ack")
+
+			// ========== Duplicate Packet Tracking ==========
+			// Duplicates detected by defensive check in btree Insert
+			// Primary duplicate detection is in push.go via DropReasonDuplicate
+			writeCounterIfNonZero(b, "gosrt_recv_pkt_duplicate_total",
+				metrics.CongestionRecvPktDuplicate.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "type", "data")
+			writeCounterIfNonZero(b, "gosrt_recv_byte_duplicate_total",
+				metrics.CongestionRecvByteDuplicate.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "type", "data")
+
+			// ========== Suppression Metrics (Future - RTO-based) ==========
+			// Placeholders for retransmission_and_nak_suppression_design.md
+			writeCounterIfNonZero(b, "gosrt_nak_suppressed_seqs_total",
+				metrics.NakSuppressedSeqs.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_nak_allowed_seqs_total",
+				metrics.NakAllowedSeqs.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_retrans_suppressed_total",
+				metrics.RetransSuppressed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_retrans_allowed_total",
+				metrics.RetransAllowed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_retrans_first_time_total",
+				metrics.RetransFirstTime.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
 
 			// ========== NAK Detail Counters (RFC SRT Appendix A) ==========
 			// Receiver-side: NAKs generated and sent

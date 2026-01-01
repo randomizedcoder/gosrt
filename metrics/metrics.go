@@ -165,6 +165,11 @@ type ConnectionMetrics struct {
 	CongestionRecvMbpsLinkCapacity atomic.Uint64 // Mbps * 1000
 	CongestionRecvPktRetransRate   atomic.Uint64 // Retransmission rate: bytesRetrans/bytesRecv * 100 (NOT loss rate)
 
+	// Duplicate packet tracking (defensive check in btree Insert)
+	// Primary duplicate detection is in push.go; this catches edge cases
+	CongestionRecvPktDuplicate  atomic.Uint64 // Duplicate data packets detected by btree
+	CongestionRecvByteDuplicate atomic.Uint64 // Duplicate data bytes
+
 	// NAK generation counters - Receiver sends NAKs to request retransmission
 	// RFC SRT Appendix A defines two NAK encoding formats:
 	// - Single packet (Figure 21): 4 bytes, bit 0 = 0
@@ -207,6 +212,7 @@ type ConnectionMetrics struct {
 	// These track programming errors or invalid state - should always be 0
 	NakBtreeNilWhenEnabled    atomic.Uint64 // nakBtree nil when useNakBtree=true
 	CongestionSendNAKNotFound atomic.Uint64 // NAK requests for packets not in lossList
+	NakBeforeACKCount         atomic.Uint64 // NAK requests for already-ACK'd sequences (receiver bug indicator)
 
 	// NAK receive counters - Sender receives NAKs and retransmits
 	// RFC SRT Appendix A defines two NAK encoding formats:
@@ -257,6 +263,14 @@ type ConnectionMetrics struct {
 	NakConsolidationEntries atomic.Uint64 // Total entries produced by consolidation
 	NakConsolidationMerged  atomic.Uint64 // Times adjacent sequences merged into ranges
 	NakConsolidationTimeout atomic.Uint64 // Times consolidation hit time budget
+
+	// Suppression metrics (future implementation - RTO-based)
+	// These are placeholders for retransmission_and_nak_suppression_design.md
+	NakSuppressedSeqs atomic.Uint64 // NAK entries skipped (already NAK'd recently, awaiting RTO)
+	NakAllowedSeqs    atomic.Uint64 // NAK entries that passed RTO threshold
+	RetransSuppressed atomic.Uint64 // Sender retransmissions skipped (already in flight)
+	RetransAllowed    atomic.Uint64 // Sender retransmissions that passed threshold
+	RetransFirstTime  atomic.Uint64 // First-time retransmissions (RetransmitCount was 0)
 
 	// NAK btree metrics - FastNAK
 	NakFastTriggers       atomic.Uint64 // Times FastNAK triggered after silence

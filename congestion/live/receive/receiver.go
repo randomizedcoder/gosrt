@@ -7,11 +7,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	ring "github.com/randomizedcoder/go-lock-free-ring"
 	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/congestion"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
-	ring "github.com/randomizedcoder/go-lock-free-ring"
 )
 
 // gapSlicePool reuses []uint32 slices for collecting gaps in periodicNakBtree.
@@ -359,11 +359,13 @@ func (r *receiver) releasePacketFully(p packet.Packet) {
 //   - updateDrainMetric: whether to increment RingDrainedPackets (for ring drain paths)
 //
 // Returns true if packet was inserted (unique), false if duplicate.
-// On duplicate: increments failure metrics and releases the packet.
+// On duplicate: increments failure metrics and releases the duplicate packet.
 func (r *receiver) insertAndUpdateMetrics(p packet.Packet, pktLen uint64, isRetransmit bool, updateDrainMetric bool) bool {
 	m := r.metrics
 
-	inserted, _ := r.packetStore.Insert(p)
+	// Insert returns (inserted, duplicatePacket)
+	// On duplicate: new packet stays in tree, old packet is returned for release
+	inserted, dupPkt := r.packetStore.Insert(p)
 	if inserted {
 		if updateDrainMetric {
 			m.RingDrainedPackets.Add(1)
@@ -382,10 +384,12 @@ func (r *receiver) insertAndUpdateMetrics(p packet.Packet, pktLen uint64, isRetr
 		return true
 	}
 
-	// Duplicate - update failure metrics and release
+	// Duplicate - update failure metrics and release the old packet that was kicked out
 	m.CongestionRecvPktStoreInsertFailed.Add(1)
+	m.CongestionRecvPktDuplicate.Add(1)
+	m.CongestionRecvByteDuplicate.Add(pktLen)
 	metrics.IncrementRecvDataDrop(m, metrics.DropReasonStoreInsertFailed, pktLen)
-	r.releasePacketFully(p)
+	r.releasePacketFully(dupPkt) // Release the OLD packet (kicked out of tree)
 	return false
 }
 
@@ -453,4 +457,3 @@ func (r *receiver) Flush() {
 
 	r.packetStore.Clear()
 }
-

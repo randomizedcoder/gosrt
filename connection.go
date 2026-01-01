@@ -13,8 +13,8 @@ import (
 
 	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/congestion"
-	"github.com/randomizedcoder/gosrt/congestion/live"
 	"github.com/randomizedcoder/gosrt/congestion/live/receive"
+	"github.com/randomizedcoder/gosrt/congestion/live/send"
 	"github.com/randomizedcoder/gosrt/crypto"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
@@ -463,7 +463,7 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	}
 	c.dropThreshold += 20_000
 
-	c.snd = live.NewSender(live.SendConfig{
+	c.snd = send.NewSender(send.SendConfig{
 		InitialSequenceNumber: c.initialPacketSequenceNumber,
 		DropThreshold:         c.dropThreshold,
 		MaxBW:                 c.config.MaxBW,

@@ -8,7 +8,7 @@
 // - HonorOrder: Respects NAK list order, retransmits in receiver priority order
 //
 // See documentation/table_driven_test_design_implementation.md for progress.
-package live
+package send
 
 import (
 	"net"
@@ -48,23 +48,23 @@ func (s NakStrategy) String() string {
 
 // SendNakTestCase defines a single sender NAK test scenario.
 type SendNakTestCase struct {
-	Name         string
+	Name string
 
 	// CODE_PARAM: Maps to SendConfig.InitialSequenceNumber (critical for wraparound)
-	StartSeq     uint32        // Starting sequence number (default 0)
+	StartSeq uint32 // Starting sequence number (default 0)
 
-	TotalPackets int           // Packets to push to sender
-	NakRanges    [][2]uint32   // NAK ranges as (start, end) pairs
+	TotalPackets int         // Packets to push to sender
+	NakRanges    [][2]uint32 // NAK ranges as (start, end) pairs
 
 	// Expected outcomes - differ by strategy
-	ExpectedRetrans    int        // Expected retransmit count (same for both)
-	ExpectedSeqOrig    []uint32   // Expected sequence order for Original
-	ExpectedSeqHonor   []uint32   // Expected sequence order for HonorOrder
+	ExpectedRetrans  int      // Expected retransmit count (same for both)
+	ExpectedSeqOrig  []uint32 // Expected sequence order for Original
+	ExpectedSeqHonor []uint32 // Expected sequence order for HonorOrder
 
 	// Special test flags
-	NotFoundTest       bool       // If true, NAK contains seqs not in loss list
-	SkipOriginal       bool       // Skip Original strategy (e.g., metrics-only test)
-	SkipHonorOrder     bool       // Skip HonorOrder strategy
+	NotFoundTest   bool // If true, NAK contains seqs not in loss list
+	SkipOriginal   bool // Skip Original strategy (e.g., metrics-only test)
+	SkipHonorOrder bool // Skip HonorOrder strategy
 }
 
 // ============================================================================
@@ -175,10 +175,10 @@ func makeNakListFromPairsTable(pairs [][2]uint32) []circular.Number {
 var SendNakTableTests = []SendNakTestCase{
 	// === Basic Tests ===
 	{
-		Name:            "BasicSingle",
-		TotalPackets:    10,
-		NakRanges:       [][2]uint32{{5, 5}},
-		ExpectedRetrans: 1,
+		Name:             "BasicSingle",
+		TotalPackets:     10,
+		NakRanges:        [][2]uint32{{5, 5}},
+		ExpectedRetrans:  1,
 		ExpectedSeqOrig:  []uint32{5},
 		ExpectedSeqHonor: []uint32{5},
 	},
@@ -188,7 +188,7 @@ var SendNakTableTests = []SendNakTestCase{
 		NakRanges:       [][2]uint32{{3, 6}},
 		ExpectedRetrans: 4,
 		// Original: backwards iteration returns 6,5,4,3
-		ExpectedSeqOrig:  []uint32{6, 5, 4, 3},
+		ExpectedSeqOrig: []uint32{6, 5, 4, 3},
 		// HonorOrder: forward iteration returns 3,4,5,6
 		ExpectedSeqHonor: []uint32{3, 4, 5, 6},
 	},
@@ -202,7 +202,7 @@ var SendNakTableTests = []SendNakTestCase{
 		// Original: processes ALL packets against ALL ranges, highest first
 		// Loss list order is 0-19, backwards gives 19,18,...
 		// First match: 15, then 10, then 5
-		ExpectedSeqOrig:  []uint32{15, 10, 5},
+		ExpectedSeqOrig: []uint32{15, 10, 5},
 		// HonorOrder: respects NAK list order
 		ExpectedSeqHonor: []uint32{15, 5, 10},
 	},
@@ -214,7 +214,7 @@ var SendNakTableTests = []SendNakTestCase{
 		NakRanges:       [][2]uint32{{20, 22}, {5, 7}, {12, 14}},
 		ExpectedRetrans: 9, // 3 + 3 + 3
 		// Original: highest seq first within each range match
-		ExpectedSeqOrig:  []uint32{22, 21, 20, 14, 13, 12, 7, 6, 5},
+		ExpectedSeqOrig: []uint32{22, 21, 20, 14, 13, 12, 7, 6, 5},
 		// HonorOrder: respects NAK list order
 		ExpectedSeqHonor: []uint32{20, 21, 22, 5, 6, 7, 12, 13, 14},
 	},
@@ -226,20 +226,20 @@ var SendNakTableTests = []SendNakTestCase{
 		NakRanges:       [][2]uint32{{40, 40}, {10, 12}, {25, 25}, {30, 33}},
 		ExpectedRetrans: 9, // 1 + 3 + 1 + 4 = 9
 		// Original: backwards, grouped by first match
-		ExpectedSeqOrig:  []uint32{40, 33, 32, 31, 30, 25, 12, 11, 10},
+		ExpectedSeqOrig: []uint32{40, 33, 32, 31, 30, 25, 12, 11, 10},
 		// HonorOrder: NAK list order
 		ExpectedSeqHonor: []uint32{40, 10, 11, 12, 25, 30, 31, 32, 33},
 	},
 
 	// === Not Found Packets ===
 	{
-		Name:            "NotFoundPackets",
-		TotalPackets:    10,
-		NakRanges:       [][2]uint32{{5, 5}, {100, 100}, {7, 7}}, // 100 doesn't exist
-		ExpectedRetrans: 2, // Only 5 and 7 exist
+		Name:             "NotFoundPackets",
+		TotalPackets:     10,
+		NakRanges:        [][2]uint32{{5, 5}, {100, 100}, {7, 7}}, // 100 doesn't exist
+		ExpectedRetrans:  2,                                       // Only 5 and 7 exist
 		ExpectedSeqOrig:  []uint32{7, 5},
 		ExpectedSeqHonor: []uint32{5, 7},
-		NotFoundTest:    true,
+		NotFoundTest:     true,
 	},
 
 	// === Modulus Drops (Every Nth) ===
@@ -266,14 +266,14 @@ var SendNakTableTests = []SendNakTestCase{
 		},
 		ExpectedRetrans: 15, // 5 + 5 + 5
 		ExpectedSeqOrig: []uint32{
-			84, 83, 82, 81, 80,  // Third burst (highest first)
-			54, 53, 52, 51, 50,  // Second burst
-			24, 23, 22, 21, 20,  // First burst
+			84, 83, 82, 81, 80, // Third burst (highest first)
+			54, 53, 52, 51, 50, // Second burst
+			24, 23, 22, 21, 20, // First burst
 		},
 		ExpectedSeqHonor: []uint32{
-			20, 21, 22, 23, 24,  // First burst
-			50, 51, 52, 53, 54,  // Second burst
-			80, 81, 82, 83, 84,  // Third burst
+			20, 21, 22, 23, 24, // First burst
+			50, 51, 52, 53, 54, // Second burst
+			80, 81, 82, 83, 84, // Third burst
 		},
 	},
 
@@ -319,50 +319,50 @@ var SendNakTableTests = []SendNakTestCase{
 
 	// Corner: StartSeq=0 (explicit baseline)
 	{
-		Name:            "Corner_StartSeq_Zero",
-		StartSeq:        0, // Explicit zero
-		TotalPackets:    10,
-		NakRanges:       [][2]uint32{{3, 5}},
-		ExpectedRetrans: 3,
+		Name:             "Corner_StartSeq_Zero",
+		StartSeq:         0, // Explicit zero
+		TotalPackets:     10,
+		NakRanges:        [][2]uint32{{3, 5}},
+		ExpectedRetrans:  3,
 		ExpectedSeqOrig:  []uint32{5, 4, 3},
 		ExpectedSeqHonor: []uint32{3, 4, 5},
 	},
 
 	// Corner: TotalPackets=1 (minimum edge case)
 	{
-		Name:            "Corner_TotalPackets_Single",
-		TotalPackets:    1,
-		NakRanges:       [][2]uint32{{0, 0}},
-		ExpectedRetrans: 1,
+		Name:             "Corner_TotalPackets_Single",
+		TotalPackets:     1,
+		NakRanges:        [][2]uint32{{0, 0}},
+		ExpectedRetrans:  1,
 		ExpectedSeqOrig:  []uint32{0},
 		ExpectedSeqHonor: []uint32{0},
 	},
 
 	// Corner: StartSeq wraparound tests
 	{
-		Name:            "Wraparound_NearMax",
-		StartSeq:        packet.MAX_SEQUENCENUMBER - 50, // Start near MAX
-		TotalPackets:    100,                            // Will wrap around
-		NakRanges:       [][2]uint32{{packet.MAX_SEQUENCENUMBER - 45, packet.MAX_SEQUENCENUMBER - 45}},
-		ExpectedRetrans: 1,
+		Name:             "Wraparound_NearMax",
+		StartSeq:         packet.MAX_SEQUENCENUMBER - 50, // Start near MAX
+		TotalPackets:     100,                            // Will wrap around
+		NakRanges:        [][2]uint32{{packet.MAX_SEQUENCENUMBER - 45, packet.MAX_SEQUENCENUMBER - 45}},
+		ExpectedRetrans:  1,
 		ExpectedSeqOrig:  []uint32{packet.MAX_SEQUENCENUMBER - 45},
 		ExpectedSeqHonor: []uint32{packet.MAX_SEQUENCENUMBER - 45},
 	},
 	{
-		Name:            "Wraparound_AtMax",
-		StartSeq:        packet.MAX_SEQUENCENUMBER - 5, // Very close to MAX
-		TotalPackets:    20,                            // Will wrap around
-		NakRanges:       [][2]uint32{{packet.MAX_SEQUENCENUMBER - 3, packet.MAX_SEQUENCENUMBER - 3}},
-		ExpectedRetrans: 1,
+		Name:             "Wraparound_AtMax",
+		StartSeq:         packet.MAX_SEQUENCENUMBER - 5, // Very close to MAX
+		TotalPackets:     20,                            // Will wrap around
+		NakRanges:        [][2]uint32{{packet.MAX_SEQUENCENUMBER - 3, packet.MAX_SEQUENCENUMBER - 3}},
+		ExpectedRetrans:  1,
 		ExpectedSeqOrig:  []uint32{packet.MAX_SEQUENCENUMBER - 3},
 		ExpectedSeqHonor: []uint32{packet.MAX_SEQUENCENUMBER - 3},
 	},
 	{
 		Name:            "Wraparound_CrossingMax",
 		StartSeq:        packet.MAX_SEQUENCENUMBER - 10,
-		TotalPackets:    30,                             // Seqs: MAX-10 to MAX, then 0 to 18
+		TotalPackets:    30, // Seqs: MAX-10 to MAX, then 0 to 18
 		NakRanges:       [][2]uint32{{0, 2}, {packet.MAX_SEQUENCENUMBER - 5, packet.MAX_SEQUENCENUMBER - 3}},
-		ExpectedRetrans: 6,                              // 3 + 3
+		ExpectedRetrans: 6, // 3 + 3
 		// Original: processes backwards within each range, ranges in reverse packet order
 		ExpectedSeqOrig: []uint32{2, 1, 0, packet.MAX_SEQUENCENUMBER - 3, packet.MAX_SEQUENCENUMBER - 4, packet.MAX_SEQUENCENUMBER - 5},
 		// HonorOrder: respects NAK list order
@@ -446,4 +446,3 @@ func TestSendNak_StrategyDifference(t *testing.T) {
 	// Verify HonorOrder respects NAK list order (ranges processed in order given)
 	require.Equal(t, []uint32{20, 21, 22, 5, 6, 7, 12, 13, 14}, honorSeqs)
 }
-
