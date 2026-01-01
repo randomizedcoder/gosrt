@@ -17,18 +17,15 @@ import (
 	srtnet "github.com/randomizedcoder/gosrt/net"
 )
 
-const MAX_SEQUENCENUMBER uint32 = 0b01111111_11111111_11111111_11111111
-const MAX_TIMESTAMP uint32 = 0b11111111_11111111_11111111_11111111
-const MAX_PAYLOAD_SIZE = 1456
-
-// HeaderSize is the size of the SRT packet header in bytes.
-// Used by zero-copy path to compute payload slice: (*recvBuffer)[HeaderSize:n]
-const HeaderSize = 16
-
-// Table 1: SRT Control Packet Types
-type CtrlType uint16
-
 const (
+	MAX_SEQUENCENUMBER uint32 = 0b01111111_11111111_11111111_11111111
+	MAX_TIMESTAMP      uint32 = 0b11111111_11111111_11111111_11111111
+	MAX_PAYLOAD_SIZE          = 1456
+
+	// HeaderSize is the size of the SRT packet header in bytes.
+	// Used by zero-copy path to compute payload slice: (*recvBuffer)[HeaderSize:n]
+	HeaderSize = 16
+
 	CTRLTYPE_HANDSHAKE CtrlType = 0x0000
 	CTRLTYPE_KEEPALIVE CtrlType = 0x0001
 	CTRLTYPE_ACK       CtrlType = 0x0002
@@ -40,6 +37,9 @@ const (
 	CRTLTYPE_PEERERROR CtrlType = 0x0008 // unimplemented, receiver->sender (only for file transfers)
 	CTRLTYPE_USER      CtrlType = 0x7FFF
 )
+
+// Table 1: SRT Control Packet Types
+type CtrlType uint16
 
 func (h CtrlType) String() string {
 	switch h {
