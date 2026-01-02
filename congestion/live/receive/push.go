@@ -124,8 +124,9 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 	}
 
 	// Delete from NAK btree - this packet is no longer missing
+	// Use DeleteLocking() because this is called from legacy push path (not event loop)
 	if r.nakBtree != nil {
-		if r.nakBtree.Delete(seq) {
+		if r.nakBtree.DeleteLocking(seq) {
 			m.NakBtreeDeletes.Add(1)
 		}
 	}

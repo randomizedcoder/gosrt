@@ -190,7 +190,7 @@ func TestNakBtree_ConcurrentAccess(t *testing.T) {
 	nb := newNakBtree(32)
 	var wg sync.WaitGroup
 
-	// Concurrent inserts
+	// Concurrent inserts (Insert has its own lock)
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func(seq uint32) {
@@ -203,11 +203,12 @@ func TestNakBtree_ConcurrentAccess(t *testing.T) {
 	require.Equal(t, 100, nb.Len())
 
 	// Concurrent reads while deleting
+	// Use DeleteLocking() for concurrent access
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			nb.Delete(uint32(i))
+			nb.DeleteLocking(uint32(i))
 		}
 	}()
 	go func() {

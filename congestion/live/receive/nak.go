@@ -534,8 +534,8 @@ func (r *receiver) expireNakEntries() int {
 
 	// Any NAK entry older than the oldest packet's sequence is expired
 	// (the packet btree has already released those packets via TSBPD)
-	// nakBtree.DeleteBefore has its own lock
-	expired := r.nakBtree.DeleteBefore(cutoff)
+	// Use DeleteBeforeLocking() because this is called from tick() path (not event loop)
+	expired := r.nakBtree.DeleteBeforeLocking(cutoff)
 	if expired > 0 && r.metrics != nil {
 		r.metrics.NakBtreeExpired.Add(uint64(expired))
 	}

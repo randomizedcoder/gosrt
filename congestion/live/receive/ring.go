@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
+	ring "github.com/randomizedcoder/go-lock-free-ring"
 	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
-	ring "github.com/randomizedcoder/go-lock-free-ring"
 )
 
 func parseRetryStrategy(s string) ring.RetryStrategy {
@@ -214,6 +214,7 @@ func (r *receiver) drainPacketRing(now uint64) {
 		}
 
 		// Delete from NAK btree - this packet is no longer missing
+		// Use lock-free Delete() because this runs in single-threaded event loop context
 		if r.nakBtree != nil {
 			if r.nakBtree.Delete(seq.Val()) {
 				m.NakBtreeDeletes.Add(1)
@@ -321,6 +322,7 @@ func (r *receiver) drainRingByDelta() uint64 {
 		}
 
 		// Delete from NAK btree - this packet is no longer missing
+		// Use lock-free Delete() because this runs in single-threaded event loop context
 		if r.nakBtree != nil {
 			if r.nakBtree.Delete(seq.Val()) {
 				m.NakBtreeDeletes.Add(1)
@@ -350,4 +352,3 @@ func (r *receiver) drainRingByDelta() uint64 {
 
 	return drainedCount
 }
-

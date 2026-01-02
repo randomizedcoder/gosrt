@@ -5,8 +5,8 @@ package receive
 import (
 	"sync"
 
-	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/google/btree"
+	"github.com/randomizedcoder/gosrt/circular"
 )
 
 // nakBtree stores missing sequence numbers for NAK generation.
@@ -57,19 +57,26 @@ func (nb *nakBtree) InsertBatch(seqs []uint32) int {
 }
 
 // Delete removes a sequence number (packet arrived or expired).
+// This is the lock-free version for use in single-threaded contexts (event loop).
+// For concurrent access, use DeleteLocking().
 func (nb *nakBtree) Delete(seq uint32) bool {
-	nb.mu.Lock()
-	defer nb.mu.Unlock()
 	_, found := nb.tree.Delete(seq)
 	return found
 }
 
-// DeleteBefore removes all sequences before cutoff (expired).
-// Returns count of deleted entries.
-func (nb *nakBtree) DeleteBefore(cutoff uint32) int {
+// DeleteLocking removes a sequence number with lock protection.
+// Use this version when called from tick() paths or other concurrent contexts.
+func (nb *nakBtree) DeleteLocking(seq uint32) bool {
 	nb.mu.Lock()
 	defer nb.mu.Unlock()
+	return nb.Delete(seq)
+}
 
+// DeleteBefore removes all sequences before cutoff (expired).
+// Returns count of deleted entries.
+// This is the lock-free version for use in single-threaded contexts (event loop).
+// For concurrent access, use DeleteBeforeLocking().
+func (nb *nakBtree) DeleteBefore(cutoff uint32) int {
 	var toDelete []uint32
 	nb.tree.Ascend(func(seq uint32) bool {
 		if circular.SeqLess(seq, cutoff) {
@@ -83,6 +90,14 @@ func (nb *nakBtree) DeleteBefore(cutoff uint32) int {
 		nb.tree.Delete(seq)
 	}
 	return len(toDelete)
+}
+
+// DeleteBeforeLocking removes all sequences before cutoff with lock protection.
+// Use this version when called from tick() paths or other concurrent contexts.
+func (nb *nakBtree) DeleteBeforeLocking(cutoff uint32) int {
+	nb.mu.Lock()
+	defer nb.mu.Unlock()
+	return nb.DeleteBefore(cutoff)
 }
 
 // Len returns the number of entries.

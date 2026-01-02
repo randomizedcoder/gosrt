@@ -379,8 +379,9 @@ func (r *receiver) processOnePacket() bool {
 	}
 
 	// Delete from NAK btree - this packet is no longer missing
+	// Use DeleteLocking() because this is called from tick() path (not event loop)
 	if r.nakBtree != nil {
-		if r.nakBtree.Delete(seq.Val()) {
+		if r.nakBtree.DeleteLocking(seq.Val()) {
 			m.NakBtreeDeletes.Add(1)
 		}
 	}
