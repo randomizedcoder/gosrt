@@ -8,6 +8,16 @@ import (
 	"github.com/randomizedcoder/gosrt/packet"
 )
 
+// RTTProvider provides access to RTT-related values for congestion control.
+// Used for NAK suppression (receiver) and retransmit suppression (sender).
+// Phase 6: RTO Suppression - implemented by srt.rtt
+type RTTProvider interface {
+	// RTOUs returns the pre-calculated RTO (Retransmission Timeout) in microseconds.
+	// For NAK suppression (receiver): use full RTO (round-trip)
+	// For retransmit suppression (sender): use RTOUs()/2 (one-way delay)
+	RTOUs() uint64
+}
+
 // Sender is the sending part of the congestion control
 type Sender interface {
 	// Stats returns sender statistics.
@@ -56,6 +66,11 @@ type Receiver interface {
 
 	// SetNAKInterval sets the interval between two periodic NAK messages to the sender in microseconds.
 	SetNAKInterval(nakInterval uint64)
+
+	// SetRTTProvider sets the RTT provider for NAK suppression.
+	// Phase 6: RTO Suppression - enables RTO-based NAK suppression in consolidateNakBtree().
+	// Called during connection setup after the connection's RTT tracker is configured.
+	SetRTTProvider(rtt RTTProvider)
 
 	// EventLoop runs the continuous event loop for packet processing (Phase 4: Lockless Design).
 	// This replaces the timer-driven Tick() for lower latency and smoother CPU usage.

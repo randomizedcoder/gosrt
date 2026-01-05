@@ -89,6 +89,14 @@ var (
 	// Sender retransmission configuration flags
 	HonorNakOrder = flag.Bool("honornakorder", false, "Retransmit packets in NAK packet order (oldest first)")
 
+	// RTO-based suppression configuration flags (Phase 6: RTO Suppression)
+	RTOMode = flag.String("rtomode", "",
+		"RTO calculation mode: 'rtt_rttvar' (RTT+RTTVar, default), "+
+			"'rtt_4rttvar' (RTT+4*RTTVar, RFC 6298 conservative), "+
+			"'rtt_rttvar_margin' (RTT+RTTVar with extra margin)")
+	ExtraRTTMargin = flag.Float64("extrarttmargin", 0,
+		"Extra RTT margin as decimal (0.1 = 10%, default: 0.1). Only used with rtomode=rtt_rttvar_margin")
+
 	// Lock-free ring buffer configuration flags (Phase 3: Lockless Design)
 	UsePacketRing             = flag.Bool("usepacketring", false, "Enable lock-free ring buffer for packet handoff (decouples io_uring completion from Tick processing)")
 	PacketRingSize            = flag.Int("packetringsize", 0, "Capacity of the lock-free ring buffer per shard (must be power of 2, default: 1024)")
@@ -367,6 +375,21 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	// Sender flags
 	if FlagSet["honornakorder"] {
 		config.HonorNakOrder = *HonorNakOrder
+	}
+
+	// RTO suppression flags (Phase 6: RTO Suppression)
+	if FlagSet["rtomode"] {
+		switch *RTOMode {
+		case "rtt_rttvar":
+			config.RTOMode = srt.RTORttRttVar
+		case "rtt_4rttvar":
+			config.RTOMode = srt.RTORtt4RttVar
+		case "rtt_rttvar_margin":
+			config.RTOMode = srt.RTORttRttVarMargin
+		}
+	}
+	if FlagSet["extrarttmargin"] {
+		config.ExtraRTTMargin = *ExtraRTTMargin
 	}
 
 	// Lock-free ring buffer flags (Phase 3: Lockless Design)

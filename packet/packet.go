@@ -262,6 +262,11 @@ type PacketHeader struct {
 	RetransmittedPacketFlag bool             // This flag is clear when a packet is transmitted the first time. The flag is set to "1" when a packet is retransmitted.
 	MessageNumber           uint32           // The sequential number of consecutive data packets that form a message (see PP field).
 
+	// Retransmit tracking (sender-side suppression) - NOT transmitted on wire
+	// These fields track when a packet was last retransmitted to avoid redundant retransmissions
+	LastRetransmitTimeUs uint64 // Timestamp when last retransmitted (microseconds since epoch)
+	RetransmitCount      uint32 // Number of times this packet has been retransmitted
+
 	// common fields
 
 	Timestamp           uint32 // microseconds
@@ -398,6 +403,8 @@ func (p *pkt) Decommission() {
 	p.header.KeyBaseEncryptionFlag = UnencryptedPacket
 	p.header.RetransmittedPacketFlag = false
 	p.header.MessageNumber = 1
+	p.header.LastRetransmitTimeUs = 0 // Reset retransmit tracking (Phase 6: RTO Suppression)
+	p.header.RetransmitCount = 0      // Reset retransmit tracking (Phase 6: RTO Suppression)
 	p.header.Timestamp = 0
 	p.header.DestinationSocketId = 0
 

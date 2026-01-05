@@ -79,6 +79,7 @@ func categorizeAndCompareMetrics(baseline, highperf map[string]float64) []Metric
 			"gosrt_connection_congestion_retransmissions_total",
 			"gosrt_connection_retransmissions_from_nak_total",
 		})},
+		{Name: "🛡️ Suppression (RTO)", Metrics: compareSuppressionMetrics(baseline, highperf)},
 		{Name: "📩 NAK Activity", Metrics: compareNAKMetrics(baseline, highperf)},
 		{Name: "📥 Drops", Metrics: compareDropMetrics(baseline, highperf)},
 		{Name: "⏱️ Timing", Metrics: compareMetricGroup(baseline, highperf, []string{
@@ -242,6 +243,22 @@ func compareDropMetrics(baseline, highperf map[string]float64) []MetricCompariso
 	}
 
 	return compareMetricGroup(baseline, highperf, dropPrefixes)
+}
+
+// compareSuppressionMetrics specifically handles RTO-based suppression metrics
+// These metrics are critical for evaluating the effectiveness of suppression
+func compareSuppressionMetrics(baseline, highperf map[string]float64) []MetricComparison {
+	suppressionPrefixes := []string{
+		// Sender-side retransmit suppression
+		"gosrt_retrans_suppressed_total", // Retransmits blocked by suppression
+		"gosrt_retrans_allowed_total",    // Retransmits that passed threshold
+		"gosrt_retrans_first_time_total", // First-time retransmits (RetransmitCount was 0)
+		// Receiver-side NAK suppression
+		"gosrt_nak_suppressed_seqs_total", // NAK entries blocked by suppression
+		"gosrt_nak_allowed_seqs_total",    // NAK entries that passed threshold
+	}
+
+	return compareMetricGroup(baseline, highperf, suppressionPrefixes)
 }
 
 // createComparison builds a MetricComparison from two values

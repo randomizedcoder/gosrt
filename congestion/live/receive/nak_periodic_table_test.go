@@ -334,7 +334,7 @@ func runTriggerFastNakTest(t *testing.T, tc TriggerFastNakTestCase) {
 	// Add gaps to NAK btree
 	if tc.GapsToAdd != nil && recv.nakBtree != nil {
 		for _, gap := range tc.GapsToAdd {
-			recv.nakBtree.Insert(gap)
+			recv.nakBtree.InsertLocking(gap)
 		}
 	}
 

@@ -220,6 +220,12 @@ func (r *fakeLiveReceive) SetNAKInterval(nakInterval uint64) {
 	r.periodicNAKInterval = nakInterval
 }
 
+// SetRTTProvider is a no-op for the fake receiver (Phase 6: RTO Suppression).
+// The fake receiver doesn't implement NAK suppression.
+func (r *fakeLiveReceive) SetRTTProvider(rtt congestion.RTTProvider) {
+	// No-op: fake receiver doesn't use RTO-based suppression
+}
+
 // EventLoop is a no-op for the fake receiver (Phase 4: Lockless Design).
 // The fake receiver doesn't use the event loop - it uses timer-driven Tick().
 func (r *fakeLiveReceive) EventLoop(ctx context.Context) {

@@ -151,11 +151,12 @@ func runConsolidateTableTest(t *testing.T, tc ConsolidateTestCase) {
 		nakConsolidationBudget: 2 * time.Millisecond,
 		metrics:                &metrics.ConnectionMetrics{},
 	}
+	r.setupNakDispatch(false) // Use locking versions for tests
 
 	// Generate and insert sequences
 	seqs := tc.Pattern.Generate()
 	for _, seq := range seqs {
-		r.nakBtree.Insert(seq)
+		r.nakBtree.InsertLocking(seq)
 	}
 
 	// Run consolidation
@@ -506,10 +507,11 @@ func TestConsolidateNakBtree_MSS_Table(t *testing.T) {
 				nakConsolidationBudget: 2 * time.Millisecond,
 				metrics:                &metrics.ConnectionMetrics{},
 			}
+			r.setupNakDispatch(false) // Use locking versions for tests
 
 			seqs := tc.Pattern.Generate()
 			for _, seq := range seqs {
-				r.nakBtree.Insert(seq)
+				r.nakBtree.InsertLocking(seq)
 			}
 
 			list := r.consolidateNakBtree()
@@ -568,6 +570,7 @@ func TestConsolidateNakBtree_ExtremeScale_Table(t *testing.T) {
 				nakConsolidationBudget: 50 * time.Millisecond, // More time for extreme tests
 				metrics:                &metrics.ConnectionMetrics{},
 			}
+			r.setupNakDispatch(false) // Use locking versions for tests
 
 			// Generate based on loss pattern
 			var insertedCount int
@@ -575,14 +578,14 @@ func TestConsolidateNakBtree_ExtremeScale_Table(t *testing.T) {
 				// Burst loss
 				start := uint32(tc.TotalPackets / 2)
 				for i := 0; i < tc.BurstSize; i++ {
-					r.nakBtree.Insert(start + uint32(i))
+					r.nakBtree.InsertLocking(start + uint32(i))
 					insertedCount++
 				}
 			} else {
 				// Uniform loss
 				step := int(1.0 / tc.LossRate)
 				for i := 0; i < tc.TotalPackets; i += step {
-					r.nakBtree.Insert(uint32(i))
+					r.nakBtree.InsertLocking(uint32(i))
 					insertedCount++
 				}
 			}
@@ -656,6 +659,7 @@ func TestEntriesToNakList_Table(t *testing.T) {
 				nakConsolidationBudget: 2 * time.Millisecond,
 				metrics:                &metrics.ConnectionMetrics{},
 			}
+			r.setupNakDispatch(false) // Use locking versions for tests
 
 			list := r.entriesToNakList(tc.Entries)
 

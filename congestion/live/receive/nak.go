@@ -82,7 +82,7 @@ func (r *receiver) periodicNAK(now uint64) []circular.Number {
 		if r.useNakBtree {
 			btreeSize := 0
 			if r.nakBtree != nil {
-				btreeSize = r.nakBtree.Len()
+				btreeSize = r.nakLen()
 			}
 			r.logFunc("receiver:nak:debug", func() string {
 				return fmt.Sprintf("periodicNAK: using NAK btree (size=%d, nakBtree=%v)",
@@ -463,7 +463,7 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 
 	// Batch insert all gaps with single lock acquisition
 	if len(*gapsPtr) > 0 {
-		inserted := r.nakBtree.InsertBatch(*gapsPtr)
+		inserted := r.nakInsertBatch(*gapsPtr)
 		if m != nil {
 			m.NakBtreeInserts.Add(uint64(inserted))
 			m.NakBtreeScanGaps.Add(uint64(len(*gapsPtr)))
@@ -484,14 +484,14 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 
 	// Update NAK btree size gauge
 	if m != nil {
-		m.NakBtreeSize.Store(uint64(r.nakBtree.Len()))
+		m.NakBtreeSize.Store(uint64(r.nakLen()))
 	}
 
 	r.lastPeriodicNAK = now
 
 	// Debug: log NAK list if not empty
 	if r.debug && r.logFunc != nil && len(list) > 0 {
-		btreeSize := r.nakBtree.Len()
+		btreeSize := r.nakLen()
 		r.logFunc("receiver:nak:debug", func() string {
 			// Show first few entries to avoid huge logs
 			preview := list
@@ -535,7 +535,7 @@ func (r *receiver) expireNakEntries() int {
 	// Any NAK entry older than the oldest packet's sequence is expired
 	// (the packet btree has already released those packets via TSBPD)
 	// Use DeleteBeforeLocking() because this is called from tick() path (not event loop)
-	expired := r.nakBtree.DeleteBeforeLocking(cutoff)
+	expired := r.nakDeleteBefore(cutoff)
 	if expired > 0 && r.metrics != nil {
 		r.metrics.NakBtreeExpired.Add(uint64(expired))
 	}

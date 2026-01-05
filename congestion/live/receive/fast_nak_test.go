@@ -29,6 +29,7 @@ func createTestReceiverForFastNak(t *testing.T) *receiver {
 		nakMergeGap:          3,
 		metrics:              m,
 	}
+	r.setupNakDispatch(false) // Use locking versions for tests
 
 	// Initialize rate stats with reasonable defaults (Phase 1: Lockless)
 	m.RecvRatePacketsPerSec.Store(math.Float64bits(500.0)) // 500 pps default
@@ -120,6 +121,7 @@ func TestCheckFastNakRecent_MultipleBurstLosses(t *testing.T) {
 		nakConsolidationBudget: 5 * time.Second,
 		metrics:                m,
 	}
+	r.setupNakDispatch(false) // Use locking versions for tests
 	r.metrics.RecvRatePacketsPerSec.Store(math.Float64bits(5000.0))
 
 	baseTime := time.Now()
@@ -222,9 +224,9 @@ func TestCheckFastNakRecent_LargeBurstWithPriorGaps(t *testing.T) {
 
 	// Pre-existing gaps (singles from earlier modulus-like drops)
 	for i := 100; i <= 500; i += 50 {
-		r.nakBtree.Insert(uint32(i))
+		r.nakBtree.InsertLocking(uint32(i))
 	}
-	priorGaps := r.nakBtree.Len()
+	priorGaps := r.nakBtree.LenLocking()
 
 	now := time.Now()
 	r.lastPacketArrivalTime.Store(now.Add(-60 * time.Millisecond))
@@ -234,7 +236,7 @@ func TestCheckFastNakRecent_LargeBurstWithPriorGaps(t *testing.T) {
 	newSeq := uint32(10300)
 	r.checkFastNakRecent(newSeq, now)
 
-	totalEntries := r.nakBtree.Len()
+	totalEntries := r.nakBtree.LenLocking()
 	t.Logf("Prior gaps: %d, After burst: %d total", priorGaps, totalEntries)
 
 	// Consolidate
@@ -269,7 +271,7 @@ func TestCheckFastNakRecent_VeryLongOutage(t *testing.T) {
 	t.Logf("Very long outage (500ms): %d inserts, %d overflow", inserts, overflow)
 
 	// Verify entries were capped or inserted appropriately
-	btreeLen := r.nakBtree.Len()
+	btreeLen := r.nakBtree.LenLocking()
 	if btreeLen == 0 {
 		t.Error("Should have entries in NAK btree for long outage")
 	}

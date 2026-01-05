@@ -19,6 +19,29 @@ const (
 	SRT_VERSION         = 0x010401
 )
 
+// RTOMode defines the RTO calculation strategy for NAK/retransmit suppression.
+// Used for both NAK suppression (full RTO) and retransmit suppression (RTO/2).
+type RTOMode uint8
+
+const (
+	RTORttRttVar       RTOMode = iota // RTT + RTTVar (balanced default)
+	RTORtt4RttVar                     // RTT + 4*RTTVar (RFC 6298 conservative)
+	RTORttRttVarMargin                // (RTT + RTTVar) * (1 + ExtraRTTMargin)
+)
+
+// String returns the string representation of RTOMode.
+func (m RTOMode) String() string {
+	switch m {
+	case RTORtt4RttVar:
+		return "rtt_4rttvar"
+	case RTORttRttVarMargin:
+		return "rtt_rttvar_margin"
+	default:
+		// RTORttRttVar (0) is the default, and any unknown value defaults to it
+		return "rtt_rttvar"
+	}
+}
+
 // Config is the configuration for a SRT connection
 type Config struct {
 	// Type of congestion control. 'live' or 'file'
@@ -318,6 +341,22 @@ type Config struct {
 	// Default: false (existing behavior: newest-first)
 	HonorNakOrder bool
 
+	// --- RTO-based Suppression Configuration (Phase 6: RTO Suppression) ---
+
+	// RTOMode controls how RTO is calculated for NAK/retransmit suppression.
+	// Options:
+	//   RTORttRttVar (0, default): RTT + RTTVar (balanced)
+	//   RTORtt4RttVar (1): RTT + 4*RTTVar (RFC 6298 conservative)
+	//   RTORttRttVarMargin (2): (RTT + RTTVar) * (1 + ExtraRTTMargin)
+	// Default: RTORttRttVar
+	RTOMode RTOMode
+
+	// ExtraRTTMargin is the extra margin for RTORttRttVarMargin mode.
+	// Specified as a multiplier (0.1 = 10% extra margin).
+	// Only used when RTOMode = RTORttRttVarMargin.
+	// Default: 0.10 (10%)
+	ExtraRTTMargin float64
+
 	// --- Testing Configuration ---
 
 	// SendFilter is an optional function called before each packet is sent.
@@ -495,6 +534,10 @@ var defaultConfig Config = Config{
 	FastNakThresholdMs:       50,    // 50ms silent period triggers FastNAK
 	FastNakRecentEnabled:     false, // Auto-set when FastNakEnabled=true
 	HonorNakOrder:            false, // Existing behavior: newest-first
+
+	// RTO-based suppression defaults (Phase 6)
+	RTOMode:        RTORttRttVar, // RTT + RTTVar (balanced)
+	ExtraRTTMargin: 0.10,         // 10% extra margin (only for RTORttRttVarMargin mode)
 
 	// Lock-free ring buffer defaults (Phase 3)
 	UsePacketRing:             false,                  // Legacy path by default

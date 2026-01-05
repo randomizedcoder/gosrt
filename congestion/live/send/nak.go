@@ -1,6 +1,8 @@
 package send
 
 import (
+	"time"
+
 	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
@@ -74,6 +76,18 @@ func (s *sender) nakLockedOriginal(sequenceNumbers []circular.Number) uint64 {
 	m.CongestionSendPktLoss.Add(totalLossCount)
 	m.CongestionSendByteLoss.Add(totalLossBytes)
 
+	// ──────────────────────────────────────────────────────────────────
+	// PRE-FETCH VALUES ONCE (avoid repeated syscalls/atomics in loop)
+	// Performance: 1 syscall + 1 atomic load instead of N each
+	// ──────────────────────────────────────────────────────────────────
+	nowUs := uint64(time.Now().UnixMicro())
+	var oneWayThreshold uint64
+	if s.rtoUs != nil {
+		// One-way delay = RTO/2 (sender→receiver only, not round-trip)
+		// Note: /2 on uint64 compiles to bit shift (>>1)
+		oneWayThreshold = s.rtoUs.Load() / 2
+	}
+
 	// Now, retransmit packets that we can find in our buffer
 	retransCount := uint64(0)
 	for e := s.lossList.Back(); e != nil; e = e.Prev() {
@@ -81,6 +95,33 @@ func (s *sender) nakLockedOriginal(sequenceNumbers []circular.Number) uint64 {
 
 		for i := 0; i < len(sequenceNumbers); i += 2 {
 			if p.Header().PacketSequenceNumber.Gte(sequenceNumbers[i]) && p.Header().PacketSequenceNumber.Lte(sequenceNumbers[i+1]) {
+				h := p.Header()
+
+				// ──────────────────────────────────────────────────────────────
+				// RETRANSMIT SUPPRESSION CHECK (RTO-based)
+				// Skip if previous retransmit hasn't had time to arrive at receiver.
+				// Uses one-way delay (RTO/2) since we only care about Sender→Receiver.
+				// ──────────────────────────────────────────────────────────────
+				if h.LastRetransmitTimeUs > 0 && oneWayThreshold > 0 {
+					if nowUs-h.LastRetransmitTimeUs < oneWayThreshold {
+						// Too soon - previous retransmit still in flight
+						m.RetransSuppressed.Add(1)
+						continue // Skip this packet, check next
+					}
+				}
+
+				// ──────────────────────────────────────────────────────────────
+				// PROCEED WITH RETRANSMIT - update tracking
+				// ──────────────────────────────────────────────────────────────
+				h.LastRetransmitTimeUs = nowUs
+				h.RetransmitCount++
+
+				// Track first-time vs repeated retransmits
+				if h.RetransmitCount == 1 {
+					m.RetransFirstTime.Add(1)
+				}
+				m.RetransAllowed.Add(1)
+
 				pktLen := p.Len()
 				m.CongestionSendPktRetrans.Add(1)
 				m.CongestionSendPkt.Add(1)
@@ -94,7 +135,7 @@ func (s *sender) nakLockedOriginal(sequenceNumbers []circular.Number) uint64 {
 				m.SendRateBytesSent.Add(pktLen)
 				m.SendRateBytesRetrans.Add(pktLen)
 
-				p.Header().RetransmittedPacketFlag = true
+				h.RetransmittedPacketFlag = true
 				s.deliver(p)
 
 				retransCount++
@@ -130,6 +171,17 @@ func (s *sender) nakLockedHonorOrder(sequenceNumbers []circular.Number) uint64 {
 	m.CongestionSendPktLoss.Add(totalLossCount)
 	m.CongestionSendByteLoss.Add(totalLossBytes)
 
+	// ──────────────────────────────────────────────────────────────────
+	// PRE-FETCH VALUES ONCE (avoid repeated syscalls/atomics in loop)
+	// Performance: 1 syscall + 1 atomic load instead of N each
+	// ──────────────────────────────────────────────────────────────────
+	nowUs := uint64(time.Now().UnixMicro())
+	var oneWayThreshold uint64
+	if s.rtoUs != nil {
+		// One-way delay = RTO/2 (sender→receiver only, not round-trip)
+		oneWayThreshold = s.rtoUs.Load() / 2
+	}
+
 	// Retransmit packets in NAK order (honoring receiver priority)
 	retransCount := uint64(0)
 
@@ -141,10 +193,36 @@ func (s *sender) nakLockedHonorOrder(sequenceNumbers []circular.Number) uint64 {
 		// Find and retransmit packets in this range, in sequence order
 		for e := s.lossList.Front(); e != nil; e = e.Next() {
 			p := e.Value.(packet.Packet)
-			pktSeq := p.Header().PacketSequenceNumber
+			h := p.Header()
+			pktSeq := h.PacketSequenceNumber
 
 			// Check if this packet is in the requested range
 			if pktSeq.Gte(startSeq) && pktSeq.Lte(endSeq) {
+				// ──────────────────────────────────────────────────────────────
+				// RETRANSMIT SUPPRESSION CHECK (RTO-based)
+				// Skip if previous retransmit hasn't had time to arrive at receiver.
+				// Uses one-way delay (RTO/2) since we only care about Sender→Receiver.
+				// ──────────────────────────────────────────────────────────────
+				if h.LastRetransmitTimeUs > 0 && oneWayThreshold > 0 {
+					if nowUs-h.LastRetransmitTimeUs < oneWayThreshold {
+						// Too soon - previous retransmit still in flight
+						m.RetransSuppressed.Add(1)
+						continue // Skip this packet, check next
+					}
+				}
+
+				// ──────────────────────────────────────────────────────────────
+				// PROCEED WITH RETRANSMIT - update tracking
+				// ──────────────────────────────────────────────────────────────
+				h.LastRetransmitTimeUs = nowUs
+				h.RetransmitCount++
+
+				// Track first-time vs repeated retransmits
+				if h.RetransmitCount == 1 {
+					m.RetransFirstTime.Add(1)
+				}
+				m.RetransAllowed.Add(1)
+
 				pktLen := p.Len()
 				m.CongestionSendPktRetrans.Add(1)
 				m.CongestionSendPkt.Add(1)
@@ -158,7 +236,7 @@ func (s *sender) nakLockedHonorOrder(sequenceNumbers []circular.Number) uint64 {
 				m.SendRateBytesSent.Add(pktLen)
 				m.SendRateBytesRetrans.Add(pktLen)
 
-				p.Header().RetransmittedPacketFlag = true
+				h.RetransmittedPacketFlag = true
 				s.deliver(p)
 
 				retransCount++

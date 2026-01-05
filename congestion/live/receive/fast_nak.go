@@ -133,11 +133,11 @@ func (r *receiver) checkFastNakRecent(currentSeq uint32, now time.Time) {
 		upperBound = maxAbsoluteGap
 	}
 
-	if actualGap > minGapThreshold && actualGap < upperBound {
+	if actualGap > minGapThreshold && actualGap < upperBound && r.nakInsert != nil {
 		// Add missing range to NAK btree (as singles)
 		seq := circular.SeqAdd(lastSeq, 1)
 		for circular.SeqLess(seq, currentSeq) {
-			r.nakBtree.Insert(seq)
+			r.nakInsert(seq)
 			seq = circular.SeqAdd(seq, 1)
 		}
 
@@ -186,7 +186,7 @@ func (r *receiver) buildNakListLocked() []circular.Number {
 		}
 		return nil
 	}
-	if r.nakBtree.Len() == 0 {
+	if r.nakLen == nil || r.nakLen() == 0 {
 		return nil
 	}
 

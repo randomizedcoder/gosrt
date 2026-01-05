@@ -360,6 +360,12 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	// Set minimum NAK interval from config (convert ms to µs)
 	c.rtt.minNakIntervalUs.Store(c.config.PeriodicNakIntervalMs * 1000)
 
+	// Phase 6: RTO Suppression - configure RTO calculation mode
+	// This must be set before receiver is created so RTOUs() returns valid values
+	c.rtt.SetRTOMode(c.config.RTOMode, c.config.ExtraRTTMargin)
+	// Trigger initial RTO calculation based on initial RTT values
+	c.rtt.Recalculate(100 * time.Millisecond)
+
 	// Determine channel buffer sizes (default: 1024 if not configured)
 	networkQueueSize := c.config.NetworkQueueSize
 	if networkQueueSize <= 0 {
@@ -454,6 +460,10 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		Debug:   c.config.ReceiverDebug,
 		LogFunc: c.log,
 	})
+
+	// Phase 6: RTO Suppression - wire up RTT provider to receiver for NAK suppression
+	// This enables RTO-based NAK suppression in consolidateNakBtree()
+	c.recv.SetRTTProvider(&c.rtt)
 
 	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second
 	// https://github.com/Haivision/srt/blob/master/docs/API/API-socket-options.md#SRTO_SNDDROPDELAY

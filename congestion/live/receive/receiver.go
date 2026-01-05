@@ -54,6 +54,10 @@ type receiver struct {
 	lockTiming  *metrics.LockTimingMetrics // Optional lock timing metrics
 	metrics     *metrics.ConnectionMetrics // For atomic statistics updates
 
+	// RTT provider for NAK suppression (Phase 6: RTO Suppression)
+	// Set via SetRTTProvider() after connection RTT is configured
+	rtt congestion.RTTProvider
+
 	// Buffer pool for zero-copy support (Phase 2: Lockless Design)
 	// Used by releasePacketFully() to return receive buffers to the pool
 	bufferPool *sync.Pool
@@ -116,6 +120,16 @@ type receiver struct {
 	packetRing    *ring.ShardedRing   // Lock-free ring for packet handoff
 	writeConfig   ring.WriteConfig    // Backoff configuration for ring writes
 	pushFn        func(packet.Packet) // Function dispatch: pushToRing or pushWithLock
+
+	// NAK btree function dispatch (configured once based on usePacketRing)
+	// Event loop mode (usePacketRing=true): lock-free versions for single-threaded access
+	// Tick mode (usePacketRing=false): locking versions for concurrent Push/Tick safety
+	nakInsert           func(seq uint32)
+	nakInsertBatch      func(seqs []uint32) int
+	nakDelete           func(seq uint32) bool
+	nakDeleteBefore     func(cutoff uint32) int
+	nakLen              func() int
+	nakIterateAndUpdate func(fn func(entry NakEntryWithTime) (NakEntryWithTime, bool, bool))
 
 	// Event loop (Phase 4: Lockless Design)
 	// When enabled, replaces timer-driven Tick() with continuous event loop
@@ -189,6 +203,10 @@ func New(recvConfig Config) congestion.Receiver {
 			degree = 32 // Default btree degree
 		}
 		r.nakBtree = newNakBtree(degree)
+
+		// Setup NAK btree function dispatch based on execution mode
+		// This is configured once at startup for zero runtime overhead
+		r.setupNakDispatch(recvConfig.UsePacketRing)
 	}
 
 	// Initialize lock-free ring buffer if enabled (Phase 3: Lockless Design)
@@ -456,4 +474,38 @@ func (r *receiver) Flush() {
 	defer r.lock.Unlock()
 
 	r.packetStore.Clear()
+}
+
+// setupNakDispatch configures NAK btree function dispatch based on execution mode.
+// Called once at receiver initialization for zero runtime overhead.
+//
+// In event loop mode (usePacketRing=true):
+//   - After draining ring, Tick has exclusive access to nakBtree
+//   - Use lock-free versions for maximum performance
+//
+// In tick mode (usePacketRing=false):
+//   - Push and Tick can run concurrently
+//   - Use locking versions for thread safety
+func (r *receiver) setupNakDispatch(usePacketRing bool) {
+	if r.nakBtree == nil {
+		return
+	}
+
+	if usePacketRing {
+		// Event loop mode: lock-free (single-threaded after ring drain)
+		r.nakInsert = r.nakBtree.Insert
+		r.nakInsertBatch = r.nakBtree.InsertBatch
+		r.nakDelete = r.nakBtree.Delete
+		r.nakDeleteBefore = r.nakBtree.DeleteBefore
+		r.nakLen = r.nakBtree.Len
+		r.nakIterateAndUpdate = r.nakBtree.IterateAndUpdate
+	} else {
+		// Tick mode: locking (concurrent Push/Tick safety)
+		r.nakInsert = r.nakBtree.InsertLocking
+		r.nakInsertBatch = r.nakBtree.InsertBatchLocking
+		r.nakDelete = r.nakBtree.DeleteLocking
+		r.nakDeleteBefore = r.nakBtree.DeleteBeforeLocking
+		r.nakLen = r.nakBtree.LenLocking
+		r.nakIterateAndUpdate = r.nakBtree.IterateAndUpdateLocking
+	}
 }

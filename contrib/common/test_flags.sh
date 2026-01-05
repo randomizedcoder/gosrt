@@ -231,7 +231,14 @@ run_test "FastNakRecentEnabled flag" "-fastnakrecentenabled" '"FastNakRecentEnab
 # Test 34: Sender flags
 run_test "HonorNakOrder flag" "-honornakorder" '"HonorNakOrder" *: *true' "$SERVER_BIN"
 
-# Test 35: NAK btree flag combinations
+# Test 35: RTO suppression flags (Phase 6: RTO Suppression)
+run_test "RTOMode flag (rtt_rttvar)" "-rtomode rtt_rttvar" '"RTOMode" *: *0' "$SERVER_BIN"
+run_test "RTOMode flag (rtt_4rttvar)" "-rtomode rtt_4rttvar" '"RTOMode" *: *1' "$SERVER_BIN"
+run_test "RTOMode flag (rtt_rttvar_margin)" "-rtomode rtt_rttvar_margin" '"RTOMode" *: *2' "$SERVER_BIN"
+run_test "ExtraRTTMargin flag" "-rtomode rtt_rttvar_margin -extrarttmargin 0.15" '"RTOMode" *: *2.*"ExtraRTTMargin" *: *0\.15' "$SERVER_BIN"
+run_test "RTO suppression full config" "-rtomode rtt_rttvar_margin -extrarttmargin 0.2" '"RTOMode" *: *2.*"ExtraRTTMargin" *: *0\.2' "$CLIENT_BIN"
+
+# Test 36: NAK btree flag combinations
 run_test "NAK btree full config" "-usenakbtree -nakrecentpercent 0.2 -nakmergegap 4 -fastnakenabled -fastnakthresholdms 75" '"UseNakBtree" *: *true.*"NakRecentPercent" *: *0\.2.*"NakMergeGap" *: *4.*"FastNakEnabled" *: *true.*"FastNakThresholdMs" *: *75' "$SERVER_BIN"
 
 # Test 36: Lock-free ring buffer flags (Phase 3: Lockless Design)

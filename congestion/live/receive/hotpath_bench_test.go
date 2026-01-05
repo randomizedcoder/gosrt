@@ -590,28 +590,50 @@ func BenchmarkHotPath_CircularSeqArithmetic(b *testing.B) {
 func BenchmarkHotPath_NakBtreeOperations(b *testing.B) {
 	recv := createHotPathReceiver(b, false, false)
 
-	b.Run("Insert", func(b *testing.B) {
+	// Test both lock-free (event loop) and locking (tick) versions
+
+	b.Run("Insert_LockFree", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			recv.nakBtree.Insert(uint32(i))
 		}
 	})
 
+	b.Run("Insert_Locking", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			recv.nakBtree.InsertLocking(uint32(i))
+		}
+	})
+
 	// Pre-populate for lookup/delete tests
 	for i := 0; i < 10000; i++ {
-		recv.nakBtree.Insert(uint32(i))
+		recv.nakBtree.InsertLocking(uint32(i))
 	}
 
-	b.Run("Has", func(b *testing.B) {
+	b.Run("Has_LockFree", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			recv.nakBtree.Has(uint32(i % 10000))
 		}
 	})
 
-	b.Run("Delete", func(b *testing.B) {
+	b.Run("Has_Locking", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			recv.nakBtree.HasLocking(uint32(i % 10000))
+		}
+	})
+
+	b.Run("Delete_LockFree", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			recv.nakBtree.Delete(uint32(i % 10000))
 			// Re-insert for next iteration
 			recv.nakBtree.Insert(uint32(i % 10000))
+		}
+	})
+
+	b.Run("Delete_Locking", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			recv.nakBtree.DeleteLocking(uint32(i % 10000))
+			// Re-insert for next iteration
+			recv.nakBtree.InsertLocking(uint32(i % 10000))
 		}
 	})
 }

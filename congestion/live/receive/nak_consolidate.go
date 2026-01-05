@@ -34,25 +34,39 @@ var nakEntryPool = sync.Pool{
 	},
 }
 
-// consolidateNakBtree converts NAK btree singles into ranges.
+// consolidateNakBtree converts NAK btree singles into ranges with RTO-based suppression.
 // Traverses in ascending order (oldest first = most urgent).
 // Respects time budget to avoid blocking.
 // Uses sync.Pool for intermediate []NAKEntry slice.
 //
+// Phase 6: RTO Suppression - skips entries where full round-trip hasn't completed:
+//   - NAK → Sender → Retransmit → back to us = full RTO
+//   - Uses pre-calculated rtoUs from connection's RTT tracker
+//
 // Must be called with r.lock held (at least RLock).
 func (r *receiver) consolidateNakBtree() []circular.Number {
-	if r.nakBtree == nil {
+	if r.nakBtree == nil || r.nakLen == nil {
 		// This should never happen when called (ISSUE-001)
-		if r.metrics != nil {
+		if r.metrics != nil && r.nakBtree == nil {
 			r.metrics.NakBtreeNilWhenEnabled.Add(1)
 		}
 		return nil
 	}
-	if r.nakBtree.Len() == 0 {
+	if r.nakLen() == 0 {
 		return nil
 	}
 
+	// ──────────────────────────────────────────────────────────────────
+	// PRE-FETCH ALL VALUES ONCE (minimize syscalls/atomic loads in loop)
+	// ──────────────────────────────────────────────────────────────────
+	nowUs := uint64(time.Now().UnixMicro())
 	deadline := time.Now().Add(r.nakConsolidationBudget)
+
+	// RTO threshold for suppression (single atomic load for ALL entries)
+	var rtoThreshold uint64
+	if r.rtt != nil {
+		rtoThreshold = r.rtt.RTOUs() // Direct atomic access
+	}
 
 	// Get pooled slice for intermediate entries
 	entriesPtr := nakEntryPool.Get().(*[]NAKEntry)
@@ -67,32 +81,57 @@ func (r *receiver) consolidateNakBtree() []circular.Number {
 
 	var currentEntry *NAKEntry
 	iterCount := 0
+	var suppressedCount uint64
+	var allowedCount uint64
 
-	r.nakBtree.Iterate(func(seq uint32) bool {
+	if r.nakIterateAndUpdate == nil {
+		return nil
+	}
+	r.nakIterateAndUpdate(func(entry NakEntryWithTime) (NakEntryWithTime, bool, bool) {
 		// Check time budget every 100 iterations
-		// (time.Now() per iteration is expensive - ~30-50ns each)
 		iterCount++
 		if iterCount%100 == 0 {
 			if time.Now().After(deadline) {
-				// Track timeout for monitoring
 				if r.metrics != nil {
 					r.metrics.NakConsolidationTimeout.Add(1)
 				}
-				return false // Stop - time's up
+				return entry, false, false // Stop - time's up
 			}
 		}
+
+		// ──────────────────────────────────────────────────────────────
+		// NAK SUPPRESSION CHECK (RTO-based)
+		// Skip entries where full round-trip hasn't had time to complete.
+		// Full RTO: NAK → Sender → Retransmit → back to us
+		// ──────────────────────────────────────────────────────────────
+		if entry.LastNakedAtUs > 0 && rtoThreshold > 0 {
+			timeSinceNAK := nowUs - entry.LastNakedAtUs
+			if timeSinceNAK < rtoThreshold {
+				// Too soon - round-trip hasn't completed
+				suppressedCount++
+				return entry, false, true // Continue to next entry, don't update
+			}
+		}
+
+		// ──────────────────────────────────────────────────────────────
+		// INCLUDE IN NAK - update tracking
+		// ──────────────────────────────────────────────────────────────
+		entry.LastNakedAtUs = nowUs
+		entry.NakCount++
+		allowedCount++
+
+		seq := entry.Seq
 
 		if currentEntry == nil {
 			// Start new entry
 			currentEntry = &NAKEntry{Start: seq, End: seq}
-			return true
+			return entry, true, true // Update entry, continue
 		}
 
 		// Check if contiguous or within mergeGap
-		// gap = actual distance between sequences minus 1 (for adjacent sequences, gap=0)
 		gap := circular.SeqDiff(seq, currentEntry.End) - 1
 		if gap >= 0 && uint32(gap) <= r.nakMergeGap {
-			// Extend current entry (contiguous or within merge gap)
+			// Extend current entry
 			currentEntry.End = seq
 			if r.metrics != nil {
 				r.metrics.NakConsolidationMerged.Add(1)
@@ -103,7 +142,7 @@ func (r *receiver) consolidateNakBtree() []circular.Number {
 			currentEntry = &NAKEntry{Start: seq, End: seq}
 		}
 
-		return true
+		return entry, true, true // Update entry, continue
 	})
 
 	// Emit final entry
@@ -115,10 +154,11 @@ func (r *receiver) consolidateNakBtree() []circular.Number {
 	if r.metrics != nil {
 		r.metrics.NakConsolidationRuns.Add(1)
 		r.metrics.NakConsolidationEntries.Add(uint64(len(entries)))
+		r.metrics.NakSuppressedSeqs.Add(suppressedCount)
+		r.metrics.NakAllowedSeqs.Add(allowedCount)
 	}
 
 	// Convert to NAK list format
-	// entries is consumed here, then returned to pool by defer
 	return r.entriesToNakList(entries)
 }
 

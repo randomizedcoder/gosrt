@@ -29,12 +29,14 @@ func createTestReceiverForConsolidation(t *testing.T) *receiver {
 
 	m := &metrics.ConnectionMetrics{}
 
-	return &receiver{
+	r := &receiver{
 		nakBtree:               newNakBtree(32),
 		nakMergeGap:            3, // Default merge gap
 		nakConsolidationBudget: 2 * time.Millisecond,
 		metrics:                m,
 	}
+	r.setupNakDispatch(false) // Use locking versions for tests
+	return r
 }
 
 // Helper to extract values from circular.Number slice for logging
@@ -99,14 +101,14 @@ func TestSyncPoolReuse(t *testing.T) {
 
 	// Run consolidation multiple times and verify no panics
 	for i := 0; i < 100; i++ {
-		r.nakBtree.Insert(uint32(i))
+		r.nakBtree.InsertLocking(uint32(i))
 		_ = r.consolidateNakBtree()
 	}
 
 	// Clear and run again
-	r.nakBtree.Clear()
+	r.nakBtree.ClearLocking()
 	for i := 0; i < 50; i++ {
-		r.nakBtree.Insert(uint32(i * 3))
+		r.nakBtree.InsertLocking(uint32(i * 3))
 		_ = r.consolidateNakBtree()
 	}
 
@@ -117,9 +119,9 @@ func TestConsolidateMetrics(t *testing.T) {
 	r := createTestReceiverForConsolidation(t)
 
 	// Insert some entries that will merge
-	r.nakBtree.Insert(100)
-	r.nakBtree.Insert(101)
-	r.nakBtree.Insert(102)
+	r.nakBtree.InsertLocking(100)
+	r.nakBtree.InsertLocking(101)
+	r.nakBtree.InsertLocking(102)
 
 	initialRuns := r.metrics.NakConsolidationRuns.Load()
 
@@ -144,9 +146,9 @@ func TestConsolidateUsesCircularSeqDiff(t *testing.T) {
 
 	// Use sequences that would wrap if using simple subtraction
 	// But with circular.SeqDiff, adjacent sequences should merge
-	r.nakBtree.Insert(10)
-	r.nakBtree.Insert(11)
-	r.nakBtree.Insert(12)
+	r.nakBtree.InsertLocking(10)
+	r.nakBtree.InsertLocking(11)
+	r.nakBtree.InsertLocking(12)
 
 	list := r.consolidateNakBtree()
 
@@ -170,7 +172,7 @@ func TestConsolidateNakBtree_InOrderBaseline(t *testing.T) {
 
 	// Insert sequences IN ORDER (this is the baseline)
 	for seq := uint32(100); seq <= 105; seq++ {
-		r.nakBtree.Insert(seq)
+		r.nakBtree.InsertLocking(seq)
 	}
 
 	list := r.consolidateNakBtree()
@@ -192,7 +194,7 @@ func TestConsolidateNakBtree_InOrderVsOutOfOrder_Consistency(t *testing.T) {
 	r1 := createTestReceiverForConsolidation(t)
 	r1.nakMergeGap = 2
 	for _, seq := range sequences {
-		r1.nakBtree.Insert(seq)
+		r1.nakBtree.InsertLocking(seq)
 	}
 	list1 := r1.consolidateNakBtree()
 
@@ -200,7 +202,7 @@ func TestConsolidateNakBtree_InOrderVsOutOfOrder_Consistency(t *testing.T) {
 	r2 := createTestReceiverForConsolidation(t)
 	r2.nakMergeGap = 2
 	for i := len(sequences) - 1; i >= 0; i-- {
-		r2.nakBtree.Insert(sequences[i])
+		r2.nakBtree.InsertLocking(sequences[i])
 	}
 	list2 := r2.consolidateNakBtree()
 
@@ -209,7 +211,7 @@ func TestConsolidateNakBtree_InOrderVsOutOfOrder_Consistency(t *testing.T) {
 	r3.nakMergeGap = 2
 	shuffled := []uint32{106, 121, 100, 108, 101, 120, 107, 102}
 	for _, seq := range shuffled {
-		r3.nakBtree.Insert(seq)
+		r3.nakBtree.InsertLocking(seq)
 	}
 	list3 := r3.consolidateNakBtree()
 
@@ -246,7 +248,7 @@ func TestConsolidateNakBtree_MSS_UnderLimit_Ranges(t *testing.T) {
 	for i := 0; i < numRanges; i++ {
 		start := uint32(i * 1000)
 		for j := 0; j < rangeSize; j++ {
-			r.nakBtree.Insert(start + uint32(j))
+			r.nakBtree.InsertLocking(start + uint32(j))
 		}
 	}
 
@@ -268,7 +270,7 @@ func TestConsolidateNakBtree_MSS_OverLimit_Ranges(t *testing.T) {
 	for i := 0; i < numRanges; i++ {
 		start := uint32(i * 1000) // Gap of 990 > mergeGap=100
 		for j := 0; j < rangeSize; j++ {
-			r.nakBtree.Insert(start + uint32(j))
+			r.nakBtree.InsertLocking(start + uint32(j))
 		}
 	}
 
@@ -298,14 +300,14 @@ func TestConsolidateNakBtree_MSS_MixedOverflow(t *testing.T) {
 
 	// Singles (every 50th, gap=49 > mergeGap=3)
 	for i := 0; i < 200; i++ {
-		r.nakBtree.Insert(uint32(i * 50))
+		r.nakBtree.InsertLocking(uint32(i * 50))
 	}
 
 	// Ranges at offset 50000
 	for i := 0; i < 100; i++ {
 		start := uint32(50000 + i*100)
 		for j := 0; j < 5; j++ { // 5 consecutive = 1 range
-			r.nakBtree.Insert(start + uint32(j))
+			r.nakBtree.InsertLocking(start + uint32(j))
 		}
 	}
 
@@ -373,13 +375,13 @@ func TestCalculateNakWireSize(t *testing.T) {
 
 			// Add singles
 			for i := 0; i < tc.singles; i++ {
-				r.nakBtree.Insert(uint32(i * 1000))
+				r.nakBtree.InsertLocking(uint32(i * 1000))
 			}
 			// Add ranges (consecutive pairs at offset)
 			for i := 0; i < tc.ranges; i++ {
 				start := uint32(500000 + i*1000)
-				r.nakBtree.Insert(start)
-				r.nakBtree.Insert(start + 1) // Makes it a range
+				r.nakBtree.InsertLocking(start)
+				r.nakBtree.InsertLocking(start + 1) // Makes it a range
 			}
 
 			list := r.consolidateNakBtree()
@@ -403,10 +405,11 @@ func TestConsolidateNakBtree_ExtremeScale_60SecBuffer(t *testing.T) {
 		nakConsolidationBudget: 1 * time.Second,
 		metrics:                m,
 	}
+	r.setupNakDispatch(false) // Use locking versions for tests
 
 	numDrops := 10000
 	for i := 0; i < numDrops; i++ {
-		r.nakBtree.Insert(uint32(i * 20)) // Every 20th = 5% loss pattern
+		r.nakBtree.InsertLocking(uint32(i * 20)) // Every 20th = 5% loss pattern
 	}
 
 	list := r.consolidateNakBtree()
@@ -429,6 +432,7 @@ func TestConsolidateNakBtree_ExtremeScale_LongOutage(t *testing.T) {
 		nakConsolidationBudget: 1 * time.Second,
 		metrics:                m,
 	}
+	r.setupNakDispatch(false) // Use locking versions for tests
 
 	numOutages := 5
 	outageSize := 1000
@@ -436,7 +440,7 @@ func TestConsolidateNakBtree_ExtremeScale_LongOutage(t *testing.T) {
 	for outage := 0; outage < numOutages; outage++ {
 		start := uint32(outage * 100000) // Large gap between outages
 		for i := 0; i < outageSize; i++ {
-			r.nakBtree.Insert(start + uint32(i))
+			r.nakBtree.InsertLocking(start + uint32(i))
 		}
 	}
 
@@ -460,11 +464,12 @@ func TestConsolidateNakBtree_ExtremeScale_WorstCase(t *testing.T) {
 		nakConsolidationBudget: 1 * time.Second,
 		metrics:                m,
 	}
+	r.setupNakDispatch(false) // Use locking versions for tests
 
 	numDrops := 50000
 
 	for i := 0; i < numDrops; i++ {
-		r.nakBtree.Insert(uint32(i * 100)) // Gap > mergeGap
+		r.nakBtree.InsertLocking(uint32(i * 100)) // Gap > mergeGap
 	}
 
 	list := r.consolidateNakBtree()
@@ -497,9 +502,9 @@ func BenchmarkConsolidateNakBtree(b *testing.B) {
 
 			for i := 0; i < size; i++ {
 				if i%5 == 0 {
-					r.nakBtree.Insert(uint32(i * 10))
+					r.nakBtree.InsertLocking(uint32(i * 10))
 				} else {
-					r.nakBtree.Insert(uint32(i*10 + 1))
+					r.nakBtree.InsertLocking(uint32(i*10 + 1))
 				}
 			}
 
@@ -527,7 +532,7 @@ func BenchmarkSyncPoolConsolidation(b *testing.B) {
 	}
 
 	for i := 0; i < 200; i++ {
-		r.nakBtree.Insert(uint32(i * 2))
+		r.nakBtree.InsertLocking(uint32(i * 2))
 	}
 
 	b.ResetTimer()
@@ -560,12 +565,13 @@ func BenchmarkConsolidate_ExtremeScales(b *testing.B) {
 				nakConsolidationBudget: 100 * time.Millisecond,
 				metrics:                &metrics.ConnectionMetrics{},
 			}
+			r.setupNakDispatch(false) // Use locking versions for benchmarks
 
 			for i := 0; i < s.numDrops; i++ {
 				if s.mergeGap == 0 {
-					r.nakBtree.Insert(uint32(i * 100))
+					r.nakBtree.InsertLocking(uint32(i * 100))
 				} else {
-					r.nakBtree.Insert(uint32(i))
+					r.nakBtree.InsertLocking(uint32(i))
 				}
 			}
 

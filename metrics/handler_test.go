@@ -764,6 +764,45 @@ func TestPrometheusRTTMetrics(t *testing.T) {
 		"RTT variance microseconds should be exported")
 }
 
+// TestPrometheusSuppressionMetrics verifies RTO-based suppression metrics are correctly exported
+// Phase 6: RTO Suppression - validates sender and receiver suppression metrics
+func TestPrometheusSuppressionMetrics(t *testing.T) {
+	socketId := uint32(0xABC61234)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set sender-side suppression metrics
+	m.RetransSuppressed.Store(100) // Retransmits blocked by suppression
+	m.RetransAllowed.Store(50)     // Retransmits that passed threshold
+	m.RetransFirstTime.Store(40)   // First-time retransmits
+
+	// Set receiver-side NAK suppression metrics
+	m.NakSuppressedSeqs.Store(75) // NAK entries blocked by suppression
+	m.NakAllowedSeqs.Store(25)    // NAK entries that passed threshold
+
+	output := getPrometheusOutput(t)
+
+	// Verify sender suppression metrics are present
+	require.Contains(t, output,
+		`gosrt_retrans_suppressed_total{socket_id="0xabc61234",instance="default"} 100`,
+		"Retransmit suppressed should be exported")
+	require.Contains(t, output,
+		`gosrt_retrans_allowed_total{socket_id="0xabc61234",instance="default"} 50`,
+		"Retransmit allowed should be exported")
+	require.Contains(t, output,
+		`gosrt_retrans_first_time_total{socket_id="0xabc61234",instance="default"} 40`,
+		"Retransmit first-time should be exported")
+
+	// Verify receiver NAK suppression metrics are present
+	require.Contains(t, output,
+		`gosrt_nak_suppressed_seqs_total{socket_id="0xabc61234",instance="default"} 75`,
+		"NAK suppressed seqs should be exported")
+	require.Contains(t, output,
+		`gosrt_nak_allowed_seqs_total{socket_id="0xabc61234",instance="default"} 25`,
+		"NAK allowed seqs should be exported")
+}
+
 // TestPrometheusIoUringSubmissionMetrics verifies io_uring submission metrics are correctly exported
 // Phase 5: WaitCQETimeout Implementation - validates submission path metrics
 func TestPrometheusIoUringSubmissionMetrics(t *testing.T) {

@@ -355,3 +355,152 @@ func TestRTT_Both_Equivalent(t *testing.T) {
 		t.Errorf("NAKInterval mismatch: lock=%f atomic=%f", rLock.NAKInterval(), rAtomic.NAKInterval())
 	}
 }
+
+// ============================================================================
+// RTO Calculation Tests (Phase 6: RTO Suppression)
+// ============================================================================
+
+// TestRTOCalcFunc verifies RTO calculation function dispatch
+func TestRTOCalcFunc(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      RTOMode
+		margin    float64
+		rttVal    float64 // RTT in microseconds
+		rttVarVal float64 // RTTVar in microseconds
+		wantRTO   uint64  // expected RTO in microseconds
+	}{
+		{"RTT+RTTVar", RTORttRttVar, 0, 100_000, 10_000, 110_000},
+		{"RTT+4*RTTVar", RTORtt4RttVar, 0, 100_000, 10_000, 140_000},
+		{"RTT+RTTVar+10%", RTORttRttVarMargin, 0.10, 100_000, 10_000, 121_000},
+		{"RTT+RTTVar+20%", RTORttRttVarMargin, 0.20, 100_000, 10_000, 132_000},
+		// Edge cases
+		{"Zero RTT", RTORttRttVar, 0, 0, 0, 0},
+		{"Small values", RTORttRttVar, 0, 100, 10, 110},
+		{"Large values", RTORttRttVar, 0, 500_000, 50_000, 550_000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &rtt{}
+			r.SetRTOMode(tt.mode, tt.margin)
+
+			// Test the function dispatch directly
+			if r.rtoCalcFunc == nil {
+				t.Fatal("rtoCalcFunc should not be nil after SetRTOMode")
+			}
+
+			gotRTO := r.rtoCalcFunc(tt.rttVal, tt.rttVarVal)
+
+			if gotRTO != tt.wantRTO {
+				t.Errorf("rtoCalcFunc() = %d, want %d", gotRTO, tt.wantRTO)
+			}
+
+			// Verify one-way delay calculation (trivial /2, compiles to >>1)
+			gotOneWay := gotRTO / 2
+			wantOneWay := tt.wantRTO / 2
+			if gotOneWay != wantOneWay {
+				t.Errorf("oneWay = %d, want %d", gotOneWay, wantOneWay)
+			}
+		})
+	}
+}
+
+// TestRecalculateUpdatesRTO verifies that Recalculate() updates the pre-calculated RTO
+func TestRecalculateUpdatesRTO(t *testing.T) {
+	r := &rtt{}
+	r.SetRTOMode(RTORttRttVar, 0)
+
+	// Initialize with some RTT value
+	r.rttBits.Store(math.Float64bits(100_000))   // 100ms
+	r.rttVarBits.Store(math.Float64bits(10_000)) // 10ms
+
+	// Trigger Recalculate
+	r.Recalculate(100 * time.Millisecond)
+
+	// Verify pre-calculated RTO is populated
+	rtoUs := r.rtoUs.Load()
+	if rtoUs == 0 {
+		t.Error("rtoUs should be non-zero after Recalculate")
+	}
+
+	// RTO should be approximately RTT + RTTVar (smoothed values)
+	// After one EWMA update, values won't be exactly 100000+10000
+	// but should be in a reasonable range
+	if rtoUs < 50_000 || rtoUs > 200_000 {
+		t.Errorf("rtoUs = %d, should be in reasonable range (50000-200000)", rtoUs)
+	}
+
+	// Verify one-way delay is just rtoUs/2
+	oneWayUs := rtoUs / 2
+	if oneWayUs == 0 {
+		t.Error("oneWayUs should be non-zero")
+	}
+	if oneWayUs != rtoUs/2 {
+		t.Errorf("oneWayUs = %d, want %d (rtoUs/2)", oneWayUs, rtoUs/2)
+	}
+}
+
+// TestRTOCalcFuncNilSafe verifies Recalculate handles nil rtoCalcFunc gracefully
+func TestRTOCalcFuncNilSafe(t *testing.T) {
+	r := &rtt{}
+	// Don't call SetRTOMode - rtoCalcFunc is nil
+
+	r.rttBits.Store(math.Float64bits(100_000))
+	r.rttVarBits.Store(math.Float64bits(10_000))
+
+	// Recalculate should handle nil rtoCalcFunc gracefully
+	r.Recalculate(100 * time.Millisecond)
+
+	// rtoUs should remain zero
+	if r.rtoUs.Load() != 0 {
+		t.Error("rtoUs should be 0 when rtoCalcFunc is nil")
+	}
+}
+
+// TestRTOUsGetter verifies the RTOUs() getter method
+func TestRTOUsGetter(t *testing.T) {
+	r := &rtt{}
+	r.SetRTOMode(RTORttRttVar, 0)
+
+	// Initial value should be 0
+	if r.RTOUs() != 0 {
+		t.Errorf("Initial RTOUs() = %d, want 0", r.RTOUs())
+	}
+
+	// Set RTT values and recalculate
+	r.rttBits.Store(math.Float64bits(100_000))
+	r.rttVarBits.Store(math.Float64bits(10_000))
+	r.Recalculate(100 * time.Millisecond)
+
+	// RTOUs() should now return non-zero
+	if r.RTOUs() == 0 {
+		t.Error("RTOUs() should be non-zero after Recalculate")
+	}
+
+	// Verify RTOUs() matches direct atomic load
+	if r.RTOUs() != r.rtoUs.Load() {
+		t.Errorf("RTOUs() = %d, rtoUs.Load() = %d - should match", r.RTOUs(), r.rtoUs.Load())
+	}
+}
+
+// TestRTOModeString verifies RTOMode.String() returns correct values
+func TestRTOModeString(t *testing.T) {
+	tests := []struct {
+		mode RTOMode
+		want string
+	}{
+		{RTORttRttVar, "rtt_rttvar"},
+		{RTORtt4RttVar, "rtt_4rttvar"},
+		{RTORttRttVarMargin, "rtt_rttvar_margin"},
+		{RTOMode(99), "rtt_rttvar"}, // Unknown defaults to rtt_rttvar
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.mode.String(); got != tt.want {
+				t.Errorf("RTOMode(%d).String() = %q, want %q", tt.mode, got, tt.want)
+			}
+		})
+	}
+}

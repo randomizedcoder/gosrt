@@ -338,7 +338,7 @@ func TestOutOfOrderArrival_ModulusDrops(t *testing.T) {
 
 	// Verify NAK btree was populated (through gap detection in periodicNakBtree)
 	require.NotNil(t, recv.nakBtree)
-	t.Logf("NAK btree size after push (before NAK cycles): %d", recv.nakBtree.Len())
+	t.Logf("NAK btree size after push (before NAK cycles): %d", recv.nakBtree.LenLocking())
 
 	// Run multiple NAK cycles, advancing time to mature TSBPD times
 	// The "too recent" threshold is: now + tsbpdDelay*nakRecentPercent (10%)
@@ -354,7 +354,7 @@ func TestOutOfOrderArrival_ModulusDrops(t *testing.T) {
 		recv.Tick(currentTime)
 	}
 
-	t.Logf("NAK btree size after NAK cycles: %d", recv.nakBtree.Len())
+	t.Logf("NAK btree size after NAK cycles: %d", recv.nakBtree.LenLocking())
 
 	// Verify all dropped packets were NAK'd
 	nakLists := nakCapture.getNakLists()
@@ -437,7 +437,7 @@ func TestTSBPDSkip_DoesNotSkipScanning(t *testing.T) {
 
 	// At this point, NAK btree might be empty (gaps detected during periodic NAK scan)
 	require.NotNil(t, recv.nakBtree)
-	t.Logf("NAK btree size after push: %d", recv.nakBtree.Len())
+	t.Logf("NAK btree size after push: %d", recv.nakBtree.LenLocking())
 
 	// Run NAK cycles with advancing time
 	// Time needs to advance so that packets become "not too recent"
@@ -447,7 +447,7 @@ func TestTSBPDSkip_DoesNotSkipScanning(t *testing.T) {
 		recv.Tick(currentTime)
 	}
 
-	t.Logf("NAK btree size after cycles: %d", recv.nakBtree.Len())
+	t.Logf("NAK btree size after cycles: %d", recv.nakBtree.LenLocking())
 
 	// Verify packets 11-20 were NAK'd
 	nakedSeqs := nakCapture.getAllNAKedSequences()
@@ -543,7 +543,7 @@ func TestConcurrent_PushTickNAKACK_OutOfOrder(t *testing.T) {
 	// The test passes if no race conditions occurred
 	// (run with -race flag to detect races)
 	t.Logf("✅ Concurrent test completed without race conditions")
-	t.Logf("NAK btree final size: %d", recv.nakBtree.Len())
+	t.Logf("NAK btree final size: %d", recv.nakBtree.LenLocking())
 	t.Logf("Total NAK lists: %d", len(nakCapture.getNakLists()))
 }
 

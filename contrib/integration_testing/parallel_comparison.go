@@ -29,6 +29,11 @@ const (
 
 	ProcessUptimeTolerance = 10 * time.Second // Process uptime should be within 10s of test duration
 	ConnectionAgeTolerance = 10 * time.Second // Connection age should be within 10s of expected
+
+	// EffectivelyZeroThreshold treats values below this as zero.
+	// 1e-9 seconds = 1 nanosecond - anything smaller is measurement noise.
+	// This prevents misleading percentages like "0 vs 0 = +8000%".
+	EffectivelyZeroThreshold = 1e-9
 )
 
 // calculateTolerance returns dynamic tolerance based on configured loss rate.
@@ -292,13 +297,20 @@ func createEnhancedComparison(name string, baseVal, highVal float64) EnhancedCom
 	var diffPct float64
 	var status string
 
-	if baseVal == 0 && highVal == 0 {
+	absBase := math.Abs(baseVal)
+	absHigh := math.Abs(highVal)
+
+	// Handle "effectively zero" cases to avoid misleading percentages like "0 vs 0 = +8000%"
+	// This happens with timing metrics that have sub-nanosecond values
+	if absBase < EffectivelyZeroThreshold && absHigh < EffectivelyZeroThreshold {
 		status = "OK"
 		diffPct = 0
-	} else if baseVal == 0 {
+	} else if absBase < EffectivelyZeroThreshold {
+		// Baseline is effectively zero, highperf has a real value
 		status = "NEW"
 		diffPct = 100
-	} else if highVal == 0 {
+	} else if absHigh < EffectivelyZeroThreshold {
+		// HighPerf is effectively zero, baseline has a real value
 		status = "GONE"
 		diffPct = -100
 	} else {
@@ -706,6 +718,27 @@ func printComponentComparison(title string, baseSnapshot, highSnapshot *MetricsS
 	fmt.Printf("└─────────────────────────────────────────────────────────────────────────────┘\n")
 }
 
+// formatMetricValue formats a value adaptively based on its magnitude.
+// This prevents tiny values like 0.000000001 from displaying as "0".
+func formatMetricValue(val float64) string {
+	if val == 0 {
+		return "0"
+	}
+	absVal := math.Abs(val)
+	switch {
+	case absVal >= 1000000:
+		return fmt.Sprintf("%.2e", val) // 1.23e+06
+	case absVal >= 1:
+		return fmt.Sprintf("%.0f", val) // 1234
+	case absVal >= 0.001:
+		return fmt.Sprintf("%.4f", val) // 0.0012
+	case absVal >= 1e-6:
+		return fmt.Sprintf("%.2e", val) // 1.23e-04
+	default:
+		return fmt.Sprintf("%.1e", val) // 1.2e-09
+	}
+}
+
 func printComparisonRow(c EnhancedComparison) {
 	// Format difference
 	var diffStr string
@@ -719,8 +752,8 @@ func printComparisonRow(c EnhancedComparison) {
 		diffStr = "GONE"
 		diffColor = colorYellow
 	case "OK":
-		if c.Diff == 0 {
-			diffStr = "="
+		if c.Diff == 0 || c.DiffPercent == 0 {
+			diffStr = "~0"
 		} else {
 			diffStr = fmt.Sprintf("%+.1f%%", c.DiffPercent)
 		}
@@ -756,8 +789,12 @@ func printComparisonRow(c EnhancedComparison) {
 		name = name[:33] + "..."
 	}
 
-	fmt.Printf("│ %s%-36s %12.0f %12.0f %s%10s%s │\n",
-		statusIcon, name, c.BaselineVal, c.HighPerfVal, diffColor, diffStr, colorReset)
+	// Use adaptive formatting for values to handle both large counts and tiny durations
+	baseStr := formatMetricValue(c.BaselineVal)
+	highStr := formatMetricValue(c.HighPerfVal)
+
+	fmt.Printf("│ %s%-36s %12s %12s %s%10s%s │\n",
+		statusIcon, name, baseStr, highStr, diffColor, diffStr, colorReset)
 }
 
 func printSameConnectionValidation(baseline, highperf *TestMetrics, lossRate float64) {

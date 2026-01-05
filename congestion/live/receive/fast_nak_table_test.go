@@ -328,6 +328,7 @@ func TestCheckFastNakRecent_Table(t *testing.T) {
 
 			if tc.HasNakBtree {
 				r.nakBtree = newNakBtree(32)
+				r.setupNakDispatch(false) // Use locking versions for tests
 			}
 
 			if tc.PacketsPerSec > 0 {
@@ -422,8 +423,9 @@ func TestBuildNakListLocked_Table(t *testing.T) {
 
 			if tc.UseNakBtree {
 				r.nakBtree = newNakBtree(32)
+				r.setupNakDispatch(false) // Use locking versions for tests
 				for _, seq := range tc.Sequences {
-					r.nakBtree.Insert(seq)
+					r.nakBtree.InsertLocking(seq)
 				}
 			}
 
@@ -501,6 +503,7 @@ func TestCheckFastNakRecent_MultipleBursts_Table(t *testing.T) {
 				nakConsolidationBudget: 5 * time.Second,
 				metrics:                m,
 			}
+			r.setupNakDispatch(false) // Use locking versions for tests
 			m.RecvRatePacketsPerSec.Store(math.Float64bits(tc.PacketsPerSec))
 
 			now := time.Now()

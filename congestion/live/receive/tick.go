@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/randomizedcoder/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/congestion"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
 )
@@ -381,7 +382,7 @@ func (r *receiver) processOnePacket() bool {
 	// Delete from NAK btree - this packet is no longer missing
 	// Use DeleteLocking() because this is called from tick() path (not event loop)
 	if r.nakBtree != nil {
-		if r.nakBtree.DeleteLocking(seq.Val()) {
+		if r.nakDelete(seq.Val()) {
 			m.NakBtreeDeletes.Add(1)
 		}
 	}
@@ -477,6 +478,16 @@ func (r *receiver) SetNAKInterval(nakInterval uint64) {
 	defer r.lock.Unlock()
 
 	r.periodicNAKInterval = nakInterval
+}
+
+// SetRTTProvider sets the RTT provider for NAK suppression.
+// Called during connection setup after the connection's RTT tracker is configured.
+// Phase 6: RTO Suppression - enables RTO-based NAK suppression in consolidateNakBtree().
+func (r *receiver) SetRTTProvider(rtt congestion.RTTProvider) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	r.rtt = rtt
 }
 
 func (r *receiver) String(t uint64) string {

@@ -4,6 +4,7 @@ package send
 import (
 	"container/list"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/randomizedcoder/gosrt/circular"
@@ -26,6 +27,11 @@ type SendConfig struct {
 
 	// NAK order configuration - when true, retransmit in NAK packet order (receiver-controlled priority)
 	HonorNakOrder bool
+
+	// RTO-based retransmit suppression (Phase 6: RTO Suppression)
+	// Pointer to connection's pre-calculated RTO in microseconds.
+	// When set, sender suppresses retransmits within one-way delay (RTOUs/2).
+	RTOUs *atomic.Uint64
 }
 
 // sender implements the Sender interface
@@ -54,6 +60,11 @@ type sender struct {
 
 	// NAK order configuration
 	honorNakOrder bool // When true, retransmit in NAK packet order (receiver-controlled priority)
+
+	// RTO-based retransmit suppression (Phase 6: RTO Suppression)
+	// Pointer to connection's pre-calculated RTO in microseconds.
+	// Nil = suppression disabled (legacy behavior)
+	rtoUs *atomic.Uint64
 }
 
 // NewSender takes a SendConfig and returns a new Sender
@@ -74,6 +85,8 @@ func NewSender(sendConfig SendConfig) congestion.Sender {
 		deliver: sendConfig.OnDeliver,
 
 		honorNakOrder: sendConfig.HonorNakOrder,
+
+		rtoUs: sendConfig.RTOUs, // RTO suppression (nil = disabled)
 	}
 
 	if s.deliver == nil {

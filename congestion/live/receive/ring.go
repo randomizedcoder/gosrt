@@ -216,7 +216,7 @@ func (r *receiver) drainPacketRing(now uint64) {
 		// Delete from NAK btree - this packet is no longer missing
 		// Use lock-free Delete() because this runs in single-threaded event loop context
 		if r.nakBtree != nil {
-			if r.nakBtree.Delete(seq.Val()) {
+			if r.nakDelete(seq.Val()) {
 				m.NakBtreeDeletes.Add(1)
 			}
 		}
@@ -324,7 +324,7 @@ func (r *receiver) drainRingByDelta() uint64 {
 		// Delete from NAK btree - this packet is no longer missing
 		// Use lock-free Delete() because this runs in single-threaded event loop context
 		if r.nakBtree != nil {
-			if r.nakBtree.Delete(seq.Val()) {
+			if r.nakDelete(seq.Val()) {
 				m.NakBtreeDeletes.Add(1)
 			}
 		}
