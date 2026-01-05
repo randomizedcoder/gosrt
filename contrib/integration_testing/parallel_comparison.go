@@ -662,6 +662,35 @@ func printCrossPipelineComparison(baseline, highperf *TestMetrics) {
 		"")
 }
 
+// isCoreMetric returns true if this is a core SRT metric that should always be shown
+func isCoreMetric(name string) bool {
+	corePatterns := []string{
+		"pkt_sent_data",
+		"pkt_recv_data",
+		"pkt_sent_retrans",
+		"pkt_recv_retrans",
+		"pkt_sent_nak",
+		"pkt_recv_nak",
+		"pkt_recv_loss",
+		"pkt_sent_loss",
+		"recv_data_total",
+		"sent_data_total",
+		"recv_pkt_loss",
+		"sent_pkt_loss",
+		"nak_entries_total",
+		"retrans_total",
+		"recovery",
+		"recv_data_drop_total",
+	}
+	nameLower := strings.ToLower(name)
+	for _, pattern := range corePatterns {
+		if strings.Contains(nameLower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func printComponentComparison(title string, baseSnapshot, highSnapshot *MetricsSnapshot, peerTypeFilter string) {
 	fmt.Println()
 	fmt.Printf("┌─────────────────────────────────────────────────────────────────────────────┐\n")
@@ -676,8 +705,11 @@ func printComponentComparison(title string, baseSnapshot, highSnapshot *MetricsS
 
 	comparisons := CompareMetricMaps(baseSnapshot.Metrics, highSnapshot.Metrics, true)
 
-	// Filter to important metrics and limit display
-	var filtered []EnhancedComparison
+	// Separate core metrics from other metrics
+	var coreMetrics []EnhancedComparison
+	var otherMetrics []EnhancedComparison
+	shownCore := make(map[string]bool) // Track which core metric types we've shown
+
 	for _, c := range comparisons {
 		// Skip metrics with zero values on both sides
 		if c.BaselineVal == 0 && c.HighPerfVal == 0 {
@@ -687,10 +719,23 @@ func printComponentComparison(title string, baseSnapshot, highSnapshot *MetricsS
 		if strings.Contains(c.Name, "rtt_ms") || strings.Contains(c.Name, "send_period") {
 			continue
 		}
-		filtered = append(filtered, c)
+
+		if isCoreMetric(c.Name) {
+			// Deduplicate core metrics by base name to avoid showing multiple labels
+			baseName := c.Name
+			if idx := strings.Index(baseName, " ["); idx > 0 {
+				baseName = baseName[:idx]
+			}
+			if !shownCore[baseName] || strings.Contains(c.Name, "[data]") {
+				coreMetrics = append(coreMetrics, c)
+				shownCore[baseName] = true
+			}
+		} else {
+			otherMetrics = append(otherMetrics, c)
+		}
 	}
 
-	if len(filtered) == 0 {
+	if len(coreMetrics) == 0 && len(otherMetrics) == 0 {
 		fmt.Printf("│ %-75s │\n", "(No significant metrics)")
 		fmt.Printf("└─────────────────────────────────────────────────────────────────────────────┘\n")
 		return
@@ -700,19 +745,32 @@ func printComponentComparison(title string, baseSnapshot, highSnapshot *MetricsS
 		"Metric", colorBlue, "Baseline", colorReset, colorGreen, "HighPerf", colorReset, "Diff")
 	fmt.Printf("│ %-38s %12s %12s %10s │\n", strings.Repeat("─", 38), "────────────", "────────────", "──────────")
 
-	// Show top 15 by difference
-	maxShow := 15
-	if len(filtered) < maxShow {
-		maxShow = len(filtered)
-	}
-
-	for i := 0; i < maxShow; i++ {
-		c := filtered[i]
+	// Always show core metrics first (sorted by absolute difference)
+	sort.Slice(coreMetrics, func(i, j int) bool {
+		return coreMetrics[i].AbsDiff > coreMetrics[j].AbsDiff
+	})
+	for _, c := range coreMetrics {
 		printComparisonRow(c)
 	}
 
-	if len(filtered) > maxShow {
-		fmt.Printf("│ %-75s │\n", fmt.Sprintf("... and %d more metrics", len(filtered)-maxShow))
+	// Add separator if we have both core and other metrics
+	if len(coreMetrics) > 0 && len(otherMetrics) > 0 {
+		fmt.Printf("│ %-75s │\n", "── Other Metrics ──")
+	}
+
+	// Show top remaining metrics by difference
+	maxOther := 10
+	if len(otherMetrics) < maxOther {
+		maxOther = len(otherMetrics)
+	}
+
+	for i := 0; i < maxOther; i++ {
+		printComparisonRow(otherMetrics[i])
+	}
+
+	remaining := len(otherMetrics) - maxOther
+	if remaining > 0 {
+		fmt.Printf("│ %-75s │\n", fmt.Sprintf("... and %d more metrics", remaining))
 	}
 
 	fmt.Printf("└─────────────────────────────────────────────────────────────────────────────┘\n")
