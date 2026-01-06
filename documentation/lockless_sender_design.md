@@ -304,7 +304,18 @@ See Section 7.4 for detailed race condition analysis with 5 specific scenarios.
 
 ### 4.1 SendPacketRing
 
-Following the receiver pattern (`congestion/live/receive/ring.go`), but with **single shard** to preserve packet ordering.
+Following the receiver pattern (`congestion/live/receive/ring.go`), with **configurable shard count**.
+
+**Initial Implementation:** Start with **1 shard** (default) to preserve strict packet ordering.
+
+**High Write Rate Optimization:** For applications with very high write rates where multiple
+goroutines call `Push()` concurrently, increasing the shard count (e.g., 4 or 8) can reduce
+contention. The btree will sort packets by sequence number regardless, so ordering is preserved
+in the final delivery. However, for most use cases, a single shard is sufficient and simpler.
+
+**Configuration:**
+- `SendRingShards`: Number of shards (power of 2, default: 1)
+- `SendRingSize`: Per-shard capacity (power of 2, default: 1024)
 
 **File:** `congestion/live/send/ring.go` (new)
 
@@ -317,17 +328,22 @@ import (
 )
 
 // SendPacketRing is a lock-free MPSC ring for incoming packets.
-// Uses single shard to preserve application packet ordering.
+// Shard count is configurable for high-throughput scenarios.
 type SendPacketRing struct {
     ring *ring.MultiShardLockFreeRing[packet.Packet]
 }
 
-// NewSendPacketRing creates a ring with single shard for ordering.
-func NewSendPacketRing(size int) *SendPacketRing {
+// NewSendPacketRing creates a ring with configurable shards.
+// For strict ordering, use shards=1 (default).
+// For high write throughput, increase shards (btree will sort).
+func NewSendPacketRing(size, shards int) *SendPacketRing {
+    if shards < 1 {
+        shards = 1 // Default: single shard for ordering
+    }
     return &SendPacketRing{
         ring: ring.NewMultiShardLockFreeRing[packet.Packet](
-            size,  // Per-shard capacity (power of 2)
-            1,     // Single shard - preserves order!
+            size,    // Per-shard capacity (power of 2)
+            shards,  // Configurable shards
             ring.WithMaxRetries[packet.Packet](3),
             ring.WithBackoffDuration[packet.Packet](100*time.Microsecond),
         ),
@@ -1114,13 +1130,16 @@ func (s *sender) calculateTsbpdSleepDuration(
 
     if nextDeliveryIn > 0 {
         // We have a packet waiting - calculate sleep until it's ready
-        // Use 90% of the duration to wake up slightly early
-        // This accounts for scheduling jitter
+        // Use configured percentage of the duration to wake up slightly early
+        // This accounts for scheduling jitter (default: 90% = wake up 10% early)
         result.WasTsbpd = true
         s.metrics.SendEventLoopTsbpdSleeps.Add(1)
         s.metrics.SendEventLoopNextDeliveryTotalUs.Add(uint64(nextDeliveryIn.Microseconds()))
 
-        result.Duration = time.Duration(float64(nextDeliveryIn) * 0.9)
+        // tsbpdSleepFactor is configured in SendConfig (default: 0.9)
+        // Lower values = wake earlier (more CPU, lower latency)
+        // Higher values = sleep longer (less CPU, higher latency variance)
+        result.Duration = time.Duration(float64(nextDeliveryIn) * s.tsbpdSleepFactor)
 
         // Clamp to reasonable bounds and track when clamping occurs
         if result.Duration < minSleep {
@@ -1900,6 +1919,12 @@ type Config struct {
     SendDeliveryIntervalMs int           // TSBPD delivery check interval (default: 1ms)
     SendDropIntervalMs     int           // Drop check interval (default: 100ms)
 
+    // TSBPD-aware sleep configuration
+    // The EventLoop sleeps for (nextDeliveryIn * SendTsbpdSleepFactor) to wake up
+    // just before the next packet is ready. Lower values = earlier wake-up.
+    // Range: 0.5 to 0.99. Default: 0.9 (wake up 10% early)
+    SendTsbpdSleepFactor float64 // Sleep factor for TSBPD timing (default: 0.9)
+
     // Sender payload pool (zero-copy)
     UseSendPayloadPool bool // Enable payload pool for zero-copy (default: false)
     SendPayloadSize    int  // Payload buffer size (default: 1316 bytes)
@@ -1923,6 +1948,7 @@ var defaultConfig = Config{
     UseSendEventLoop:       false,
     SendDeliveryIntervalMs: 1,
     SendDropIntervalMs:     100,
+    SendTsbpdSleepFactor:   0.9,        // Wake up 10% early (accounts for jitter)
     UseSendPayloadPool:     false,
     SendPayloadSize:        1316,
 }
@@ -1972,6 +1998,15 @@ func (c *Config) Validate() error {
         c.SendBtreeDegree = 32  // Use default
     }
 
+    // TSBPD sleep factor validation (see Implementation Note 5)
+    // Range: 0.5-0.99 (lower = earlier wake, higher = longer sleep)
+    if c.SendTsbpdSleepFactor == 0 {
+        c.SendTsbpdSleepFactor = 0.9 // Default
+    }
+    if c.SendTsbpdSleepFactor < 0.5 || c.SendTsbpdSleepFactor > 0.99 {
+        return fmt.Errorf("SendTsbpdSleepFactor must be 0.5-0.99, got %f", c.SendTsbpdSleepFactor)
+    }
+
     return nil
 }
 ```
@@ -1991,6 +2026,8 @@ var (
         "Use btree for sender packet storage (O(log n) NAK lookup)")
     UseSendEventLoop = flag.Bool("usesendeventloop", false,
         "Enable sender event loop for smooth packet delivery (requires -usesendring)")
+    SendTsbpdSleepFactor = flag.Float64("sendtsbpdsleepfactor", 0.9,
+        "TSBPD sleep factor (0.5-0.99, lower=earlier wake, default: 0.9)")
 
     // Sender control ring flags (REQUIRED for lock-free sender - see Section 7.4)
     UseSendControlRing = flag.Bool("usesendcontrolring", false,
@@ -2017,6 +2054,9 @@ func ApplyFlagsToConfig(c *gosrt.Config) {
     }
     if *UseSendEventLoop {
         c.UseSendEventLoop = true
+    }
+    if *SendTsbpdSleepFactor != 0.9 {
+        c.SendTsbpdSleepFactor = *SendTsbpdSleepFactor
     }
 
     // Sender control ring flags
