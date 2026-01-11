@@ -1,10 +1,12 @@
 /contrib/server/server*
 /contrib/client/client*
+server*
+client*
+integration_testing
 *.prof
+*.pprof
 *.out
 *.html
 *.ts
 *.mp4
-server*
-client*
 *.pprofserver
