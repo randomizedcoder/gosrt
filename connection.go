@@ -481,9 +481,37 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		MinInputBW:            c.config.MinInputBW,
 		OverheadBW:            c.config.OverheadBW,
 		OnDeliver:             c.pop,
+		OnLog:                 c.log, // Pass connection logger to sender for debug topics
 		LockTimingMetrics:     c.metrics.SenderLockTiming,
 		ConnectionMetrics:     c.metrics,
-		HonorNakOrder:         c.config.HonorNakOrder,
+		// CRITICAL: Connection start time for EventLoop time base.
+		// PktTsbpdTime uses relative time (since connection start), so EventLoop
+		// must also use relative time for TSBPD comparisons.
+		// BUG FIX: Without this, EventLoop used absolute time (~1.7e12 µs) while
+		// packets had relative time (~millions µs), causing all packets to be dropped.
+		StartTime:     c.start,
+		HonorNakOrder: c.config.HonorNakOrder,
+		RTOUs:         &c.rtt.rtoUs, // RTO suppression (Phase 6)
+		// Phase 1: Sender Lockless Btree
+		UseBtree:    c.config.UseSendBtree,
+		BtreeDegree: c.config.SendBtreeDegree,
+		// Phase 2: Sender Lock-Free Ring
+		UseSendRing:    c.config.UseSendRing,
+		SendRingSize:   c.config.SendRingSize,
+		SendRingShards: c.config.SendRingShards,
+		// Phase 3: Sender Control Packet Ring
+		UseSendControlRing:    c.config.UseSendControlRing,
+		SendControlRingSize:   c.config.SendControlRingSize,
+		SendControlRingShards: c.config.SendControlRingShards,
+		// Phase 4: Sender EventLoop
+		UseSendEventLoop:             c.config.UseSendEventLoop,
+		SendEventLoopBackoffMinSleep: c.config.SendEventLoopBackoffMinSleep,
+		SendEventLoopBackoffMaxSleep: c.config.SendEventLoopBackoffMaxSleep,
+		SendTsbpdSleepFactor:         c.config.SendTsbpdSleepFactor,
+		SendDropThresholdUs:          c.config.SendDropThresholdUs,
+
+		// Phase 5: Zero-copy payload pool
+		ValidatePayloadSize: c.config.ValidateSendPayloadSize,
 	})
 
 	// Store parent waitgroup
@@ -592,16 +620,39 @@ func (c *srtConn) Version() uint32 {
 //
 // Phase 4: If the receiver uses event loop (UseEventLoop=true), the event loop
 // runs in a separate goroutine and handles packet processing continuously.
-// In this case, ticker() only drives the sender.
+// In this case, ticker() only drives the sender (unless sender EventLoop is also enabled).
 func (c *srtConn) ticker(ctx context.Context) {
-	// Phase 4: Start event loop in separate goroutine if enabled
+	// WaitGroup to track EventLoop goroutines for orderly shutdown
+	// Reference: context_and_cancellation_design.md - "Pattern for Goroutines"
+	var eventLoopWg sync.WaitGroup
+
+	// Phase 4: Start receiver event loop in separate goroutine if enabled
 	if c.recv.UseEventLoop() {
-		go c.recv.EventLoop(ctx)
+		eventLoopWg.Add(1)
+		go func() {
+			defer eventLoopWg.Done()
+			c.recv.EventLoop(ctx)
+		}()
+	}
+
+	// Phase 4: Start sender event loop in separate goroutine if enabled
+	// CRITICAL: This was missing and caused send ring overflow!
+	// Without this, Push() fills the ring but EventLoop never drains it.
+	if c.snd.UseEventLoop() {
+		eventLoopWg.Add(1)
+		go func() {
+			defer eventLoopWg.Done()
+			c.snd.EventLoop(ctx)
+		}()
 	}
 
 	ticker := time.NewTicker(c.tick)
 	defer ticker.Stop()
 	defer func() {
+		// Wait for EventLoop goroutines to finish their cleanup before ticker exits
+		// This ensures orderly shutdown: EventLoops complete cleanup before connection closes
+		c.log("connection:close", func() string { return "waiting for EventLoop goroutines" })
+		eventLoopWg.Wait()
 		c.log("connection:close", func() string { return "left ticker loop" })
 	}()
 
@@ -616,7 +667,14 @@ func (c *srtConn) ticker(ctx context.Context) {
 			if !c.recv.UseEventLoop() {
 				c.recv.Tick(c.tsbpdTimeBase + tickTime)
 			}
-			c.snd.Tick(tickTime)
+
+			// Phase 4: Only call snd.Tick if sender event loop is not running
+			// CRITICAL: When sender EventLoop is enabled, it handles all btree access
+			// (drain ring, deliver packets, process ACK/NAK). Running Tick() concurrently
+			// would cause race conditions on the btree and compete for ring packets.
+			if !c.snd.UseEventLoop() {
+				c.snd.Tick(tickTime)
+			}
 		}
 	}
 }

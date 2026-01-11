@@ -93,6 +93,24 @@ func categorizeAndCompareMetrics(baseline, highperf map[string]float64) []Metric
 			"gosrt_connection_bytes_sent_total",
 			"gosrt_connection_congestion_bytes_retrans_total",
 		})},
+		// Lockless Sender metrics (Phase 5+: Sender EventLoop)
+		{Name: "🚀 Sender Ring", Metrics: compareMetricGroup(baseline, highperf, []string{
+			"gosrt_send_ring_pushed_total",
+			"gosrt_send_ring_dropped_total",
+			"gosrt_send_ring_drained_total",
+			"gosrt_send_btree_inserted_total",
+			"gosrt_send_btree_duplicates_total",
+		})},
+		{Name: "🎛️ Sender Control Ring", Metrics: compareMetricGroup(baseline, highperf, []string{
+			"gosrt_send_control_ring_pushed_ack_total",
+			"gosrt_send_control_ring_pushed_nak_total",
+			"gosrt_send_control_ring_dropped_ack_total",
+			"gosrt_send_control_ring_dropped_nak_total",
+			"gosrt_send_control_ring_drained_total",
+			"gosrt_send_control_ring_processed_ack_total",
+			"gosrt_send_control_ring_processed_nak_total",
+		})},
+		{Name: "⚡ Sender EventLoop", Metrics: compareSenderEventLoopMetrics(baseline, highperf)},
 	}
 
 	// Filter out empty categories
@@ -259,6 +277,72 @@ func compareSuppressionMetrics(baseline, highperf map[string]float64) []MetricCo
 	}
 
 	return compareMetricGroup(baseline, highperf, suppressionPrefixes)
+}
+
+// compareSenderEventLoopMetrics compares sender EventLoop metrics
+// These are critical for evaluating the lockless sender implementation
+// See lockless_sender_design.md Section 11 for expected metrics
+func compareSenderEventLoopMetrics(baseline, highperf map[string]float64) []MetricComparison {
+	eventLoopPrefixes := []string{
+		// Core EventLoop counters
+		"gosrt_send_event_loop_iterations_total",
+		"gosrt_send_event_loop_default_runs_total",
+		"gosrt_send_event_loop_drop_fires_total",
+		// Packet processing
+		"gosrt_send_event_loop_data_drained_total",
+		"gosrt_send_event_loop_control_drained_total",
+		"gosrt_send_event_loop_acks_processed_total",
+		"gosrt_send_event_loop_naks_processed_total",
+		"gosrt_send_delivery_packets_total",
+		// Sleep behavior
+		"gosrt_send_event_loop_idle_backoffs_total",
+		"gosrt_send_event_loop_tsbpd_sleeps_total",
+		"gosrt_send_event_loop_empty_btree_sleeps_total",
+		"gosrt_send_event_loop_sleep_clamped_min_total",
+		"gosrt_send_event_loop_sleep_clamped_max_total",
+		// Current state
+		"gosrt_send_btree_len",
+	}
+
+	comparisons := compareMetricGroup(baseline, highperf, eventLoopPrefixes)
+
+	// Add burst detection metric (Packets/Iteration ratio)
+	// Lower ratio = smoother delivery (more iterations per packet)
+	// Baseline Tick() mode typically releases bursts in one iteration
+	baseIterations := 0.0
+	highIterations := 0.0
+	baseDelivered := 0.0
+	highDelivered := 0.0
+
+	for name, val := range baseline {
+		if strings.Contains(name, "send_event_loop_iterations_total") || strings.Contains(name, "send_tick_runs") {
+			baseIterations += val
+		}
+		if strings.Contains(name, "send_delivery_packets_total") || strings.Contains(name, "send_tick_delivered_packets") {
+			baseDelivered += val
+		}
+	}
+	for name, val := range highperf {
+		if strings.Contains(name, "send_event_loop_iterations_total") || strings.Contains(name, "send_tick_runs") {
+			highIterations += val
+		}
+		if strings.Contains(name, "send_delivery_packets_total") || strings.Contains(name, "send_tick_delivered_packets") {
+			highDelivered += val
+		}
+	}
+
+	// Calculate Packets/Iteration ratio (lower = smoother)
+	if baseIterations > 0 && highIterations > 0 {
+		baseRatio := baseDelivered / baseIterations
+		highRatio := highDelivered / highIterations
+		comparisons = append(comparisons, createComparison(
+			"[DERIVED] Packets/Iteration (lower=smoother)",
+			baseRatio,
+			highRatio,
+		))
+	}
+
+	return comparisons
 }
 
 // createComparison builds a MetricComparison from two values

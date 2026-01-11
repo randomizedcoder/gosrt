@@ -311,6 +311,89 @@ type ConnectionMetrics struct {
 	RingPacketsProcessed atomic.Uint64 // Total packets consumed from ring (for delta calculation)
 
 	// ========================================================================
+	// Sender Tick Baseline Metrics (for burst detection comparison)
+	// ========================================================================
+	// Tracks baseline Tick() mode behavior for comparison with EventLoop.
+	// These metrics enable Packets/Iteration ratio calculation to detect bursts.
+
+	SendTickRuns             atomic.Uint64 // Number of Tick() invocations
+	SendTickDeliveredPackets atomic.Uint64 // Packets delivered during Tick() calls
+
+	// ========================================================================
+	// Sender Lock-Free Ring Metrics (Phase 2: Lockless Sender)
+	// ========================================================================
+	// Tracks sender packet ring buffer operations.
+
+	SendRingPushed       atomic.Uint64 // Packets successfully pushed to sender ring
+	SendRingDropped      atomic.Uint64 // Packets dropped due to sender ring full
+	SendRingDrained      atomic.Uint64 // Packets drained from sender ring to btree
+	SendBtreeInserted    atomic.Uint64 // Packets inserted into sender btree
+	SendBtreeDuplicates  atomic.Uint64 // Duplicate packets detected in sender btree
+	SendRingDrainSeqGap  atomic.Uint64 // Sequence gaps detected during ring→btree drain (sender bug indicator)
+
+	// ========================================================================
+	// Sender Control Ring Metrics (Phase 3: Lockless Sender)
+	// ========================================================================
+	// Tracks control packet (ACK/NAK) ring buffer operations.
+
+	SendControlRingPushedACK    atomic.Uint64 // ACKs successfully pushed to control ring
+	SendControlRingPushedNAK    atomic.Uint64 // NAKs successfully pushed to control ring
+	SendControlRingDroppedACK   atomic.Uint64 // ACKs dropped due to control ring full
+	SendControlRingDroppedNAK   atomic.Uint64 // NAKs dropped due to control ring full
+	SendControlRingDrained      atomic.Uint64 // Control packets drained by EventLoop
+	SendControlRingProcessed    atomic.Uint64 // Control packets processed by EventLoop (total)
+	SendControlRingProcessedACK atomic.Uint64 // ACKs processed by EventLoop
+	SendControlRingProcessedNAK atomic.Uint64 // NAKs processed by EventLoop
+
+	// ========================================================================
+	// Sender EventLoop Metrics (Phase 4: Lockless Sender)
+	// ========================================================================
+	// Tracks sender EventLoop iterations, processing, and sleep behavior.
+
+	// Startup diagnostics (debug intermittent failures)
+	SendEventLoopStartAttempts   atomic.Uint64 // Times EventLoop() was called
+	SendEventLoopSkippedDisabled atomic.Uint64 // Times EventLoop returned early (useEventLoop=false)
+	SendEventLoopStarted         atomic.Uint64 // Times EventLoop entered main loop
+
+	SendEventLoopIterations        atomic.Uint64 // Total EventLoop iterations
+	SendEventLoopDefaultRuns       atomic.Uint64 // Default case runs (no timer fired)
+	SendEventLoopDropFires         atomic.Uint64 // Drop ticker fires
+	SendEventLoopDataDrained       atomic.Uint64 // Data packets drained from ring
+	SendEventLoopControlDrained    atomic.Uint64 // Control packets drained from ring
+	SendEventLoopACKsProcessed     atomic.Uint64 // ACKs processed by EventLoop
+	SendEventLoopNAKsProcessed     atomic.Uint64 // NAKs processed by EventLoop
+	SendEventLoopIdleBackoffs      atomic.Uint64 // Times EventLoop entered idle backoff
+	// Diagnostic metrics for drain debugging
+	SendEventLoopDrainAttempts     atomic.Uint64 // Times drain was called
+	SendEventLoopDrainRingNil      atomic.Uint64 // Times packetRing was nil
+	SendEventLoopDrainRingEmpty    atomic.Uint64 // Times TryPop returned empty (first try)
+	SendEventLoopDrainRingHadData  atomic.Uint64 // Times ring.Len() > 0 before drain
+	SendEventLoopTsbpdSleeps       atomic.Uint64 // Times EventLoop used TSBPD-aware sleep
+	SendEventLoopEmptyBtreeSleeps  atomic.Uint64 // Times EventLoop slept due to empty btree
+	SendEventLoopSleepClampedMin   atomic.Uint64 // Times sleep was clamped to minimum
+	SendEventLoopSleepClampedMax   atomic.Uint64 // Times sleep was clamped to maximum
+	SendEventLoopSleepTotalUs      atomic.Uint64 // Total sleep time in microseconds
+	SendEventLoopNextDeliveryTotalUs atomic.Uint64 // Total next delivery time in microseconds
+	SendDeliveryPackets            atomic.Uint64 // Packets delivered by EventLoop
+	SendBtreeLen                   atomic.Uint64 // Current btree length (updated per iteration)
+	// Delivery debugging metrics
+	SendDeliveryAttempts       atomic.Uint64 // Times deliverReadyPacketsEventLoop was called
+	SendDeliveryBtreeEmpty     atomic.Uint64 // Times btree was empty when trying to deliver
+	SendDeliveryIterStarted    atomic.Uint64 // Times IterateFrom called callback (had packets)
+	SendDeliveryTsbpdNotReady  atomic.Uint64 // Times first packet had tsbpdTime > nowUs
+	SendDeliveryLastNowUs      atomic.Uint64 // Last nowUs value (for debugging)
+	SendDeliveryLastTsbpd      atomic.Uint64 // Last first packet's tsbpdTime (for debugging)
+	SendDeliveryStartSeq       atomic.Uint64 // Last deliveryStartPoint value (for debugging)
+	SendDeliveryBtreeMinSeq    atomic.Uint64 // Btree min sequence (for debugging IterateFrom)
+	SendDropAheadOfDelivery    atomic.Uint64 // Packets dropped that were ahead of deliveryStartPoint (head-of-line blocking)
+
+	// ========================================================================
+	// Zero-Copy Payload Pool Metrics (Phase 5: Lockless Sender)
+	// ========================================================================
+	// Tracks payload validation and buffer pool usage.
+	SendPayloadSizeErrors atomic.Uint64 // Payloads rejected due to size validation
+
+	// ========================================================================
 	// Rate Calculation Fields (Phase 1: Lockless Design)
 	// ========================================================================
 	// These replace the embedded `rate struct` in congestion/live/receive.go and send.go

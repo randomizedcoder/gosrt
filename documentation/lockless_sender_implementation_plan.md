@@ -53,6 +53,7 @@ numbers, function signatures, and build/test checkpoints.
 
 **Related Documents:**
 - `lockless_sender_design.md` - High-level design and architecture
+- `lockless_sender_implementation_tracking.md` - **Implementation progress tracking**
 - `retransmission_and_nak_suppression_design.md` - RTO suppression (already implemented)
 - `gosrt_lockless_design.md` - Receiver lockless patterns (reference)
 - `large_file_refactoring_plan_send.md` - Sender file organization

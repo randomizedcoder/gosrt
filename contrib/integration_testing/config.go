@@ -67,6 +67,24 @@ const (
 	// ConfigFullEventLoop enables everything including lock-free ring + event loop
 	// This is the complete Phase 4 lockless design configuration
 	ConfigFullEventLoop ConfigVariant = "FullEventLoop"
+
+	// ========================================================================
+	// LOCKLESS SENDER VARIANTS (Phase 5+: Lockless Sender Design)
+	// ========================================================================
+
+	// ConfigSendBtree enables sender btree only (O(log n) NAK lookup)
+	ConfigSendBtree ConfigVariant = "SendBtree"
+
+	// ConfigSendRing enables sender btree + lock-free data ring
+	ConfigSendRing ConfigVariant = "SendRing"
+
+	// ConfigSendEL enables sender btree + data ring + control ring + EventLoop
+	// This is the complete lockless sender configuration
+	ConfigSendEL ConfigVariant = "SendEL"
+
+	// ConfigFullSendEL enables everything: receiver lockless + sender lockless
+	// This is the ultimate high-performance configuration
+	ConfigFullSendEL ConfigVariant = "FullSendEL"
 )
 
 // GetSRTConfig returns an SRTConfig for a given ConfigVariant.
@@ -95,6 +113,15 @@ func GetSRTConfig(variant ConfigVariant) SRTConfig {
 		return ControlSRTConfig.WithPacketRing().WithEventLoop()
 	case ConfigFullEventLoop:
 		return HighPerfSRTConfig.WithPacketRing().WithEventLoop()
+	// Lockless Sender variants
+	case ConfigSendBtree:
+		return ControlSRTConfig.WithSendBtree()
+	case ConfigSendRing:
+		return ControlSRTConfig.WithSendBtree().WithSendRing()
+	case ConfigSendEL:
+		return ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoop()
+	case ConfigFullSendEL:
+		return HighPerfSRTConfig.WithPacketRing().WithEventLoop().WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoop()
 	default:
 		return BaselineSRTConfig
 	}
@@ -410,6 +437,35 @@ type SRTConfig struct {
 	BackoffMinSleep       time.Duration // -backoffminsleep (default: 10µs)
 	BackoffMaxSleep       time.Duration // -backoffmaxsleep (default: 1ms)
 
+	// ========================================================================
+	// LOCKLESS SENDER CONFIGURATION (Phase 5+: Lockless Sender Design)
+	// ========================================================================
+	// See lockless_sender_design.md and lockless_sender_implementation_plan.md
+
+	// Sender btree configuration (Phase 1: SendPacketBtree)
+	UseSendBtree    bool // -usesendbtree (enable btree for sender packet storage)
+	SendBtreeDegree int  // -sendbtreesize (default: 32)
+
+	// Sender data ring (Phase 2: Lock-free Push())
+	UseSendRing    bool // -usesendring (requires -usesendbtree)
+	SendRingSize   int  // -sendringsize (default: 1024)
+	SendRingShards int  // -sendringshards (default: 1 for ordering)
+
+	// Sender control ring (Phase 3: Lock-free ACK/NAK routing)
+	UseSendControlRing    bool // -usesendcontrolring (requires -usesendring)
+	SendControlRingSize   int  // -sendcontrolringsize (default: 256)
+	SendControlRingShards int  // -sendcontrolringshards (default: 2)
+
+	// Sender EventLoop (Phase 4: Continuous event loop)
+	UseSendEventLoop             bool          // -usesendeventloop (requires -usesendcontrolring)
+	SendEventLoopBackoffMinSleep time.Duration // -sendeventloopbackoffminsleep (default: 100µs)
+	SendEventLoopBackoffMaxSleep time.Duration // -sendeventloopbackoffmaxsleep (default: 1ms)
+	SendTsbpdSleepFactor         float64       // -sendtsbpdsleepfactor (default: 0.9)
+	SendDropThresholdUs          uint64        // -senddropthresholdus (default: 1000000)
+
+	// Sender payload validation (Phase 5: Zero-copy)
+	ValidateSendPayloadSize bool // -validatesendpayloadsize (validate payload size)
+
 	// Debug configuration
 	ReceiverDebug bool   // -receiverdebug (enable receiver debug logging)
 	LogTopics     string // -logtopics (comma-separated log topics, e.g., "receiver" or "receiver:nak")
@@ -580,6 +636,50 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 	if c.BackoffMaxSleep > 0 {
 		flags = append(flags, "-backoffmaxsleep", c.BackoffMaxSleep.String())
+	}
+
+	// Lockless Sender configuration (Phase 5+)
+	if c.UseSendBtree {
+		flags = append(flags, "-usesendbtree")
+	}
+	if c.SendBtreeDegree > 0 {
+		flags = append(flags, "-sendbtreesize", strconv.Itoa(c.SendBtreeDegree))
+	}
+	if c.UseSendRing {
+		flags = append(flags, "-usesendring")
+	}
+	if c.SendRingSize > 0 {
+		flags = append(flags, "-sendringsize", strconv.Itoa(c.SendRingSize))
+	}
+	if c.SendRingShards > 0 {
+		flags = append(flags, "-sendringshards", strconv.Itoa(c.SendRingShards))
+	}
+	if c.UseSendControlRing {
+		flags = append(flags, "-usesendcontrolring")
+	}
+	if c.SendControlRingSize > 0 {
+		flags = append(flags, "-sendcontrolringsize", strconv.Itoa(c.SendControlRingSize))
+	}
+	if c.SendControlRingShards > 0 {
+		flags = append(flags, "-sendcontrolringshards", strconv.Itoa(c.SendControlRingShards))
+	}
+	if c.UseSendEventLoop {
+		flags = append(flags, "-usesendeventloop")
+	}
+	if c.SendEventLoopBackoffMinSleep > 0 {
+		flags = append(flags, "-sendeventloopbackoffminsleep", c.SendEventLoopBackoffMinSleep.String())
+	}
+	if c.SendEventLoopBackoffMaxSleep > 0 {
+		flags = append(flags, "-sendeventloopbackoffmaxsleep", c.SendEventLoopBackoffMaxSleep.String())
+	}
+	if c.SendTsbpdSleepFactor > 0 {
+		flags = append(flags, "-sendtsbpdsleepfactor", strconv.FormatFloat(c.SendTsbpdSleepFactor, 'f', 2, 64))
+	}
+	if c.SendDropThresholdUs > 0 {
+		flags = append(flags, "-senddropthresholdus", strconv.FormatUint(c.SendDropThresholdUs, 10))
+	}
+	if c.ValidateSendPayloadSize {
+		flags = append(flags, "-validatesendpayloadsize")
 	}
 
 	// Debug configuration
@@ -1266,6 +1366,98 @@ func (c SRTConfig) WithEventLoopCustom(rateInterval time.Duration, coldStartPkts
 // WithoutEventLoop disables the event loop (uses timer-driven Tick).
 func (c SRTConfig) WithoutEventLoop() SRTConfig {
 	c.UseEventLoop = false
+	return c
+}
+
+// ============================================================================
+// LOCKLESS SENDER HELPERS (Phase 5+: Lockless Sender Design)
+// ============================================================================
+
+// WithSendBtree enables sender btree for O(log n) NAK lookup.
+// Default: degree 32
+func (c SRTConfig) WithSendBtree() SRTConfig {
+	c.UseSendBtree = true
+	c.SendBtreeDegree = 32
+	return c
+}
+
+// WithSendRing enables the lock-free sender data ring.
+// REQUIRES: UseSendBtree=true
+// Default: 1024 ring size, 1 shard (for strict ordering)
+func (c SRTConfig) WithSendRing() SRTConfig {
+	if !c.UseSendBtree {
+		c = c.WithSendBtree()
+	}
+	c.UseSendRing = true
+	c.SendRingSize = 1024
+	c.SendRingShards = 1 // Default: single shard for ordering
+	return c
+}
+
+// WithSendRingCustom enables the lock-free sender data ring with custom settings.
+func (c SRTConfig) WithSendRingCustom(size, shards int) SRTConfig {
+	if !c.UseSendBtree {
+		c = c.WithSendBtree()
+	}
+	c.UseSendRing = true
+	c.SendRingSize = size
+	c.SendRingShards = shards
+	return c
+}
+
+// WithSendControlRing enables the lock-free sender control ring.
+// REQUIRES: UseSendRing=true
+// Default: 256 size, 2 shards
+func (c SRTConfig) WithSendControlRing() SRTConfig {
+	if !c.UseSendRing {
+		c = c.WithSendRing()
+	}
+	c.UseSendControlRing = true
+	c.SendControlRingSize = 256
+	c.SendControlRingShards = 2
+	return c
+}
+
+// WithSendEventLoop enables the sender EventLoop.
+// REQUIRES: UseSendControlRing=true
+// Default: 100µs-1ms backoff, 0.9 TSBPD factor
+func (c SRTConfig) WithSendEventLoop() SRTConfig {
+	if !c.UseSendControlRing {
+		c = c.WithSendControlRing()
+	}
+	c.UseSendEventLoop = true
+	c.SendEventLoopBackoffMinSleep = 100 * time.Microsecond
+	c.SendEventLoopBackoffMaxSleep = 1 * time.Millisecond
+	c.SendTsbpdSleepFactor = 0.9
+	// NOTE: SendDropThresholdUs = 0 means use the auto-calculated value from connection.go:
+	// dropThreshold = 1.25 * peerTsbpdDelay + SendDropDelay (min 1 second)
+	// This ensures drop threshold is always >= TSBPD latency for proper retransmission.
+	c.SendDropThresholdUs = 0
+	return c
+}
+
+// WithSendEventLoopCustom enables the sender EventLoop with custom settings.
+func (c SRTConfig) WithSendEventLoopCustom(minSleep, maxSleep time.Duration, tsbpdFactor float64, dropThresholdUs uint64) SRTConfig {
+	if !c.UseSendControlRing {
+		c = c.WithSendControlRing()
+	}
+	c.UseSendEventLoop = true
+	c.SendEventLoopBackoffMinSleep = minSleep
+	c.SendEventLoopBackoffMaxSleep = maxSleep
+	c.SendTsbpdSleepFactor = tsbpdFactor
+	c.SendDropThresholdUs = dropThresholdUs
+	return c
+}
+
+// WithoutSendEventLoop disables the sender EventLoop.
+func (c SRTConfig) WithoutSendEventLoop() SRTConfig {
+	c.UseSendEventLoop = false
+	return c
+}
+
+// WithValidateSendPayloadSize enables payload size validation in sender Push().
+func (c SRTConfig) WithValidateSendPayloadSize() SRTConfig {
+	c.ValidateSendPayloadSize = true
 	return c
 }
 

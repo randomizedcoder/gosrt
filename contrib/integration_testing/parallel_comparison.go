@@ -681,6 +681,12 @@ func isCoreMetric(name string) bool {
 		"retrans_total",
 		"recovery",
 		"recv_data_drop_total",
+		// Lockless Sender core metrics (Phase 5+)
+		"send_ring_pushed",
+		"send_ring_dropped",
+		"send_event_loop_iterations",
+		"send_delivery_packets",
+		"send_btree_len",
 	}
 	nameLower := strings.ToLower(name)
 	for _, pattern := range corePatterns {

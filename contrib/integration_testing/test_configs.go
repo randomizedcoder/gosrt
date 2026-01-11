@@ -1953,6 +1953,302 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		CollectInterval: 5 * time.Second,
 		ProfileDuration: 5 * time.Minute,
 	},
+
+	// ============================================================================
+	// LOCKLESS SENDER PARALLEL TESTS (Phase 5+)
+	// ============================================================================
+	// These tests compare the new lockless sender implementation against
+	// the baseline sender. Key metrics to observe:
+	// - SendRingPushed/Dropped: Ring buffer utilization
+	// - SendBtreeInserted/Duplicates: Btree operations
+	// - SendEventLoopIterations: EventLoop activity
+	// - SendDeliveryPackets: Packets delivered
+	// - Packets/Iteration ratio: Burst detection (lower = smoother)
+	// See lockless_sender_design.md Section 11 for expected metrics.
+
+	// Compare: Baseline (locking sender) vs Sender Btree only
+	// Expected: Btree shows O(log n) NAK lookup improvement
+	{
+		Name:        "Parallel-Clean-20M-Base-vs-SendBtree",
+		Description: "Lockless Sender Phase 1: Baseline vs SendPacketBtree (O(log n) NAK lookup)",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigSendBtree),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Compare: Baseline vs Sender Btree + Data Ring
+	// Expected: Lock-free Push() reduces contention
+	{
+		Name:        "Parallel-Clean-20M-Base-vs-SendRing",
+		Description: "Lockless Sender Phase 2: Baseline vs SendPacketBtree + SendRing",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigSendRing),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Compare: Baseline vs Full Sender EventLoop
+	// Expected: Smoother delivery (lower Packets/Iteration ratio)
+	{
+		Name:        "Parallel-Clean-20M-Base-vs-SendEL",
+		Description: "Lockless Sender Phase 4: Baseline vs Full Sender EventLoop",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigSendEL),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Compare: Full Receiver EventLoop vs Full Receiver + Full Sender EventLoop
+	// Expected: Maximum lockless performance
+	{
+		Name:        "Parallel-Clean-20M-FullEL-vs-FullSendEL",
+		Description: "Ultimate: Receiver EventLoop vs Full Lockless (Receiver + Sender EventLoop)",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigFullEventLoop),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullSendEL),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// High throughput test: 50 Mb/s Baseline vs Full Sender EventLoop
+	{
+		Name:        "Parallel-Clean-50M-Base-vs-SendEL",
+		Description: "Lockless Sender: 50 Mb/s Baseline vs Full Sender EventLoop",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigSendEL),
+		},
+		Bitrate:         50_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Extreme throughput test: 100 Mb/s Baseline vs Full Lockless (Receiver + Sender)
+	{
+		Name:        "Parallel-Clean-100M-Base-vs-FullSendEL",
+		Description: "Ultimate: 100 Mb/s Baseline vs Full Lockless (Receiver + Sender EventLoop)",
+		Impairment: NetworkImpairment{
+			Pattern:        "none",
+			LatencyProfile: "none",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullSendEL),
+		},
+		Bitrate:         100_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// Starlink test with Sender EventLoop: Test loss recovery
+	{
+		Name:        "Parallel-Starlink-20M-Base-vs-SendEL",
+		Description: "Lockless Sender: Starlink pattern at 20 Mb/s with Sender EventLoop",
+		Impairment: NetworkImpairment{
+			Pattern:        "starlink",
+			LatencyProfile: "regional",
+			Thresholds:     ptrTo(BurstLossThresholds()),
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigSendEL),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// 5% loss test with Sender EventLoop
+	{
+		Name:        "Parallel-Loss-L5-20M-Base-vs-SendEL",
+		Description: "Lockless Sender: 5% loss at 20 Mb/s with Sender EventLoop",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "regional",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigSendEL),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    90 * time.Second,
+		ConnectionWait:  3 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// GEO satellite with Full Lockless (Receiver + Sender)
+	{
+		Name:        "Parallel-Loss-L5-20M-Base-vs-FullSendEL-GEO",
+		Description: "Ultimate: 5% loss at GEO (300ms RTT) with Full Lockless (Receiver + Sender)",
+		Impairment: NetworkImpairment{
+			LossRate:       0.05,
+			LatencyProfile: "geo-satellite",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullSendEL),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    120 * time.Second,
+		ConnectionWait:  5 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
 }
 
 // GetParallelTestConfigByName finds a parallel test configuration by name
@@ -2656,6 +2952,403 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		TestDuration:  12 * time.Second,
 		Bitrate:       5_000_000,
 		StatsPeriod:   5 * time.Second,
+	},
+
+	// ============================================================================
+	// Lockless Sender Isolation Tests (Phase 5: Sender-Specific Features)
+	// These tests isolate each sender feature independently to identify issues.
+	//
+	// IMPORTANT: Sender features are tested on BOTH CG (publisher) and Server
+	// (forwarder) to identify where issues occur in the data flow:
+	//   CG → Server (publish path)
+	//   Server → Client (subscribe/forward path)
+	// ============================================================================
+
+	// --------------------------------------------------------------------------
+	// Phase 1: SendPacketBtree - O(log n) sender packet storage
+	// Tests btree alone without rings or EventLoop
+	// --------------------------------------------------------------------------
+
+	// Test: CG uses sender btree only
+	{
+		Name:          "Isolation-5M-CG-SendBtree",
+		Description:   "Client-Generator: Sender btree only (O(log n) NAK lookup)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithSendBtree(), // ONLY sender btree
+		TestServer:    ControlSRTConfig,
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Server uses sender btree only
+	{
+		Name:          "Isolation-5M-Server-SendBtree",
+		Description:   "Server: Sender btree only (O(log n) NAK lookup)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithSendBtree(), // ONLY sender btree
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// --------------------------------------------------------------------------
+	// Phase 2: SendPacketRing - Lock-free data ring for Push()
+	// Tests btree + data ring without control ring or EventLoop
+	// --------------------------------------------------------------------------
+
+	// Test: CG uses sender btree + data ring
+	{
+		Name:          "Isolation-5M-CG-SendRing",
+		Description:   "Client-Generator: Sender btree + data ring (lock-free Push())",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithSendBtree().WithSendRing(), // btree + data ring
+		TestServer:    ControlSRTConfig,
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Server uses sender btree + data ring
+	{
+		Name:          "Isolation-5M-Server-SendRing",
+		Description:   "Server: Sender btree + data ring (lock-free Push())",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithSendBtree().WithSendRing(), // btree + data ring
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// --------------------------------------------------------------------------
+	// Phase 3: SendControlRing - Lock-free ACK/NAK routing
+	// Tests btree + data ring + control ring WITHOUT EventLoop (Tick() mode)
+	// --------------------------------------------------------------------------
+
+	// Test: CG uses sender btree + data ring + control ring (NO EventLoop)
+	{
+		Name:          "Isolation-5M-CG-SendControlRing",
+		Description:   "Client-Generator: Sender btree + data ring + control ring (NO EventLoop)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithoutSendEventLoop(),
+		TestServer:    ControlSRTConfig,
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Server uses sender btree + data ring + control ring (NO EventLoop)
+	{
+		Name:          "Isolation-5M-Server-SendControlRing",
+		Description:   "Server: Sender btree + data ring + control ring (NO EventLoop)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithoutSendEventLoop(),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// --------------------------------------------------------------------------
+	// Phase 4: SendEventLoop - Full sender lockless path
+	// Tests complete sender stack with EventLoop
+	// --------------------------------------------------------------------------
+
+	// Test: CG uses full sender EventLoop
+	{
+		Name:          "Isolation-5M-CG-SendEventLoop",
+		Description:   "Client-Generator: Full sender EventLoop (btree + rings + EventLoop)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigSendEL), // Full sender EventLoop
+		TestServer:    ControlSRTConfig,
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Server uses full sender EventLoop
+	{
+		Name:          "Isolation-5M-Server-SendEventLoop",
+		Description:   "Server: Full sender EventLoop (btree + rings + EventLoop)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,
+		TestServer:    GetSRTConfig(ConfigSendEL), // Full sender EventLoop
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Both CG and Server use full sender EventLoop
+	{
+		Name:          "Isolation-5M-Full-SendEventLoop",
+		Description:   "Full sender EventLoop on both CG and Server",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigSendEL),
+		TestServer:    GetSRTConfig(ConfigSendEL),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// --------------------------------------------------------------------------
+	// Combined: Sender EventLoop + Receiver features
+	// Tests interaction between sender and receiver lockless paths
+	// --------------------------------------------------------------------------
+
+	// Test: Sender EventLoop + Receiver io_uring recv
+	{
+		Name:          "Isolation-5M-SendEL-IoUrRecv",
+		Description:   "Sender EventLoop + io_uring recv (test interaction)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigSendEL).WithIoUringRecv(),
+		TestServer:    GetSRTConfig(ConfigSendEL).WithIoUringRecv(),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Sender EventLoop + Receiver Ring
+	{
+		Name:          "Isolation-5M-SendEL-RecvRing",
+		Description:   "Sender EventLoop + Receiver ring (test interaction)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigSendEL).WithPacketRing(),
+		TestServer:    GetSRTConfig(ConfigSendEL).WithPacketRing(),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Sender EventLoop + Full Receiver EventLoop
+	{
+		Name:          "Isolation-5M-SendEL-RecvEL",
+		Description:   "Sender EventLoop + Receiver EventLoop (both lockless)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigSendEL).WithPacketRing().WithEventLoop(),
+		TestServer:    GetSRTConfig(ConfigSendEL).WithPacketRing().WithEventLoop(),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// --------------------------------------------------------------------------
+	// Sender EventLoop backoff tuning tests
+	// --------------------------------------------------------------------------
+
+	// Test: Sender EventLoop with low backoff (lower latency)
+	{
+		Name:          "Isolation-5M-SendEL-LowBackoff",
+		Description:   "Sender EventLoop: Low backoff (5µs-500µs) for lower latency",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(5*time.Microsecond, 500*time.Microsecond, 0.9, 1000000),
+		TestServer:    ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(5*time.Microsecond, 500*time.Microsecond, 0.9, 1000000),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Sender EventLoop with high backoff (CPU efficiency)
+	{
+		Name:          "Isolation-5M-SendEL-HighBackoff",
+		Description:   "Sender EventLoop: High backoff (50µs-5ms) for CPU efficiency",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(50*time.Microsecond, 5*time.Millisecond, 0.9, 1000000),
+		TestServer:    ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(50*time.Microsecond, 5*time.Millisecond, 0.9, 1000000),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// --------------------------------------------------------------------------
+	// Higher bitrate sender tests
+	// --------------------------------------------------------------------------
+
+	// Test: Sender EventLoop at 20 Mb/s
+	{
+		Name:          "Isolation-20M-SendEventLoop",
+		Description:   "20 Mb/s Sender EventLoop stress test",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigSendEL),
+		TestServer:    GetSRTConfig(ConfigSendEL),
+		TestDuration:  30 * time.Second,
+		Bitrate:       20_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Full lockless (sender + receiver) at 20 Mb/s
+	{
+		Name:          "Isolation-20M-FullSendEL",
+		Description:   "20 Mb/s Full Lockless (Sender + Receiver EventLoop)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullSendEL).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullSendEL),
+		TestDuration:  30 * time.Second,
+		Bitrate:       20_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Sender EventLoop at 50 Mb/s
+	{
+		Name:          "Isolation-50M-SendEventLoop",
+		Description:   "50 Mb/s Sender EventLoop stress test",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigSendEL),
+		TestServer:    GetSRTConfig(ConfigSendEL),
+		TestDuration:  60 * time.Second,
+		Bitrate:       50_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Full lockless (sender + receiver) at 50 Mb/s
+	{
+		Name:          "Isolation-50M-FullSendEL",
+		Description:   "50 Mb/s Full Lockless (Sender + Receiver EventLoop)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullSendEL).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullSendEL),
+		TestDuration:  60 * time.Second,
+		Bitrate:       50_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// --------------------------------------------------------------------------
+	// DEBUG: Isolate Server subscriber (forward) path
+	// These tests are designed to identify the clean network bug
+	// --------------------------------------------------------------------------
+
+	// Test: CG-only sender EventLoop (Server uses Tick, verify CG->Server works)
+	{
+		Name:          "Isolation-5M-CGOnly-SendEL",
+		Description:   "DEBUG: Sender EventLoop ONLY on CG (Server uses Tick)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigSendEL), // CG has sender EventLoop
+		TestServer:    ControlSRTConfig,           // Server uses baseline (Tick)
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Server-only sender EventLoop (CG uses Tick, isolate Server forwarding)
+	{
+		Name:          "Isolation-5M-ServerOnly-SendEL",
+		Description:   "DEBUG: Sender EventLoop ONLY on Server (CG uses Tick)",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        ControlSRTConfig,           // CG uses baseline (Tick)
+		TestServer:    GetSRTConfig(ConfigSendEL), // Server has sender EventLoop
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// --------------------------------------------------------------------------
+	// DEBUG: 20M SendEventLoop intermittent failure debugging
+	// This test has been observed to fail intermittently with 97% packet drops
+	// The failure appears to be a startup race condition where the EventLoop
+	// never enters delivery mode and all packets are dropped as "too_old"
+	// --------------------------------------------------------------------------
+
+	// Test: 20M SendEventLoop with verbose output and frequent metrics
+	{
+		Name:           "Isolation-20M-SendEventLoop-Debug",
+		Description:    "DEBUG: 20M SendEventLoop with verbose metrics, short duration for rapid iteration",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         GetSRTConfig(ConfigSendEL).WithLogTopics("sender,sender:eventloop,sender:delivery,sender:ring"),
+		TestServer:     GetSRTConfig(ConfigSendEL).WithLogTopics("sender,sender:eventloop,sender:delivery,sender:ring"),
+		TestDuration:   15 * time.Second, // Short duration for rapid iteration
+		Bitrate:        20_000_000,
+		StatsPeriod:    2 * time.Second, // Frequent stats to catch failures early
+		VerboseMetrics: true,
+	},
+
+	// Test: 20M SendEventLoop with slower backoff (hypothesis: aggressive backoff causes race)
+	{
+		Name:           "Isolation-20M-SendEventLoop-SlowBackoff",
+		Description:    "DEBUG: 20M SendEventLoop with 1ms-10ms backoff (test if aggressive backoff causes race)",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(1*time.Millisecond, 10*time.Millisecond, 0.90, 1000000),
+		TestServer:     ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(1*time.Millisecond, 10*time.Millisecond, 0.90, 1000000),
+		TestDuration:   15 * time.Second,
+		Bitrate:        20_000_000,
+		StatsPeriod:    2 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// Test: 20M SendEventLoop with faster backoff (hypothesis: too-slow backoff causes race)
+	{
+		Name:           "Isolation-20M-SendEventLoop-FastBackoff",
+		Description:    "DEBUG: 20M SendEventLoop with 10µs-100µs backoff (test if too-slow backoff causes race)",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(10*time.Microsecond, 100*time.Microsecond, 0.90, 1000000),
+		TestServer:     ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(10*time.Microsecond, 100*time.Microsecond, 0.90, 1000000),
+		TestDuration:   15 * time.Second,
+		Bitrate:        20_000_000,
+		StatsPeriod:    2 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// Test: 20M SendEventLoop with no TSBPD sleep (hypothesis: TSBPD sleep causes race)
+	{
+		Name:           "Isolation-20M-SendEventLoop-NoTSBPD",
+		Description:    "DEBUG: 20M SendEventLoop with TSBPD factor 0 (deliver immediately, no TSBPD sleep)",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(100*time.Microsecond, 1*time.Millisecond, 0.0, 1000000),
+		TestServer:     ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoopCustom(100*time.Microsecond, 1*time.Millisecond, 0.0, 1000000),
+		TestDuration:   15 * time.Second,
+		Bitrate:        20_000_000,
+		StatsPeriod:    2 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// ========================================================================
+	// FULL SEND EVENTLOOP DEBUG TEST
+	// ========================================================================
+	// This test enables both receiver EventLoop and sender EventLoop with
+	// verbose logging for debugging the intermittent NAK/drop issue.
+	//
+	// Log topics enabled:
+	// - sender:eventloop:drain      - packet drain from ring to btree
+	// - sender:eventloop:drain:gap  - sequence gap detection
+	// - sender:eventloop:delivery   - delivery attempt start/packet/notready
+	// - sender:eventloop:drop       - packet drops (too old)
+	// ========================================================================
+
+	{
+		Name:           "Isolation-20M-FullSendEL-Debug",
+		Description:    "DEBUG: 20M FullSendEL with verbose sender EventLoop logging for drop/NAK investigation",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         GetSRTConfig(ConfigFullSendEL).WithLogTopics("sender:eventloop:drain,sender:eventloop:delivery,sender:eventloop:drop"),
+		TestServer:     GetSRTConfig(ConfigFullSendEL).WithLogTopics("sender:eventloop:drain,sender:eventloop:delivery,sender:eventloop:drop"),
+		TestDuration:   15 * time.Second, // Short duration for rapid iteration
+		Bitrate:        20_000_000,
+		StatsPeriod:    2 * time.Second, // Frequent stats to catch failures early
+		VerboseMetrics: true,
 	},
 }
 

@@ -12,9 +12,9 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/randomizedcoder/giouring"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
-	"github.com/randomizedcoder/giouring"
 )
 
 // ioUringWaitTimeout is the timeout for WaitCQETimeout when waiting for completions.
@@ -167,6 +167,17 @@ func (c *srtConn) cleanupIoUring() {
 
 // sendIoUring implements the Linux-specific io_uring send path
 func (c *srtConn) sendIoUring(p packet.Packet) {
+	// Check if connection is shutting down (context cancelled)
+	// This prevents accessing the io_uring ring after it's been closed
+	select {
+	case <-c.ctx.Done():
+		// Connection shutting down - don't try to send
+		p.Decommission()
+		return
+	default:
+		// Not shutting down - proceed
+	}
+
 	// Type assert to *giouring.Ring (only available on Linux)
 	// Note: If sendRing is nil (set by cleanupIoUring after QueueExit),
 	// this type assertion will fail and we'll handle gracefully below

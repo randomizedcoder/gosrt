@@ -8,12 +8,27 @@ import (
 	"github.com/randomizedcoder/gosrt/packet"
 )
 
-// NAK processes a NAK request and returns the number of packets retransmitted
+// NAK is the public API for receiving NAKs.
+// Routes through control ring (if enabled) for EventLoop processing,
+// otherwise processes directly with locking.
+// Returns the number of packets retransmitted (0 if routed to ring).
 func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 	if len(sequenceNumbers) == 0 {
 		return 0
 	}
 
+	// Phase 3: Route through control ring for EventLoop processing
+	if s.useControlRing {
+		if s.controlRing.PushNAK(sequenceNumbers) {
+			s.metrics.SendControlRingPushedNAK.Add(1)
+			return 0 // Actual count tracked when EventLoop processes
+		}
+		// Ring full - fallback to direct processing with lock
+		s.metrics.SendControlRingDroppedNAK.Add(1)
+		// Fall through to locked path
+	}
+
+	// Legacy path with locking
 	if s.lockTiming != nil {
 		var result uint64
 		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {
@@ -26,12 +41,94 @@ func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 	return s.nakLocked(sequenceNumbers)
 }
 
-// nakLocked dispatches to the original or honor-order implementation.
+// nakLocked dispatches to btree or list implementation based on config.
 func (s *sender) nakLocked(sequenceNumbers []circular.Number) uint64 {
+	if s.useBtree {
+		return s.nakBtree(sequenceNumbers)
+	}
+	// Legacy list mode
 	if s.honorNakOrder {
 		return s.nakLockedHonorOrder(sequenceNumbers)
 	}
 	return s.nakLockedOriginal(sequenceNumbers)
+}
+
+// nakBtree processes NAK using O(log n) btree lookup (Phase 1: Btree mode)
+// Reference: lockless_sender_implementation_plan.md Step 1.10
+func (s *sender) nakBtree(sequenceNumbers []circular.Number) uint64 {
+	m := s.metrics
+
+	// Defensive check: NAK should not request sequences we already ACK'd
+	s.checkNakBeforeACK(sequenceNumbers)
+
+	// Count packets requested by this NAK
+	totalLossCount := metrics.CountNAKEntries(m, sequenceNumbers, metrics.NAKCounterRecv)
+	totalLossBytes := totalLossCount * uint64(s.avgPayloadSize)
+
+	m.CongestionSendPktLoss.Add(totalLossCount)
+	m.CongestionSendByteLoss.Add(totalLossBytes)
+
+	// Pre-fetch RTO values once (avoid repeated syscalls/atomics in loop)
+	nowUs := uint64(time.Now().UnixMicro())
+	var oneWayThreshold uint64
+	if s.rtoUs != nil {
+		oneWayThreshold = s.rtoUs.Load() / 2
+	}
+
+	retransCount := uint64(0)
+
+	// Process each range in NAK
+	for i := 0; i < len(sequenceNumbers); i += 2 {
+		startSeq := sequenceNumbers[i].Val()
+		endSeq := sequenceNumbers[i+1].Val()
+
+		// O(log n) lookup for each sequence in range
+		for seq := startSeq; circular.SeqLessOrEqual(seq, endSeq); seq = circular.SeqAdd(seq, 1) {
+			p := s.packetBtree.Get(seq)
+			if p == nil {
+				// Packet not found (already ACK'd and removed, or dropped)
+				continue
+			}
+
+			h := p.Header()
+
+			// RTO suppression check
+			if h.LastRetransmitTimeUs > 0 && oneWayThreshold > 0 {
+				if nowUs-h.LastRetransmitTimeUs < oneWayThreshold {
+					m.RetransSuppressed.Add(1)
+					continue
+				}
+			}
+
+			// Retransmit
+			h.LastRetransmitTimeUs = nowUs
+			h.RetransmitCount++
+			if h.RetransmitCount == 1 {
+				m.RetransFirstTime.Add(1)
+			}
+			m.RetransAllowed.Add(1)
+
+			pktLen := p.Len()
+			m.CongestionSendPktRetrans.Add(1)
+			m.CongestionSendPkt.Add(1)
+			m.CongestionSendByteRetrans.Add(uint64(pktLen))
+			m.CongestionSendByte.Add(uint64(pktLen))
+
+			s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
+			m.SendRateBytesSent.Add(pktLen)
+			m.SendRateBytesRetrans.Add(pktLen)
+
+			h.RetransmittedPacketFlag = true
+			s.deliver(p)
+			retransCount++
+		}
+	}
+
+	if retransCount < totalLossCount {
+		m.CongestionSendNAKNotFound.Add(totalLossCount - retransCount)
+	}
+
+	return retransCount
 }
 
 // isNakBeforeACK checks if a NAK sequence number is before the last ACK'd sequence.

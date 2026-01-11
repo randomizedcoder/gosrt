@@ -17,6 +17,12 @@ import (
 )
 
 func (r *receiver) Tick(now uint64) {
+	// Step 7.5.2: Runtime Verification (Debug Mode)
+	// Track that we're in Tick context - panics if EventLoop is active.
+	// No-op in release builds.
+	r.EnterTick()
+	defer r.ExitTick()
+
 	// Phase 3/4: Drain ring buffer before processing (if enabled)
 	// Uses delta-based drain for precise control: received - processed = in ring
 	// This transfers packets from lock-free ring into btree for ordered processing.
@@ -140,6 +146,12 @@ func (r *receiver) EventLoop(ctx context.Context) {
 	if r.packetRing == nil {
 		return // Ring not initialized (should not happen if config validated)
 	}
+
+	// Step 7.5.2: Runtime Verification (Debug Mode)
+	// Track that we're in EventLoop context - panics if Tick is active.
+	// No-op in release builds.
+	r.EnterEventLoop()
+	defer r.ExitEventLoop()
 
 	// Create backoff manager
 	backoff := newAdaptiveBackoff(
@@ -333,6 +345,9 @@ func (r *receiver) EventLoop(ctx context.Context) {
 // Returns true if a packet was processed (or rejected as duplicate).
 // Called by EventLoop's default case for continuous processing.
 func (r *receiver) processOnePacket() bool {
+	// Step 7.5.2: Assert EventLoop context (no-op in release builds)
+	r.AssertEventLoopContext()
+
 	if r.packetRing == nil {
 		return false
 	}
@@ -398,10 +413,14 @@ func (r *receiver) processOnePacket() bool {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // deliverReadyPacketsWithTime delivers all packets whose TSBPD time <= now.
-// This is the core function - no locking.
+// This is the core function - no locking inside.
 // Called every EventLoop/Tick iteration for smooth, non-bursty delivery.
 // Returns the count of packets delivered.
-// NO LOCK needed when event loop has exclusive access to btree.
+//
+// Context: This is a SHARED function called from both:
+//   - EventLoop: via deliverReadyPackets() - no lock needed (single-threaded btree access)
+//   - Tick: via deliverReadyPacketsLocked() - lock acquired by caller
+// No context assertion here because this function works correctly in either mode.
 func (r *receiver) deliverReadyPacketsWithTime(now uint64) int {
 	m := r.metrics
 	delivered := 0

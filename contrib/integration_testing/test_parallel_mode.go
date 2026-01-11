@@ -99,6 +99,26 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 		return result
 	}
 
+	// Start packet captures if configured via environment variables
+	tcpdumpConfig := GetTcpdumpConfigFromEnv()
+	if tcpdumpConfig.HasAnyCapture() {
+		fmt.Println("Starting packet captures (TCPDUMP_* enabled)...")
+		if err := nc.StartTcpdumpFromConfig(ctx, tcpdumpConfig); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: tcpdump start failed: %v\n", err)
+		} else {
+			if tcpdumpConfig.PublisherFile != "" {
+				fmt.Printf("  Publisher (CG): %s\n", tcpdumpConfig.PublisherFile)
+			}
+			if tcpdumpConfig.ServerFile != "" {
+				fmt.Printf("  Server: %s\n", tcpdumpConfig.ServerFile)
+			}
+			if tcpdumpConfig.SubscriberFile != "" {
+				fmt.Printf("  Subscriber (Client): %s\n", tcpdumpConfig.SubscriberFile)
+			}
+		}
+		fmt.Println()
+	}
+
 	// Print network status
 	fmt.Println("\nNetwork Topology (Parallel Mode):")
 	fmt.Printf("  Baseline Pipeline:\n")

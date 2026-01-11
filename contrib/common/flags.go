@@ -89,6 +89,30 @@ var (
 	// Sender retransmission configuration flags
 	HonorNakOrder = flag.Bool("honornakorder", false, "Retransmit packets in NAK packet order (oldest first)")
 
+	// Sender lockless configuration flags (Phase 1: Lockless Sender)
+	UseSendBtree    = flag.Bool("usesendbtree", false, "Enable btree for sender packet storage (O(log n) NAK lookup)")
+	SendBtreeDegree = flag.Int("sendbtreesize", 32, "B-tree degree for sender (default: 32)")
+
+	// Sender lock-free ring configuration flags (Phase 2: Lockless Sender)
+	UseSendRing    = flag.Bool("usesendring", false, "Enable lock-free ring for sender Push() (requires -usesendbtree)")
+	SendRingSize   = flag.Int("sendringsize", 1024, "Sender ring size per shard (default: 1024)")
+	SendRingShards = flag.Int("sendringshards", 1, "Sender ring shards (1=strict ordering, >1=high throughput)")
+
+	// Sender control ring configuration flags (Phase 3: Lockless Sender)
+	UseSendControlRing    = flag.Bool("usesendcontrolring", false, "Enable lock-free ring for ACK/NAK (requires -usesendring)")
+	SendControlRingSize   = flag.Int("sendcontrolringsize", 256, "Sender control ring size per shard (default: 256)")
+	SendControlRingShards = flag.Int("sendcontrolringshards", 2, "Sender control ring shards (default: 2)")
+
+	// Sender EventLoop configuration flags (Phase 4: Lockless Sender)
+	UseSendEventLoop             = flag.Bool("usesendeventloop", false, "Enable sender EventLoop (requires -usesendcontrolring)")
+	SendEventLoopBackoffMinSleep = flag.Duration("sendeventloopbackoffminsleep", 100*time.Microsecond, "Sender EventLoop minimum sleep (default: 100µs)")
+	SendEventLoopBackoffMaxSleep = flag.Duration("sendeventloopbackoffmaxsleep", 1*time.Millisecond, "Sender EventLoop maximum sleep (default: 1ms)")
+	SendTsbpdSleepFactor         = flag.Float64("sendtsbpdsleepfactor", 0.9, "Sender TSBPD sleep factor (default: 0.9)")
+	SendDropThresholdUs          = flag.Uint64("senddropthresholdus", 0, "Sender drop threshold in microseconds (0 = auto-calculated from 1.25 * peerTsbpdDelay)")
+
+	// Zero-copy payload pool flags (Phase 5: Lockless Sender)
+	ValidateSendPayloadSize = flag.Bool("validatesendpayloadsize", false, "Validate payload size in Push() (rejects > 1316 bytes)")
+
 	// RTO-based suppression configuration flags (Phase 6: RTO Suppression)
 	RTOMode = flag.String("rtomode", "",
 		"RTO calculation mode: 'rtt_rttvar' (RTT+RTTVar, default), "+
@@ -375,6 +399,58 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	// Sender flags
 	if FlagSet["honornakorder"] {
 		config.HonorNakOrder = *HonorNakOrder
+	}
+
+	// Sender lockless flags (Phase 1: Lockless Sender)
+	if FlagSet["usesendbtree"] {
+		config.UseSendBtree = *UseSendBtree
+	}
+	if FlagSet["sendbtreesize"] {
+		config.SendBtreeDegree = *SendBtreeDegree
+	}
+
+	// Sender lock-free ring flags (Phase 2: Lockless Sender)
+	if FlagSet["usesendring"] {
+		config.UseSendRing = *UseSendRing
+	}
+	if FlagSet["sendringsize"] {
+		config.SendRingSize = *SendRingSize
+	}
+	if FlagSet["sendringshards"] {
+		config.SendRingShards = *SendRingShards
+	}
+
+	// Sender control ring flags (Phase 3: Lockless Sender)
+	if FlagSet["usesendcontrolring"] {
+		config.UseSendControlRing = *UseSendControlRing
+	}
+	if FlagSet["sendcontrolringsize"] {
+		config.SendControlRingSize = *SendControlRingSize
+	}
+	if FlagSet["sendcontrolringshards"] {
+		config.SendControlRingShards = *SendControlRingShards
+	}
+
+	// Sender EventLoop flags (Phase 4: Lockless Sender)
+	if FlagSet["usesendeventloop"] {
+		config.UseSendEventLoop = *UseSendEventLoop
+	}
+	if FlagSet["sendeventloopbackoffminsleep"] {
+		config.SendEventLoopBackoffMinSleep = *SendEventLoopBackoffMinSleep
+	}
+	if FlagSet["sendeventloopbackoffmaxsleep"] {
+		config.SendEventLoopBackoffMaxSleep = *SendEventLoopBackoffMaxSleep
+	}
+	if FlagSet["sendtsbpdsleepfactor"] {
+		config.SendTsbpdSleepFactor = *SendTsbpdSleepFactor
+	}
+	if FlagSet["senddropthresholdus"] {
+		config.SendDropThresholdUs = *SendDropThresholdUs
+	}
+
+	// Zero-copy payload pool flags (Phase 5: Lockless Sender)
+	if *ValidateSendPayloadSize {
+		config.ValidateSendPayloadSize = true
 	}
 
 	// RTO suppression flags (Phase 6: RTO Suppression)

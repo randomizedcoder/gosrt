@@ -1022,6 +1022,37 @@ func TestPrometheusOutputSize(t *testing.T) {
 	}
 }
 
+// TestPrometheusSenderTickBaselineMetrics verifies sender Tick baseline metrics are exported
+// These metrics enable burst detection comparison (Packets/Iteration ratio)
+func TestPrometheusSenderTickBaselineMetrics(t *testing.T) {
+	socketId := uint32(0xB0851001)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set baseline Tick metrics - typical values for burst detection
+	m.SendTickRuns.Store(900)                // ~900 ticks in a 90s test (100ms interval)
+	m.SendTickDeliveredPackets.Store(135000) // 135k packets delivered
+
+	output := getPrometheusOutput(t)
+
+	// Verify baseline Tick metrics are present
+	require.Contains(t, output,
+		`gosrt_send_tick_runs_total{socket_id="0xb0851001",instance="default"} 900`,
+		"Send Tick runs should be exported")
+	require.Contains(t, output,
+		`gosrt_send_tick_delivered_packets_total{socket_id="0xb0851001",instance="default"} 135000`,
+		"Send Tick delivered packets should be exported")
+
+	// Verify burst ratio calculation would work:
+	// Packets/Iteration = 135000 / 900 = 150 (bursty - typical for Tick mode)
+	tickRuns := m.SendTickRuns.Load()
+	deliveredPackets := m.SendTickDeliveredPackets.Load()
+	packetsPerIteration := float64(deliveredPackets) / float64(tickRuns)
+	require.InDelta(t, 150.0, packetsPerIteration, 0.1,
+		"Packets/Iteration ratio should be ~150 for baseline Tick mode")
+}
+
 // ==================== Benchmarks ====================
 
 // BenchmarkPrometheusHandlerNoConnections benchmarks handler with only runtime metrics

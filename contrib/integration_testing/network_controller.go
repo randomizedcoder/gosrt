@@ -50,6 +50,27 @@ type NetworkController struct {
 
 	// Verbose enables detailed logging of pattern events and script execution
 	Verbose bool
+
+	// tcpdumpProcesses tracks active tcpdump processes for cleanup
+	tcpdumpProcesses map[string]*exec.Cmd
+}
+
+// TcpdumpConfig specifies which packet captures to run
+type TcpdumpConfig struct {
+	// PublisherFile captures packets in the publisher namespace (client-generator)
+	PublisherFile string
+
+	// ServerFile captures packets in the server namespace
+	ServerFile string
+
+	// SubscriberFile captures packets in the subscriber namespace (client)
+	SubscriberFile string
+
+	// RouterClientFile captures packets at the client-side router
+	RouterClientFile string
+
+	// RouterServerFile captures packets at the server-side router
+	RouterServerFile string
 }
 
 // NetworkControllerConfig holds configuration for creating a NetworkController
@@ -164,6 +185,9 @@ func (nc *NetworkController) Setup(ctx context.Context) error {
 func (nc *NetworkController) Cleanup(ctx context.Context) error {
 	nc.mu.Lock()
 	defer nc.mu.Unlock()
+
+	// Stop all tcpdump captures first
+	nc.stopAllTcpdumpsLocked()
 
 	// Stop any running patterns
 	if nc.patternCancel != nil {
@@ -872,4 +896,190 @@ func (nc *NetworkController) runScriptWithOutput(ctx context.Context, script str
 	cmd.Env = nc.buildScriptEnv()
 
 	return cmd.CombinedOutput()
+}
+
+// ============================================================================
+// TCPDUMP PACKET CAPTURE
+// ============================================================================
+// These methods enable packet capture in network namespaces for debugging.
+// Captures are automatically stopped during Cleanup().
+
+// StartTcpdump starts tcpdump in the specified namespace, capturing to the given file.
+// The interface is auto-detected as eth0 (the main interface in endpoint namespaces).
+// Returns an error if tcpdump fails to start.
+func (nc *NetworkController) StartTcpdump(ctx context.Context, namespace, outputFile string) error {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	if !nc.isSetup {
+		return fmt.Errorf("network not setup")
+	}
+
+	if nc.tcpdumpProcesses == nil {
+		nc.tcpdumpProcesses = make(map[string]*exec.Cmd)
+	}
+
+	// Stop any existing capture for this namespace
+	if existing, ok := nc.tcpdumpProcesses[namespace]; ok {
+		_ = existing.Process.Kill()
+		_ = existing.Wait()
+		delete(nc.tcpdumpProcesses, namespace)
+	}
+
+	// Determine the interface name based on namespace type
+	var iface string
+	switch namespace {
+	case nc.NamespacePublisher, nc.NamespaceSubscriber, nc.NamespaceServer:
+		iface = "eth0" // Endpoint namespaces use eth0
+	case nc.NamespaceRouterClient:
+		iface = "any" // Capture all interfaces on router
+	case nc.NamespaceRouterServer:
+		iface = "any" // Capture all interfaces on router
+	default:
+		iface = "eth0" // Default
+	}
+
+	// Build tcpdump command: tcpdump -ni <iface> -s 0 -w <file>
+	// -n: don't resolve hostnames
+	// -i: interface
+	// -s 0: capture full packets (no truncation)
+	// -w: write to file
+	cmdArgs := []string{
+		"netns", "exec", namespace,
+		"tcpdump", "-ni", iface, "-s", "0", "-w", outputFile,
+	}
+	cmd := exec.CommandContext(ctx, "ip", cmdArgs...)
+	cmd.Env = os.Environ()
+
+	// Start tcpdump in background
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start tcpdump in %s: %w", namespace, err)
+	}
+
+	nc.tcpdumpProcesses[namespace] = cmd
+
+	if nc.Verbose {
+		fmt.Printf("[TCPDUMP] Started capture in %s on %s -> %s (PID %d)\n",
+			namespace, iface, outputFile, cmd.Process.Pid)
+	}
+
+	return nil
+}
+
+// StartTcpdumpFromConfig starts packet captures based on the TcpdumpConfig.
+// Only files that are non-empty will be captured.
+func (nc *NetworkController) StartTcpdumpFromConfig(ctx context.Context, config TcpdumpConfig) error {
+	var errs []string
+
+	if config.PublisherFile != "" {
+		if err := nc.StartTcpdump(ctx, nc.NamespacePublisher, config.PublisherFile); err != nil {
+			errs = append(errs, fmt.Sprintf("publisher: %v", err))
+		}
+	}
+
+	if config.ServerFile != "" {
+		if err := nc.StartTcpdump(ctx, nc.NamespaceServer, config.ServerFile); err != nil {
+			errs = append(errs, fmt.Sprintf("server: %v", err))
+		}
+	}
+
+	if config.SubscriberFile != "" {
+		if err := nc.StartTcpdump(ctx, nc.NamespaceSubscriber, config.SubscriberFile); err != nil {
+			errs = append(errs, fmt.Sprintf("subscriber: %v", err))
+		}
+	}
+
+	if config.RouterClientFile != "" {
+		if err := nc.StartTcpdump(ctx, nc.NamespaceRouterClient, config.RouterClientFile); err != nil {
+			errs = append(errs, fmt.Sprintf("router_client: %v", err))
+		}
+	}
+
+	if config.RouterServerFile != "" {
+		if err := nc.StartTcpdump(ctx, nc.NamespaceRouterServer, config.RouterServerFile); err != nil {
+			errs = append(errs, fmt.Sprintf("router_server: %v", err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("tcpdump errors: %s", strings.Join(errs, "; "))
+	}
+
+	return nil
+}
+
+// StopAllTcpdumps gracefully stops all running tcpdump processes.
+// This can be called manually or is automatically called by Cleanup().
+func (nc *NetworkController) StopAllTcpdumps() {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+	nc.stopAllTcpdumpsLocked()
+}
+
+// stopAllTcpdumpsLocked is the internal implementation (assumes lock is held)
+func (nc *NetworkController) stopAllTcpdumpsLocked() {
+	if nc.tcpdumpProcesses == nil {
+		return
+	}
+
+	for namespace, cmd := range nc.tcpdumpProcesses {
+		if cmd.Process != nil {
+			if nc.Verbose {
+				fmt.Printf("[TCPDUMP] Stopping capture in %s (PID %d)\n",
+					namespace, cmd.Process.Pid)
+			}
+			// Send SIGINT for graceful shutdown (tcpdump writes final packets)
+			_ = cmd.Process.Signal(os.Interrupt)
+
+			// Wait with timeout
+			done := make(chan error, 1)
+			go func(c *exec.Cmd) {
+				done <- c.Wait()
+			}(cmd)
+
+			select {
+			case <-done:
+				// Exited cleanly
+			case <-time.After(2 * time.Second):
+				// Force kill if didn't exit
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		}
+	}
+
+	nc.tcpdumpProcesses = nil
+}
+
+// GetTcpdumpConfigFromEnv reads TCPDUMP_* environment variables and returns a TcpdumpConfig.
+// Environment variables:
+//   - TCPDUMP_CG or TCPDUMP_PUBLISHER: Capture at publisher/client-generator
+//   - TCPDUMP_SERVER or TCPDUMP_S: Capture at server
+//   - TCPDUMP_CLIENT or TCPDUMP_SUBSCRIBER: Capture at subscriber/client
+//   - TCPDUMP_ROUTER_CLIENT: Capture at client-side router
+//   - TCPDUMP_ROUTER_SERVER: Capture at server-side router
+func GetTcpdumpConfigFromEnv() TcpdumpConfig {
+	return TcpdumpConfig{
+		PublisherFile:    firstNonEmpty(os.Getenv("TCPDUMP_CG"), os.Getenv("TCPDUMP_PUBLISHER")),
+		ServerFile:       firstNonEmpty(os.Getenv("TCPDUMP_SERVER"), os.Getenv("TCPDUMP_S")),
+		SubscriberFile:   firstNonEmpty(os.Getenv("TCPDUMP_CLIENT"), os.Getenv("TCPDUMP_SUBSCRIBER"), os.Getenv("TCPDUMP_C")),
+		RouterClientFile: os.Getenv("TCPDUMP_ROUTER_CLIENT"),
+		RouterServerFile: os.Getenv("TCPDUMP_ROUTER_SERVER"),
+	}
+}
+
+// HasAnyCapture returns true if any capture file is configured
+func (tc TcpdumpConfig) HasAnyCapture() bool {
+	return tc.PublisherFile != "" || tc.ServerFile != "" || tc.SubscriberFile != "" ||
+		tc.RouterClientFile != "" || tc.RouterServerFile != ""
+}
+
+// firstNonEmpty returns the first non-empty string from the arguments
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

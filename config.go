@@ -357,6 +357,90 @@ type Config struct {
 	// Default: 0.10 (10%)
 	ExtraRTTMargin float64
 
+	// --- Sender Lockless Configuration (Phase 1: Lockless Sender) ---
+
+	// UseSendBtree enables btree for sender packet storage.
+	// When enabled, replaces linked lists with O(log n) btree operations.
+	// Provides faster NAK lookup and ACK processing.
+	// Default: false (use linked lists)
+	UseSendBtree bool
+
+	// SendBtreeDegree is the B-tree degree for sender packet storage.
+	// Higher values use more memory but may reduce tree height.
+	// Default: 32 (same as receiver btree)
+	SendBtreeDegree int
+
+	// --- Sender Lock-Free Ring Configuration (Phase 2: Lockless Sender) ---
+
+	// UseSendRing enables lock-free ring for sender Push() operations.
+	// When enabled, Push() writes to ring (lock-free), Tick()/EventLoop drains to btree.
+	// REQUIRES: UseSendBtree=true
+	// Default: false
+	UseSendRing bool
+
+	// SendRingSize is the ring capacity per shard.
+	// Will be rounded to power of 2 by the ring library.
+	// Default: 1024
+	SendRingSize int
+
+	// SendRingShards is the number of ring shards.
+	// - 1 shard: strict FIFO ordering (default, suitable for single producer)
+	// - N shards: higher throughput with multiple producers (btree sorts by seq#)
+	// Default: 1 (preserves strict ordering)
+	SendRingShards int
+
+	// --- Sender Control Packet Ring Configuration (Phase 3: Lockless Sender) ---
+
+	// UseSendControlRing enables lock-free ring for ACK/NAK routing.
+	// When enabled, control packets are queued to EventLoop via ring.
+	// CRITICAL: Required for lock-free sender EventLoop.
+	// REQUIRES: UseSendRing=true
+	// Default: false
+	UseSendControlRing bool
+
+	// SendControlRingSize is the control ring capacity per shard.
+	// Will be rounded to power of 2 by the ring library.
+	// Default: 256
+	SendControlRingSize int
+
+	// SendControlRingShards is the number of control ring shards.
+	// Default: 2 (one for ACK, one for NAK)
+	SendControlRingShards int
+
+	// --- Sender EventLoop Configuration (Phase 4: Lockless Sender) ---
+
+	// UseSendEventLoop enables continuous event loop for sender.
+	// When enabled, replaces Tick() with continuous EventLoop.
+	// REQUIRES: UseSendBtree, UseSendRing, UseSendControlRing all enabled.
+	// Default: false
+	UseSendEventLoop bool
+
+	// SendEventLoopBackoffMinSleep is minimum sleep during idle periods.
+	// Default: 100µs
+	SendEventLoopBackoffMinSleep time.Duration
+
+	// SendEventLoopBackoffMaxSleep is maximum sleep during idle periods.
+	// Default: 1ms
+	SendEventLoopBackoffMaxSleep time.Duration
+
+	// SendTsbpdSleepFactor is the multiplier for TSBPD-aware sleep.
+	// Sleep = nextDeliveryIn * SendTsbpdSleepFactor
+	// Default: 0.9 (wake up slightly before next packet is due)
+	SendTsbpdSleepFactor float64
+
+	// SendDropThresholdUs is the threshold for dropping old packets (microseconds).
+	// Packets older than this are dropped.
+	// Default: 1000000 (1 second)
+	SendDropThresholdUs uint64
+
+	// --- Zero-Copy Payload Pool Configuration (Phase 5: Lockless Sender) ---
+
+	// ValidateSendPayloadSize enables payload size validation in Push().
+	// When enabled, payloads exceeding MaxPayloadSize (1316 bytes) are rejected.
+	// This prevents buffer overflows when using pooled buffers.
+	// Default: false (no validation for backward compatibility)
+	ValidateSendPayloadSize bool
+
 	// --- Testing Configuration ---
 
 	// SendFilter is an optional function called before each packet is sent.
@@ -538,6 +622,30 @@ var defaultConfig Config = Config{
 	// RTO-based suppression defaults (Phase 6)
 	RTOMode:        RTORttRttVar, // RTT + RTTVar (balanced)
 	ExtraRTTMargin: 0.10,         // 10% extra margin (only for RTORttRttVarMargin mode)
+
+	// Sender lockless defaults (Phase 1: Lockless Sender)
+	UseSendBtree:    false, // Legacy linked lists by default
+	SendBtreeDegree: 32,    // Same as receiver btree
+
+	// Sender lock-free ring defaults (Phase 2: Lockless Sender)
+	UseSendRing:    false, // Legacy path by default
+	SendRingSize:   1024,  // Per-shard capacity
+	SendRingShards: 1,     // Single shard for strict ordering
+
+	// Sender control ring defaults (Phase 3: Lockless Sender)
+	UseSendControlRing:    false, // Legacy path by default
+	SendControlRingSize:   256,   // Per-shard capacity
+	SendControlRingShards: 2,     // 2 shards (ACK/NAK separation)
+
+	// Sender EventLoop defaults (Phase 4: Lockless Sender)
+	UseSendEventLoop:             false,                  // Legacy Tick() by default
+	SendEventLoopBackoffMinSleep: 100 * time.Microsecond, // 100µs minimum sleep
+	SendEventLoopBackoffMaxSleep: 1 * time.Millisecond,   // 1ms maximum sleep
+	SendTsbpdSleepFactor:         0.9,                    // Wake up at 90% of next TSBPD
+	SendDropThresholdUs:          0,                      // 0 = use auto-calculated (1.25 * peerTsbpdDelay)
+
+	// Zero-copy payload pool defaults (Phase 5: Lockless Sender)
+	ValidateSendPayloadSize: false, // No validation by default (backward compat)
 
 	// Lock-free ring buffer defaults (Phase 3)
 	UsePacketRing:             false,                  // Legacy path by default

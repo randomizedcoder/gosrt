@@ -1,0 +1,373 @@
+# Mutual Exclusion Groups for GoSRT Metrics Audit
+#
+# This file defines which code paths are mutually exclusive, meaning only ONE
+# of them runs per connection/packet. Multiple increment locations within
+# mutually exclusive groups are NOT double-counting bugs.
+#
+# Format:
+#   groups:
+#     group_name:
+#       description: "What this group represents"
+#       files: [list of files that belong to this group]
+#       functions: [list of function names that belong to this group]
+#
+#   mutual_exclusion:
+#     - [group_a, group_b]  # group_a and group_b never run together
+#
+#   separate_programs:
+#     - "path/prefix"  # These are separate executables, not the main library
+
+groups:
+  # ============================================================================
+  # SENDER MODE GROUPS
+  # A sender connection runs in EITHER EventLoop mode OR Tick mode, never both
+  # ============================================================================
+
+  sender_eventloop:
+    description: "Sender EventLoop mode - continuous lock-free processing"
+    files:
+      - "congestion/live/send/eventloop.go"
+    functions:
+      - "EventLoop"
+      - "drainRingToBtreeEventLoop"
+      - "deliverReadyPacketsEventLoop"
+      - "dropOldPacketsEventLoop"
+      - "processControlPacketsDelta"
+
+  sender_tick:
+    description: "Sender Tick mode - periodic batch processing with locks"
+    files:
+      - "congestion/live/send/tick.go"
+    functions:
+      - "Tick"
+      - "tickDeliverPackets"
+      - "tickDropOldPackets"
+      - "tickUpdateRateStats"
+      - "drainRingToBtree"
+      - "processControlRing"
+
+  # ============================================================================
+  # SENDER DATA STRUCTURE GROUPS
+  # A sender uses EITHER Btree OR List for packet storage, never both
+  # ============================================================================
+
+  sender_btree:
+    description: "Btree-based packet storage (Phase 1: Lockless Sender)"
+    functions:
+      - "tickDeliverPacketsBtree"
+      - "tickDropOldPacketsBtree"
+      - "pushBtree"
+
+  sender_list:
+    description: "Legacy linked-list packet storage"
+    functions:
+      - "tickDeliverPacketsList"
+      - "tickDropOldPacketsList"
+      - "pushList"
+
+  # ============================================================================
+  # SENDER PUSH MODE GROUPS
+  # Push uses EITHER ring buffer OR direct btree/list, never both
+  # ============================================================================
+
+  sender_push_ring:
+    description: "Push via lock-free ring buffer (Phase 2: Lockless Sender)"
+    functions:
+      - "pushRing"
+
+  sender_push_direct:
+    description: "Push directly to btree/list (legacy)"
+    functions:
+      - "pushDirect"
+      - "pushBtree"
+      - "pushList"
+
+  # ============================================================================
+  # RECEIVER MODE GROUPS
+  # A receiver runs in EITHER EventLoop mode OR Tick mode, never both
+  # ============================================================================
+
+  receiver_eventloop:
+    description: "Receiver EventLoop mode - continuous lock-free processing"
+    files:
+      - "congestion/live/receive/ring.go"
+    functions:
+      - "processOnePacket"
+      # Note: drainRingToBtree removed - same name exists in sender, causes misclassification
+      # The file-based matching handles receiver EventLoop correctly
+
+  receiver_tick:
+    description: "Receiver Tick mode - periodic batch processing"
+    files:
+      - "congestion/live/receive/tick.go"
+    functions:
+      - "Tick"
+      - "periodicACK"
+      - "periodicNAK"
+      - "deliverReadyPacketsWithTime"
+
+  # ============================================================================
+  # RECEIVER PUSH MODE GROUPS
+  # ============================================================================
+
+  receiver_push_ring:
+    description: "Receiver push via ring buffer"
+    functions:
+      - "PushRing"
+
+  receiver_push_direct:
+    description: "Receiver push directly to btree"
+    functions:
+      - "Push"
+      - "pushDirect"
+
+  # ============================================================================
+  # NAK HANDLING GROUPS
+  # Each NAK packet is processed by exactly ONE handler type
+  # ============================================================================
+
+  nak_single:
+    description: "Single sequence NAK handling"
+    functions:
+      - "handleSingleNAK"
+      - "processSingleNAK"
+
+  nak_range:
+    description: "Range NAK handling (sequence range)"
+    functions:
+      - "handleRangeNAK"
+      - "processRangeNAK"
+
+  nak_btree:
+    description: "NAK handling with btree lookup (Phase 1)"
+    functions:
+      - "handleNAKBtree"
+      - "processNAKBtree"
+
+  # ============================================================================
+  # ACK HANDLING GROUPS
+  # ============================================================================
+
+  ack_eventloop:
+    description: "ACK processing in EventLoop mode"
+    functions:
+      - "processACKEventLoop"
+      - "handleACKEventLoop"
+
+  ack_tick:
+    description: "ACK processing in Tick mode"
+    functions:
+      - "periodicACK"
+      - "periodicACKBtree"
+
+  # ============================================================================
+  # RECEIVE ERROR CLASSIFICATION
+  # Each error is classified into exactly ONE category
+  # ============================================================================
+
+  recv_error_parse:
+    description: "Packet parse errors"
+    functions:
+      - "classifyParseError"
+      - "handleParseError"
+
+  recv_error_iouring:
+    description: "io_uring receive errors"
+    functions:
+      - "classifyIoUringError"
+      - "handleIoUringError"
+
+  recv_error_empty:
+    description: "Empty packet errors"
+    functions:
+      - "classifyEmptyError"
+
+  # ============================================================================
+  # SEND ERROR CLASSIFICATION
+  # ============================================================================
+
+  send_error_marshal:
+    description: "Packet marshal errors"
+    functions:
+      - "classifyMarshalError"
+
+  send_error_iouring:
+    description: "io_uring send errors"
+    functions:
+      - "classifySendIoUringError"
+
+  # ============================================================================
+  # PACKET DROP REASON GROUPS
+  # Each dropped packet has exactly ONE drop reason
+  # ============================================================================
+
+  drop_too_late:
+    description: "Packet dropped - arrived too late"
+    functions:
+      - "dropTooLate"
+      - "handleTooLatePacket"
+
+  drop_buffer_full:
+    description: "Packet dropped - buffer full"
+    functions:
+      - "dropBufferFull"
+
+  drop_ttl_expired:
+    description: "Packet dropped - TTL expired"
+    functions:
+      - "dropTTLExpired"
+
+  # ============================================================================
+  # HANDSHAKE PACKET TYPES
+  # Each handshake is exactly ONE type
+  # ============================================================================
+
+  handshake_induction:
+    description: "Induction handshake packets"
+    functions:
+      - "handleInduction"
+      - "sendInduction"
+
+  handshake_conclusion:
+    description: "Conclusion handshake packets"
+    functions:
+      - "handleConclusion"
+      - "sendConclusion"
+
+  handshake_agreement:
+    description: "Agreement handshake packets"
+    functions:
+      - "handleAgreement"
+
+# ============================================================================
+# MUTUAL EXCLUSION RULES
+# Groups in the same list never run together for the same connection/packet
+# ============================================================================
+
+mutual_exclusion:
+  # Sender mode: EventLoop OR Tick (primary mode split)
+  - [sender_eventloop, sender_tick]
+
+  # Sender data structure: Btree OR List (within Tick mode)
+  - [sender_btree, sender_list]
+
+  # EventLoop is also exclusive with btree/list (because it uses btree internally)
+  - [sender_eventloop, sender_list]
+  - [sender_btree, sender_eventloop]
+
+  # Sender push: Ring OR Direct
+  - [sender_push_ring, sender_push_direct]
+
+  # Push modes are also exclusive with Tick drain (ring drains in tick OR eventloop)
+  - [sender_btree, sender_tick]
+  - [sender_list, sender_tick]
+
+  # Receiver mode: EventLoop OR Tick
+  - [receiver_eventloop, receiver_tick]
+
+  # Receiver push: Ring OR Direct
+  - [receiver_push_ring, receiver_push_direct]
+
+  # Receiver push is exclusive with tick
+  - [receiver_push_direct, receiver_tick]
+
+  # NAK types: Single OR Range OR Btree lookup
+  - [nak_single, nak_range, nak_btree]
+
+  # ACK processing mode
+  - [ack_eventloop, ack_tick]
+
+  # Receive error types
+  - [recv_error_parse, recv_error_iouring, recv_error_empty]
+
+  # Send error types
+  - [send_error_marshal, send_error_iouring]
+
+  # Drop reasons
+  - [drop_too_late, drop_buffer_full, drop_ttl_expired]
+
+  # Handshake types
+  - [handshake_induction, handshake_conclusion, handshake_agreement]
+
+# ============================================================================
+# SEPARATE PROGRAMS
+# These are standalone executables that have their own metrics instances
+# Metrics in these paths are NOT double-counting the main library
+# ============================================================================
+
+separate_programs:
+  - "contrib/client/"
+  - "contrib/client-generator/"
+  - "contrib/server/"
+  - "contrib/test-harness/"
+  - "contrib/integration_testing/"
+
+# ============================================================================
+# KNOWN MULTI-INCREMENT PATTERNS (Acceptable)
+# These patterns are documented as intentional and correct
+# ============================================================================
+
+known_patterns:
+  # ConnectionsActive is incremented on register, decremented on unregister
+  - metric: "ConnectionsActive"
+    reason: "Incremented on register, decremented on unregister (gauge behavior)"
+
+  # PktRecvInvalid covers many validation failure points
+  - metric: "PktRecvInvalid"
+    reason: "Multiple distinct validation failure paths (each packet fails for one reason)"
+
+  # Store() calls that update gauges from multiple places
+  - metric: "AckBtreeSize"
+    reason: "Gauge updated from multiple code paths (OK for Store)"
+
+  - metric: "SendBtreeLen"
+    reason: "Gauge updated from multiple code paths (OK for Store)"
+
+  - metric: "CongestionRecvMsBuf"
+    reason: "Gauge updated from multiple ACK calculation paths"
+
+  # SendTickDeliveredPackets - btree vs list mode (mutually exclusive via useBtree flag)
+  - metric: "SendTickDeliveredPackets"
+    reason: "Btree vs List mode - selected by useBtree flag, never both"
+
+  # CongestionSendPktBuf - tracks buffer occupancy at multiple lifecycle points
+  - metric: "CongestionSendPktBuf"
+    reason: "Buffer tracking at push/drain/drop/ack - different events, not double-counting same packet"
+
+  - metric: "CongestionSendByteBuf"
+    reason: "Buffer tracking at push/drain/drop/ack - different events, not double-counting same packet"
+
+  # Send unique/duration - delivery happens once per packet in exactly one mode
+  - metric: "CongestionSendByteUnique"
+    reason: "Packet delivered exactly once - EventLoop OR Tick, never both"
+
+  - metric: "CongestionSendPktUnique"
+    reason: "Packet delivered exactly once - EventLoop OR Tick, never both"
+
+  - metric: "CongestionSendUsSndDuration"
+    reason: "Duration tracked once per delivery - EventLoop OR Tick mode"
+
+  # Flight size is a gauge, updated at multiple push points
+  - metric: "CongestionSendPktFlightSize"
+    reason: "Gauge tracking flight size - Store() updates from mutually exclusive push modes"
+
+  # Rate tracking - accumulated during packet flow, reset during rate calculation
+  - metric: "RecvRateBytes"
+    reason: "Rate accumulator - Add() during receive, Store(0) during rate calc"
+
+  - metric: "RecvRatePackets"
+    reason: "Rate accumulator - Add() during receive, Store(0) during rate calc"
+
+  - metric: "SendRateBytes"
+    reason: "Rate accumulator - Add() during push/drain, Store() during rate calc"
+
+  - metric: "SendRateBytesSent"
+    reason: "Rate accumulator - Add() during delivery/retransmit, Store() during rate calc"
+
+  # Btree operations in drain - EventLoop OR Tick mode
+  - metric: "SendBtreeDuplicates"
+    reason: "Btree duplicate detection - EventLoop OR Tick drain mode, never both"
+
+  - metric: "SendRingDrained"
+    reason: "Ring drain counter - EventLoop OR Tick drains ring, never both"
+

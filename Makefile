@@ -196,6 +196,8 @@ integration-testing:
 ## sudo PROFILES=cpu make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo PROFILES=cpu,mutex make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo PROFILES=all make test-parallel CONFIG=Parallel-Starlink-5Mbps
+## Add TCPDUMP_* to capture packets for analysis with tshark/wireshark:
+## sudo TCPDUMP_CG=/tmp/cg.pcap TCPDUMP_SERVER=/tmp/server.pcap TCPDUMP_CLIENT=/tmp/client.pcap make test-parallel ...
 # When PROFILES is set, use debug builds (with symbols) for better profile output
 test-parallel: integration-testing $(if $(PROFILES),client-debug server-debug client-generator-debug,client server client-generator)
 	@echo "NOTE: Parallel tests require root privileges for network namespace creation"
@@ -205,6 +207,64 @@ test-parallel: integration-testing $(if $(PROFILES),client-debug server-debug cl
 test-parallel-all: integration-testing client server client-generator
 	@echo "NOTE: Parallel tests require root privileges for network namespace creation"
 	@cd contrib/integration_testing && ./integration_testing parallel-test-all
+
+## ============================================================================
+## LOCKLESS SENDER PARALLEL TESTS (Phase 5+)
+## ============================================================================
+## These targets test the new lockless sender implementation.
+## See lockless_sender_design.md for expected metrics.
+
+## test-parallel-sender: Run sender lockless test (clean network, 20 Mb/s)
+## sudo make test-parallel-sender
+test-parallel-sender: integration-testing client server client-generator
+	@echo "Running Lockless Sender test: Baseline vs SendEL"
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Clean-20M-Base-vs-SendEL
+
+## test-parallel-sender-full: Run full lockless test (receiver + sender EventLoop)
+## sudo make test-parallel-sender-full
+test-parallel-sender-full: integration-testing client server client-generator
+	@echo "Running Full Lockless test: FullEL vs FullSendEL"
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Clean-20M-FullEL-vs-FullSendEL
+
+## test-parallel-sender-high: Run high throughput sender test (50 Mb/s)
+## sudo make test-parallel-sender-high
+test-parallel-sender-high: integration-testing client server client-generator
+	@echo "Running High Throughput Sender test: 50 Mb/s"
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Clean-50M-Base-vs-SendEL
+
+## test-parallel-sender-loss: Run sender test with 5% loss
+## sudo make test-parallel-sender-loss
+test-parallel-sender-loss: integration-testing client server client-generator
+	@echo "Running Sender Loss test: 5% loss at 20 Mb/s"
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Loss-L5-20M-Base-vs-SendEL
+
+## test-parallel-sender-starlink: Run sender test with Starlink impairment
+## sudo make test-parallel-sender-starlink
+test-parallel-sender-starlink: integration-testing client server client-generator
+	@echo "Running Sender Starlink test: 20 Mb/s with Starlink pattern"
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Starlink-20M-Base-vs-SendEL
+
+## test-parallel-sender-all: Run all sender lockless tests
+## sudo make test-parallel-sender-all
+test-parallel-sender-all: integration-testing client server client-generator
+	@echo "Running all Lockless Sender tests..."
+	@echo ""
+	@echo "=== Test 1/5: Clean Network 20 Mb/s ==="
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Clean-20M-Base-vs-SendEL
+	@echo ""
+	@echo "=== Test 2/5: Full Lockless (Receiver + Sender) ==="
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Clean-20M-FullEL-vs-FullSendEL
+	@echo ""
+	@echo "=== Test 3/5: High Throughput 50 Mb/s ==="
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Clean-50M-Base-vs-SendEL
+	@echo ""
+	@echo "=== Test 4/5: 5% Loss ==="
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Loss-L5-20M-Base-vs-SendEL
+	@echo ""
+	@echo "=== Test 5/5: Starlink Pattern ==="
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-Starlink-20M-Base-vs-SendEL
+	@echo ""
+	@echo "All Lockless Sender tests complete!"
 
 ## test-isolation-list: List available isolation test configurations
 test-isolation-list:
@@ -220,6 +280,14 @@ test-isolation-list:
 ## sudo PROFILES=cpu,mutex make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
 ## sudo PROFILES=all make test-isolation CONFIG=Isolation-5M-Server-NakBtree-IoUr
 ## sudo PRINT_PROM=true make test-isolation CONFIG=Isolation-5M-EventLoop-NoIOUring
+## Add TCPDUMP_* to capture packets for analysis with tshark/wireshark:
+## sudo TCPDUMP_CG=/tmp/cg.pcap TCPDUMP_SERVER=/tmp/server.pcap make test-isolation CONFIG=...
+## Environment variables for packet capture:
+##   TCPDUMP_CG or TCPDUMP_PUBLISHER: Capture at publisher/client-generator
+##   TCPDUMP_SERVER or TCPDUMP_S: Capture at server
+##   TCPDUMP_CLIENT or TCPDUMP_SUBSCRIBER or TCPDUMP_C: Capture at subscriber/client
+## Analyze captures with tshark:
+##   tshark -r /tmp/cg.pcap -Y "srt" -T fields -e frame.time_relative -e srt.type -e srt.seqno
 # When PROFILES is set, use debug builds (with symbols) for better profile output
 test-isolation: $(if $(PROFILES),server-debug client-generator-debug,server client-generator)
 	@echo "NOTE: Isolation tests require root privileges for network namespace creation"
@@ -246,6 +314,105 @@ test-isolation-strategies: server client-generator
 	@echo ""
 	@echo "=== Strategy Comparison Complete ==="
 	@echo "Compare RTT (us) and Drops columns to find best strategy"
+
+## test-isolation-sender-list: List all sender-specific isolation tests
+test-isolation-sender-list:
+	@echo "Sender-specific isolation tests:"
+	@cd contrib/integration_testing && go run . list-isolation-configs | grep -E "Send|SendEL"
+
+## test-isolation-sender-phases: Run sender isolation tests by phase (~6 min total)
+## Tests each sender feature in isolation: Btree, Ring, ControlRing, EventLoop
+## sudo make test-isolation-sender-phases
+test-isolation-sender-phases: server client-generator
+	@echo "=== Lockless Sender Phase Isolation Tests ==="
+	@echo "Testing each sender feature in isolation on CG side..."
+	@for test in CG-SendBtree CG-SendRing CG-SendControlRing CG-SendEventLoop; do \
+		echo ""; \
+		echo "=== Testing: Isolation-5M-$$test ==="; \
+		(cd contrib/integration_testing && go run . isolation-test Isolation-5M-$$test); \
+	done
+	@echo ""
+	@echo "=== Sender Phase Tests Complete ==="
+
+## test-isolation-sender-server: Run sender isolation tests on server side (~4 tests, ~2 min)
+## Tests sender features on the server (forwarding path)
+## sudo make test-isolation-sender-server
+test-isolation-sender-server: server client-generator
+	@echo "=== Server-Side Sender Isolation Tests ==="
+	@for test in Server-SendBtree Server-SendRing Server-SendControlRing Server-SendEventLoop; do \
+		echo ""; \
+		echo "=== Testing: Isolation-5M-$$test ==="; \
+		(cd contrib/integration_testing && go run . isolation-test Isolation-5M-$$test); \
+	done
+	@echo ""
+	@echo "=== Server Sender Tests Complete ==="
+
+## test-isolation-sender-all: Run ALL sender isolation tests (~15 min)
+## sudo make test-isolation-sender-all
+test-isolation-sender-all: server client-generator
+	@echo "=== ALL Lockless Sender Isolation Tests ==="
+	@for test in CG-SendBtree Server-SendBtree \
+		CG-SendRing Server-SendRing \
+		CG-SendControlRing Server-SendControlRing \
+		CG-SendEventLoop Server-SendEventLoop \
+		Full-SendEventLoop \
+		SendEL-IoUrRecv SendEL-RecvRing SendEL-RecvEL \
+		SendEL-LowBackoff SendEL-HighBackoff \
+		CGOnly-SendEL ServerOnly-SendEL; do \
+		echo ""; \
+		echo "=== Testing: Isolation-5M-$$test ==="; \
+		(cd contrib/integration_testing && go run . isolation-test Isolation-5M-$$test); \
+	done
+	@echo ""
+	@echo "=== All Sender Isolation Tests Complete ==="
+
+## test-isolation-sender-quick: Run quick sender sanity test (single test, ~30s)
+## sudo make test-isolation-sender-quick
+test-isolation-sender-quick: server client-generator
+	@echo "=== Quick Sender EventLoop Test ==="
+	@cd contrib/integration_testing && go run . isolation-test Isolation-5M-CG-SendEventLoop
+
+## test-isolation-sender-20m-debug: Run 20M debug tests for intermittent failure analysis
+## These tests help diagnose the intermittent startup race condition at 20 Mb/s
+## sudo make test-isolation-sender-20m-debug
+test-isolation-sender-20m-debug: server client-generator
+	@echo "=== 20M SendEventLoop Debug Tests (Intermittent Failure Analysis) ==="
+	@echo "Running multiple configurations to identify race condition..."
+	@for test in 20M-SendEventLoop-Debug 20M-SendEventLoop-SlowBackoff 20M-SendEventLoop-FastBackoff 20M-SendEventLoop-NoTSBPD; do \
+		echo ""; \
+		echo "=== Testing: Isolation-$$test ==="; \
+		(cd contrib/integration_testing && go run . isolation-test Isolation-$$test) || true; \
+		echo "=== $$test complete ==="; \
+	done
+
+## test-isolation-sender-20m-repeat: Run the 20M test N times to measure failure rate
+## Usage: sudo make test-isolation-sender-20m-repeat ITERATIONS=10
+## Default: 5 iterations
+## Detection: Fails if >1000 packets dropped as too_old (normal run ~192, failure ~53000)
+ITERATIONS ?= 5
+test-isolation-sender-20m-repeat: server client-generator
+	@echo "=== 20M SendEventLoop Repeat Test ($(ITERATIONS) iterations) ==="
+	@echo "Detection: FAIL if >1000 packets dropped as too_old"
+	@passes=0; fails=0; \
+	for i in $$(seq 1 $(ITERATIONS)); do \
+		echo ""; \
+		echo "=== Run $$i of $(ITERATIONS) ==="; \
+		(cd contrib/integration_testing && PRINT_PROM=true go run . isolation-test Isolation-20M-SendEventLoop) 2>&1 | tee /tmp/20m-run-$$i.log; \
+		drops=$$(grep 'congestion_send_data_drop_total.*test-cg.*too_old' /tmp/20m-run-$$i.log | grep -oE '[0-9]+$$' || echo 0); \
+		if [ -z "$$drops" ]; then drops=0; fi; \
+		if [ "$$drops" -gt 1000 ]; then \
+			echo "❌ Run $$i: FAILED ($$drops packets dropped as too_old)"; \
+			fails=$$((fails + 1)); \
+		else \
+			echo "✅ Run $$i: PASSED ($$drops packets dropped)"; \
+			passes=$$((passes + 1)); \
+		fi; \
+	done; \
+	echo ""; \
+	echo "=== Summary ==="; \
+	echo "Passed: $$passes / $(ITERATIONS)"; \
+	echo "Failed: $$fails / $(ITERATIONS)"; \
+	if [ $(ITERATIONS) -gt 0 ]; then echo "Failure rate: $$((fails * 100 / $(ITERATIONS)))%"; fi
 
 ## test-matrix-list: List all matrix-generated tests (64 tests)
 test-matrix-list:
@@ -549,6 +716,47 @@ bench-circular:
 fuzz:
 	go test -fuzz=Fuzz -run=^Fuzz ./packet -fuzztime 30s
 
+## ═══════════════════════════════════════════════════════════════════════════
+## DEBUG BUILD TARGETS (Lock-Free Verification)
+## ═══════════════════════════════════════════════════════════════════════════
+## These targets build and test with runtime assertions enabled.
+## Debug builds verify EventLoop vs Tick context separation.
+## Reference: lockless_sender_implementation_plan.md Step 7.5.2
+
+## test-debug: Run tests with debug assertions enabled
+## This catches EventLoop/Tick context violations at runtime
+test-debug:
+	@echo "=== Running tests with debug assertions ==="
+	go test -tags debug -race ./congestion/live/send/... -v
+	go test -tags debug -race ./congestion/live/receive/... -v
+	@echo "✅ Debug assertion tests passed"
+
+## test-debug-quick: Quick debug test (no race detector)
+test-debug-quick:
+	@echo "=== Quick debug assertion tests ==="
+	go test -tags debug ./congestion/live/send/... -v
+	go test -tags debug ./congestion/live/receive/... -v
+
+## build-debug: Build server/client with debug assertions
+build-debug:
+	@echo "=== Building with debug assertions ==="
+	cd contrib/server && CGO_ENABLED=0 go build -tags debug -o server-debug -gcflags="all=-N -l" -a
+	cd contrib/client && CGO_ENABLED=0 go build -tags debug -o client-debug -gcflags="all=-N -l" -a
+	cd contrib/client-generator && CGO_ENABLED=0 go build -tags debug -o client-generator-debug -gcflags="all=-N -l" -a
+	@echo "✅ Debug binaries built (use server-debug, client-debug, client-generator-debug)"
+
+## verify-lockfree-context: Verify context assertions compile and work
+verify-lockfree-context:
+	@echo "=== Verifying lockfree context assertions ==="
+	@echo "Checking send package debug builds..."
+	go build -tags debug ./congestion/live/send/...
+	@echo "Checking receive package debug builds..."
+	go build -tags debug ./congestion/live/receive/...
+	@echo "Checking release builds (stub functions)..."
+	go build ./congestion/live/send/...
+	go build ./congestion/live/receive/...
+	@echo "✅ Lock-free context assertions verified"
+
 ## vet: Analyze code for potential errors
 vet:
 	go vet ./...
@@ -647,8 +855,13 @@ nixshell:
 .PHONY: test-network-list test-network test-network-all test-network-quick network-setup network-cleanup network-status
 # Parallel comparison testing targets (require root)
 .PHONY: test-parallel-list test-parallel test-parallel-all integration-testing
+.PHONY: test-parallel-sender test-parallel-sender-full test-parallel-sender-high
+.PHONY: test-parallel-sender-loss test-parallel-sender-starlink test-parallel-sender-all
 # Isolation testing targets (require root)
 .PHONY: test-isolation-list test-isolation test-isolation-all test-isolation-strategies
+.PHONY: test-isolation-sender-list test-isolation-sender-phases test-isolation-sender-server
+.PHONY: test-isolation-sender-all test-isolation-sender-quick
+.PHONY: test-isolation-sender-20m-debug test-isolation-sender-20m-repeat
 # Matrix-generated testing targets (parallel, require root)
 .PHONY: test-matrix-list test-matrix-summary test-matrix-tier1-list test-matrix-tier2-list
 .PHONY: test-matrix-tier1 test-matrix-tier2 test-matrix-all
@@ -659,6 +872,8 @@ nixshell:
 # Benchmark targets
 .PHONY: bench-packet bench-packet-all bench-packet-pool bench-circular
 .PHONY: bench-receiver bench-receiver-realistic bench-receiver-full bench-nak-btree bench-seqless
+# Debug build targets
+.PHONY: test-debug test-debug-quick build-debug verify-lockfree-context
 # Code quality targets
 .PHONY: vet fmt lint
 # Dependency management targets

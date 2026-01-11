@@ -1316,8 +1316,17 @@ func (s *sender) deliverReadyPackets() (delivered int, nextDeliveryIn time.Durat
 }
 
 // dropOldPackets removes packets past the drop threshold.
+//
+// CRITICAL: Must guard against uint64 underflow when nowUs < dropThreshold!
+// Without this, threshold wraps to ~18.4e18 at startup, dropping ALL packets.
+// See implementation in eventloop.go for the fixed version with the guard.
 func (s *sender) dropOldPackets() {
-    nowUs := uint64(time.Now().UnixMicro())
+    nowUs := s.nowFn()  // Use relative time (same base as PktTsbpdTime)
+
+    // Guard against uint64 underflow at startup
+    if nowUs < s.dropThreshold {
+        return // Too early - no packets can be old enough to drop
+    }
     threshold := nowUs - s.dropThreshold
 
     droppedCount := 0

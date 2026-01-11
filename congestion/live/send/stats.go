@@ -6,15 +6,35 @@ import (
 )
 
 func (s *sender) Stats() congestion.SendStats {
-	// Read lock only for non-atomic fields (pktSndPeriod, avgPayloadSize, lossList)
+	// Read lock only for non-atomic fields (pktSndPeriod, avgPayloadSize, lossList/packetBtree)
 	s.lock.RLock()
 	usPktSndPeriod := s.pktSndPeriod
 	bytePayload := uint64(s.avgPayloadSize)
 	msBuf := uint64(0)
-	max := s.lossList.Back()
-	min := s.lossList.Front()
-	if max != nil && min != nil {
-		msBuf = (max.Value.(packet.Packet).Header().PktTsbpdTime - min.Value.(packet.Packet).Header().PktTsbpdTime) / 1_000
+
+	// Calculate buffer time range
+	if s.useBtree {
+		// Phase 1: Btree mode - calculate from btree min/max
+		if s.packetBtree != nil && s.packetBtree.Len() > 0 {
+			minPkt := s.packetBtree.Min()
+			maxPkt := s.packetBtree.Max()
+			if minPkt != nil && maxPkt != nil {
+				minTime := minPkt.Header().PktTsbpdTime
+				maxTime := maxPkt.Header().PktTsbpdTime
+				if maxTime > minTime {
+					msBuf = (maxTime - minTime) / 1_000
+				}
+			}
+		}
+	} else {
+		// Legacy: linked list mode
+		if s.lossList != nil {
+			max := s.lossList.Back()
+			min := s.lossList.Front()
+			if max != nil && min != nil {
+				msBuf = (max.Value.(packet.Packet).Header().PktTsbpdTime - min.Value.(packet.Packet).Header().PktTsbpdTime) / 1_000
+			}
+		}
 	}
 	s.lock.RUnlock()
 

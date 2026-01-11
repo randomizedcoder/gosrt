@@ -9,6 +9,44 @@ import (
 	"github.com/randomizedcoder/gosrt/packet"
 )
 
+// calculateHSReqDropThreshold calculates the drop threshold from HSReq parameters.
+// This is extracted for testability.
+//
+// Parameters:
+//   - configPeerLatencyMs: local config latency in milliseconds
+//   - cifSendTSBPDDelayMs: peer's TSBPD delay from handshake extension (milliseconds)
+//   - sendDropDelayUs: additional drop delay from config (microseconds)
+//
+// Returns: drop threshold in microseconds
+//
+// The drop threshold is calculated as:
+//
+//	dropThreshold = max(sendTsbpdDelay * 1.25, 1 second) + 20ms + sendDropDelay
+//
+// BUG FIX: sendTsbpdDelay is in MILLISECONDS but the calculation needs MICROSECONDS.
+// The original code treated milliseconds as microseconds, resulting in a threshold
+// that was 1000x too small. For example, with 3s latency:
+//   - Buggy:  3000 * 1.25 = 3750 µs → hits 1s minimum → 1.02s threshold
+//   - Fixed:  3000 * 1000 * 1.25 = 3,750,000 µs → 3.77s threshold
+func calculateHSReqDropThreshold(configPeerLatencyMs int64, cifSendTSBPDDelayMs uint16, sendDropDelayUs uint64) uint64 {
+	sendTsbpdDelayMs := uint16(configPeerLatencyMs)
+
+	if cifSendTSBPDDelayMs > sendTsbpdDelayMs {
+		sendTsbpdDelayMs = cifSendTSBPDDelayMs
+	}
+
+	// FIX: Convert milliseconds to microseconds by multiplying by 1000
+	sendTsbpdDelayUs := uint64(sendTsbpdDelayMs) * 1000
+
+	dropThreshold := uint64(float64(sendTsbpdDelayUs)*1.25) + sendDropDelayUs
+	if dropThreshold < uint64(time.Second.Microseconds()) {
+		dropThreshold = uint64(time.Second.Microseconds())
+	}
+	dropThreshold += 20_000
+
+	return dropThreshold
+}
+
 // handleHSRequest handles the HSv4 handshake extension request and sends the response
 func (c *srtConn) handleHSRequest(p packet.Packet) {
 	c.log("control:recv:HSReq:dump", func() string { return p.Dump() })
@@ -211,17 +249,11 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 			return
 		}
 
-		sendTsbpdDelay := uint16(c.config.PeerLatency.Milliseconds())
-
-		if cif.SendTSBPDDelay > sendTsbpdDelay {
-			sendTsbpdDelay = cif.SendTSBPDDelay
-		}
-
-		c.dropThreshold = uint64(float64(sendTsbpdDelay)*1.25) + uint64(c.config.SendDropDelay.Microseconds())
-		if c.dropThreshold < uint64(time.Second.Microseconds()) {
-			c.dropThreshold = uint64(time.Second.Microseconds())
-		}
-		c.dropThreshold += 20_000
+		c.dropThreshold = calculateHSReqDropThreshold(
+			c.config.PeerLatency.Milliseconds(),
+			cif.SendTSBPDDelay,
+			uint64(c.config.SendDropDelay.Microseconds()),
+		)
 
 		c.snd.SetDropThreshold(c.dropThreshold)
 

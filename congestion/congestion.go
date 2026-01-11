@@ -43,6 +43,15 @@ type Sender interface {
 
 	// SetDropThreshold sets the threshold in microseconds for when to drop too late packages from the queue.
 	SetDropThreshold(threshold uint64)
+
+	// EventLoop runs the continuous event loop for sender packet processing (Phase 4: Lockless Sender).
+	// This replaces the timer-driven Tick() for the sender side.
+	// Only runs if UseEventLoop() returns true.
+	EventLoop(ctx context.Context)
+
+	// UseEventLoop returns whether the sender event loop is enabled.
+	// Used by connection code to decide between EventLoop and Tick loop.
+	UseEventLoop() bool
 }
 
 // Receiver is the receiving part of the congestion control

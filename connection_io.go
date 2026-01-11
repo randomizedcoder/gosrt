@@ -151,59 +151,64 @@ func (c *srtConn) pop(p packet.Packet) {
 	p.Header().Addr = c.remoteAddr
 	p.Header().DestinationSocketId = c.peerSocketId
 
-	if !p.Header().IsControlPacket {
+	// OPTIMIZATION: Only acquire crypto lock if crypto is enabled AND this is a data packet.
+	// Previously, the lock was acquired/released for EVERY data packet even
+	// when crypto was nil, causing unnecessary overhead on non-encrypted connections.
+	// See: send_eventloop_intermittent_failure_bug.md Section 22.8.2
+	if !p.Header().IsControlPacket && c.crypto != nil {
 		c.cryptoLock.Lock()
-		if c.crypto != nil {
-			p.Header().KeyBaseEncryptionFlag = c.keyBaseEncryption
-			if !p.Header().RetransmittedPacketFlag {
-				if err := c.crypto.EncryptOrDecryptPayload(p.Data(), p.Header().KeyBaseEncryptionFlag, p.Header().PacketSequenceNumber.Val()); err != nil {
-					c.log("connection:send:error", func() string {
-						return fmt.Sprintf("encryption failed: %v", err)
-					})
-					// Track error in metrics if available
-					if c.metrics != nil {
-						c.metrics.CryptoErrorEncrypt.Add(1)
-						c.metrics.PktSentDataError.Add(1)
-					}
+		p.Header().KeyBaseEncryptionFlag = c.keyBaseEncryption
+		if !p.Header().RetransmittedPacketFlag {
+			if err := c.crypto.EncryptOrDecryptPayload(p.Data(), p.Header().KeyBaseEncryptionFlag, p.Header().PacketSequenceNumber.Val()); err != nil {
+				c.log("connection:send:error", func() string {
+					return fmt.Sprintf("encryption failed: %v", err)
+				})
+				// Track error in metrics if available
+				if c.metrics != nil {
+					c.metrics.CryptoErrorEncrypt.Add(1)
+					c.metrics.PktSentDataError.Add(1)
 				}
 			}
+		}
 
-			c.kmPreAnnounceCountdown--
-			c.kmRefreshCountdown--
+		c.kmPreAnnounceCountdown--
+		c.kmRefreshCountdown--
 
-			if c.kmPreAnnounceCountdown == 0 && !c.kmConfirmed {
-				c.sendKMRequest(c.keyBaseEncryption.Opposite())
+		if c.kmPreAnnounceCountdown == 0 && !c.kmConfirmed {
+			c.sendKMRequest(c.keyBaseEncryption.Opposite())
 
-				// Resend the request until we get a response
-				c.kmPreAnnounceCountdown = c.config.KMPreAnnounce/10 + 1
-			}
+			// Resend the request until we get a response
+			c.kmPreAnnounceCountdown = c.config.KMPreAnnounce/10 + 1
+		}
 
-			if c.kmRefreshCountdown == 0 {
-				c.kmPreAnnounceCountdown = c.config.KMRefreshRate - c.config.KMPreAnnounce
-				c.kmRefreshCountdown = c.config.KMRefreshRate
+		if c.kmRefreshCountdown == 0 {
+			c.kmPreAnnounceCountdown = c.config.KMRefreshRate - c.config.KMPreAnnounce
+			c.kmRefreshCountdown = c.config.KMRefreshRate
 
-				// Switch the keys
-				c.keyBaseEncryption = c.keyBaseEncryption.Opposite()
+			// Switch the keys
+			c.keyBaseEncryption = c.keyBaseEncryption.Opposite()
 
-				c.kmConfirmed = false
-			}
+			c.kmConfirmed = false
+		}
 
-			if c.kmRefreshCountdown == c.config.KMRefreshRate-c.config.KMPreAnnounce {
-				// Decommission the previous key, resp. create a new SEK that will
-				// be used in the next switch.
-				if err := c.crypto.GenerateSEK(c.keyBaseEncryption.Opposite()); err != nil {
-					c.log("connection:crypto:error", func() string {
-						return fmt.Sprintf("failed to generate SEK: %v", err)
-					})
-					// Track error in metrics if available
-					if c.metrics != nil {
-						c.metrics.CryptoErrorGenerateSEK.Add(1)
-					}
+		if c.kmRefreshCountdown == c.config.KMRefreshRate-c.config.KMPreAnnounce {
+			// Decommission the previous key, resp. create a new SEK that will
+			// be used in the next switch.
+			if err := c.crypto.GenerateSEK(c.keyBaseEncryption.Opposite()); err != nil {
+				c.log("connection:crypto:error", func() string {
+					return fmt.Sprintf("failed to generate SEK: %v", err)
+				})
+				// Track error in metrics if available
+				if c.metrics != nil {
+					c.metrics.CryptoErrorGenerateSEK.Add(1)
 				}
 			}
 		}
 		c.cryptoLock.Unlock()
+	}
 
+	// Debug logging for data packets (runs regardless of crypto)
+	if !p.Header().IsControlPacket {
 		c.log("data:send:dump", func() string { return p.Dump() })
 	}
 
@@ -260,4 +265,3 @@ func (c *srtConn) deliver(p packet.Packet) {
 		c.log("connection:error", func() string { return "readQueue was blocking, dropping packet" })
 	}
 }
-

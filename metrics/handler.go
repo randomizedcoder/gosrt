@@ -855,6 +855,169 @@ func MetricsHandler() http.Handler {
 				metrics.EventLoopIdleBackoffs.Load(),
 				"socket_id", socketIdStr, "instance", instanceName)
 
+			// ========== Sender Tick Baseline Metrics (for burst detection) ==========
+			writeCounterIfNonZero(b, "gosrt_send_tick_runs_total",
+				metrics.SendTickRuns.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_tick_delivered_packets_total",
+				metrics.SendTickDeliveredPackets.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// ========== Sender Lockless Metrics (Phase 1-5: Lockless Sender) ==========
+			// Data ring metrics (Phase 2)
+			writeCounterIfNonZero(b, "gosrt_send_ring_pushed_total",
+				metrics.SendRingPushed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_ring_dropped_total",
+				metrics.SendRingDropped.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_ring_drained_total",
+				metrics.SendRingDrained.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// Btree metrics (Phase 1)
+			writeCounterIfNonZero(b, "gosrt_send_btree_inserted_total",
+				metrics.SendBtreeInserted.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_btree_duplicates_total",
+				metrics.SendBtreeDuplicates.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_ring_drain_seq_gap_total",
+				metrics.SendRingDrainSeqGap.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGauge(b, "gosrt_send_btree_len",
+				float64(metrics.SendBtreeLen.Load()),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// Control ring metrics (Phase 3)
+			writeCounterIfNonZero(b, "gosrt_send_control_ring_pushed_ack_total",
+				metrics.SendControlRingPushedACK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_control_ring_pushed_nak_total",
+				metrics.SendControlRingPushedNAK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_control_ring_dropped_ack_total",
+				metrics.SendControlRingDroppedACK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_control_ring_dropped_nak_total",
+				metrics.SendControlRingDroppedNAK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_control_ring_drained_total",
+				metrics.SendControlRingDrained.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_control_ring_processed_total",
+				metrics.SendControlRingProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_control_ring_processed_ack_total",
+				metrics.SendControlRingProcessedACK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_control_ring_processed_nak_total",
+				metrics.SendControlRingProcessedNAK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// Sender EventLoop metrics (Phase 4)
+			// Startup diagnostics (debug intermittent failures)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_start_attempts_total",
+				metrics.SendEventLoopStartAttempts.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_skipped_disabled_total",
+				metrics.SendEventLoopSkippedDisabled.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_started_total",
+				metrics.SendEventLoopStarted.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_iterations_total",
+				metrics.SendEventLoopIterations.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_default_runs_total",
+				metrics.SendEventLoopDefaultRuns.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_drop_fires_total",
+				metrics.SendEventLoopDropFires.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_data_drained_total",
+				metrics.SendEventLoopDataDrained.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_control_drained_total",
+				metrics.SendEventLoopControlDrained.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_acks_processed_total",
+				metrics.SendEventLoopACKsProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_naks_processed_total",
+				metrics.SendEventLoopNAKsProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_idle_backoffs_total",
+				metrics.SendEventLoopIdleBackoffs.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_tsbpd_sleeps_total",
+				metrics.SendEventLoopTsbpdSleeps.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_empty_btree_sleeps_total",
+				metrics.SendEventLoopEmptyBtreeSleeps.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_sleep_clamped_min_total",
+				metrics.SendEventLoopSleepClampedMin.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_sleep_clamped_max_total",
+				metrics.SendEventLoopSleepClampedMax.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_sleep_total_us",
+				metrics.SendEventLoopSleepTotalUs.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_next_delivery_total_us",
+				metrics.SendEventLoopNextDeliveryTotalUs.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			// Diagnostic metrics for drain debugging
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_drain_attempts_total",
+				metrics.SendEventLoopDrainAttempts.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_drain_ring_nil_total",
+				metrics.SendEventLoopDrainRingNil.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_drain_ring_empty_total",
+				metrics.SendEventLoopDrainRingEmpty.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_drain_ring_had_data_total",
+				metrics.SendEventLoopDrainRingHadData.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_delivery_packets_total",
+				metrics.SendDeliveryPackets.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			// Delivery debugging metrics
+			writeCounterIfNonZero(b, "gosrt_send_delivery_attempts_total",
+				metrics.SendDeliveryAttempts.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_delivery_btree_empty_total",
+				metrics.SendDeliveryBtreeEmpty.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_delivery_iter_started_total",
+				metrics.SendDeliveryIterStarted.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_delivery_tsbpd_not_ready_total",
+				metrics.SendDeliveryTsbpdNotReady.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGaugeIfNonZero(b, "gosrt_send_delivery_last_now_us",
+				float64(metrics.SendDeliveryLastNowUs.Load()),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGaugeIfNonZero(b, "gosrt_send_delivery_last_tsbpd",
+				float64(metrics.SendDeliveryLastTsbpd.Load()),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGaugeIfNonZero(b, "gosrt_send_delivery_start_seq",
+				float64(metrics.SendDeliveryStartSeq.Load()),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeGaugeIfNonZero(b, "gosrt_send_delivery_btree_min_seq",
+				float64(metrics.SendDeliveryBtreeMinSeq.Load()),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_drop_ahead_of_delivery_total",
+				metrics.SendDropAheadOfDelivery.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// Zero-copy payload pool metrics (Phase 5)
+			writeCounterIfNonZero(b, "gosrt_send_payload_size_errors_total",
+				metrics.SendPayloadSizeErrors.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
 			// ========== ACK Btree Metrics (Phase 4: ACK/ACKACK Redesign) ==========
 			// Tracks the btree storing sent Full ACKs awaiting ACKACK for RTT calculation
 			writeGauge(b, "gosrt_ack_btree_size",

@@ -80,6 +80,26 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 		}
 	}()
 
+	// Start packet captures if configured via environment variables
+	tcpdumpConfig := GetTcpdumpConfigFromEnv()
+	if tcpdumpConfig.HasAnyCapture() {
+		fmt.Println("Starting packet captures (TCPDUMP_* enabled)...")
+		if err := nc.StartTcpdumpFromConfig(ctx, tcpdumpConfig); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: tcpdump start failed: %v\n", err)
+		} else {
+			if tcpdumpConfig.PublisherFile != "" {
+				fmt.Printf("  Publisher (CG): %s\n", tcpdumpConfig.PublisherFile)
+			}
+			if tcpdumpConfig.ServerFile != "" {
+				fmt.Printf("  Server: %s\n", tcpdumpConfig.ServerFile)
+			}
+			if tcpdumpConfig.SubscriberFile != "" {
+				fmt.Printf("  Subscriber: %s\n", tcpdumpConfig.SubscriberFile)
+			}
+		}
+		fmt.Println()
+	}
+
 	// Use clean path (no latency, no loss)
 	fmt.Println("Using clean network path (no impairment)")
 

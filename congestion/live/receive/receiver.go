@@ -147,6 +147,10 @@ type receiver struct {
 	// Debug logging
 	debug   bool
 	logFunc func(string, func() string)
+
+	// Debug context tracking (Step 7.5.2: Runtime Verification)
+	// Only active in debug builds (-tags debug), zero-size struct in release builds.
+	debugCtx debugContext
 }
 
 // NewReceiver takes a Config and returns a new Receiver
@@ -350,6 +354,10 @@ func New(recvConfig Config) congestion.Receiver {
 	// Initialize lastLightACKSeq from lastACKSequenceNumber (NOT ISN)
 	// This ensures the initial difference is 0, not a huge number due to Dec()
 	r.lastLightACKSeq = r.lastACKSequenceNumber.Val()
+
+	// Initialize debug context (Step 7.5.2: Runtime Verification)
+	// No-op in release builds, enables assertions in debug builds.
+	r.initDebugContext()
 
 	return r
 }
