@@ -305,4 +305,3 @@ func (c *srtConn) sendHSRequest() {
 
 	c.pop(p)
 }
-

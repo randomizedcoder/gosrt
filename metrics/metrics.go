@@ -248,8 +248,15 @@ type ConnectionMetrics struct {
 	// NAK btree metrics - Core operations
 	NakBtreeInserts     atomic.Uint64 // Sequences added to NAK btree
 	NakBtreeDeletes     atomic.Uint64 // Sequences removed (packet arrived)
-	NakBtreeExpired     atomic.Uint64 // Sequences removed (TSBPD expired)
-	NakBtreeSize        atomic.Uint64 // Current size (gauge, updated each periodic NAK)
+	NakBtreeExpired        atomic.Uint64 // Sequences removed (sequence-based expiry, fallback)
+	NakBtreeExpiredEarly   atomic.Uint64 // Sequences removed RTT before TSBPD (time-based)
+	NakBtreeSkippedExpired atomic.Uint64 // Sequences not inserted (already expired at gap detection)
+	NakBtreeSize           atomic.Uint64 // Current size (gauge, updated each periodic NAK)
+
+	// NAK TSBPD estimation metrics (nak_btree_expiry_optimization.md)
+	NakTsbpdEstBoundary    atomic.Uint64 // TSBPD estimated using boundary packets (linear interpolation)
+	NakTsbpdEstEWMA        atomic.Uint64 // TSBPD estimated using inter-packet EWMA (warm fallback)
+	NakTsbpdEstColdFallback atomic.Uint64 // TSBPD estimated during EWMA warm-up (conservative)
 	NakBtreeScanPackets atomic.Uint64 // Packets scanned in periodicNakBtree()
 	NakBtreeScanGaps    atomic.Uint64 // Gaps found during scan
 

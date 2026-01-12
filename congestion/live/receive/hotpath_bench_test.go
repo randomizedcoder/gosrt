@@ -660,7 +660,7 @@ func BenchmarkHotPath_GapScan(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		recv.gapScan()
+		recv.gapScan() // Returns (gaps, tsbpds), ignore return values for benchmark
 	}
 }
 

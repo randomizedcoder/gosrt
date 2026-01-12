@@ -2219,12 +2219,43 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		ProfileDuration: 5 * time.Minute,
 	},
 
-	// GEO satellite with Full Lockless (Receiver + Sender)
+	// GEO satellite with Full Lockless (Receiver + Sender) - 5% loss
 	{
 		Name:        "Parallel-Loss-L5-20M-Base-vs-FullSendEL-GEO",
 		Description: "Ultimate: 5% loss at GEO (300ms RTT) with Full Lockless (Receiver + Sender)",
 		Impairment: NetworkImpairment{
 			LossRate:       0.05,
+			LatencyProfile: "geo-satellite",
+		},
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          GetSRTConfig(ConfigBase),
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          GetSRTConfig(ConfigFullSendEL),
+		},
+		Bitrate:         20_000_000,
+		TestDuration:    120 * time.Second,
+		ConnectionWait:  5 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
+
+	// GEO satellite with Full Lockless (Receiver + Sender) - 10% loss
+	{
+		Name:        "Parallel-Loss-L10-20M-Base-vs-FullSendEL-GEO",
+		Description: "Extreme: 10% loss at GEO (300ms RTT) with Full Lockless (Receiver + Sender)",
+		Impairment: NetworkImpairment{
+			LossRate:       0.10,
 			LatencyProfile: "geo-satellite",
 		},
 		Baseline: PipelineConfig{

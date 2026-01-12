@@ -31,6 +31,47 @@ const DefaultNakConsolidationBudgetUs = 2_000 // 2ms in microseconds
 
 const DefaultPayloadSizeBytes = 1456
 
+// --- Inter-packet timing constants (nak_btree_expiry_optimization.md Section 4.2) ---
+
+const (
+	// InterPacketIntervalMinUs filters out measurement errors (sub-10µs intervals).
+	InterPacketIntervalMinUs = 10
+
+	// InterPacketIntervalMaxUs filters out pauses (>100ms gaps aren't normal inter-packet).
+	InterPacketIntervalMaxUs = 100_000
+
+	// InterPacketIntervalDefaultUs is the fallback when no measurement available (1ms = ~1000pps).
+	InterPacketIntervalDefaultUs = 1000
+
+	// InterPacketEWMAAlpha is the weight for new samples (0.125 = 1/8).
+	// Old = 0.875, New = 0.125 provides smooth convergence.
+	InterPacketEWMAAlpha = 0.125
+)
+
+// interPacketEstimator tracks inter-packet arrival timing for TSBPD estimation.
+// All fields are atomic for lock-free access in the event loop.
+//
+// This struct groups related estimator state to:
+// 1. Make the logical relationship between fields explicit
+// 2. Prevent partial updates during refactoring
+// 3. Enable future extension (e.g., jitter tracking)
+//
+// See nak_btree_expiry_optimization.md Section 4.6 for warm-up strategy.
+type interPacketEstimator struct {
+	// avgIntervalUs is the EWMA of inter-packet arrival intervals (microseconds).
+	// Updated on each valid packet arrival using 0.875/0.125 weighting.
+	avgIntervalUs atomic.Uint64
+
+	// lastArrivalUs is the arrival time of the previous packet (microseconds).
+	// Used to calculate the interval to the current packet.
+	lastArrivalUs atomic.Uint64
+
+	// sampleCount tracks how many valid samples have been collected.
+	// Used for warm-up detection (see ewmaWarmupThreshold config).
+	// Saturates at MaxUint32 to avoid overflow.
+	sampleCount atomic.Uint32
+}
+
 // defaultNakConsolidationBudget returns the NAK consolidation budget as a time.Duration.
 // If configValue is 0, uses DefaultNakConsolidationBudgetUs (5ms).
 func defaultNakConsolidationBudget(configValue uint64) time.Duration {
@@ -76,6 +117,10 @@ type receiver struct {
 	avgPayloadSizeBits  atomic.Uint64 // float64 via math.Float64bits/Float64frombits
 	avgLinkCapacityBits atomic.Uint64 // float64 via math.Float64bits/Float64frombits
 
+	// Inter-packet timing estimator for TSBPD estimation fallback
+	// See nak_btree_expiry_optimization.md Section 4.6
+	interPacketEst interPacketEstimator
+
 	probeTime    time.Time
 	probeNextSeq circular.Number
 
@@ -91,6 +136,10 @@ type receiver struct {
 	nakRecentPercent       float64
 	nakMergeGap            uint32
 	nakConsolidationBudget time.Duration
+
+	// NAK btree expiry configuration (nak_btree_expiry_optimization.md Section 5)
+	nakExpiryMargin     float64 // Margin for expiry threshold: now + RTO*(1+margin)
+	ewmaWarmupThreshold uint32  // Min samples before EWMA is trusted (0 = disabled)
 
 	// FastNAK fields
 	fastNakEnabled       bool
@@ -129,6 +178,10 @@ type receiver struct {
 	nakDelete           func(seq uint32) bool
 	nakDeleteBefore     func(cutoff uint32) int
 	nakLen              func() int
+
+	// TSBPD-aware NAK btree function dispatch (nak_btree_expiry_optimization.md)
+	nakInsertBatchWithTsbpd func(seqs []uint32, tsbpdTimes []uint64) int
+	nakDeleteBeforeTsbpd    func(expiryThresholdUs uint64) int
 	nakIterateAndUpdate func(fn func(entry NakEntryWithTime) (NakEntryWithTime, bool, bool))
 
 	// Event loop (Phase 4: Lockless Design)
@@ -198,6 +251,10 @@ func New(recvConfig Config) congestion.Receiver {
 		fastNakEnabled:       recvConfig.FastNakEnabled,
 		fastNakThreshold:     time.Duration(recvConfig.FastNakThresholdUs) * time.Microsecond,
 		fastNakRecentEnabled: recvConfig.FastNakRecentEnabled,
+
+		// NAK btree expiry configuration (nak_btree_expiry_optimization.md)
+		nakExpiryMargin:     recvConfig.NakExpiryMargin,
+		ewmaWarmupThreshold: recvConfig.EWMAWarmupThreshold,
 	}
 
 	// Create NAK btree if enabled
@@ -506,6 +563,9 @@ func (r *receiver) setupNakDispatch(usePacketRing bool) {
 		r.nakDelete = r.nakBtree.Delete
 		r.nakDeleteBefore = r.nakBtree.DeleteBefore
 		r.nakLen = r.nakBtree.Len
+		// TSBPD-aware methods (nak_btree_expiry_optimization.md)
+		r.nakInsertBatchWithTsbpd = r.nakBtree.InsertBatchWithTsbpd
+		r.nakDeleteBeforeTsbpd = r.nakBtree.DeleteBeforeTsbpd
 		r.nakIterateAndUpdate = r.nakBtree.IterateAndUpdate
 	} else {
 		// Tick mode: locking (concurrent Push/Tick safety)
@@ -514,6 +574,9 @@ func (r *receiver) setupNakDispatch(usePacketRing bool) {
 		r.nakDelete = r.nakBtree.DeleteLocking
 		r.nakDeleteBefore = r.nakBtree.DeleteBeforeLocking
 		r.nakLen = r.nakBtree.LenLocking
+		// TSBPD-aware methods (nak_btree_expiry_optimization.md)
+		r.nakInsertBatchWithTsbpd = r.nakBtree.InsertBatchWithTsbpdLocking
+		r.nakDeleteBeforeTsbpd = r.nakBtree.DeleteBeforeTsbpdLocking
 		r.nakIterateAndUpdate = r.nakBtree.IterateAndUpdateLocking
 	}
 }

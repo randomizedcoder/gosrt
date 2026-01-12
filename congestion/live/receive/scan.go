@@ -228,14 +228,17 @@ func (r *receiver) contiguousScanWithTime(now uint64) (ok bool, ackSeq uint32, s
 // and btree.Min() have been delivered via TSBPD expiry and removed from the btree.
 // We should NOT NAK those sequences - they were already delivered!
 // Instead, advance the scan start point to btree.Min()-1.
-func (r *receiver) gapScan() []uint32 {
+// gapScan scans the packet btree for gaps and returns their sequences with estimated TSBPD times.
+// Returns (gap sequences, estimated TSBPD times for each gap).
+// The TSBPD times are used for RTT-aware early expiry (nak_btree_expiry_optimization.md).
+func (r *receiver) gapScan() ([]uint32, []uint64) {
 	// Atomic load of contiguous point (shared with contiguousScan)
 	lastContiguous := r.contiguousPoint.Load()
 
 	// Get min packet to check for stale contiguousPoint
 	minPkt := r.packetStore.Min()
 	if minPkt == nil {
-		return nil // Empty btree, no gaps to report
+		return nil, nil // Empty btree, no gaps to report
 	}
 
 	minSeq := minPkt.Header().PacketSequenceNumber.Val()
@@ -272,34 +275,81 @@ func (r *receiver) gapScan() []uint32 {
 	tooRecentThreshold := r.tooRecentThreshold(now)
 
 	// Scan forward looking for gaps
+	// Track boundary packets for TSBPD estimation (nak_btree_expiry_optimization.md)
 	var gaps []uint32
+	var gapTsbpds []uint64
 	startSeq := lastContiguous
 	expectedSeq := circular.SeqAdd(lastContiguous, 1)
+
+	// Track lower boundary for TSBPD interpolation
+	var lowerSeq uint32
+	var lowerTsbpd uint64
 
 	r.packetStore.IterateFrom(circular.New(startSeq, packet.MAX_SEQUENCENUMBER),
 		func(p packet.Packet) bool {
 			h := p.Header()
 			seq := h.PacketSequenceNumber.Val()
+			pktTsbpd := h.PktTsbpdTime
 
 			// Stop if too recent - per ack_optimization_plan.md Section 3.2:
 			// Packets beyond tooRecentThreshold are in the "TOO RECENT" zone.
 			// Gaps leading to "too recent" packets might be reordering, not loss.
 			// We wait until packets age enough before considering them lost.
-			if h.PktTsbpdTime > tooRecentThreshold {
+			if pktTsbpd > tooRecentThreshold {
 				return false
 			}
 
 			// Skip packets at or before contiguous point
 			// MUST use circular.SeqLessOrEqual for 31-bit wraparound!
 			if circular.SeqLessOrEqual(seq, startSeq) {
+				// Update lower boundary for future gap estimation
+				lowerSeq = seq
+				lowerTsbpd = pktTsbpd
 				return true
 			}
 
 			// Record gaps between expectedSeq and seq
 			// Use circular.SeqLess to handle wraparound in gap detection
-			for expectedSeq != seq && circular.SeqLess(expectedSeq, seq) {
-				gaps = append(gaps, expectedSeq)
-				expectedSeq = circular.SeqAdd(expectedSeq, 1)
+			if expectedSeq != seq && circular.SeqLess(expectedSeq, seq) {
+				// We have a gap! Current packet is the upper boundary
+				upperSeq := seq
+				upperTsbpd := pktTsbpd
+
+				// Estimate TSBPD for each missing sequence
+				for expectedSeq != seq && circular.SeqLess(expectedSeq, seq) {
+					gaps = append(gaps, expectedSeq)
+
+					// Estimate TSBPD using linear interpolation or fallback
+					var estTsbpd uint64
+					if lowerTsbpd > 0 && upperTsbpd > 0 {
+						// Have both boundaries - use linear interpolation
+						estTsbpd = estimateTsbpdForSeq(expectedSeq, lowerSeq, lowerTsbpd, upperSeq, upperTsbpd)
+						if r.metrics != nil {
+							r.metrics.NakTsbpdEstBoundary.Add(1)
+						}
+					} else if upperTsbpd > 0 {
+						// Only upper boundary - use fallback
+						estTsbpd = r.estimateTsbpdFallback(expectedSeq, upperSeq, upperTsbpd)
+						if r.metrics != nil {
+							r.metrics.NakTsbpdEstEWMA.Add(1)
+						}
+					} else if lowerTsbpd > 0 {
+						// Only lower boundary - use fallback
+						estTsbpd = r.estimateTsbpdFallback(expectedSeq, lowerSeq, lowerTsbpd)
+						if r.metrics != nil {
+							r.metrics.NakTsbpdEstEWMA.Add(1)
+						}
+					} else {
+						// No boundaries (shouldn't happen) - use conservative estimate
+						estTsbpd = now + r.tsbpdDelay
+						if r.metrics != nil {
+							r.metrics.NakTsbpdEstEWMA.Add(1)
+						}
+					}
+
+					gapTsbpds = append(gapTsbpds, estTsbpd)
+					expectedSeq = circular.SeqAdd(expectedSeq, 1)
+				}
 			}
 
 			// This packet is present - if no gaps before it, advance contiguousPoint
@@ -308,6 +358,10 @@ func (r *receiver) gapScan() []uint32 {
 			if len(gaps) == 0 {
 				lastContiguous = seq
 			}
+
+			// Update lower boundary for next iteration
+			lowerSeq = seq
+			lowerTsbpd = pktTsbpd
 
 			expectedSeq = circular.SeqAdd(seq, 1)
 			return true
@@ -319,7 +373,7 @@ func (r *receiver) gapScan() []uint32 {
 		r.contiguousPoint.Store(lastContiguous)
 	}
 
-	return gaps
+	return gaps, gapTsbpds
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

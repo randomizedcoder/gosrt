@@ -138,6 +138,19 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 	r.lastPacketArrivalTime.Store(now)
 	r.lastDataPacketSeq.Store(seq)
 
+	// Track inter-packet interval for TSBPD estimation fallback
+	// Also tracks sample count for EWMA warm-up (nak_btree_expiry_optimization.md Section 4.6)
+	nowUs := uint64(now.UnixMicro())
+	lastArrivalUs := r.interPacketEst.lastArrivalUs.Swap(nowUs)
+	if newInterval, valid := updateInterPacketInterval(nowUs, lastArrivalUs, r.interPacketEst.avgIntervalUs.Load()); valid {
+		r.interPacketEst.avgIntervalUs.Store(newInterval)
+		// Increment sample count for warm-up tracking (saturate to avoid overflow)
+		count := r.interPacketEst.sampleCount.Load()
+		if count < 0xFFFFFFFF {
+			r.interPacketEst.sampleCount.Add(1)
+		}
+	}
+
 	// NOTE: No gap detection, no immediate NAK, no maxSeenSequenceNumber tracking
 	// Gaps are detected by periodicNakBtree() which scans the packet btree
 }

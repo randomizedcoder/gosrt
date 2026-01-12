@@ -63,6 +63,10 @@ type Config struct {
 	FastNakThresholdUs   uint64 // Microseconds, silence threshold to trigger FastNAK
 	FastNakRecentEnabled bool   // Enable FastNAKRecent to detect sequence jumps
 
+	// NAK btree expiry configuration (nak_btree_expiry_optimization.md)
+	NakExpiryMargin     float64 // Margin for expiry: threshold = now + RTO*(1+margin), default 0.10
+	EWMAWarmupThreshold uint32  // Min samples before EWMA trusted (0=disabled), default 32
+
 	// Light ACK configuration (Phase 5: ACK Optimization)
 	LightACKDifference uint32 // Send Light ACK after N packets progress (default: 64)
 

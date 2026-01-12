@@ -608,8 +608,8 @@ After N samples, influence of initial value = β^N
 During warm-up, use tsbpdDelay as a worst-case estimate:
 ```go
 func (r *receiver) estimateTsbpdFallbackWithWarmup(missingSeq, refSeq uint32, refTsbpd uint64) uint64 {
-    // Check if EWMA is warm
-    if r.interPacketSampleCount.Load() < EWMAWarmupThreshold {
+    // Check if EWMA is warm (using grouped estimator struct)
+    if r.interPacketEst.sampleCount.Load() < r.ewmaWarmupThreshold {
         // Cold: use conservative estimate
         // Assume 1 packet per TSBPD delay (very conservative)
         // This means we'll NAK slightly more than necessary initially
@@ -617,7 +617,7 @@ func (r *receiver) estimateTsbpdFallbackWithWarmup(missingSeq, refSeq uint32, re
     }
 
     // Warm: use EWMA-based estimate
-    intervalUs := r.avgInterPacketIntervalUs.Load()
+    intervalUs := r.interPacketEst.avgIntervalUs.Load()
     if intervalUs == 0 {
         intervalUs = InterPacketIntervalDefaultUs
     }
@@ -633,8 +633,8 @@ During warm-up, don't use time-based expiry at all:
 ```go
 func (r *receiver) calculateExpiryThreshold(nowUs uint64) uint64 {
     // During warm-up, skip time-based expiry entirely
-    // This means some phantom NAKs during initial 32 packets
-    if r.interPacketSampleCount.Load() < EWMAWarmupThreshold {
+    // This means some phantom NAKs during initial packets
+    if r.interPacketEst.sampleCount.Load() < r.ewmaWarmupThreshold {
         return 0 // Signal to use sequence-based fallback
     }
 
@@ -652,7 +652,7 @@ func (r *receiver) calculateExpiryThreshold(nowUs uint64) uint64 {
 Use a more conservative margin until warm:
 ```go
 func (r *receiver) getEffectiveNakExpiryMargin() float64 {
-    if r.interPacketSampleCount.Load() < EWMAWarmupThreshold {
+    if r.interPacketEst.sampleCount.Load() < r.ewmaWarmupThreshold {
         // Cold: use 2x margin (very conservative)
         return r.nakExpiryMargin * 2.0
     }
@@ -678,19 +678,32 @@ Rationale:
 
 #### 4.6.5 Sample Count Tracking
 
-Add atomic counter to track warm-up progress:
+Group atomic fields into a struct for maintainability and to make the logical relationship explicit:
 
 ```go
+// interPacketEstimator tracks inter-packet arrival timing for TSBPD estimation.
+// All fields are atomic for lock-free access in the event loop.
+//
+// Grouping these fields into a struct:
+// 1. Makes the logical relationship between fields explicit
+// 2. Prevents partial updates during refactoring
+// 3. Enables future extension (e.g., jitter tracking)
+type interPacketEstimator struct {
+    avgIntervalUs atomic.Uint64 // EWMA of inter-packet intervals (µs)
+    lastArrivalUs atomic.Uint64 // Previous packet arrival time (µs)
+    sampleCount   atomic.Uint32 // Valid samples collected (for warm-up)
+}
+
 // In receiver struct:
-interPacketSampleCount atomic.Uint32 // Count of valid inter-packet samples
+interPacketEst interPacketEstimator
 
 // In updateInterPacketInterval():
 if newInterval, valid := updateInterPacketInterval(nowUs, lastArrivalUs, oldInterval); valid {
-    r.avgInterPacketIntervalUs.Store(newInterval)
+    r.interPacketEst.avgIntervalUs.Store(newInterval)
     // Increment sample count (saturate at max to avoid overflow)
-    count := r.interPacketSampleCount.Load()
+    count := r.interPacketEst.sampleCount.Load()
     if count < math.MaxUint32 {
-        r.interPacketSampleCount.Add(1)
+        r.interPacketEst.sampleCount.Add(1)
     }
 }
 ```
@@ -698,18 +711,18 @@ if newInterval, valid := updateInterPacketInterval(nowUs, lastArrivalUs, oldInte
 #### 4.6.6 Warm-up Timeline Example
 
 ```
-Connection startup at T=0:
+Connection startup at T=0 (using interPacketEst struct):
 
 T=0ms:     First packet arrives
-           interPacketSampleCount = 0 (cold)
+           interPacketEst.sampleCount = 0 (cold)
 
 T=1ms:     Second packet arrives
            intervalUs = 1000 (actual)
-           interPacketSampleCount = 1 (cold)
+           interPacketEst.sampleCount = 1 (cold)
 
 T=32ms:    33rd packet arrives (at ~1000 pps)
-           avgInterPacketIntervalUs ≈ 1000µs (converged)
-           interPacketSampleCount = 32 (WARM!)
+           interPacketEst.avgIntervalUs ≈ 1000µs (converged)
+           interPacketEst.sampleCount = 32 (WARM!)
 
 T=35ms:    Gap detected (packets 34-36 missing)
            Linear interpolation uses boundary packets ← accurate
@@ -955,7 +968,7 @@ func (r *receiver) isEWMAWarm() bool {
     if r.ewmaWarmupThreshold == 0 {
         return true
     }
-    return r.interPacketSampleCount.Load() >= r.ewmaWarmupThreshold
+    return r.interPacketEst.sampleCount.Load() >= r.ewmaWarmupThreshold
 }
 ```
 
@@ -1027,7 +1040,7 @@ Both margin configs default to 10% extra margin for consistency across the codeb
 | `congestion/live/receive/nak.go` | NEW | Add `calculateExpiryThreshold()` with margin (Section 5.2.5) |
 | `congestion/live/receive/nak.go` | gapScan | Use linear interpolation + pre-filter expired entries (Section 4.5.4.1) |
 | `congestion/live/receive/nak.go` | 509-544 | Modify `expireNakEntries()` to use time-based expiry with margin |
-| `congestion/live/receive/receiver.go` | struct | Add `avgInterPacketIntervalUs`, `lastPacketArrivalUs`, `nakExpiryMargin` |
+| `congestion/live/receive/receiver.go` | struct | Add `interPacketEstimator` struct and `interPacketEst` field, `nakExpiryMargin`, `ewmaWarmupThreshold` |
 | `congestion/live/receive/push.go` | pushLocked | Track inter-packet interval EWMA (fallback) |
 | `metrics/metrics.go` | ~700 | Add `NakBtreeExpiredEarly`, `NakBtreeSkippedExpired` counters |
 | `metrics/handler.go` | ~1100 | Export new metrics |
@@ -1563,6 +1576,10 @@ A few extra useless NAKs are acceptable; missing a recovery window is not.
 | 10 | **Empty NAK btree** | LOW | Check for empty | `TestExpiryEmptyBtree` |
 | 11 | **Single entry in btree** | LOW | Min() handles | `TestExpirySingleEntry` |
 | 12 | **Concurrent modification** | MEDIUM | Use locking versions | `TestExpiryConcurrent` |
+| 13 | **Inverted TSBPD order** | MEDIUM | Clamp to lowerTsbpd | `TestEstimate_AdversarialMonotonicity` |
+| 14 | **Equal TSBPD diff seq** | LOW | Return lowerTsbpd | `TestEstimate_AdversarialMonotonicity` |
+| 15 | **Zero/uninitialized TSBPD** | MEDIUM | Safe expiry (always < threshold) | `TestExpiry_ZeroTsbpd` |
+| 16 | **MaxUint64 TSBPD** | LOW | Safe (always > threshold) | `TestExpiry_MaxTsbpd` |
 
 ### 7.3 High-Risk Scenarios Analysis
 
@@ -1597,6 +1614,80 @@ Mitigation:
   1. Use linear interpolation (bounds error to gap duration)
   2. Apply nakExpiryMargin (absorbs estimation error)
   3. For Starlink bursts, error is bounded by burst duration (~60ms)
+```
+
+#### 7.3.3 Adversarial Monotonicity Violations (Corner Cases #13-16)
+
+**Problem:** What if TSBPD values violate expected ordering?
+
+This can happen due to:
+1. **Sender clock bugs**: Clock jumped backward between packets
+2. **Timestamp wraparound**: Rare but possible after ~70 minutes at microsecond resolution
+3. **Future refactors**: Code changes that inadvertently break timestamp semantics
+4. **Malicious sender**: Crafted packets with invalid timestamps
+
+**Test Scenarios:**
+
+```
+Scenario A: Inverted TSBPD Order
+  Lower packet: seq=100, TSBPD=2_000_000 (2s)
+  Upper packet: seq=110, TSBPD=1_000_000 (1s)  ← LOWER than lower!
+  Missing:      seq=105
+
+  Without guard: interpolation would produce nonsense
+  With guard:    clamp to lowerTsbpd (2s) - safe, keeps NAK entry longer
+
+Scenario B: Equal TSBPD, Different Sequence
+  Lower packet: seq=100, TSBPD=1_000_000
+  Upper packet: seq=110, TSBPD=1_000_000  ← Same TSBPD
+  Missing:      seq=105
+
+  Without guard: division by zero or nonsense interpolation
+  With guard:    return lowerTsbpd (no interpolation possible)
+
+Scenario C: Zero TSBPD (uninitialized)
+  Entry with TsbpdTimeUs=0 in NAK btree
+
+  Behavior: Will always be < expiryThreshold, so expires immediately
+  Risk:     Loses recovery opportunity
+  Mitigation: Should never have zero TSBPD - detect at insertion time
+
+Scenario D: MaxUint64 TSBPD (overflow/corruption)
+  Entry with TsbpdTimeUs=MaxUint64 in NAK btree
+
+  Behavior: Will never be < expiryThreshold, so never expires via time
+  Risk:     NAK entry stays forever, wasting memory
+  Mitigation: Sequence-based expiry still works as fallback
+```
+
+**Guards in estimateTsbpdForSeq:**
+
+```go
+func estimateTsbpdForSeq(missingSeq, lowerSeq uint32, lowerTsbpd uint64, upperSeq uint32, upperTsbpd uint64) uint64 {
+    // Guard #1: Inverted or equal TSBPD - return safe fallback
+    if upperTsbpd <= lowerTsbpd {
+        return lowerTsbpd
+    }
+
+    // Guard #2: Equal sequence (shouldn't happen)
+    if upperSeq == lowerSeq {
+        return lowerTsbpd
+    }
+
+    // Safe to interpolate
+    seqRange := uint64(circular.SeqSub(upperSeq, lowerSeq))
+    tsbpdRange := upperTsbpd - lowerTsbpd
+    seqOffset := uint64(circular.SeqSub(missingSeq, lowerSeq))
+
+    estimated := lowerTsbpd + (seqOffset * tsbpdRange / seqRange)
+
+    // Guard #3: Monotonicity - result should be >= lowerTsbpd
+    if estimated < lowerTsbpd {
+        return lowerTsbpd
+    }
+
+    return estimated
+}
 ```
 
 ### 7.4 Table-Driven Test Design
@@ -1823,6 +1914,45 @@ func TestDeleteBeforeTsbpd_CornerCases(t *testing.T) {
             wantExpired:   0,         // 1.025s < 1.030s → EXPIRED
             wantRemaining: []uint32{},
         },
+
+        // === ADVERSARIAL MONOTONICITY VIOLATION TESTS ===
+        // These test what happens when TSBPD ordering assumptions are violated.
+        // Protects against: sender clock bugs, future timestamp refactors.
+        {
+            name: "adversarial_zero_tsbpd_entries",
+            entries: []NakEntryWithTime{
+                {Seq: 100, TsbpdTimeUs: 0}, // Zero TSBPD (uninitialized?)
+                {Seq: 101, TsbpdTimeUs: 0},
+            },
+            nowUs:         1_000_000,
+            rtoUs:         15_000,
+            nakExpiryMargin:        0.10,
+            wantExpired:   2,         // All zero TSBPD should be expired (< any threshold)
+            wantRemaining: []uint32{},
+        },
+        {
+            name: "adversarial_mixed_zero_and_valid",
+            entries: []NakEntryWithTime{
+                {Seq: 100, TsbpdTimeUs: 0},         // Zero (bug?)
+                {Seq: 101, TsbpdTimeUs: 2_000_000}, // Valid future TSBPD
+            },
+            nowUs:         1_000_000,
+            rtoUs:         15_000,
+            nakExpiryMargin:        0.10,      // threshold = 1.0165s
+            wantExpired:   1,         // Only zero should expire
+            wantRemaining: []uint32{101},
+        },
+        {
+            name: "adversarial_max_uint64_tsbpd",
+            entries: []NakEntryWithTime{
+                {Seq: 100, TsbpdTimeUs: math.MaxUint64}, // Max value
+            },
+            nowUs:         1_000_000,
+            rtoUs:         15_000,
+            nakExpiryMargin:        0.10,
+            wantExpired:   0,         // MaxUint64 > any threshold → kept
+            wantRemaining: []uint32{100},
+        },
     }
 
     for _, tc := range tests {
@@ -1935,12 +2065,117 @@ func TestEstimateTsbpdForSeq_CornerCases(t *testing.T) {
             upperSeq:   100, upperTsbpd: 1_000_000, // Same seq (shouldn't happen)
             wantTsbpd:  1_000_000, // Falls back to lower
         },
+
+        // ============================================================
+        // ADVERSARIAL MONOTONICITY VIOLATION TESTS
+        // ============================================================
+        // These test cases simulate clock bugs, sender timestamp errors,
+        // or future refactors that might violate TSBPD ordering assumptions.
+        // The estimator MUST clamp safely and never produce:
+        // - Negative values (would cause underflow)
+        // - Values less than lowerTsbpd (would violate timeline)
+        // - Panics or unexpected behavior
+
+        // Case: Lower TSBPD > Upper TSBPD (clock jumped backward on sender)
+        {
+            name:       "adversarial_inverted_tsbpd_order",
+            missingSeq: 105,
+            lowerSeq:   100, lowerTsbpd: 2_000_000, // Lower has HIGHER tsbpd!
+            upperSeq:   110, upperTsbpd: 1_000_000, // Upper has LOWER tsbpd
+            wantTsbpd:  2_000_000, // Must clamp to lowerTsbpd (safe fallback)
+        },
+
+        // Case: Equal TSBPD with increasing sequence (degenerate timestamps)
+        {
+            name:       "adversarial_equal_tsbpd_diff_seq",
+            missingSeq: 105,
+            lowerSeq:   100, lowerTsbpd: 1_000_000,
+            upperSeq:   110, upperTsbpd: 1_000_000, // Same TSBPD, different seq
+            wantTsbpd:  1_000_000, // No interpolation possible, use lower
+        },
+
+        // Case: Huge TSBPD gap that could overflow if multiplied carelessly
+        {
+            name:       "adversarial_huge_tsbpd_range",
+            missingSeq: 105,
+            lowerSeq:   100, lowerTsbpd: 0,
+            upperSeq:   110, upperTsbpd: 0xFFFFFFFFFFFFFF00, // Near max uint64
+            wantTsbpd:  0x7FFFFFFFFFFFFFF8, // 50% = should be safe
+        },
+
+        // Case: Upper sequence < Lower sequence (wraparound confusion)
+        // This tests circular arithmetic edge case
+        {
+            name:       "adversarial_apparent_seq_inversion",
+            missingSeq: 5,
+            lowerSeq:   0xFFFFFFF0, lowerTsbpd: 1_000_000, // Near max
+            upperSeq:   10, upperTsbpd: 1_020_000,          // Wrapped to low
+            // Gap is 0x20 (32 sequences), missing is 21 seqs from lower
+            // 21/32 * 20000 = 13125
+            wantTsbpd:  1_013_125,
+        },
+
+        // Case: Missing sequence outside bounds (shouldn't happen but be safe)
+        {
+            name:       "adversarial_missing_before_lower",
+            missingSeq: 95, // Before lower bound
+            lowerSeq:   100, lowerTsbpd: 1_000_000,
+            upperSeq:   110, upperTsbpd: 1_010_000,
+            // Negative offset - implementation should handle gracefully
+            wantTsbpd:  995_000, // Or clamp to lowerTsbpd depending on impl
+        },
     }
 
     for _, tc := range tests {
         t.Run(tc.name, func(t *testing.T) {
             result := estimateTsbpdForSeq(tc.missingSeq, tc.lowerSeq, tc.lowerTsbpd, tc.upperSeq, tc.upperTsbpd)
             require.Equal(t, tc.wantTsbpd, result)
+        })
+    }
+}
+
+// TestEstimateTsbpdForSeq_AdversarialNoUnderflow specifically verifies
+// that no input combination can cause underflow or negative results.
+func TestEstimateTsbpdForSeq_AdversarialNoUnderflow(t *testing.T) {
+    // Fuzz-like test with adversarial inputs
+    adversarialInputs := []struct {
+        name       string
+        missingSeq uint32
+        lowerSeq   uint32
+        lowerTsbpd uint64
+        upperSeq   uint32
+        upperTsbpd uint64
+    }{
+        {"inverted_tsbpd", 105, 100, 2_000_000, 110, 1_000_000},
+        {"zero_lower", 105, 100, 0, 110, 1_000_000},
+        {"zero_upper", 105, 100, 1_000_000, 110, 0},
+        {"both_zero", 105, 100, 0, 110, 0},
+        {"max_lower", 105, 100, math.MaxUint64, 110, 1_000_000},
+        {"max_upper", 105, 100, 1_000_000, 110, math.MaxUint64},
+        {"both_max", 105, 100, math.MaxUint64, 110, math.MaxUint64},
+        {"seq_at_zero", 0, 0, 1_000_000, 10, 1_010_000},
+        {"seq_at_max", math.MaxUint32, math.MaxUint32-5, 1_000_000, math.MaxUint32, 1_005_000},
+    }
+
+    for _, tc := range adversarialInputs {
+        t.Run(tc.name, func(t *testing.T) {
+            // Should not panic
+            result := estimateTsbpdForSeq(tc.missingSeq, tc.lowerSeq, tc.lowerTsbpd, tc.upperSeq, tc.upperTsbpd)
+
+            // Result should be >= lowerTsbpd when upper >= lower (monotonicity)
+            // When inverted, result should be clamped to lowerTsbpd
+            if tc.upperTsbpd < tc.lowerTsbpd {
+                require.Equal(t, tc.lowerTsbpd, result,
+                    "inverted TSBPD should clamp to lowerTsbpd")
+            }
+
+            // Result should never be "negative" (in uint64 terms, extremely large)
+            // A reasonable upper bound: max(lowerTsbpd, upperTsbpd) + some margin
+            maxReasonable := max(tc.lowerTsbpd, tc.upperTsbpd)
+            if maxReasonable < math.MaxUint64/2 {
+                require.Less(t, result, maxReasonable*2,
+                    "result should not overflow to unreasonable values")
+            }
         })
     }
 }
@@ -2437,10 +2672,12 @@ The optimization is particularly important because:
 | Item | Size | Notes |
 |------|------|-------|
 | `TsbpdTimeUs` field | +8 bytes per entry | Added to `NakEntryWithTime` |
-| `avgInterPacketIntervalUs` | +8 bytes per receiver | Atomic uint64 |
-| `lastPacketArrivalUs` | +8 bytes per receiver | Atomic uint64 |
+| `interPacketEstimator` struct | +20 bytes per receiver | Contains 3 atomic fields |
+| - `avgIntervalUs` | 8 bytes | Atomic uint64 |
+| - `lastArrivalUs` | 8 bytes | Atomic uint64 |
+| - `sampleCount` | 4 bytes | Atomic uint32 |
 
-**Total per connection:** ~16 bytes + 8 bytes per NAK entry
+**Total per connection:** ~20 bytes + 8 bytes per NAK entry
 
 At typical NAK btree sizes (10-100 entries during loss events), this is 80-800 bytes additional memory per connection. This is an acceptable tradeoff for accurate time-based expiry.
 
@@ -2460,7 +2697,7 @@ At typical NAK btree sizes (10-100 entries during loss events), this is 80-800 b
 | Total per 20ms cycle | ~same | ~same |
 
 The TSBPD calculation during insertion uses:
-- One atomic load (`avgInterPacketIntervalUs`)
+- One atomic load (`interPacketEst.avgIntervalUs`)
 - Simple arithmetic (multiplication, addition)
 - Cost: ~10 nanoseconds per insertion
 
@@ -2581,7 +2818,7 @@ For a 100-packet gap with 1 boundary:
 
 ### 12.2 Phase 2: TSBPD Estimation
 
-1. Add `avgInterPacketIntervalUs` and `lastPacketArrivalUs` to receiver
+1. Add `interPacketEstimator` struct with `avgIntervalUs`, `lastArrivalUs`, and `sampleCount` to receiver
 2. Implement `estimateTsbpdForSeq()` function
 3. Update `pushLocked()` to track inter-packet interval
 4. Add unit tests for TSBPD estimation

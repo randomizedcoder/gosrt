@@ -432,6 +432,10 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		FastNakThresholdUs:   c.config.FastNakThresholdMs * 1000, // Convert ms to µs
 		FastNakRecentEnabled: c.config.FastNakRecentEnabled,
 
+		// NAK btree expiry configuration (nak_btree_expiry_optimization.md)
+		NakExpiryMargin:     c.config.NakExpiryMargin,
+		EWMAWarmupThreshold: c.config.EWMAWarmupThreshold,
+
 		// Lock-free ring buffer configuration (Phase 3: Lockless Design)
 		UsePacketRing:             c.config.UsePacketRing,
 		PacketRingSize:            c.config.PacketRingSize,

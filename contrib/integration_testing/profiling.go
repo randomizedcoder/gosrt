@@ -12,18 +12,20 @@ import (
 type ProfileType string
 
 const (
-	ProfileCPU    ProfileType = "cpu"
-	ProfileMem    ProfileType = "mem"
-	ProfileMutex  ProfileType = "mutex"
-	ProfileBlock  ProfileType = "block"
-	ProfileHeap   ProfileType = "heap"
-	ProfileAllocs ProfileType = "allocs"
-	ProfileTrace  ProfileType = "trace"
+	ProfileCPU          ProfileType = "cpu"
+	ProfileMem          ProfileType = "mem"
+	ProfileMutex        ProfileType = "mutex"
+	ProfileBlock        ProfileType = "block"
+	ProfileHeap         ProfileType = "heap"
+	ProfileAllocs       ProfileType = "allocs"
+	ProfileTrace        ProfileType = "trace"
+	ProfileThread       ProfileType = "thread"       // OS thread creation (threadcreate)
+	ProfileGoroutine    ProfileType = "goroutine"    // All current goroutines
 )
 
 // AllProfiles returns all profile types (excluding trace due to size)
 func AllProfiles() []ProfileType {
-	return []ProfileType{ProfileCPU, ProfileMutex, ProfileBlock, ProfileHeap, ProfileAllocs}
+	return []ProfileType{ProfileCPU, ProfileMutex, ProfileBlock, ProfileHeap, ProfileAllocs, ProfileThread, ProfileGoroutine}
 }
 
 // ProfileConfig holds configuration for a profiling run
@@ -36,8 +38,13 @@ type ProfileConfig struct {
 
 // NewProfileConfig creates a ProfileConfig from environment variables
 func NewProfileConfig(testName string) (*ProfileConfig, error) {
-	profiles := ParseProfiles(os.Getenv("PROFILES"))
+	envValue := os.Getenv("PROFILES")
+	profiles := ParseProfiles(envValue)
 	if len(profiles) == 0 {
+		if envValue != "" {
+			fmt.Printf("Warning: PROFILES=%q did not match any known profile types\n", envValue)
+			fmt.Println("  Valid types: cpu, mem, mutex, block, heap, allocs, trace, thread, goroutine, all")
+		}
 		return nil, nil // Profiling not enabled
 	}
 
@@ -81,6 +88,10 @@ func ParseProfiles(env string) []ProfileType {
 			profiles = append(profiles, ProfileAllocs)
 		case "trace":
 			profiles = append(profiles, ProfileTrace)
+		case "thread", "threadcreate":
+			profiles = append(profiles, ProfileThread)
+		case "goroutine":
+			profiles = append(profiles, ProfileGoroutine)
 		}
 	}
 	return profiles
@@ -127,6 +138,10 @@ func GetProfileDuration(p ProfileType) time.Duration {
 		return 60 * time.Second
 	case ProfileTrace:
 		return 30 * time.Second
+	case ProfileThread, ProfileGoroutine:
+		// Thread/goroutine profiles are point-in-time snapshots, not duration-based
+		// but we still run for a duration to let the system stabilize
+		return 120 * time.Second
 	default:
 		return 60 * time.Second
 	}
@@ -191,7 +206,8 @@ func (c *ProfileConfig) PrintProfilingInfo() {
 	fmt.Printf("║  Test:     %-60s ║\n", c.TestName)
 	fmt.Printf("║  Profiles: %-60s ║\n", formatProfileTypes(c.Profiles))
 	fmt.Printf("║  Output:   %-60s ║\n", truncatePath(c.OutputDir, 60))
-	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════╝\n")
+	fmt.Printf("\nProfile files will be written to: %s\n\n", c.OutputDir)
 }
 
 // formatProfileTypes formats profile types for display
@@ -231,6 +247,46 @@ func (c *ProfileConfig) ListProfileFiles() ([]string, error) {
 		return nil
 	})
 	return files, err
+}
+
+// PrintProfileFileLocations prints a summary of all generated profile files
+func (c *ProfileConfig) PrintProfileFileLocations() {
+	if c == nil {
+		return
+	}
+
+	files, err := c.ListProfileFiles()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not list profile files: %v\n", err)
+		return
+	}
+
+	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  PROFILE FILES GENERATED                                                                      ║\n")
+	fmt.Printf("╠═══════════════════════════════════════════════════════════════════════════════════════════════╣\n")
+	fmt.Printf("║  Output Directory:                                                                            ║\n")
+	fmt.Printf("║    %s\n", c.OutputDir)
+	fmt.Printf("║                                                                                               ║\n")
+
+	if len(files) == 0 {
+		fmt.Printf("║  (No .pprof files found)                                                                      ║\n")
+	} else {
+		fmt.Printf("║  Files (%d total):                                                                             ║\n", len(files))
+		for _, f := range files {
+			// Show relative path from output dir for cleaner display
+			relPath, err := filepath.Rel(c.OutputDir, f)
+			if err != nil {
+				relPath = f
+			}
+			fmt.Printf("║    %s\n", relPath)
+		}
+	}
+
+	fmt.Printf("╠═══════════════════════════════════════════════════════════════════════════════════════════════╣\n")
+	fmt.Printf("║  To analyze profiles:                                                                         ║\n")
+	fmt.Printf("║    go tool pprof -http=:8080 <file.pprof>                                                     ║\n")
+	fmt.Printf("║    go tool pprof -top <file.pprof>                                                            ║\n")
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════════════════════╝\n\n")
 }
 
 // ProfileComponent represents a profiled component with its profile file paths

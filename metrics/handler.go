@@ -743,6 +743,24 @@ func MetricsHandler() http.Handler {
 			writeCounterIfNonZero(b, "gosrt_nak_btree_expired_total",
 				metrics.NakBtreeExpired.Load(),
 				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_nak_btree_expired_early_total",
+				metrics.NakBtreeExpiredEarly.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_nak_btree_skipped_expired_total",
+				metrics.NakBtreeSkippedExpired.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// TSBPD estimation method metrics (nak_btree_expiry_optimization.md)
+			writeCounterIfNonZero(b, "gosrt_nak_tsbpd_est_boundary_total",
+				metrics.NakTsbpdEstBoundary.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_nak_tsbpd_est_ewma_total",
+				metrics.NakTsbpdEstEWMA.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_nak_tsbpd_est_cold_fallback_total",
+				metrics.NakTsbpdEstColdFallback.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
 			writeGaugeIfNonZero(b, "gosrt_nak_btree_size",
 				float64(metrics.NakBtreeSize.Load()),
 				"socket_id", socketIdStr, "instance", instanceName)

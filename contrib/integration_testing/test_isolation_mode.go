@@ -341,6 +341,9 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 			if err := GenerateHTMLReport(report); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to generate report: %v\n", err)
 			}
+
+			// Print summary of where profile files are located
+			profileConfig.PrintProfileFileLocations()
 		} else {
 			fmt.Println("No profile files found to analyze")
 		}

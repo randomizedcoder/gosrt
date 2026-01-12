@@ -525,6 +525,9 @@ func generateParallelProfileReport(testName string, profileConfig *ProfileConfig
 	if err := GenerateHTMLReport(report); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to generate report: %v\n", err)
 	}
+
+	// Print summary of where profile files are located
+	profileConfig.PrintProfileFileLocations()
 }
 
 // printParallelProfileSummary prints an overall summary of the parallel comparison

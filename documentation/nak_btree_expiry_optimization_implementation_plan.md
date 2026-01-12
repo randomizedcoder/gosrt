@@ -525,7 +525,39 @@ go test ./congestion/live/receive/... -run TestNakBtree -v
 
 ## Phase 3: Receiver Infrastructure
 
-### Step 3.1: Add Fields to Receiver Struct
+### Step 3.1: Add Inter-Packet Estimator Struct
+
+**File:** `congestion/live/receive/receiver.go`
+
+**Location:** Before the receiver struct definition (around line 30)
+
+```go
+// interPacketEstimator tracks inter-packet arrival timing for TSBPD estimation.
+// All fields are atomic for lock-free access in the event loop.
+//
+// This struct groups related estimator state to:
+// 1. Make the logical relationship between fields explicit
+// 2. Prevent partial updates during refactoring
+// 3. Enable future extension (e.g., jitter tracking)
+//
+// See nak_btree_expiry_optimization.md Section 4.6 for warm-up strategy.
+type interPacketEstimator struct {
+	// avgIntervalUs is the EWMA of inter-packet arrival intervals (microseconds).
+	// Updated on each valid packet arrival using 0.875/0.125 weighting.
+	avgIntervalUs atomic.Uint64
+
+	// lastArrivalUs is the arrival time of the previous packet (microseconds).
+	// Used to calculate the interval to the current packet.
+	lastArrivalUs atomic.Uint64
+
+	// sampleCount tracks how many valid samples have been collected.
+	// Used for warm-up detection (see ewmaWarmupThreshold config).
+	// Saturates at MaxUint32 to avoid overflow.
+	sampleCount atomic.Uint32
+}
+```
+
+### Step 3.2: Add Estimator to Receiver Struct
 
 **File:** `congestion/live/receive/receiver.go`
 
@@ -535,11 +567,9 @@ go test ./congestion/live/receive/... -run TestNakBtree -v
 	avgPayloadSizeBits  atomic.Uint64 // float64 via math.Float64bits/Float64frombits
 	avgLinkCapacityBits atomic.Uint64 // float64 via math.Float64bits/Float64frombits
 
-	// Inter-packet interval tracking (for TSBPD estimation fallback)
+	// Inter-packet timing estimator for TSBPD estimation fallback
 	// See nak_btree_expiry_optimization.md Section 4.6
-	avgInterPacketIntervalUs atomic.Uint64 // EWMA of inter-packet arrival interval (µs)
-	lastPacketArrivalUs      atomic.Uint64 // Last packet arrival time (µs) for interval calc
-	interPacketSampleCount   atomic.Uint32 // Count of valid samples for warm-up tracking
+	interPacketEst interPacketEstimator
 ```
 
 **Location:** After `nakConsolidationBudget` (around line 93)
@@ -565,7 +595,7 @@ go test ./congestion/live/receive/... -run TestNakBtree -v
 	nakDeleteBeforeTsbpd    func(expiryThresholdUs uint64) int
 ```
 
-### Step 3.2: Wire Up Configuration
+### Step 3.3: Wire Up Configuration
 
 **File:** `congestion/live/receive/receiver.go`
 
@@ -822,13 +852,13 @@ func updateInterPacketInterval(nowUs, lastArrivalUs, oldInterval uint64) (newInt
 	// Track inter-packet interval for TSBPD estimation fallback
 	// Also tracks sample count for EWMA warm-up (Section 4.6)
 	nowUs := uint64(now.UnixMicro())
-	lastArrivalUs := r.lastPacketArrivalUs.Swap(nowUs)
-	if newInterval, valid := updateInterPacketInterval(nowUs, lastArrivalUs, r.avgInterPacketIntervalUs.Load()); valid {
-		r.avgInterPacketIntervalUs.Store(newInterval)
+	lastArrivalUs := r.interPacketEst.lastArrivalUs.Swap(nowUs)
+	if newInterval, valid := updateInterPacketInterval(nowUs, lastArrivalUs, r.interPacketEst.avgIntervalUs.Load()); valid {
+		r.interPacketEst.avgIntervalUs.Store(newInterval)
 		// Increment sample count for warm-up tracking (saturate to avoid overflow)
-		count := r.interPacketSampleCount.Load()
+		count := r.interPacketEst.sampleCount.Load()
 		if count < math.MaxUint32 {
-			r.interPacketSampleCount.Add(1)
+			r.interPacketEst.sampleCount.Add(1)
 		}
 	}
 
@@ -922,7 +952,7 @@ func (r *receiver) isEWMAWarm() bool {
 	if r.ewmaWarmupThreshold == 0 {
 		return true
 	}
-	return r.interPacketSampleCount.Load() >= r.ewmaWarmupThreshold
+	return r.interPacketEst.sampleCount.Load() >= r.ewmaWarmupThreshold
 }
 ```
 
@@ -957,7 +987,7 @@ func (r *receiver) estimateTsbpdFallback(missingSeq uint32, refSeq uint32, refTs
 	}
 
 	// EWMA is warm - use it
-	intervalUs := r.avgInterPacketIntervalUs.Load()
+	intervalUs := r.interPacketEst.avgIntervalUs.Load()
 	if intervalUs == 0 {
 		// Edge case: warm but no interval (shouldn't happen, but handle it)
 		intervalUs = InterPacketIntervalDefaultUs
@@ -1169,7 +1199,7 @@ periodicNakBtree()
 				intervalUs = (b.upperTsbpd - b.lowerTsbpd) / seqRange
 			} else {
 				// Fallback: use EWMA interval
-				intervalUs = r.avgInterPacketIntervalUs.Load()
+				intervalUs = r.interPacketEst.avgIntervalUs.Load()
 				if intervalUs == 0 {
 					intervalUs = InterPacketIntervalDefaultUs
 				}
@@ -1688,6 +1718,44 @@ func TestDeleteBeforeTsbpd(t *testing.T) {
 			wantExpired:     0, // Should not expire with time-based (falls back)
 			wantRemaining:   []uint32{100},
 		},
+
+		// === ADVERSARIAL MONOTONICITY VIOLATION TESTS ===
+		// Protect against sender clock bugs, future refactors
+		{
+			name: "adversarial_zero_tsbpd_expires",
+			entries: []NakEntryWithTime{
+				{Seq: 100, TsbpdTimeUs: 0}, // Uninitialized/buggy
+			},
+			nowUs:           1_000_000,
+			rtoUs:           15_000,
+			nakExpiryMargin: 0.10,
+			wantExpired:     1, // Zero TSBPD always < threshold
+			wantRemaining:   []uint32{},
+		},
+		{
+			name: "adversarial_max_uint64_never_expires",
+			entries: []NakEntryWithTime{
+				{Seq: 100, TsbpdTimeUs: math.MaxUint64}, // Overflow/corruption
+			},
+			nowUs:           1_000_000,
+			rtoUs:           15_000,
+			nakExpiryMargin: 0.10,
+			wantExpired:     0, // MaxUint64 always > threshold
+			wantRemaining:   []uint32{100},
+		},
+		{
+			name: "adversarial_mixed_valid_and_corrupt",
+			entries: []NakEntryWithTime{
+				{Seq: 100, TsbpdTimeUs: 0},             // Bug: zero
+				{Seq: 101, TsbpdTimeUs: 1_020_000},    // Valid
+				{Seq: 102, TsbpdTimeUs: math.MaxUint64}, // Bug: max
+			},
+			nowUs:           1_000_000,
+			rtoUs:           15_000,
+			nakExpiryMargin: 0.10,
+			wantExpired:     1, // Only zero expires
+			wantRemaining:   []uint32{101, 102},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1723,6 +1791,7 @@ func TestDeleteBeforeTsbpd(t *testing.T) {
 package receive
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -1771,6 +1840,115 @@ func TestEstimateTsbpdForSeq(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := estimateTsbpdForSeq(tc.missingSeq, tc.lowerSeq, tc.lowerTsbpd, tc.upperSeq, tc.upperTsbpd)
 			require.Equal(t, tc.wantTsbpd, result)
+		})
+	}
+}
+
+// TestEstimateTsbpdForSeq_AdversarialMonotonicity tests that the estimator
+// safely handles inputs that violate expected TSBPD ordering.
+// Protects against: sender clock bugs, future timestamp refactors.
+func TestEstimateTsbpdForSeq_AdversarialMonotonicity(t *testing.T) {
+	tests := []struct {
+		name       string
+		missingSeq uint32
+		lowerSeq   uint32
+		lowerTsbpd uint64
+		upperSeq   uint32
+		upperTsbpd uint64
+		wantTsbpd  uint64
+		wantClamp  bool // true if result should clamp to lowerTsbpd
+	}{
+		// Inverted TSBPD: lower has higher TSBPD than upper (clock jumped back)
+		{
+			name:       "inverted_tsbpd_clamps_to_lower",
+			missingSeq: 105,
+			lowerSeq:   100,
+			lowerTsbpd: 2_000_000, // Higher than upper!
+			upperSeq:   110,
+			upperTsbpd: 1_000_000, // Lower than lower
+			wantTsbpd:  2_000_000, // Should clamp to lowerTsbpd
+			wantClamp:  true,
+		},
+		// Equal TSBPD: no time progression between packets
+		{
+			name:       "equal_tsbpd_returns_lower",
+			missingSeq: 105,
+			lowerSeq:   100,
+			lowerTsbpd: 1_000_000,
+			upperSeq:   110,
+			upperTsbpd: 1_000_000, // Same as lower
+			wantTsbpd:  1_000_000, // Should return lowerTsbpd
+			wantClamp:  true,
+		},
+		// Zero lower TSBPD (uninitialized)
+		{
+			name:       "zero_lower_tsbpd",
+			missingSeq: 105,
+			lowerSeq:   100,
+			lowerTsbpd: 0, // Uninitialized
+			upperSeq:   110,
+			upperTsbpd: 1_000_000,
+			wantTsbpd:  500_000, // Should interpolate (50% of range)
+			wantClamp:  false,
+		},
+		// Zero upper TSBPD: treated as inverted
+		{
+			name:       "zero_upper_tsbpd_clamps",
+			missingSeq: 105,
+			lowerSeq:   100,
+			lowerTsbpd: 1_000_000,
+			upperSeq:   110,
+			upperTsbpd: 0, // Bug: zero
+			wantTsbpd:  1_000_000, // Should clamp to lowerTsbpd (upper < lower)
+			wantClamp:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := estimateTsbpdForSeq(tc.missingSeq, tc.lowerSeq, tc.lowerTsbpd, tc.upperSeq, tc.upperTsbpd)
+			require.Equal(t, tc.wantTsbpd, result)
+
+			if tc.wantClamp {
+				require.Equal(t, tc.lowerTsbpd, result,
+					"expected result to clamp to lowerTsbpd")
+			}
+		})
+	}
+}
+
+// TestEstimateTsbpdForSeq_AdversarialNoUnderflow verifies that no input
+// combination causes underflow, overflow, or panics.
+func TestEstimateTsbpdForSeq_AdversarialNoUnderflow(t *testing.T) {
+	adversarialInputs := []struct {
+		name       string
+		missingSeq uint32
+		lowerSeq   uint32
+		lowerTsbpd uint64
+		upperSeq   uint32
+		upperTsbpd uint64
+	}{
+		{"inverted_tsbpd", 105, 100, 2_000_000, 110, 1_000_000},
+		{"both_zero_tsbpd", 105, 100, 0, 110, 0},
+		{"both_max_tsbpd", 105, 100, math.MaxUint64, 110, math.MaxUint64},
+		{"max_lower_zero_upper", 105, 100, math.MaxUint64, 110, 0},
+		{"zero_lower_max_upper", 105, 100, 0, 110, math.MaxUint64},
+		{"seq_at_boundaries", 100, 100, 1_000_000, 100, 1_010_000},
+		{"huge_gap", 500_000, 0, 0, 1_000_000, 10_000_000_000},
+	}
+
+	for _, tc := range adversarialInputs {
+		t.Run(tc.name, func(t *testing.T) {
+			// Must not panic
+			require.NotPanics(t, func() {
+				result := estimateTsbpdForSeq(tc.missingSeq, tc.lowerSeq, tc.lowerTsbpd, tc.upperSeq, tc.upperTsbpd)
+
+				// Monotonicity: when upper >= lower, result should be >= lowerTsbpd
+				if tc.upperTsbpd >= tc.lowerTsbpd {
+					require.GreaterOrEqual(t, result, tc.lowerTsbpd,
+						"result should respect monotonicity")
+				}
+			})
 		})
 	}
 }

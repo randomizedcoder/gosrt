@@ -543,13 +543,15 @@ func TestGapScan_Table(t *testing.T) {
 			}
 
 			// Run scan
-			gaps := recv.gapScan()
+			gaps, gapTsbpds := recv.gapScan()
 
 			// Verify results
 			if len(tc.ExpectedGaps) == 0 {
 				require.Empty(t, gaps, "Expected no gaps")
 			} else {
 				require.Equal(t, tc.ExpectedGaps, gaps, "gaps mismatch")
+				// Verify TSBPD times were estimated for all gaps
+				require.Equal(t, len(gaps), len(gapTsbpds), "TSBPD count should match gap count")
 			}
 			require.Equal(t, tc.ExpectedCP, recv.contiguousPoint.Load(), "contiguousPoint mismatch")
 		})

@@ -9,12 +9,18 @@ import (
 	"github.com/randomizedcoder/gosrt/circular"
 )
 
-// NakEntryWithTime stores a missing sequence number with suppression tracking.
-// Used in NAK btree to track when each sequence was last NAK'd.
+// NakEntryWithTime stores a missing sequence number with timing information.
+// Used in NAK btree to track:
+// - When the packet should be delivered (TsbpdTimeUs) - for RTT-aware expiry
+// - When we last sent NAK (LastNakedAtUs) - for NAK suppression
+// - How many times NAK'd (NakCount) - for metrics
+//
 // Phase 6: RTO Suppression - prevents redundant NAKs within RTO window.
+// Phase 7: NAK Btree Expiry Optimization - RTT-aware early expiry (nak_btree_expiry_optimization.md)
 type NakEntryWithTime struct {
 	Seq           uint32 // Missing sequence number
-	LastNakedAtUs uint64 // When we last sent NAK for this seq (microseconds)
+	TsbpdTimeUs   uint64 // TSBPD release time for this sequence (microseconds) - for expiry
+	LastNakedAtUs uint64 // When we last sent NAK for this seq (microseconds) - for suppression
 	NakCount      uint32 // Number of times NAK'd
 }
 
@@ -82,6 +88,53 @@ func (nb *nakBtree) InsertBatchLocking(seqs []uint32) int {
 	return nb.InsertBatch(seqs)
 }
 
+// --- TSBPD-aware insertion methods (nak_btree_expiry_optimization.md) ---
+
+// InsertWithTsbpd adds a missing sequence number with its estimated TSBPD time.
+// Used for RTT-aware expiry: entries expire based on TSBPD time, not sequence.
+// This is the lock-free version for use in single-threaded contexts (event loop).
+// For concurrent access, use InsertWithTsbpdLocking().
+func (nb *nakBtree) InsertWithTsbpd(seq uint32, tsbpdTimeUs uint64) {
+	entry := NakEntryWithTime{Seq: seq, TsbpdTimeUs: tsbpdTimeUs, LastNakedAtUs: 0, NakCount: 0}
+	nb.tree.ReplaceOrInsert(entry)
+}
+
+// InsertWithTsbpdLocking adds a missing sequence with TSBPD time, with lock protection.
+// Use this version when called from tick() paths or other concurrent contexts.
+func (nb *nakBtree) InsertWithTsbpdLocking(seq uint32, tsbpdTimeUs uint64) {
+	nb.mu.Lock()
+	defer nb.mu.Unlock()
+	nb.InsertWithTsbpd(seq, tsbpdTimeUs)
+}
+
+// InsertBatchWithTsbpd adds multiple missing sequences with their TSBPD times.
+// seqs and tsbpdTimes must have the same length.
+// Returns the count of newly inserted sequences (excludes duplicates).
+// This is the lock-free version for use in single-threaded contexts (event loop).
+// For concurrent access, use InsertBatchWithTsbpdLocking().
+func (nb *nakBtree) InsertBatchWithTsbpd(seqs []uint32, tsbpdTimes []uint64) int {
+	if len(seqs) == 0 || len(seqs) != len(tsbpdTimes) {
+		return 0
+	}
+
+	count := 0
+	for i, seq := range seqs {
+		entry := NakEntryWithTime{Seq: seq, TsbpdTimeUs: tsbpdTimes[i], LastNakedAtUs: 0, NakCount: 0}
+		if _, replaced := nb.tree.ReplaceOrInsert(entry); !replaced {
+			count++
+		}
+	}
+	return count
+}
+
+// InsertBatchWithTsbpdLocking adds multiple sequences with TSBPD times, with lock protection.
+// Use this version when called from tick() paths or other concurrent contexts.
+func (nb *nakBtree) InsertBatchWithTsbpdLocking(seqs []uint32, tsbpdTimes []uint64) int {
+	nb.mu.Lock()
+	defer nb.mu.Unlock()
+	return nb.InsertBatchWithTsbpd(seqs, tsbpdTimes)
+}
+
 // Delete removes a sequence number (packet arrived or expired).
 // This is the lock-free version for use in single-threaded contexts (event loop).
 // For concurrent access, use DeleteLocking().
@@ -125,6 +178,62 @@ func (nb *nakBtree) DeleteBeforeLocking(cutoff uint32) int {
 	nb.mu.Lock()
 	defer nb.mu.Unlock()
 	return nb.DeleteBefore(cutoff)
+}
+
+// --- TSBPD-aware deletion methods (nak_btree_expiry_optimization.md) ---
+
+// DeleteBeforeTsbpd removes entries whose TSBPD time is before the threshold.
+// This enables RTT-aware early expiry: expire entries that cannot be recovered
+// in time (TSBPD - RTO margin has passed).
+//
+// Note: This method iterates by sequence order (btree ordering), not TSBPD order.
+// For most cases where TSBPD increases monotonically with sequence, this works well.
+// For adversarial/edge cases (clock skew), some entries may not be expired optimally.
+//
+// Returns count of deleted entries.
+// This is the lock-free version for use in single-threaded contexts (event loop).
+// For concurrent access, use DeleteBeforeTsbpdLocking().
+func (nb *nakBtree) DeleteBeforeTsbpd(expiryThresholdUs uint64) int {
+	var toDelete []NakEntryWithTime
+	nb.tree.Ascend(func(entry NakEntryWithTime) bool {
+		if entry.TsbpdTimeUs < expiryThresholdUs {
+			toDelete = append(toDelete, entry)
+		}
+		// Continue iteration - TSBPD may not be monotonic with sequence
+		return true
+	})
+
+	for _, entry := range toDelete {
+		nb.tree.Delete(entry)
+	}
+	return len(toDelete)
+}
+
+// DeleteBeforeTsbpdLocking removes entries by TSBPD time with lock protection.
+// Use this version when called from tick() paths or other concurrent contexts.
+func (nb *nakBtree) DeleteBeforeTsbpdLocking(expiryThresholdUs uint64) int {
+	nb.mu.Lock()
+	defer nb.mu.Unlock()
+	return nb.DeleteBeforeTsbpd(expiryThresholdUs)
+}
+
+// DeleteBeforeTsbpdSlow is the unoptimized implementation that scans all entries.
+// This is provided for benchmark comparison against DeleteBeforeTsbpd.
+// It collects all entries with TSBPD < threshold, then deletes them.
+// Time complexity: O(n) scan + O(k log n) deletes = O(n + k log n)
+func (nb *nakBtree) DeleteBeforeTsbpdSlow(expiryThresholdUs uint64) int {
+	var toDelete []NakEntryWithTime
+	nb.tree.Ascend(func(entry NakEntryWithTime) bool {
+		if entry.TsbpdTimeUs < expiryThresholdUs {
+			toDelete = append(toDelete, entry)
+		}
+		return true // Must scan all - TSBPD may not be monotonic
+	})
+
+	for _, entry := range toDelete {
+		nb.tree.Delete(entry)
+	}
+	return len(toDelete)
 }
 
 // Len returns the number of entries.

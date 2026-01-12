@@ -2,6 +2,7 @@ package common
 
 import (
 	"flag"
+	"log"
 	"time"
 
 	srt "github.com/randomizedcoder/gosrt"
@@ -120,6 +121,17 @@ var (
 			"'rtt_rttvar_margin' (RTT+RTTVar with extra margin)")
 	ExtraRTTMargin = flag.Float64("extrarttmargin", 0,
 		"Extra RTT margin as decimal (0.1 = 10%, default: 0.1). Only used with rtomode=rtt_rttvar_margin")
+
+	// NAK Btree Expiry Optimization flags (nak_btree_expiry_optimization.md)
+	NakExpiryMargin = flag.Float64("nakexpirymargin", 0.10,
+		"NAK btree expiry margin as percentage (0.1 = 10%). "+
+			"Formula: expiryThreshold = now + (RTO * (1 + nakExpiryMargin)). "+
+			"Higher values keep NAK entries longer, favoring recovery over phantom NAK reduction.")
+	EWMAWarmupThreshold = flag.Uint("ewmawarmupthreshold", 32,
+		"Minimum packets before inter-packet EWMA is considered warm (reliable). "+
+			"Set to 0 to disable warm-up check. "+
+			"Higher values improve accuracy but delay time-based expiry. "+
+			"Default: 32 (balanced for most streams)")
 
 	// Lock-free ring buffer configuration flags (Phase 3: Lockless Design)
 	UsePacketRing             = flag.Bool("usepacketring", false, "Enable lock-free ring buffer for packet handoff (decouples io_uring completion from Tick processing)")
@@ -466,6 +478,19 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["extrarttmargin"] {
 		config.ExtraRTTMargin = *ExtraRTTMargin
+	}
+
+	// NAK Btree Expiry Optimization flags (nak_btree_expiry_optimization.md)
+	if FlagSet["nakexpirymargin"] {
+		config.NakExpiryMargin = *NakExpiryMargin
+		// Validate: values < -1.0 would create threshold in the past
+		if config.NakExpiryMargin < -1.0 {
+			log.Printf("WARNING: NakExpiryMargin %.2f invalid (< -1.0), resetting to 0.10", config.NakExpiryMargin)
+			config.NakExpiryMargin = 0.10
+		}
+	}
+	if FlagSet["ewmawarmupthreshold"] {
+		config.EWMAWarmupThreshold = uint32(*EWMAWarmupThreshold)
 	}
 
 	// Lock-free ring buffer flags (Phase 3: Lockless Design)

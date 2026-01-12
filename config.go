@@ -357,6 +357,47 @@ type Config struct {
 	// Default: 0.10 (10%)
 	ExtraRTTMargin float64
 
+	// --- NAK Btree Expiry Configuration (nak_btree_expiry_optimization.md) ---
+
+	// NakExpiryMargin adds extra margin when expiring NAK btree entries.
+	// Specified as a percentage (0.1 = 10% extra margin).
+	//
+	// Formula: expiryThreshold = now + (RTO * (1 + NakExpiryMargin))
+	//
+	// Higher values = more conservative (keep NAK entries longer, favor recovery).
+	// Lower values = more aggressive (expire entries earlier, reduce phantom NAKs).
+	//
+	// Values:
+	//   0.0:  Baseline - expire at exactly now + RTO
+	//   0.05: 5% margin - slightly conservative
+	//   0.10: 10% margin (default) - moderately conservative
+	//   0.25: 25% margin - more conservative
+	//   0.50: 50% margin - very conservative (high-jitter networks)
+	//
+	// Default: 0.10 (10% - prefer potential repair over phantom NAK reduction)
+	NakExpiryMargin float64
+
+	// EWMAWarmupThreshold is the minimum number of packets needed before
+	// inter-packet interval EWMA is considered "warm" (reliable).
+	//
+	// Rationale:
+	// - EWMA with α=0.125 reaches ~95% of true value after ~24 samples
+	// - Default of 32 provides safety margin for variance
+	// - At 1000 pps, this is only 32ms of data
+	// - At 100 pps (low bitrate), this is 320ms
+	//
+	// Values:
+	//   0:  Disable warm-up check (always use EWMA, even if cold)
+	//   16: Fast warm-up (high-rate streams, less accuracy)
+	//   32: Default (balanced)
+	//   64: Slow warm-up (low-rate streams, more accuracy)
+	//
+	// During warm-up (sampleCount < threshold), we use conservative
+	// fallback estimation (tsbpdDelay as worst-case estimate).
+	//
+	// Default: 32
+	EWMAWarmupThreshold uint32
+
 	// --- Sender Lockless Configuration (Phase 1: Lockless Sender) ---
 
 	// UseSendBtree enables btree for sender packet storage.
@@ -622,6 +663,10 @@ var defaultConfig Config = Config{
 	// RTO-based suppression defaults (Phase 6)
 	RTOMode:        RTORttRttVar, // RTT + RTTVar (balanced)
 	ExtraRTTMargin: 0.10,         // 10% extra margin (only for RTORttRttVarMargin mode)
+
+	// NAK btree expiry defaults (nak_btree_expiry_optimization.md)
+	NakExpiryMargin:     0.10, // 10% margin - slightly conservative, favors recovery
+	EWMAWarmupThreshold: 32,   // 32 samples before EWMA considered warm
 
 	// Sender lockless defaults (Phase 1: Lockless Sender)
 	UseSendBtree:    false, // Legacy linked lists by default

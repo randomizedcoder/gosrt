@@ -483,28 +483,28 @@ func TestHSReqDropThresholdCalculation_UnitsMismatch(t *testing.T) {
 	}{
 		{
 			name:                "3_Second_Latency",
-			configPeerLatencyMs: 3000,  // 3 seconds in ms
-			cifSendTSBPDDelayMs: 0,     // Use config value
-			sendDropDelayUs:     0,     // No extra delay
+			configPeerLatencyMs: 3000,      // 3 seconds in ms
+			cifSendTSBPDDelayMs: 0,         // Use config value
+			sendDropDelayUs:     0,         // No extra delay
 			expectedThresholdUs: 3_770_000, // 3s * 1.25 + 20ms = 3.77s
 		},
 		{
 			name:                "3_Second_Latency_From_Handshake",
-			configPeerLatencyMs: 1000,  // 1 second local config
-			cifSendTSBPDDelayMs: 3000,  // 3 seconds from peer (takes precedence)
+			configPeerLatencyMs: 1000, // 1 second local config
+			cifSendTSBPDDelayMs: 3000, // 3 seconds from peer (takes precedence)
 			sendDropDelayUs:     0,
 			expectedThresholdUs: 3_770_000, // 3s * 1.25 + 20ms = 3.77s
 		},
 		{
 			name:                "120ms_Latency_Hits_Minimum",
-			configPeerLatencyMs: 120,   // 120ms in ms
+			configPeerLatencyMs: 120, // 120ms in ms
 			cifSendTSBPDDelayMs: 0,
 			sendDropDelayUs:     0,
 			expectedThresholdUs: 1_020_000, // min(150ms * 1.25 = 150ms, 1s) + 20ms = 1.02s
 		},
 		{
 			name:                "5_Second_Latency",
-			configPeerLatencyMs: 5000,  // 5 seconds in ms
+			configPeerLatencyMs: 5000, // 5 seconds in ms
 			cifSendTSBPDDelayMs: 0,
 			sendDropDelayUs:     0,
 			expectedThresholdUs: 6_270_000, // 5s * 1.25 + 20ms = 6.27s
