@@ -1,6 +1,6 @@
 Ok, we have been doing a lot of good planning in retransmission_and_nak_suppression_design.md, but I think we need to consider something more radical.
 
-I'd like to create a new design called lockless_sender_design.md, in which we expand on the ideas in retransmission_and_nak_suppression_design.md, except that we are going to think bigger and design a lock free sender, using an event loop.  "### 3.3 Concurrency Protection and Lockless Design" does a good job summarizing the receiver lock free design, and section "### 3.4 Sender Lock Architecture" described the current sender locking, which we want to continue to support, but also support a new lock free method.  
+I'd like to create a new design called lockless_sender_design.md, in which we expand on the ideas in retransmission_and_nak_suppression_design.md, except that we are going to think bigger and design a lock free sender, using an event loop.  "### 3.3 Concurrency Protection and Lockless Design" does a good job summarizing the receiver lock free design, and section "### 3.4 Sender Lock Architecture" described the current sender locking, which we want to continue to support, but also support a new lock free method.
 
 This new design doc should refer to the other design docs, and key sections.
 
@@ -49,11 +49,11 @@ Section "#### 3.4.4 Moving Packets: packetList → lossList (on send)" descibes 
 
 For a memory reuse/lifetime perspective, we are going to want to use the same ideas as we did for the io_uring and packet btree.  The retransmission_and_nak_suppression_design.md section "#### 3.4.1 Packet Lifecycle State Machine", describes the current lifecycle, and we are going to want to redesign this.  In the IO_Uring_read_path.md design describes a lot of this, and zero_copy_opportunities.md section "### Proposed: Zero-Copy Buffer Reuse" and packet_pooling_optimization.md designs describes, the zero copy changes we made, including the recvBufferPool used to read in packets from syscall or io_uring, put that packet into the packet.go packet, with zero copy.  For the sender, zero copy could be a little more tricky.  For any application that is trying to use the goSRT library, I guess when the application creates the gosrt server, the gosrt sender could create a sync.pool for the payload, and the application could do a .Get() to get the buffer, and the application could decide how it want to populate the data.  Then when the application calls the Push(p), like we do on the reciever, the we would get a packet from the packet sync.pool, populate the pointer to the payload (zero copy), and when we free the packet when it get's ACKed, the payload would be returned to the sync.pool, and then the packet returned to the sync.pool, via the decommission method. - For the design, we can refer to how ./contrib/client-generator/main.go will need to be changed to support this new design.
 
-This new design, we want to have non locked versions of all the functions, and then support the wrapped locked versions that just do the lock, defer unlock, and call the non-locked functions e.g. pushLocked will become push, and the pushLocked will just 
+This new design, we want to have non locked versions of all the functions, and then support the wrapped locked versions that just do the lock, defer unlock, and call the non-locked functions e.g. pushLocked will become push, and the pushLocked will just
     blah.Lock()
     defer blah.Unlock()
     push(p)
-    
+
 
 We need to carefully design this, documenting it clearly with .go files, function names, and line numbers.
 
