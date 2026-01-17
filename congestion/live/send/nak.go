@@ -18,7 +18,7 @@ func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 	}
 
 	// Phase 3: Route through control ring for EventLoop processing
-	if s.useControlRing {
+	if s.controlRing != nil {
 		if s.controlRing.PushNAK(sequenceNumbers) {
 			s.metrics.SendControlRingPushedNAK.Add(1)
 			return 0 // Actual count tracked when EventLoop processes
@@ -102,8 +102,8 @@ func (s *sender) nakBtree(sequenceNumbers []circular.Number) uint64 {
 
 			// Retransmit
 			h.LastRetransmitTimeUs = nowUs
-			h.RetransmitCount++
-			if h.RetransmitCount == 1 {
+			h.TransmitCount++
+			if h.TransmitCount == 1 {
 				m.RetransFirstTime.Add(1)
 			}
 			m.RetransAllowed.Add(1)
@@ -211,10 +211,10 @@ func (s *sender) nakLockedOriginal(sequenceNumbers []circular.Number) uint64 {
 				// PROCEED WITH RETRANSMIT - update tracking
 				// ──────────────────────────────────────────────────────────────
 				h.LastRetransmitTimeUs = nowUs
-				h.RetransmitCount++
+				h.TransmitCount++
 
 				// Track first-time vs repeated retransmits
-				if h.RetransmitCount == 1 {
+				if h.TransmitCount == 1 {
 					m.RetransFirstTime.Add(1)
 				}
 				m.RetransAllowed.Add(1)
@@ -312,10 +312,10 @@ func (s *sender) nakLockedHonorOrder(sequenceNumbers []circular.Number) uint64 {
 				// PROCEED WITH RETRANSMIT - update tracking
 				// ──────────────────────────────────────────────────────────────
 				h.LastRetransmitTimeUs = nowUs
-				h.RetransmitCount++
+				h.TransmitCount++
 
 				// Track first-time vs repeated retransmits
-				if h.RetransmitCount == 1 {
+				if h.TransmitCount == 1 {
 					m.RetransFirstTime.Add(1)
 				}
 				m.RetransAllowed.Add(1)

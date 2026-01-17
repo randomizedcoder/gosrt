@@ -11,58 +11,16 @@ import (
 	"github.com/randomizedcoder/gosrt/packet"
 )
 
+// periodicNakBtreeLocked is the locking wrapper for Tick mode.
+// Acquires r.lock.RLock for packetStore access, then calls the primary function.
+// Called from Tick() and legacy code paths.
 func (r *receiver) periodicNakBtreeLocked(now uint64) []circular.Number {
-	// Interval check: only run NAK every periodicNAKInterval
-	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
-		if r.metrics != nil {
-			r.metrics.NakPeriodicSkipped.Add(1)
-		}
-		return nil
-	}
-
-	// Track that periodicNAK ran
-	m := r.metrics
-	if m != nil {
-		m.CongestionRecvPeriodicNAKRuns.Add(1)
-	}
+	r.AssertTickContext()
 
 	r.lock.RLock()
-	gaps, _ := r.gapScan()
-	r.lock.RUnlock()
+	defer r.lock.RUnlock()
 
-	if len(gaps) == 0 {
-		r.lastPeriodicNAK = now
-		return nil
-	}
-
-	// Convert individual gaps to NAK ranges (start, end pairs)
-	// Consolidate consecutive sequences into ranges for efficiency
-	var result []circular.Number
-	rangeStart := gaps[0]
-	rangeEnd := gaps[0]
-
-	for i := 1; i < len(gaps); i++ {
-		// Check if this gap is consecutive with the current range
-		// Use circular arithmetic for wraparound safety
-		if circular.SeqAdd(rangeEnd, 1) == gaps[i] {
-			rangeEnd = gaps[i]
-		} else {
-			// End current range and start new one
-			result = append(result,
-				circular.New(rangeStart, packet.MAX_SEQUENCENUMBER),
-				circular.New(rangeEnd, packet.MAX_SEQUENCENUMBER))
-			rangeStart = gaps[i]
-			rangeEnd = gaps[i]
-		}
-	}
-
-	// Add final range
-	result = append(result,
-		circular.New(rangeStart, packet.MAX_SEQUENCENUMBER),
-		circular.New(rangeEnd, packet.MAX_SEQUENCENUMBER))
-
-	r.lastPeriodicNAK = now
-	return result
+	return r.periodicNakBtree(now)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -168,8 +126,10 @@ func (r *receiver) periodicNakOriginalLocked(now uint64) []circular.Number {
 	return list
 }
 
-// periodicNakBtree scans the packet btree to find gaps and builds NAK list.
-// This is the new implementation for handling out-of-order packets with io_uring.
+// periodicNakBtree is the primary NAK function for EventLoop mode.
+// Scans the packet btree to find gaps and builds NAK list.
+// NO LOCK - EventLoop is single-threaded, so no lock needed.
+// Called from EventLoop directly, or from periodicNakBtreeLocked() in Tick mode.
 //
 // Algorithm:
 // 1. Scan packet btree from last ACK'd sequence
@@ -179,12 +139,12 @@ func (r *receiver) periodicNakOriginalLocked(now uint64) []circular.Number {
 //
 // Performance optimizations (see integration_testing_50mbps_defect.md Section 23.8):
 // - Uses IterateFrom with AscendGreaterOrEqual for O(log n) seek
-// - Minimizes lock scope to only packetStore iteration
 // - Uses sync.Pool for gap slice reuse (zero allocs per cycle)
 // - Batches metrics updates (single atomic op instead of per-packet)
 // - expireNakEntries moved to Tick() after sendNAK (not in hot path)
 func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
-	// === PRE-WORK: No lock needed ===
+	// Context assert removed - function is called from BOTH EventLoop and via
+	// periodicNakBtreeLocked (which holds the lock). Cannot assert one context.
 
 	if now-r.lastPeriodicNAK < r.periodicNAKInterval {
 		if r.metrics != nil {
@@ -233,9 +193,6 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	var packetsScanned uint64
 	var lastScannedSeq uint32
 
-	// === MINIMAL LOCK SCOPE: Only for packetStore access ===
-	r.lock.RLock()
-
 	// Step 2: Get starting point from unified contiguousPoint (Phase 14)
 	// Per ack_optimization_plan.md Section 3.1: Both ACK and NAK use contiguousPoint
 	// We scan from contiguousPoint+1 since contiguousPoint is the last VERIFIED sequence
@@ -246,7 +203,6 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 	// Check if btree is empty
 	minPkt := r.packetStore.Min()
 	if minPkt == nil {
-		r.lock.RUnlock()
 		return nil // No packets yet
 	}
 
@@ -450,11 +406,6 @@ func (r *receiver) periodicNakBtree(now uint64) []circular.Number {
 			})
 		}
 	}
-
-	r.lock.RUnlock()
-	// === END LOCK SCOPE ===
-
-	// === POST-WORK: No lock needed (nakBtree has its own lock) ===
 
 	// Update metrics once (single atomic op instead of per-packet)
 	if m != nil && packetsScanned > 0 {

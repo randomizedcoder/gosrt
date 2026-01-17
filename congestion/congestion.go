@@ -3,6 +3,7 @@ package congestion
 
 import (
 	"context"
+	"sync"
 
 	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/packet"
@@ -27,7 +28,18 @@ type Sender interface {
 	Flush()
 
 	// Push pushes a packet to be send on the sender queue.
+	// Legacy path - may acquire locks in non-ring modes.
 	Push(p packet.Packet)
+
+	// PushDirect pushes a packet directly to the lock-free ring.
+	// Returns true if successful, false if ring is full (caller should drop).
+	// This bypasses the writeQueue channel for lower latency.
+	// Only valid when UseRing() returns true.
+	// Reference: sender_lockfree_architecture.md Section 7.8
+	PushDirect(p packet.Packet) bool
+
+	// UseRing returns whether the lock-free ring is enabled for Push operations.
+	UseRing() bool
 
 	// Tick gets called from a connection in order to proceed with the queued packets. The provided value for
 	// now is corresponds to the timestamps in the queued packets. Those timestamps are the microseconds
@@ -47,7 +59,8 @@ type Sender interface {
 	// EventLoop runs the continuous event loop for sender packet processing (Phase 4: Lockless Sender).
 	// This replaces the timer-driven Tick() for the sender side.
 	// Only runs if UseEventLoop() returns true.
-	EventLoop(ctx context.Context)
+	// wg is decremented on exit for graceful shutdown coordination.
+	EventLoop(ctx context.Context, wg *sync.WaitGroup)
 
 	// UseEventLoop returns whether the sender event loop is enabled.
 	// Used by connection code to decide between EventLoop and Tick loop.
@@ -84,11 +97,17 @@ type Receiver interface {
 	// EventLoop runs the continuous event loop for packet processing (Phase 4: Lockless Design).
 	// This replaces the timer-driven Tick() for lower latency and smoother CPU usage.
 	// Only runs if UseEventLoop() returns true.
-	EventLoop(ctx context.Context)
+	EventLoop(ctx context.Context, wg *sync.WaitGroup)
 
 	// UseEventLoop returns whether the event loop is enabled.
 	// Used by connection code to decide between EventLoop and Tick loop.
 	UseEventLoop() bool
+
+	// SetProcessConnectionControlPackets sets the callback for processing
+	// connection-level control packets (ACKACK, KEEPALIVE) in EventLoop mode.
+	// The callback is called at the start of each EventLoop iteration.
+	// Set by connection.go to c.drainRecvControlRing.
+	SetProcessConnectionControlPackets(func() int)
 }
 
 // SendStats are collected statistics from a sender

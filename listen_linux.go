@@ -31,6 +31,39 @@ type recvCompletionInfo struct {
 	msg    *syscall.Msghdr         // Pointer to msg that kernel uses (must be heap-allocated to stay valid)
 }
 
+// recvRingState holds all state for a single receive io_uring ring.
+// Each ring has its own dedicated completion handler goroutine.
+// This struct is designed for ZERO cross-ring locking:
+// - completions: owned exclusively by this ring's handler (no lock needed)
+// - nextID: owned exclusively by this ring's handler (no lock needed)
+// - ring: owned exclusively by this ring's handler after init
+// - fd: shared but read-only (no lock needed)
+// See multi_iouring_design.md Section 4.1 for design rationale.
+type recvRingState struct {
+	ring        *giouring.Ring                 // io_uring ring (owned by handler)
+	completions map[uint64]*recvCompletionInfo // Maps request ID to completion info (no lock - owned)
+	nextID      uint64                         // Request ID counter (no atomic - owned)
+	fd          int                            // Socket fd (shared, read-only)
+	ringIndex   int                            // Ring index for metrics/logging
+}
+
+// newRecvRingState creates a new recvRingState with initialized completion map
+func newRecvRingState(ring *giouring.Ring, fd int, ringIndex int) *recvRingState {
+	return &recvRingState{
+		ring:        ring,
+		completions: make(map[uint64]*recvCompletionInfo),
+		nextID:      0,
+		fd:          fd,
+		ringIndex:   ringIndex,
+	}
+}
+
+// getNextID returns the next request ID for this ring (no atomic needed - single owner)
+func (rs *recvRingState) getNextID() uint64 {
+	rs.nextID++
+	return rs.nextID
+}
+
 // getUDPConnFd extracts the file descriptor from a *net.UDPConn
 // This is needed for io_uring operations which require the raw file descriptor.
 // Uses pc.File() which is the natural and supported way to get the file descriptor
@@ -100,13 +133,15 @@ func zoneToString(zone int) string {
 	return strconv.Itoa(zone)
 }
 
-// initializeIoUringRecv initializes the io_uring receive ring for the listener
+// initializeIoUringRecv initializes the io_uring receive ring(s) for the listener
+// When IoUringRecvRingCount > 1, creates multiple independent rings for parallel processing.
+// See multi_iouring_design.md Section 4.1 for design rationale.
 func (ln *listener) initializeIoUringRecv() error {
 	if !ln.config.IoUringRecvEnabled {
 		return nil // io_uring not enabled, skip initialization
 	}
 
-	// Extract socket file descriptor
+	// Extract socket file descriptor (shared by all rings)
 	fd, err := getUDPConnFd(ln.pc)
 	if err != nil {
 		return fmt.Errorf("failed to extract socket fd: %w", err)
@@ -119,9 +154,30 @@ func (ln *listener) initializeIoUringRecv() error {
 		ringSize = uint32(ln.config.IoUringRecvRingSize)
 	}
 
+	// Determine ring count (default: 1)
+	ringCount := ln.config.IoUringRecvRingCount
+	if ringCount <= 0 {
+		ringCount = 1
+	}
+
+	// Multi-ring mode: create multiple independent ring states
+	if ringCount > 1 {
+		return ln.initializeIoUringRecvMultiRing(ringSize, ringCount)
+	}
+
+	// Single-ring mode (legacy path): use original fields
+	return ln.initializeIoUringRecvSingleRing(ringSize)
+}
+
+// initializeIoUringRecvSingleRing initializes a single io_uring ring (legacy path)
+func (ln *listener) initializeIoUringRecvSingleRing(ringSize uint32) error {
+	// Initialize per-ring metrics (unified approach - even single-ring uses per-ring metrics)
+	// This MUST be done before starting handler, otherwise metric increments are silently dropped
+	metrics.GetListenerMetrics().InitListenerRecvRingMetrics(1)
+
 	// Create io_uring ring
 	ring := giouring.NewRing()
-	err = ring.QueueInit(ringSize, 0) // ringSize entries, no flags
+	err := ring.QueueInit(ringSize, 0) // ringSize entries, no flags
 	if err != nil {
 		// io_uring unavailable or failed - log and continue without it
 		ln.log("listen:io_uring:recv:init", func() string {
@@ -153,12 +209,74 @@ func (ln *listener) initializeIoUringRecv() error {
 	return nil
 }
 
-// cleanupIoUringRecv cleans up the io_uring receive ring for the listener
+// initializeIoUringRecvMultiRing initializes multiple independent io_uring rings
+// Each ring has its own completion handler for parallel processing.
+// See multi_iouring_design.md Section 4.1 for design rationale.
+func (ln *listener) initializeIoUringRecvMultiRing(ringSize uint32, ringCount int) error {
+	// Initialize per-ring metrics FIRST (unified approach - always use per-ring metrics)
+	// This MUST be done before starting handlers, otherwise metric increments are silently dropped
+	metrics.GetListenerMetrics().InitListenerRecvRingMetrics(ringCount)
+
+	// Create slice for ring states
+	ln.recvRingStates = make([]*recvRingState, 0, ringCount)
+
+	// Calculate per-ring initial pending (divide total across rings)
+	initialPending := ln.config.IoUringRecvInitialPending
+	if initialPending <= 0 {
+		initialPending = int(ringSize) // Default: full ring size
+	}
+	perRingPending := initialPending / ringCount
+	if perRingPending < 1 {
+		perRingPending = 1
+	}
+
+	// Create each ring and its handler
+	for i := 0; i < ringCount; i++ {
+		// Create io_uring ring
+		ring := giouring.NewRing()
+		err := ring.QueueInit(ringSize, 0)
+		if err != nil {
+			// Cleanup any rings already created
+			ln.cleanupIoUringRecvMultiRing()
+			ln.log("listen:io_uring:recv:init", func() string {
+				return fmt.Sprintf("failed to create io_uring receive ring %d: %v (falling back to ReadFrom)", i, err)
+			})
+			return err
+		}
+
+		// Create ring state (owns completion map and ID counter)
+		state := newRecvRingState(ring, ln.recvRingFd, i)
+		ln.recvRingStates = append(ln.recvRingStates, state)
+
+		// Start independent completion handler for this ring
+		ln.recvCompWg.Add(1)
+		go ln.recvCompletionHandlerIndependent(ln.ctx, state)
+
+		// Pre-populate this ring
+		ln.prePopulateRecvRingForState(state, perRingPending)
+	}
+
+	ln.log("listen:io_uring:recv:init", func() string {
+		return fmt.Sprintf("io_uring multi-ring receive initialized: rings=%d, ring_size=%d, per_ring_pending=%d, fd=%d",
+			ringCount, ringSize, perRingPending, ln.recvRingFd)
+	})
+
+	return nil
+}
+
+// cleanupIoUringRecv cleans up the io_uring receive ring(s) for the listener
 // Following context_and_cancellation_design.md pattern:
 // 1. Context is cancelled by parent (ln.ctx via server shutdown)
-// 2. Wait for handler to exit (via WaitGroup)
+// 2. Wait for handler(s) to exit (via WaitGroup)
 // 3. Only then clean up resources (QueueExit)
 func (ln *listener) cleanupIoUringRecv() {
+	// Multi-ring mode: use dedicated cleanup
+	if len(ln.recvRingStates) > 0 {
+		ln.cleanupIoUringRecvMultiRing()
+		return
+	}
+
+	// Single-ring mode (legacy path)
 	if ln.recvRing == nil {
 		return // Nothing to clean up
 	}
@@ -267,7 +385,7 @@ func (ln *listener) submitRecvRequest() {
 		}
 
 		// Track retry (ring temporarily full)
-		ln.incrementListenerRecvGetSQERetries()
+		ln.incrementListenerRecvGetSQERetries(0) // ringIdx=0 for single-ring mode
 
 		// Ring full - wait a bit and retry (completions may free up space)
 		if i < ioUringMaxGetSQERetries-1 {
@@ -284,7 +402,7 @@ func (ln *listener) submitRecvRequest() {
 		GetRecvBufferPool().Put(bufferPtr)
 
 		// Track ring full error
-		ln.incrementListenerRecvSubmitRingFull()
+		ln.incrementListenerRecvSubmitRingFull(0) // ringIdx=0 for single-ring mode
 
 		ln.log("listen:recv:error", func() string {
 			return "io_uring ring full after retries"
@@ -314,7 +432,7 @@ func (ln *listener) submitRecvRequest() {
 		}
 
 		// Track retry (transient error)
-		ln.incrementListenerRecvSubmitRetries()
+		ln.incrementListenerRecvSubmitRetries(0) // ringIdx=0 for single-ring mode
 
 		// Transient error - wait and retry
 		if i < ioUringMaxSubmitRetries-1 {
@@ -331,7 +449,7 @@ func (ln *listener) submitRecvRequest() {
 		GetRecvBufferPool().Put(bufferPtr)
 
 		// Track submit error
-		ln.incrementListenerRecvSubmitError()
+		ln.incrementListenerRecvSubmitError(0) // ringIdx=0 for single-ring mode
 
 		ln.log("listen:recv:error", func() string {
 			return fmt.Sprintf("failed to submit receive request: %v", err)
@@ -340,7 +458,7 @@ func (ln *listener) submitRecvRequest() {
 	}
 
 	// Request submitted successfully - track success
-	ln.incrementListenerRecvSubmitSuccess()
+	ln.incrementListenerRecvSubmitSuccess(0) // ringIdx=0 for single-ring mode
 
 	// Completion will be handled asynchronously by completion handler
 }
@@ -568,7 +686,7 @@ func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) 
 		// Check context first (non-blocking)
 		select {
 		case <-ctx.Done():
-			ln.incrementListenerRecvCompletionCtxCancelled()
+			ln.incrementListenerRecvCompletionCtxCancelled(0) // ringIdx=0 for single-ring mode
 			return nil, nil
 		default:
 		}
@@ -577,7 +695,7 @@ func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) 
 		cqe, err := ring.WaitCQETimeout(&ioUringWaitTimeout)
 		if err == nil {
 			// Success - we have a completion, look it up and return
-			ln.incrementListenerRecvCompletionSuccess()
+			ln.incrementListenerRecvCompletionSuccess(0) // ringIdx=0 for single-ring mode
 			compInfo := ln.lookupAndRemoveRecvCompletion(cqe, ring)
 			if compInfo == nil {
 				return nil, nil // Unknown request ID, skip
@@ -587,24 +705,24 @@ func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) 
 
 		// EBADF means ring was closed via QueueExit()
 		if err == syscall.EBADF {
-			ln.incrementListenerRecvCompletionEBADF()
+			ln.incrementListenerRecvCompletionEBADF(0) // ringIdx=0 for single-ring mode
 			return nil, nil
 		}
 
 		// ETIME means timeout expired - loop back to check ctx.Done()
 		if err == syscall.ETIME {
-			ln.incrementListenerRecvCompletionTimeout()
+			ln.incrementListenerRecvCompletionTimeout(0) // ringIdx=0 for single-ring mode
 			continue
 		}
 
 		// EINTR is normal (interrupted by signal) - retry immediately
 		if err == syscall.EINTR {
-			ln.incrementListenerRecvCompletionEINTR()
+			ln.incrementListenerRecvCompletionEINTR(0) // ringIdx=0 for single-ring mode
 			continue
 		}
 
 		// Other errors - log and return nil
-		ln.incrementListenerRecvCompletionError()
+		ln.incrementListenerRecvCompletionError(0) // ringIdx=0 for single-ring mode
 		ln.log("listen:recv:completion:error", func() string {
 			return fmt.Sprintf("error waiting for completion: %v", err)
 		})
@@ -612,117 +730,100 @@ func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) 
 	}
 }
 
-// Helper functions for incrementing listener recv completion metrics
-// These iterate through sync.Map connections and increment on the first one found with metrics
-func (ln *listener) incrementListenerRecvCompletionSuccess() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvCompletionSuccess.Add(1)
-			return false // Stop after first increment
-		}
-		return true
-	})
+// Helper functions for incrementing listener recv per-ring metrics.
+// These use the global ListenerMetrics with per-ring counters.
+// See multi_iouring_design.md Section 5.12 for the unified metrics approach.
+
+func (ln *listener) incrementListenerRecvCompletionSuccess(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].CompletionSuccess.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvCompletionTimeout() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvCompletionTimeout.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvCompletionTimeout(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].CompletionTimeout.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvCompletionEBADF() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvCompletionEBADF.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvCompletionEBADF(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].CompletionEBADF.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvCompletionEINTR() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvCompletionEINTR.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvCompletionEINTR(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].CompletionEINTR.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvCompletionError() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvCompletionError.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvCompletionError(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].CompletionError.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvCompletionCtxCancelled() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvCompletionCtxCancelled.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvCompletionCtxCancelled(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].CompletionCtxCancelled.Add(1)
+	}
 }
 
-// Helper functions for incrementing listener recv submission metrics
-func (ln *listener) incrementListenerRecvSubmitSuccess() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvSubmitSuccess.Add(1)
-			return false
-		}
-		return true
-	})
+// Helper functions for incrementing listener recv submission per-ring metrics.
+func (ln *listener) incrementListenerRecvSubmitSuccess(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].SubmitSuccess.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvSubmitRingFull() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvSubmitRingFull.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvSubmitRingFull(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].SubmitRingFull.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvSubmitError() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvSubmitError.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvSubmitError(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].SubmitError.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvGetSQERetries() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvGetSQERetries.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvGetSQERetries(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].GetSQERetries.Add(1)
+	}
 }
 
-func (ln *listener) incrementListenerRecvSubmitRetries() {
-	ln.conns.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*srtConn); ok && conn.metrics != nil {
-			conn.metrics.IoUringListenerRecvSubmitRetries.Add(1)
-			return false
-		}
-		return true
-	})
+func (ln *listener) incrementListenerRecvSubmitRetries(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].SubmitRetries.Add(1)
+	}
+}
+
+func (ln *listener) incrementListenerRecvPacketsProcessed(ringIdx int) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].PacketsProcessed.Add(1)
+	}
+}
+
+func (ln *listener) incrementListenerRecvBytesProcessed(ringIdx int, bytes uint64) {
+	lm := metrics.GetListenerMetrics()
+	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
+		lm.IoUringRecvRingMetrics[ringIdx].BytesProcessed.Add(bytes)
+	}
 }
 
 // submitRecvRequestBatch submits multiple receive requests in a batch
@@ -950,5 +1051,392 @@ func (ln *listener) drainRecvCompletions() {
 
 			ring.CQESeen(cqe)
 		}
+	}
+}
+
+// =============================================================================
+// Multi-Ring Support Functions
+// =============================================================================
+
+// recvCompletionHandlerIndependent is the completion handler for a specific ring (multi-ring mode)
+// Each ring has its own handler goroutine - NO cross-ring locking required.
+// The handler owns its ring state's completion map and ID counter exclusively.
+// See multi_iouring_design.md Section 4.1 for design rationale.
+func (ln *listener) recvCompletionHandlerIndependent(ctx context.Context, state *recvRingState) {
+	defer ln.recvCompWg.Done()
+
+	ring := state.ring
+	if ring == nil {
+		return
+	}
+
+	// Get batch size from config (default: 32)
+	// NOTE: Must be smaller than initial pending (default 128) otherwise ring runs dry
+	// before batch threshold is reached, causing fallback to readfrom.
+	batchSize := ln.config.IoUringRecvBatchSize
+	if batchSize <= 0 {
+		batchSize = 32 // Small batches ensure ring doesn't run dry
+	}
+
+	// Track pending resubmissions for batching
+	pendingResubmits := 0
+
+	for {
+		// Get single completion (process immediately for low latency)
+		cqe, compInfo, result := ln.getRecvCompletionFromRing(ctx, state)
+
+		switch result {
+		case completionResultSuccess:
+			// Process completion immediately
+			ln.processRecvCompletionFromRing(state, cqe, compInfo)
+
+			// Track resubmission for batching
+			pendingResubmits++
+
+			// Batch resubmit when we've accumulated enough
+			if pendingResubmits >= batchSize {
+				ln.submitRecvRequestBatchToRing(state, pendingResubmits)
+				pendingResubmits = 0
+			}
+
+		case completionResultTimeout:
+			// CRITICAL: On timeout, flush any pending resubmits to prevent ring from running dry
+			// Without this, the ring can empty out and never receive more completions
+			if pendingResubmits > 0 {
+				ln.submitRecvRequestBatchToRing(state, pendingResubmits)
+				pendingResubmits = 0
+			}
+			// Continue waiting for more completions
+
+		case completionResultShutdown:
+			// Flush any pending resubmits before exiting
+			if pendingResubmits > 0 {
+				ln.submitRecvRequestBatchToRing(state, pendingResubmits)
+			}
+			return
+
+		case completionResultError:
+			// Log already done in getRecvCompletionFromRing, continue
+			continue
+		}
+	}
+}
+
+// completionResult represents the result of waiting for a completion
+type completionResult int
+
+const (
+	completionResultSuccess completionResult = iota
+	completionResultTimeout
+	completionResultShutdown
+	completionResultError
+)
+
+// getRecvCompletionFromRing gets a completion from a specific ring state (multi-ring mode)
+// NO locking - handler owns this ring's completion map exclusively
+// Returns:
+//   - (cqe, compInfo, completionResultSuccess) on successful completion
+//   - (nil, nil, completionResultTimeout) on timeout (caller should flush pending resubmits)
+//   - (nil, nil, completionResultShutdown) on context cancellation or EBADF
+//   - (nil, nil, completionResultError) on other errors
+func (ln *listener) getRecvCompletionFromRing(ctx context.Context, state *recvRingState) (*giouring.CompletionQueueEvent, *recvCompletionInfo, completionResult) {
+	ring := state.ring
+	ringIdx := state.ringIndex
+
+	// Check context first (non-blocking)
+	select {
+	case <-ctx.Done():
+		ln.incrementListenerRecvCompletionCtxCancelled(ringIdx)
+		return nil, nil, completionResultShutdown
+	default:
+	}
+
+	// Block waiting for completion OR timeout (single attempt)
+	cqe, err := ring.WaitCQETimeout(&ioUringWaitTimeout)
+	if err == nil {
+		// Success - look up completion info (NO LOCK - we own this map)
+		ln.incrementListenerRecvCompletionSuccess(ringIdx)
+		requestID := cqe.UserData
+
+		compInfo, exists := state.completions[requestID]
+		if !exists {
+			ln.log("listen:recv:completion:error", func() string {
+				return fmt.Sprintf("completion for unknown request ID: %d (ring %d)", requestID, state.ringIndex)
+			})
+			ring.CQESeen(cqe)
+			return nil, nil, completionResultError
+		}
+		delete(state.completions, requestID)
+		return cqe, compInfo, completionResultSuccess
+	}
+
+	// Handle errors
+	if err == syscall.EBADF {
+		ln.incrementListenerRecvCompletionEBADF(ringIdx)
+		return nil, nil, completionResultShutdown
+	}
+	if err == syscall.ETIME {
+		ln.incrementListenerRecvCompletionTimeout(ringIdx)
+		return nil, nil, completionResultTimeout
+	}
+	if err == syscall.EINTR {
+		ln.incrementListenerRecvCompletionEINTR(ringIdx)
+		return nil, nil, completionResultTimeout // Treat EINTR like timeout
+	}
+
+	ln.incrementListenerRecvCompletionError(ringIdx)
+	ln.log("listen:recv:completion:error", func() string {
+		return fmt.Sprintf("error waiting for completion (ring %d): %v", state.ringIndex, err)
+	})
+	return nil, nil, completionResultError
+}
+
+// processRecvCompletionFromRing processes a completion from a specific ring state
+// Reuses existing processRecvCompletion logic - the packet handling is identical
+func (ln *listener) processRecvCompletionFromRing(state *recvRingState, cqe *giouring.CompletionQueueEvent, compInfo *recvCompletionInfo) {
+	// Reuse existing completion processing (handles packet deserialization and routing)
+	ln.processRecvCompletion(state.ring, cqe, compInfo)
+}
+
+// submitRecvRequestToRing submits a single receive request to a specific ring (multi-ring mode)
+// NO locking - handler owns this ring's completion map and ID counter exclusively
+func (ln *listener) submitRecvRequestToRing(state *recvRingState) {
+	ring := state.ring
+	if ring == nil {
+		return
+	}
+
+	// Get buffer from global pool (see buffers.go - global sync.Pool)
+	bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+	buffer := *bufferPtr
+
+	// Setup iovec
+	var iovec syscall.Iovec
+	iovec.Base = &buffer[0]
+	iovec.SetLen(len(buffer))
+
+	// Setup msghdr
+	rsa := new(syscall.RawSockaddrAny)
+	msg := new(syscall.Msghdr)
+	msg.Name = (*byte)(unsafe.Pointer(rsa))
+	msg.Namelen = uint32(syscall.SizeofSockaddrAny)
+	msg.Iov = &iovec
+	msg.Iovlen = 1
+
+	// Generate request ID (NO ATOMIC - we own this counter)
+	requestID := state.getNextID()
+
+	// Create completion info
+	compInfo := &recvCompletionInfo{
+		buffer: bufferPtr,
+		rsa:    rsa,
+		msg:    msg,
+	}
+
+	// Store in completion map (NO LOCK - we own this map)
+	state.completions[requestID] = compInfo
+	ringIdx := state.ringIndex
+
+	// Get SQE with retry
+	var sqe *giouring.SubmissionQueueEntry
+	for i := 0; i < ioUringMaxGetSQERetries; i++ {
+		sqe = ring.GetSQE()
+		if sqe != nil {
+			break
+		}
+		ln.incrementListenerRecvGetSQERetries(ringIdx)
+		if i < ioUringMaxGetSQERetries-1 {
+			time.Sleep(ioUringRetryBackoff)
+		}
+	}
+
+	if sqe == nil {
+		// Ring full - clean up (NO LOCK)
+		delete(state.completions, requestID)
+		GetRecvBufferPool().Put(bufferPtr)
+		ln.incrementListenerRecvSubmitRingFull(ringIdx)
+		ln.log("listen:recv:error", func() string {
+			return fmt.Sprintf("io_uring ring %d full after retries", state.ringIndex)
+		})
+		return
+	}
+
+	// Prepare recvmsg operation
+	sqe.PrepareRecvMsg(state.fd, msg, 0)
+	sqe.SetData64(requestID)
+
+	// Submit with retry
+	var err error
+	for i := 0; i < ioUringMaxSubmitRetries; i++ {
+		_, err = ring.Submit()
+		if err == nil {
+			break
+		}
+		if err != syscall.EINTR && err != syscall.EAGAIN {
+			break
+		}
+		ln.incrementListenerRecvSubmitRetries(ringIdx)
+		if i < ioUringMaxSubmitRetries-1 {
+			time.Sleep(ioUringRetryBackoff)
+		}
+	}
+
+	if err != nil {
+		// Submission failed - clean up (NO LOCK)
+		delete(state.completions, requestID)
+		GetRecvBufferPool().Put(bufferPtr)
+		ln.incrementListenerRecvSubmitError(ringIdx)
+		ln.log("listen:recv:error", func() string {
+			return fmt.Sprintf("failed to submit receive request (ring %d): %v", state.ringIndex, err)
+		})
+		return
+	}
+
+	ln.incrementListenerRecvSubmitSuccess(ringIdx)
+}
+
+// submitRecvRequestBatchToRing submits multiple receive requests to a specific ring
+// Batches submissions for efficiency (reduced syscalls)
+// NO locking - handler owns this ring's completion map and ID counter exclusively
+func (ln *listener) submitRecvRequestBatchToRing(state *recvRingState, count int) {
+	ring := state.ring
+	if ring == nil || count <= 0 {
+		return
+	}
+
+	// Pre-allocate slices for batch
+	compInfos := make([]*recvCompletionInfo, 0, count)
+	requestIDs := make([]uint64, 0, count)
+
+	// Prepare all SQEs
+	for i := 0; i < count; i++ {
+		bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+		buffer := *bufferPtr
+
+		var iovec syscall.Iovec
+		iovec.Base = &buffer[0]
+		iovec.SetLen(len(buffer))
+
+		rsa := new(syscall.RawSockaddrAny)
+		msg := new(syscall.Msghdr)
+		msg.Name = (*byte)(unsafe.Pointer(rsa))
+		msg.Namelen = uint32(syscall.SizeofSockaddrAny)
+		msg.Iov = &iovec
+		msg.Iovlen = 1
+
+		// Generate request ID (NO ATOMIC - we own this counter)
+		requestID := state.getNextID()
+
+		compInfo := &recvCompletionInfo{
+			buffer: bufferPtr,
+			rsa:    rsa,
+			msg:    msg,
+		}
+
+		// Store in completion map (NO LOCK - we own this map)
+		state.completions[requestID] = compInfo
+
+		// Get SQE
+		var sqe *giouring.SubmissionQueueEntry
+		const maxRetries = 3
+		for j := 0; j < maxRetries; j++ {
+			sqe = ring.GetSQE()
+			if sqe != nil {
+				break
+			}
+			if j < maxRetries-1 {
+				time.Sleep(100 * time.Microsecond)
+			}
+		}
+
+		if sqe == nil {
+			// Ring full - clean up this request (NO LOCK)
+			delete(state.completions, requestID)
+			GetRecvBufferPool().Put(bufferPtr)
+			break
+		}
+
+		// Prepare recvmsg
+		sqe.PrepareRecvMsg(state.fd, msg, 0)
+		sqe.SetData64(requestID)
+
+		compInfos = append(compInfos, compInfo)
+		requestIDs = append(requestIDs, requestID)
+	}
+
+	// Batch submit all SQEs at once
+	if len(requestIDs) > 0 {
+		_, err := ring.Submit()
+		if err != nil {
+			// Submission failed - clean up all (NO LOCK)
+			for i, requestID := range requestIDs {
+				delete(state.completions, requestID)
+				GetRecvBufferPool().Put(compInfos[i].buffer)
+			}
+			ln.incrementListenerRecvSubmitError(state.ringIndex)
+			ln.log("listen:recv:error", func() string {
+				return fmt.Sprintf("failed to submit receive batch (ring %d): %v", state.ringIndex, err)
+			})
+		} else {
+			// Success - increment metrics for each request in batch
+			lm := metrics.GetListenerMetrics()
+			if lm.IoUringRecvRingMetrics != nil && state.ringIndex < len(lm.IoUringRecvRingMetrics) {
+				lm.IoUringRecvRingMetrics[state.ringIndex].SubmitSuccess.Add(uint64(len(requestIDs)))
+			}
+		}
+	}
+}
+
+// prePopulateRecvRingForState pre-populates a specific ring with initial pending receives
+func (ln *listener) prePopulateRecvRingForState(state *recvRingState, count int) {
+	for i := 0; i < count; i++ {
+		ln.submitRecvRequestToRing(state)
+	}
+}
+
+// cleanupIoUringRecvMultiRing cleans up multi-ring resources
+func (ln *listener) cleanupIoUringRecvMultiRing() {
+	if len(ln.recvRingStates) == 0 {
+		return
+	}
+
+	// Wait for all handlers to exit (context should already be cancelled)
+	done := make(chan struct{})
+	go func() {
+		ln.recvCompWg.Wait()
+		close(done)
+	}()
+
+	handlerExited := false
+	select {
+	case <-done:
+		handlerExited = true
+	case <-time.After(2 * time.Second):
+		if ln.config.Logger != nil {
+			ln.config.Logger.Print("listen:io_uring:recv:cleanup", 0, 2, func() string {
+				return "CRITICAL: multi-ring completion handlers did not exit within 2s"
+			})
+		}
+	}
+
+	// Clean up each ring state
+	if handlerExited {
+		for _, state := range ln.recvRingStates {
+			if state.ring != nil {
+				state.ring.QueueExit()
+			}
+			// Return buffers to pool (NO LOCK - handlers have exited)
+			for _, compInfo := range state.completions {
+				GetRecvBufferPool().Put(compInfo.buffer)
+			}
+		}
+	}
+
+	ln.recvRingStates = nil
+
+	// Close the duplicated file descriptor
+	if ln.recvRingFd > 0 {
+		syscall.Close(ln.recvRingFd)
+		ln.recvRingFd = -1
 	}
 }

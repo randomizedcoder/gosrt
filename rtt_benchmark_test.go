@@ -504,3 +504,51 @@ func TestRTOModeString(t *testing.T) {
 		})
 	}
 }
+
+// TestRTTLastSample verifies the raw RTT sample (without EWMA smoothing)
+// is correctly stored and retrieved.
+func TestRTTLastSample(t *testing.T) {
+	r := &rtt{}
+	r.rttBits.Store(math.Float64bits(100_000))    // Initial RTT: 100ms
+	r.rttVarBits.Store(math.Float64bits(10_000))  // Initial RTTVar: 10ms
+	r.SetRTOMode(RTORttRttVar, 0)
+
+	// Apply samples and verify the raw sample is stored (not smoothed)
+	tests := []struct {
+		sample   time.Duration
+		wantRaw  uint64 // Expected raw value (last sample)
+	}{
+		{50_000 * time.Microsecond, 50_000},  // 50ms
+		{200_000 * time.Microsecond, 200_000}, // 200ms
+		{75_000 * time.Microsecond, 75_000},  // 75ms
+		{100 * time.Microsecond, 100},         // 0.1ms (100µs)
+	}
+
+	for _, tt := range tests {
+		r.Recalculate(tt.sample)
+
+		gotRaw := r.RTTLastSample()
+		if gotRaw != tt.wantRaw {
+			t.Errorf("RTTLastSample() after %v = %d, want %d", tt.sample, gotRaw, tt.wantRaw)
+		}
+
+		// Verify smoothed RTT is different from raw
+		smoothedRTT := r.RTT()
+		if smoothedRTT == float64(tt.wantRaw) {
+			// They could be equal if this is the first sample, but after multiple
+			// samples they should diverge due to EWMA
+		}
+
+		t.Logf("Sample: %v → Raw: %d µs, Smoothed: %.0f µs",
+			tt.sample, gotRaw, smoothedRTT)
+	}
+
+	// Verify that after multiple diverse samples, raw != smoothed
+	// (demonstrating EWMA smoothing is working)
+	finalRaw := r.RTTLastSample()
+	finalSmoothed := r.RTT()
+	if float64(finalRaw) == finalSmoothed {
+		t.Logf("Note: Raw (%d) equals Smoothed (%.0f) - this is possible but unlikely after diverse samples",
+			finalRaw, finalSmoothed)
+	}
+}

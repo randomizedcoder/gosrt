@@ -1,27 +1,21 @@
 // buffers.go - Shared buffer pools for zero-copy packet handling
 //
 // This file contains THE most performance-critical memory in gosrt.
-// The globalRecvBufferPool is shared across ALL listeners and dialers
+// The PayloadBufferPool is shared across ALL listeners and dialers
 // for maximum memory reuse and minimal allocation overhead.
 
 package srt
 
 import "sync"
 
-// DefaultRecvBufferSize is the standard MTU size for Ethernet.
+// MaxPayloadBufferSize is the standard MTU size for Ethernet.
 // All receive buffers are this size to ensure they can hold any valid SRT packet.
 // Exported so applications can validate payload sizes before sending.
 //
 // Reference: lockless_sender_design.md Section 6.2
-const DefaultRecvBufferSize = 1500
+const MaxPayloadBufferSize = 1500
 
-// MaxPayloadSize is the maximum SRT payload size (MTU - headers).
-// SRT header is 16 bytes, UDP header is 8 bytes, IP header is 20 bytes.
-// 1500 - 16 - 8 - 20 = 1456 bytes max payload
-// However, SRT typically uses 1316 bytes (188 * 7 MPEG-TS packets).
-const MaxPayloadSize = 1316
-
-// globalRecvBufferPool is the shared pool for all receive AND send buffers.
+// PayloadBufferPool is the shared pool for all receive AND send buffers.
 // This single pool serves ALL listeners, dialers, and senders in the process,
 // enabling maximum buffer reuse across connections.
 //
@@ -47,9 +41,9 @@ const MaxPayloadSize = 1316
 //	sender.Push(packet)        // Buffer returned to pool when ACK'd
 //
 // Reference: lockless_sender_design.md Section 6.2
-var globalRecvBufferPool = &sync.Pool{
+var PayloadBufferPool = &sync.Pool{
 	New: func() any {
-		buf := make([]byte, DefaultRecvBufferSize)
+		buf := make([]byte, MaxPayloadBufferSize)
 		return &buf
 	},
 }
@@ -59,11 +53,11 @@ var globalRecvBufferPool = &sync.Pool{
 //
 // The returned pool contains *[]byte pointers to 1500-byte buffers.
 func GetRecvBufferPool() *sync.Pool {
-	return globalRecvBufferPool
+	return PayloadBufferPool
 }
 
 // GetBuffer acquires a buffer from the global pool.
-// The buffer is 1500 bytes (DefaultRecvBufferSize).
+// The buffer is 1500 bytes (MaxPayloadBufferSize).
 // Caller is responsible for returning it via PutBuffer() or packet.Decommission().
 //
 // For zero-copy sending:
@@ -75,7 +69,7 @@ func GetRecvBufferPool() *sync.Pool {
 //
 // Reference: lockless_sender_design.md Section 6.2
 func GetBuffer() *[]byte {
-	return globalRecvBufferPool.Get().(*[]byte)
+	return PayloadBufferPool.Get().(*[]byte)
 }
 
 // PutBuffer returns a buffer to the global pool.
@@ -85,23 +79,11 @@ func PutBuffer(buf *[]byte) {
 	if buf == nil {
 		return
 	}
-	globalRecvBufferPool.Put(buf)
-}
-
-// ValidatePayloadSize checks if a payload size is valid for pooled buffers.
-// Returns true if the size is within bounds, false otherwise.
-//
-// Use this before filling a buffer to ensure the payload fits:
-//
-//	if !srt.ValidatePayloadSize(len(data)) {
-//	    return fmt.Errorf("payload too large: %d > %d", len(data), srt.MaxPayloadSize)
-//	}
-func ValidatePayloadSize(size int) bool {
-	return size >= 0 && size <= MaxPayloadSize
+	PayloadBufferPool.Put(buf)
 }
 
 // ValidateBufferSize checks if a size fits in the buffer pool.
 // This is more permissive than ValidatePayloadSize - allows up to full MTU.
 func ValidateBufferSize(size int) bool {
-	return size >= 0 && size <= DefaultRecvBufferSize
+	return size >= 0 && size <= MaxPayloadBufferSize
 }

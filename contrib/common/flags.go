@@ -71,6 +71,10 @@ var (
 	IoUringRecvInitialPending = flag.Int("iouringrecvinitialpending", 0, "Initial number of pending receive requests at startup (default: ring size)")
 	IoUringRecvBatchSize      = flag.Int("iouringrecvbatchsize", 0, "Batch size for resubmitting receive requests after completions (default: 256)")
 
+	// Multiple io_uring rings configuration flags (Phase 1: multi_iouring_design.md)
+	IoUringRecvRingCount = flag.Int("iouringrecvringcount", 1, "Number of io_uring receive rings for parallel processing (1-16)")
+	IoUringSendRingCount = flag.Int("iouringsendringcount", 1, "Number of io_uring send rings per connection (1-8)")
+
 	// Timer interval configuration flags
 	TickIntervalMs        = flag.Uint64("tickintervalms", 0, "TSBPD delivery tick interval in milliseconds (default: 10)")
 	PeriodicNakIntervalMs = flag.Uint64("periodicnakintervalms", 0, "Periodic NAK timer interval in milliseconds (default: 20)")
@@ -101,8 +105,13 @@ var (
 
 	// Sender control ring configuration flags (Phase 3: Lockless Sender)
 	UseSendControlRing    = flag.Bool("usesendcontrolring", false, "Enable lock-free ring for ACK/NAK (requires -usesendring)")
-	SendControlRingSize   = flag.Int("sendcontrolringsize", 256, "Sender control ring size per shard (default: 256)")
-	SendControlRingShards = flag.Int("sendcontrolringshards", 2, "Sender control ring shards (default: 2)")
+	SendControlRingSize   = flag.Int("sendcontrolringsize", 128, "Sender control ring size per shard (default: 128)")
+	SendControlRingShards = flag.Int("sendcontrolringshards", 1, "Sender control ring shards (default: 1)")
+
+	// Receiver control ring configuration flags (Completely Lock-Free Receiver)
+	UseRecvControlRing    = flag.Bool("userecvcontrolring", false, "Enable lock-free ring for ACKACK/KEEPALIVE (requires -useeventloop)")
+	RecvControlRingSize   = flag.Int("recvcontrolringsize", 128, "Receiver control ring size per shard (default: 128)")
+	RecvControlRingShards = flag.Int("recvcontrolringshards", 1, "Receiver control ring shards (default: 1)")
 
 	// Sender EventLoop configuration flags (Phase 4: Lockless Sender)
 	UseSendEventLoop             = flag.Bool("usesendeventloop", false, "Enable sender EventLoop (requires -usesendcontrolring)")
@@ -371,6 +380,12 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	if FlagSet["iouringrecvbatchsize"] {
 		config.IoUringRecvBatchSize = *IoUringRecvBatchSize
 	}
+	if FlagSet["iouringrecvringcount"] {
+		config.IoUringRecvRingCount = *IoUringRecvRingCount
+	}
+	if FlagSet["iouringsendringcount"] {
+		config.IoUringSendRingCount = *IoUringSendRingCount
+	}
 
 	// Timer interval flags
 	if FlagSet["tickintervalms"] {
@@ -441,6 +456,17 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["sendcontrolringshards"] {
 		config.SendControlRingShards = *SendControlRingShards
+	}
+
+	// Receiver control ring flags (Completely Lock-Free Receiver)
+	if FlagSet["userecvcontrolring"] {
+		config.UseRecvControlRing = *UseRecvControlRing
+	}
+	if FlagSet["recvcontrolringsize"] {
+		config.RecvControlRingSize = *RecvControlRingSize
+	}
+	if FlagSet["recvcontrolringshards"] {
+		config.RecvControlRingShards = *RecvControlRingShards
 	}
 
 	// Sender EventLoop flags (Phase 4: Lockless Sender)

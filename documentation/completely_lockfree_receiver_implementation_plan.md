@@ -1544,6 +1544,31 @@ go build .
 go test -v . -run TestEventLoop
 ```
 
+### Step 7.4: Verify Metrics Usage
+
+After completing Phase 7, all receiver control ring metrics should be in use.
+
+**Checkpoint:**
+```bash
+# Verify all RecvControlRing metrics are now used (not just defined)
+make audit-metrics
+
+# Expected: RecvControlRing* metrics should no longer appear in
+# "Defined but never used" list
+```
+
+**Metrics now in use:**
+| Metric | Used In |
+|--------|---------|
+| `RecvControlRingPushedACKACK` | `dispatchACKACK()` in `connection_handlers.go` |
+| `RecvControlRingPushedKEEPALIVE` | `dispatchKeepAlive()` in `connection_handlers.go` |
+| `RecvControlRingDroppedACKACK` | `dispatchACKACK()` fallback path |
+| `RecvControlRingDroppedKEEPALIVE` | `dispatchKeepAlive()` fallback path |
+| `RecvControlRingDrained` | `drainRecvControlRing()` in `connection.go` |
+| `RecvControlRingProcessed` | `drainRecvControlRing()` per-packet |
+| `RecvControlRingProcessedACKACK` | `handleACKACK()` in `connection_handlers.go` |
+| `RecvControlRingProcessedKEEPALIVE` | `handleKeepAliveEventLoop()` in `connection_handlers.go` |
+
 ---
 
 ## Phase 8: Refactor SendControlRing to Use common

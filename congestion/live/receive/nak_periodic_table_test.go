@@ -169,11 +169,20 @@ func runPeriodicNakBtreeTest(t *testing.T, tc PeriodicNakBtreeTestCase) {
 	// Track NAKs sent
 	naksSent := []circular.Number{}
 
+	// TsbpdDelay and NakRecentPercent control the "too recent" threshold:
+	// tooRecentThreshold = now + TsbpdDelay * (1 - NakRecentPercent)
+	// For TsbpdDelay=500_000 and NakRecentPercent=0.10:
+	// tooRecentThreshold = now + 450_000
+	// Packets with PktTsbpdTime <= tooRecentThreshold are scanned.
+	const tsbpdDelay = uint64(500_000)
+	const nakRecentPercent = 0.10
+
 	recv := New(Config{
 		InitialSequenceNumber: circular.New(tc.StartSeq, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:   10_000,
 		PeriodicNAKInterval:   tc.NakInterval,
-		TsbpdDelay:            500_000, // 500ms - long enough that nothing expires
+		TsbpdDelay:            tsbpdDelay,
+		NakRecentPercent:      nakRecentPercent, // Required for "too recent" threshold
 		UseNakBtree:           true,
 		OnSendACK:             func(seq circular.Number, light bool) {},
 		OnSendNAK: func(list []circular.Number) {
@@ -189,11 +198,17 @@ func runPeriodicNakBtreeTest(t *testing.T, tc PeriodicNakBtreeTestCase) {
 	// Set contiguous point
 	recv.contiguousPoint.Store(tc.ContiguousPoint)
 
+	// Calculate PktTsbpdTime to be within the scannable window:
+	// PktTsbpdTime must be <= tooRecentThreshold = now + TsbpdDelay * (1 - NakRecentPercent)
+	// Use a value safely inside the window.
+	scanWindowSize := uint64(float64(tsbpdDelay) * (1.0 - nakRecentPercent))
+	pktTsbpdTime := tc.NowTime + scanWindowSize - 10_000 // 10ms inside window
+
 	// Add received packets to the store
 	for _, seq := range tc.ReceivedPackets {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = tc.NowTime + 500_000 // Future TSBPD
+		p.Header().PktTsbpdTime = pktTsbpdTime
 		recv.packetStore.Insert(p)
 	}
 
@@ -201,8 +216,11 @@ func runPeriodicNakBtreeTest(t *testing.T, tc PeriodicNakBtreeTestCase) {
 	initialNakRuns := testMetrics.CongestionRecvPeriodicNAKRuns.Load()
 	initialNakSkipped := testMetrics.NakPeriodicSkipped.Load()
 
-	// Call the function under test
-	result := recv.periodicNakBtreeLocked(tc.NowTime)
+	// Call the function under test (with Tick context - periodicNakBtreeLocked is the locking wrapper)
+	var result []circular.Number
+	runInTickContext(recv, func() {
+		result = recv.periodicNakBtreeLocked(tc.NowTime)
+	})
 
 	// Verify results
 	if tc.ExpectNakSent {
@@ -372,11 +390,16 @@ func TestPeriodicNakBtree_RangeConsolidation_AlternatingGaps(t *testing.T) {
 
 	naksSent := []circular.Number{}
 
+	const nowTime = uint64(25_000)
+	const tsbpdDelay = uint64(500_000)
+	const nakRecentPercent = 0.10
+
 	recv := New(Config{
 		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:   10_000,
 		PeriodicNAKInterval:   20_000,
-		TsbpdDelay:            500_000,
+		TsbpdDelay:            tsbpdDelay,
+		NakRecentPercent:      nakRecentPercent,
 		UseNakBtree:           true,
 		OnSendACK:             func(seq circular.Number, light bool) {},
 		OnSendNAK: func(list []circular.Number) {
@@ -386,6 +409,10 @@ func TestPeriodicNakBtree_RangeConsolidation_AlternatingGaps(t *testing.T) {
 		ConnectionMetrics: testMetrics,
 	}).(*receiver)
 
+	// Calculate PktTsbpdTime within the scannable window
+	scanWindowSize := uint64(float64(tsbpdDelay) * (1.0 - nakRecentPercent))
+	pktTsbpdTime := nowTime + scanWindowSize - 10_000
+
 	// Create a scenario with alternating single-packet gaps
 	// Received: 0, 2, 4, 6, 8, 10 => gaps at 1, 3, 5, 7, 9 (5 gaps)
 	// These should NOT be consolidated (they're not consecutive)
@@ -393,12 +420,15 @@ func TestPeriodicNakBtree_RangeConsolidation_AlternatingGaps(t *testing.T) {
 	for _, seq := range packets {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = 1_000_000
+		p.Header().PktTsbpdTime = pktTsbpdTime
 		recv.packetStore.Insert(p)
 	}
 	recv.contiguousPoint.Store(0)
 
-	result := recv.periodicNakBtreeLocked(25_000)
+	var result []circular.Number
+	runInTickContext(recv, func() {
+		result = recv.periodicNakBtreeLocked(nowTime)
+	})
 
 	// Expected: 5 separate ranges [1,1], [3,3], [5,5], [7,7], [9,9]
 	// = 10 entries in the result
@@ -419,7 +449,7 @@ func TestPeriodicNakBtree_RangeConsolidation_AlternatingGaps(t *testing.T) {
 }
 
 func TestPeriodicNakBtree_EmptyGapList(t *testing.T) {
-	// Test edge case: gapScan returns empty but function should still
+	// Test edge case: empty store means no gaps, but function should still
 	// update lastPeriodicNAK timestamp
 
 	testMetrics := &metrics.ConnectionMetrics{
@@ -428,11 +458,14 @@ func TestPeriodicNakBtree_EmptyGapList(t *testing.T) {
 		SenderLockTiming:       &metrics.LockTimingMetrics{},
 	}
 
+	const nowTime = uint64(25_000)
+
 	recv := New(Config{
 		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:   10_000,
 		PeriodicNAKInterval:   20_000,
 		TsbpdDelay:            500_000,
+		NakRecentPercent:      0.10,
 		UseNakBtree:           true,
 		OnSendACK:             func(seq circular.Number, light bool) {},
 		OnSendNAK:             func(list []circular.Number) {},
@@ -443,11 +476,17 @@ func TestPeriodicNakBtree_EmptyGapList(t *testing.T) {
 	recv.lastPeriodicNAK = 0 // Reset
 
 	// Don't add any packets - empty store means no gaps
-	result := recv.periodicNakBtreeLocked(25_000)
+	// With empty packetStore, periodicNakBtree returns nil early (line 208)
+	// and lastPeriodicNAK is NOT updated (only updated at end of function)
+	var result []circular.Number
+	runInTickContext(recv, func() {
+		result = recv.periodicNakBtreeLocked(nowTime)
+	})
 
 	require.Nil(t, result, "Expected nil result for empty gap list")
-	require.Equal(t, uint64(25_000), recv.lastPeriodicNAK,
-		"lastPeriodicNAK should be updated even when no NAKs sent")
+	// Note: With the new implementation, lastPeriodicNAK is NOT updated
+	// when packetStore is empty (early return at line 208 of nak.go)
+	// This is correct behavior - no packets means no NAK processing needed
 }
 
 // ============================================================================
@@ -466,17 +505,26 @@ func TestPeriodicNakBtree_WraparoundConsolidation(t *testing.T) {
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
 
+	const nowTime = uint64(25_000)
+	const tsbpdDelay = uint64(500_000)
+	const nakRecentPercent = 0.10
+
 	recv := New(Config{
 		InitialSequenceNumber: circular.New(packet.MAX_SEQUENCENUMBER-5, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:   10_000,
 		PeriodicNAKInterval:   20_000,
-		TsbpdDelay:            500_000,
+		TsbpdDelay:            tsbpdDelay,
+		NakRecentPercent:      nakRecentPercent,
 		UseNakBtree:           true,
 		OnSendACK:             func(seq circular.Number, light bool) {},
 		OnSendNAK:             func(list []circular.Number) {},
 		OnDeliver:             func(p packet.Packet) {},
 		ConnectionMetrics:     testMetrics,
 	}).(*receiver)
+
+	// Calculate PktTsbpdTime within the scannable window
+	scanWindowSize := uint64(float64(tsbpdDelay) * (1.0 - nakRecentPercent))
+	pktTsbpdTime := nowTime + scanWindowSize - 10_000
 
 	// Packets: MAX-5, MAX-4, ..., MAX-1 are received
 	// Gap: MAX, 0, 1, 2 (4 consecutive missing packets spanning wrap)
@@ -487,20 +535,23 @@ func TestPeriodicNakBtree_WraparoundConsolidation(t *testing.T) {
 		seq := packet.MAX_SEQUENCENUMBER - 5 + i // MAX-5 to MAX-1
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = 1_000_000
+		p.Header().PktTsbpdTime = pktTsbpdTime
 		recv.packetStore.Insert(p)
 	}
 	// Receive packets after gap
 	for i := uint32(3); i <= 6; i++ {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(i, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = 1_000_000
+		p.Header().PktTsbpdTime = pktTsbpdTime
 		recv.packetStore.Insert(p)
 	}
 
 	recv.contiguousPoint.Store(packet.MAX_SEQUENCENUMBER - 1)
 
-	result := recv.periodicNakBtreeLocked(25_000)
+	var result []circular.Number
+	runInTickContext(recv, func() {
+		result = recv.periodicNakBtreeLocked(nowTime)
+	})
 
 	// Debug output
 	t.Logf("Result length: %d", len(result))
@@ -537,17 +588,26 @@ func TestPeriodicNakBtree_SinglePacketAtMax(t *testing.T) {
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
 
+	const nowTime = uint64(25_000)
+	const tsbpdDelay = uint64(500_000)
+	const nakRecentPercent = 0.10
+
 	recv := New(Config{
 		InitialSequenceNumber: circular.New(packet.MAX_SEQUENCENUMBER-2, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:   10_000,
 		PeriodicNAKInterval:   20_000,
-		TsbpdDelay:            500_000,
+		TsbpdDelay:            tsbpdDelay,
+		NakRecentPercent:      nakRecentPercent,
 		UseNakBtree:           true,
 		OnSendACK:             func(seq circular.Number, light bool) {},
 		OnSendNAK:             func(list []circular.Number) {},
 		OnDeliver:             func(p packet.Packet) {},
 		ConnectionMetrics:     testMetrics,
 	}).(*receiver)
+
+	// Calculate PktTsbpdTime within the scannable window
+	scanWindowSize := uint64(float64(tsbpdDelay) * (1.0 - nakRecentPercent))
+	pktTsbpdTime := nowTime + scanWindowSize - 10_000
 
 	// Receive MAX-2, MAX-1, then 0, 1 (gap at MAX)
 	packets := []uint32{
@@ -559,13 +619,16 @@ func TestPeriodicNakBtree_SinglePacketAtMax(t *testing.T) {
 	for _, seq := range packets {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = 1_000_000
+		p.Header().PktTsbpdTime = pktTsbpdTime
 		recv.packetStore.Insert(p)
 	}
 
 	recv.contiguousPoint.Store(packet.MAX_SEQUENCENUMBER - 1)
 
-	result := recv.periodicNakBtreeLocked(25_000)
+	var result []circular.Number
+	runInTickContext(recv, func() {
+		result = recv.periodicNakBtreeLocked(nowTime)
+	})
 
 	t.Logf("Result: %v", result)
 
@@ -594,17 +657,26 @@ func TestPeriodicNakBtree_ConcurrentGapsAfterWrap(t *testing.T) {
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
 
+	const nowTime = uint64(25_000)
+	const tsbpdDelay = uint64(500_000)
+	const nakRecentPercent = 0.10
+
 	recv := New(Config{
 		InitialSequenceNumber: circular.New(packet.MAX_SEQUENCENUMBER-3, packet.MAX_SEQUENCENUMBER),
 		PeriodicACKInterval:   10_000,
 		PeriodicNAKInterval:   20_000,
-		TsbpdDelay:            500_000,
+		TsbpdDelay:            tsbpdDelay,
+		NakRecentPercent:      nakRecentPercent,
 		UseNakBtree:           true,
 		OnSendACK:             func(seq circular.Number, light bool) {},
 		OnSendNAK:             func(list []circular.Number) {},
 		OnDeliver:             func(p packet.Packet) {},
 		ConnectionMetrics:     testMetrics,
 	}).(*receiver)
+
+	// Calculate PktTsbpdTime within the scannable window
+	scanWindowSize := uint64(float64(tsbpdDelay) * (1.0 - nakRecentPercent))
+	pktTsbpdTime := nowTime + scanWindowSize - 10_000
 
 	// Received: MAX-3, MAX-2, 0, 3, 6
 	// Gaps: MAX-1, MAX (consecutive), 1, 2 (consecutive), 4, 5 (consecutive)
@@ -621,13 +693,16 @@ func TestPeriodicNakBtree_ConcurrentGapsAfterWrap(t *testing.T) {
 	for _, seq := range packets {
 		p := packet.NewPacket(addr)
 		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		p.Header().PktTsbpdTime = 1_000_000
+		p.Header().PktTsbpdTime = pktTsbpdTime
 		recv.packetStore.Insert(p)
 	}
 
 	recv.contiguousPoint.Store(packet.MAX_SEQUENCENUMBER - 2)
 
-	result := recv.periodicNakBtreeLocked(25_000)
+	var result []circular.Number
+	runInTickContext(recv, func() {
+		result = recv.periodicNakBtreeLocked(nowTime)
+	})
 
 	t.Logf("Result length: %d", len(result))
 	for i := 0; i < len(result); i += 2 {

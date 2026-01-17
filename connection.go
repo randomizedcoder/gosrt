@@ -3,6 +3,7 @@ package srt
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"net"
 	"strings"
@@ -161,9 +162,20 @@ type srtConn struct {
 	recv congestion.Receiver
 	snd  congestion.Sender
 
+	// Receiver Control Ring (Phase 6: Completely Lock-Free Receiver)
+	// Routes ACKACK and KEEPALIVE to EventLoop for lock-free processing.
+	// nil means disabled, non-nil means enabled (no separate bool needed).
+	// Reference: completely_lockfree_receiver.md Section 6.1.5
+	recvControlRing *receive.RecvControlRing
+
 	// context of all channels and routines
 	ctx       context.Context
 	cancelCtx context.CancelFunc
+
+	// Debug context for lock-free path verification (debug builds only)
+	// Tracks whether we're in EventLoop or Tick context for assert validation.
+	// nil in release builds (zero overhead).
+	debugCtx *connDebugContext
 
 	// Waitgroups for graceful shutdown
 	shutdownWg *sync.WaitGroup // Parent waitgroup (from listener/dialer)
@@ -185,14 +197,20 @@ type srtConn struct {
 	stopHSRequests context.CancelFunc
 	stopKMRequests context.CancelFunc
 
-	// Control packet dispatch tables (initialized once, never modified, no locking needed)
-	controlHandlers map[packet.CtrlType]controlPacketHandler // Main control type handlers
-	userHandlers    map[packet.CtrlSubType]userPacketHandler // CTRLTYPE_USER SubType handlers
+	// Control packet dispatch tables
+	controlHandlers map[packet.CtrlType]controlPacketHandler
+	userHandlers    map[packet.CtrlSubType]userPacketHandler
 
 	// io_uring send queue (per-connection) - using giouring for high performance
 	// Type is interface{} to allow conditional compilation (giouring.Ring on Linux, nil on others)
+	// Multi-ring support: When IoUringSendRingCount > 1, we create multiple
+	// independent io_uring rings, each with its own completion handler goroutine.
+	// This enables parallel completion processing across CPU cores.
+	// See multi_iouring_design.md Section 4.3 for design rationale.
+
+	// Legacy single-ring fields (used when IoUringSendRingCount == 1)
 	sendRing   interface{} // Direct ring access, no channels (type: *giouring.Ring on Linux)
-	sendRingFd int         // File descriptor for the socket (not the ring)
+	sendRingFd int         // Socket fd (shared by all rings)
 
 	// Pre-computed sockaddr for UDP sends (computed once at connection init, reused for all sends)
 	sendSockaddr    syscall.RawSockaddrAny // Pre-computed sockaddr structure
@@ -205,17 +223,23 @@ type srtConn struct {
 	// Used by receiver.releasePacketFully() to return buffers after packet delivery
 	recvBufferPool *sync.Pool
 
-	// Completion tracking - minimal structure for performance
+	// Legacy single-ring completion tracking
 	sendCompletions map[uint64]*sendCompletionInfo // Maps request ID to completion info
 	sendCompLock    sync.RWMutex                   // Protects sendCompletions map
 
-	// Atomic counter for generating unique request IDs
+	// Atomic counter for generating unique request IDs (legacy single-ring)
 	sendRequestID atomic.Uint64
 
-	// Completion handler goroutine lifecycle (giouring uses direct CQE polling)
+	// Multi-ring fields (used when IoUringSendRingCount > 1)
+	// Each sendRingState owns its ring, completion map, and ID counter
+	// Note: Per-ring lock needed because sender and completer access concurrently
+	sendRingStates     []*sendRingState // Slice of independent ring states
+	sendRingNextIdx    atomic.Uint32    // Round-robin index for ring selection
+
+	// Shared by both single-ring and multi-ring modes
 	sendCompCtx    context.Context
 	sendCompCancel context.CancelFunc
-	sendCompWg     sync.WaitGroup // Wait for completion handler to finish
+	sendCompWg     sync.WaitGroup // Wait for completion handler(s) to finish
 }
 
 // sendCompletionInfo stores minimal information needed for completion handling
@@ -348,6 +372,9 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		c.onShutdown = func(socketId uint32) {}
 	}
 
+	// Debug context for lock-free path verification (nil in release builds)
+	c.debugCtx = newConnDebugContext()
+
 	c.nextACKNumber.Store(1)           // ACK numbers start at 1 (0 is reserved for Light ACK)
 	c.ackNumbers = newAckEntryBtree(4) // ACK-5: btree with degree 4 (optimal for ~10 entries)
 
@@ -401,10 +428,187 @@ func newSRTConn(config srtConnConfig) *srtConn {
 	// TSBPD delivery tick interval - configurable via TickIntervalMs (default: 10ms)
 	c.tick = time.Duration(c.config.TickIntervalMs) * time.Millisecond
 
-	// 4.8.1.  Packet Acknowledgement (ACKs, ACKACKs) -> periodicACK = 10 milliseconds (default)
-	// 4.8.2.  Packet Retransmission (NAKs) -> periodicNAK at least 20 milliseconds (default)
-	// Note: Timer intervals now configurable via PeriodicAckIntervalMs/PeriodicNakIntervalMs
-	c.recv = receive.New(receive.Config{
+	// Initialize receiver (extracted for readability)
+	c.recv = createReceiver(c)
+
+	// Phase 6: RTO Suppression - wire up RTT provider to receiver for NAK suppression
+	// This enables RTO-based NAK suppression in consolidateNakBtree()
+	c.recv.SetRTTProvider(&c.rtt)
+
+	// Phase 6: Receiver Control Ring - Initialize for ACKACK/KEEPALIVE routing
+	// Note: No separate bool - recvControlRing != nil means enabled
+	// Reference: completely_lockfree_receiver.md Section 6.1.5
+	if c.config.UseRecvControlRing && c.config.UseEventLoop {
+		ringSize := c.config.RecvControlRingSize
+		if ringSize == 0 {
+			ringSize = 128 // Default
+		}
+		ringShards := c.config.RecvControlRingShards
+		if ringShards < 1 {
+			ringShards = 1 // Default
+		}
+		ring, err := receive.NewRecvControlRing(ringSize, ringShards)
+		if err != nil {
+			// Log error but continue - will use locked path (ring stays nil)
+			c.log("connection:init:error", func() string {
+				return fmt.Sprintf("failed to create recv control ring: %v", err)
+			})
+		} else {
+			c.recvControlRing = ring
+			c.log("connection:init:recv_control_ring", func() string {
+				return fmt.Sprintf("recv control ring enabled: size=%d, shards=%d", ringSize, ringShards)
+			})
+
+			// Set the callback on receiver so EventLoop can process control packets inline.
+			// This eliminates the ~100µs polling latency from recvControlRingLoop.
+			// The drainRecvControlRing function returns int for the number of packets processed.
+			c.recv.SetProcessConnectionControlPackets(func() int {
+				return c.drainRecvControlRingCount()
+			})
+		}
+	}
+
+	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second
+	// https://github.com/Haivision/srt/blob/master/docs/API/API-socket-options.md#SRTO_SNDDROPDELAY
+	c.dropThreshold = uint64(float64(c.peerTsbpdDelay)*1.25) + uint64(c.config.SendDropDelay.Microseconds())
+	if c.dropThreshold < uint64(time.Second.Microseconds()) {
+		c.dropThreshold = uint64(time.Second.Microseconds())
+	}
+	c.dropThreshold += 20_000
+
+	c.snd = createSender(c)
+
+	c.shutdownWg = config.parentWg
+
+	c.ctx, c.cancelCtx = context.WithCancel(config.parentCtx)
+
+	c.initializeControlHandlers()
+
+	c.peerIdleTimeout = time.NewTimer(c.config.PeerIdleTimeout)
+	c.peerIdleTimeoutLastReset.Store(time.Now().UnixNano())
+
+	if c.config.IoUringRecvEnabled || c.config.IoUringEnabled {
+		c.initializeIoUring(config)
+	}
+
+	if !c.config.IoUringRecvEnabled {
+		c.connWg.Add(1)
+		go c.networkQueueReader(c.ctx, &c.connWg)
+	}
+
+	// writeQueueReader takes packets from application Write() calls and pushes
+	// them to the sender congestion control. This is ALWAYS needed regardless
+	// of io_uring mode - io_uring is for network I/O (recv/send), not for the
+	// internal write queue which feeds application data to the sender.
+	c.connWg.Add(1)
+	go c.writeQueueReader(c.ctx, &c.connWg)
+
+	// Start processing goroutines based on receiver/sender mode
+	//
+	// CASE 1: Receiver EventLoop mode
+	//   - recv.EventLoop() processes data packets AND control packets (via callback)
+	//   - senderTickLoop() drives sender's Tick() (sender EventLoop not yet implemented)
+	//   - NO recvControlRingLoop needed (control packets processed inline)
+	//
+	// CASE 2: Receiver Tick mode (legacy)
+	//   - ticker() drives both recv.Tick() and snd.Tick()
+	//   - recvControlRingLoop() handles control packets (if ring enabled)
+	//
+	// Reference: completely_lockfree_receiver_debugging.md Section 15-16
+	c.log("connection:init:startup:debug", func() string {
+		return fmt.Sprintf("recv.UseEventLoop=%v, snd.UseEventLoop=%v, config.UseEventLoop=%v, config.UsePacketRing=%v, recvControlRing=%v",
+			c.recv.UseEventLoop(), c.snd.UseEventLoop(), c.config.UseEventLoop, c.config.UsePacketRing, c.recvControlRing != nil)
+	})
+	if c.recv.UseEventLoop() {
+		// CASE 1: Receiver EventLoop mode
+		c.log("connection:init:startup:eventloop", func() string {
+			return "Starting receiver EventLoop mode"
+		})
+		c.connWg.Add(1)
+		go c.recv.EventLoop(c.ctx, &c.connWg)
+
+		// Check sender mode - either EventLoop or Tick
+		if c.snd.UseEventLoop() {
+			// CASE 1a: Both receiver and sender in EventLoop mode
+			c.log("connection:init:startup:snd-eventloop", func() string {
+				return "Starting sender EventLoop mode"
+			})
+			c.connWg.Add(1)
+			go c.snd.EventLoop(c.ctx, &c.connWg)
+		} else {
+			// CASE 1b: Receiver EventLoop + Sender Tick
+			// Use senderTickLoop to drive sender's Tick() in a separate goroutine
+			c.connWg.Add(1)
+			go c.senderTickLoop(c.ctx, &c.connWg)
+		}
+	} else {
+		// CASE 2: Receiver Tick mode (legacy)
+		// ticker() drives both recv.Tick() and snd.Tick()
+		c.connWg.Add(1)
+		go c.ticker(c.ctx, &c.connWg)
+	}
+
+	// Start peer idle timeout watcher (must be after context is created)
+	c.connWg.Add(1)
+	go c.watchPeerIdleTimeout(c.ctx, &c.connWg)
+
+	if c.version == 4 && c.isCaller {
+		// HSv4 caller contexts inherit from connection context
+		var hsrequestsCtx context.Context
+		hsrequestsCtx, c.stopHSRequests = context.WithCancel(c.ctx)
+		c.connWg.Add(1)
+		go c.sendHSRequests(hsrequestsCtx, &c.connWg)
+
+		if c.crypto != nil {
+			var kmrequestsCtx context.Context
+			kmrequestsCtx, c.stopKMRequests = context.WithCancel(c.ctx)
+			c.connWg.Add(1)
+			go c.sendKMRequests(kmrequestsCtx, &c.connWg)
+		}
+	}
+
+	return c
+}
+
+func (c *srtConn) LocalAddr() net.Addr {
+	if c.localAddr == nil {
+		return nil
+	}
+
+	addr, _ := net.ResolveUDPAddr("udp", c.localAddr.String())
+	return addr
+}
+
+func (c *srtConn) RemoteAddr() net.Addr {
+	if c.remoteAddr == nil {
+		return nil
+	}
+
+	addr, _ := net.ResolveUDPAddr("udp", c.remoteAddr.String())
+	return addr
+}
+
+func (c *srtConn) SocketId() uint32 {
+	return c.socketId
+}
+
+func (c *srtConn) PeerSocketId() uint32 {
+	return c.peerSocketId
+}
+
+func (c *srtConn) StreamId() string {
+	return c.config.StreamId
+}
+
+func (c *srtConn) Version() uint32 {
+	return c.version
+}
+
+// createReceiver initializes the receiver with connection-specific configuration.
+// Extracted from newSRTConn for readability.
+// Reference: SRT spec 4.8.1 (ACKs), 4.8.2 (NAKs)
+func createReceiver(c *srtConn) congestion.Receiver {
+	return receive.New(receive.Config{
 		InitialSequenceNumber:  c.initialPacketSequenceNumber,
 		PeriodicACKInterval:    c.config.PeriodicAckIntervalMs * 1000, // Convert ms to µs
 		PeriodicNAKInterval:    c.config.PeriodicNakIntervalMs * 1000, // Convert ms to µs
@@ -464,20 +668,13 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		Debug:   c.config.ReceiverDebug,
 		LogFunc: c.log,
 	})
+}
 
-	// Phase 6: RTO Suppression - wire up RTT provider to receiver for NAK suppression
-	// This enables RTO-based NAK suppression in consolidateNakBtree()
-	c.recv.SetRTTProvider(&c.rtt)
-
-	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second
-	// https://github.com/Haivision/srt/blob/master/docs/API/API-socket-options.md#SRTO_SNDDROPDELAY
-	c.dropThreshold = uint64(float64(c.peerTsbpdDelay)*1.25) + uint64(c.config.SendDropDelay.Microseconds())
-	if c.dropThreshold < uint64(time.Second.Microseconds()) {
-		c.dropThreshold = uint64(time.Second.Microseconds())
-	}
-	c.dropThreshold += 20_000
-
-	c.snd = send.NewSender(send.SendConfig{
+// createSender initializes the sender with connection-specific configuration.
+// Extracted from newSRTConn for readability.
+// Reference: SRT spec 4.6 (Too-Late Packet Drop)
+func createSender(c *srtConn) congestion.Sender {
+	return send.NewSender(send.SendConfig{
 		InitialSequenceNumber: c.initialPacketSequenceNumber,
 		DropThreshold:         c.dropThreshold,
 		MaxBW:                 c.config.MaxBW,
@@ -485,28 +682,31 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		MinInputBW:            c.config.MinInputBW,
 		OverheadBW:            c.config.OverheadBW,
 		OnDeliver:             c.pop,
-		OnLog:                 c.log, // Pass connection logger to sender for debug topics
+		OnLog:                 c.log,
 		LockTimingMetrics:     c.metrics.SenderLockTiming,
 		ConnectionMetrics:     c.metrics,
+
 		// CRITICAL: Connection start time for EventLoop time base.
 		// PktTsbpdTime uses relative time (since connection start), so EventLoop
 		// must also use relative time for TSBPD comparisons.
-		// BUG FIX: Without this, EventLoop used absolute time (~1.7e12 µs) while
-		// packets had relative time (~millions µs), causing all packets to be dropped.
 		StartTime:     c.start,
 		HonorNakOrder: c.config.HonorNakOrder,
 		RTOUs:         &c.rtt.rtoUs, // RTO suppression (Phase 6)
+
 		// Phase 1: Sender Lockless Btree
 		UseBtree:    c.config.UseSendBtree,
 		BtreeDegree: c.config.SendBtreeDegree,
+
 		// Phase 2: Sender Lock-Free Ring
 		UseSendRing:    c.config.UseSendRing,
 		SendRingSize:   c.config.SendRingSize,
 		SendRingShards: c.config.SendRingShards,
+
 		// Phase 3: Sender Control Packet Ring
 		UseSendControlRing:    c.config.UseSendControlRing,
 		SendControlRingSize:   c.config.SendControlRingSize,
 		SendControlRingShards: c.config.SendControlRingShards,
+
 		// Phase 4: Sender EventLoop
 		UseSendEventLoop:             c.config.UseSendEventLoop,
 		SendEventLoopBackoffMinSleep: c.config.SendEventLoopBackoffMinSleep,
@@ -517,106 +717,6 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		// Phase 5: Zero-copy payload pool
 		ValidatePayloadSize: c.config.ValidateSendPayloadSize,
 	})
-
-	// Store parent waitgroup
-	c.shutdownWg = config.parentWg
-
-	// Create connection context from parent context
-	c.ctx, c.cancelCtx = context.WithCancel(config.parentCtx)
-
-	// Initialize control packet dispatch tables (must be done before connection is used)
-	c.initializeControlHandlers()
-
-	// Initialize io_uring send ring if enabled (Linux-specific)
-	c.initializeIoUring(config)
-
-	// Initialize peer idle timeout (must be after context is created)
-	c.peerIdleTimeout = time.NewTimer(c.config.PeerIdleTimeout)
-	c.peerIdleTimeoutLastReset.Store(time.Now().UnixNano())
-
-	// Start connection goroutines with waitgroup tracking.
-	// Safe to start immediately because onSend and metrics are pre-initialized.
-	c.connWg.Add(1)
-	go func() {
-		defer c.connWg.Done()
-		c.networkQueueReader(c.ctx)
-	}()
-
-	c.connWg.Add(1)
-	go func() {
-		defer c.connWg.Done()
-		c.writeQueueReader(c.ctx)
-	}()
-
-	c.connWg.Add(1)
-	go func() {
-		defer c.connWg.Done()
-		c.ticker(c.ctx)
-	}()
-
-	// Start peer idle timeout watcher (must be after context is created)
-	c.connWg.Add(1)
-	go func() {
-		defer c.connWg.Done()
-		c.watchPeerIdleTimeout()
-	}()
-
-	if c.version == 4 && c.isCaller {
-		// HSv4 caller contexts inherit from connection context
-		var hsrequestsCtx context.Context
-		hsrequestsCtx, c.stopHSRequests = context.WithCancel(c.ctx)
-		c.connWg.Add(1)
-		go func() {
-			defer c.connWg.Done()
-			c.sendHSRequests(hsrequestsCtx)
-		}()
-
-		if c.crypto != nil {
-			var kmrequestsCtx context.Context
-			kmrequestsCtx, c.stopKMRequests = context.WithCancel(c.ctx)
-			c.connWg.Add(1)
-			go func() {
-				defer c.connWg.Done()
-				c.sendKMRequests(kmrequestsCtx)
-			}()
-		}
-	}
-
-	return c
-}
-
-func (c *srtConn) LocalAddr() net.Addr {
-	if c.localAddr == nil {
-		return nil
-	}
-
-	addr, _ := net.ResolveUDPAddr("udp", c.localAddr.String())
-	return addr
-}
-
-func (c *srtConn) RemoteAddr() net.Addr {
-	if c.remoteAddr == nil {
-		return nil
-	}
-
-	addr, _ := net.ResolveUDPAddr("udp", c.remoteAddr.String())
-	return addr
-}
-
-func (c *srtConn) SocketId() uint32 {
-	return c.socketId
-}
-
-func (c *srtConn) PeerSocketId() uint32 {
-	return c.peerSocketId
-}
-
-func (c *srtConn) StreamId() string {
-	return c.config.StreamId
-}
-
-func (c *srtConn) Version() uint32 {
-	return c.version
 }
 
 // ticker invokes the congestion control in regular intervals with
@@ -625,79 +725,152 @@ func (c *srtConn) Version() uint32 {
 // Phase 4: If the receiver uses event loop (UseEventLoop=true), the event loop
 // runs in a separate goroutine and handles packet processing continuously.
 // In this case, ticker() only drives the sender (unless sender EventLoop is also enabled).
-func (c *srtConn) ticker(ctx context.Context) {
-	// WaitGroup to track EventLoop goroutines for orderly shutdown
-	// Reference: context_and_cancellation_design.md - "Pattern for Goroutines"
-	var eventLoopWg sync.WaitGroup
 
-	// Phase 4: Start receiver event loop in separate goroutine if enabled
-	if c.recv.UseEventLoop() {
-		eventLoopWg.Add(1)
-		go func() {
-			defer eventLoopWg.Done()
-			c.recv.EventLoop(ctx)
-		}()
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7: Control Ring Processing (Completely Lock-Free Receiver)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// drainRecvControlRingCount processes all pending control packets from the ring.
+// Returns the number of packets processed.
+// Called from receiver EventLoop via the ProcessConnectionControlPackets callback.
+//
+// This function processes ACKACK and KEEPALIVE packets that were pushed to
+// the ring by dispatchACKACK() and dispatchKeepAlive().
+//
+// Reference: completely_lockfree_receiver.md Section 4.1
+func (c *srtConn) drainRecvControlRingCount() int {
+	if c.recvControlRing == nil {
+		return 0
 	}
 
-	// Phase 4: Start sender event loop in separate goroutine if enabled
-	// CRITICAL: This was missing and caused send ring overflow!
-	// Without this, Push() fills the ring but EventLoop never drains it.
-	if c.snd.UseEventLoop() {
-		eventLoopWg.Add(1)
-		go func() {
-			defer eventLoopWg.Done()
-			c.snd.EventLoop(ctx)
-		}()
+	count := 0
+	for {
+		cp, ok := c.recvControlRing.TryPop()
+		if !ok {
+			break
+		}
+
+		count++
+		if c.metrics != nil {
+			c.metrics.RecvControlRingDrained.Add(1)
+		}
+
+		switch cp.Type {
+		case receive.RecvControlTypeACKACK:
+			arrivalTime := time.Unix(0, cp.Timestamp)
+			c.handleACKACK(cp.ACKNumber, arrivalTime)
+			if c.metrics != nil {
+				c.metrics.RecvControlRingProcessedACKACK.Add(1)
+				c.metrics.RecvControlRingProcessed.Add(1)
+			}
+		case receive.RecvControlTypeKEEPALIVE:
+			c.handleKeepAliveEventLoop()
+			// Note: handleKeepAliveEventLoop already increments RecvControlRingProcessedKEEPALIVE
+			if c.metrics != nil {
+				c.metrics.RecvControlRingProcessed.Add(1)
+			}
+		}
+	}
+	return count
+}
+
+// drainRecvControlRing processes all pending control packets from the ring.
+// Called from recvControlRingLoop when receiver is in Tick mode.
+//
+// This is a wrapper around drainRecvControlRingCount that discards the count.
+func (c *srtConn) drainRecvControlRing() {
+	c.drainRecvControlRingCount()
+}
+
+// recvControlRingLoop runs the control ring drain loop.
+// Called as a separate goroutine when control ring is enabled.
+//
+// This loop continuously drains control packets from the ring and processes them.
+// The loop runs at high frequency (10kHz) to ensure timely RTT calculation.
+//
+// Reference: completely_lockfree_receiver.md Section 4.1
+func (c *srtConn) recvControlRingLoop(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	if c.recvControlRing == nil {
+		return
 	}
 
-	ticker := time.NewTicker(c.tick)
+	// 10kHz check rate - ensures ACKACK is processed promptly for RTT
+	ticker := time.NewTicker(100 * time.Microsecond)
 	defer ticker.Stop()
-	defer func() {
-		// Wait for EventLoop goroutines to finish their cleanup before ticker exits
-		// This ensures orderly shutdown: EventLoops complete cleanup before connection closes
-		c.log("connection:close", func() string { return "waiting for EventLoop goroutines" })
-		eventLoopWg.Wait()
-		c.log("connection:close", func() string { return "left ticker loop" })
-	}()
 
 	for {
 		select {
 		case <-ctx.Done():
+			// Drain any remaining packets before exit
+			c.drainRecvControlRing()
 			return
-		case t := <-ticker.C:
-			tickTime := uint64(t.Sub(c.start).Microseconds())
-
-			// Phase 4: Only call recv.Tick if event loop is not running
-			if !c.recv.UseEventLoop() {
-				c.recv.Tick(c.tsbpdTimeBase + tickTime)
-			}
-
-			// Phase 4: Only call snd.Tick if sender event loop is not running
-			// CRITICAL: When sender EventLoop is enabled, it handles all btree access
-			// (drain ring, deliver packets, process ACK/NAK). Running Tick() concurrently
-			// would cause race conditions on the btree and compete for ring packets.
-			if !c.snd.UseEventLoop() {
-				c.snd.Tick(tickTime)
-			}
+		case <-ticker.C:
+			c.drainRecvControlRing()
 		}
 	}
 }
 
-// ReadPacket, Read, WritePacket, Write, push, pop, getTimestamp, getTimestampForPacket,
-// networkQueueReader, writeQueueReader, deliver - moved to connection_io.go
+// senderTickLoop drives only the sender's Tick() in a loop.
+// Used when receiver is in EventLoop mode but sender is in Tick mode.
+// This separates sender timing from receiver timing.
+//
+// Reference: completely_lockfree_receiver_debugging.md Section 16.2
+func (c *srtConn) senderTickLoop(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-// handlePacketDirect, initializeControlHandlers, handleUserPacket, handlePacket,
-// handleKeepAlive, sendProactiveKeepalive, getKeepaliveInterval, handleShutdown,
-// handleACK, handleNAK, ExtendedStatistics, GetExtendedStatistics, handleACKACK,
-// recalculateRTT, getNextACKNumber - moved to connection_handlers.go
+	ticker := time.NewTicker(c.tick)
+	defer ticker.Stop()
 
-// handleHSRequest, handleHSResponse, sendHSRequests, sendHSRequest - moved to connection_handshake.go
+	for {
+		select {
+		case <-ctx.Done():
+			c.log("connection:close", func() string { return "left senderTickLoop" })
+			return
+		case t := <-ticker.C:
+			tickTime := uint64(t.Sub(c.start).Microseconds())
+			c.snd.Tick(tickTime)
+		}
+	}
+}
 
-// handleKMRequest, handleKMResponse, sendKMRequests, sendKMRequest - moved to connection_keymgmt.go
+// ticker drives both receiver and sender Tick() in the legacy (non-EventLoop) mode.
+// Also starts recvControlRingLoop if control ring is enabled.
+//
+// This function is only used when receiver is NOT in EventLoop mode.
+// When receiver IS in EventLoop mode, recv.EventLoop() and senderTickLoop() are used instead.
+func (c *srtConn) ticker(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-// sendShutdown, splitNakList, sendNAK, sendACK, sendACKACK - moved to connection_send.go
+	var eventLoopWg sync.WaitGroup
 
-// Close, GetPeerIdleTimeoutRemaining, resetPeerIdleTimeout, getTotalReceivedPackets,
-// watchPeerIdleTimeout, close, log - moved to connection_lifecycle.go
+	// Start recvControlRingLoop only when receiver is NOT in EventLoop mode.
+	// When receiver IS in EventLoop mode, control packets are processed inline
+	// via the ProcessConnectionControlPackets callback.
+	if c.recvControlRing != nil {
+		eventLoopWg.Add(1)
+		go c.recvControlRingLoop(ctx, &eventLoopWg)
+	}
 
-// Statistics, Stats, printCloseStatistics, SetDeadline, SetReadDeadline, SetWriteDeadline - moved to connection_stats.go
+	ticker := time.NewTicker(c.tick)
+	defer ticker.Stop()
+
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			break loop
+		case t := <-ticker.C:
+			tickTime := uint64(t.Sub(c.start).Microseconds())
+
+			c.recv.Tick(c.tsbpdTimeBase + tickTime)
+
+			c.snd.Tick(tickTime)
+		}
+	}
+
+	c.log("connection:close", func() string { return "waiting for EventLoop goroutines" })
+	eventLoopWg.Wait()
+	c.log("connection:close", func() string { return "left ticker loop" })
+}

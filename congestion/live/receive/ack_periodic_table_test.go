@@ -173,8 +173,13 @@ func runPeriodicACKTest(t *testing.T, tc PeriodicACKTestCase) {
 	t.Logf("Initial state: contiguousPoint=%d, lastACKSeq=%d, packets=%v",
 		recv.contiguousPoint.Load(), recv.lastACKSequenceNumber.Val(), tc.ReceivedPackets)
 
-	// Call the function under test
-	ok, resultSeq, lite := recv.periodicACK(tc.NowTime)
+	// Call the function under test (with EventLoop context)
+	var ok bool
+	var resultSeq circular.Number
+	var lite bool
+	runInEventLoopContext(recv, func() {
+		ok, resultSeq, lite = recv.periodicACK(tc.NowTime)
+	})
 
 	t.Logf("Result: ok=%v, seq=%d, lite=%v", ok, resultSeq.Val(), lite)
 
@@ -236,8 +241,12 @@ func TestPeriodicACK_HighWaterMarkBug(t *testing.T) {
 	}
 	recv.maxSeenSequenceNumber = circular.New(9, packet.MAX_SEQUENCENUMBER)
 
-	// First ACK
-	ok, seq, _ := recv.periodicACK(15_000)
+	// First ACK (with EventLoop context)
+	var ok bool
+	var seq circular.Number
+	runInEventLoopContext(recv, func() {
+		ok, seq, _ = recv.periodicACK(15_000)
+	})
 	require.True(t, ok)
 	require.Equal(t, uint32(10), seq.Val(), "First ACK should be 10 (next after 0-9)")
 	t.Logf("After first batch: ACK=%d, contiguousPoint=%d", seq.Val(), recv.contiguousPoint.Load())
@@ -251,9 +260,11 @@ func TestPeriodicACK_HighWaterMarkBug(t *testing.T) {
 	}
 	recv.maxSeenSequenceNumber = circular.New(60, packet.MAX_SEQUENCENUMBER)
 
-	// Second ACK - after gap
+	// Second ACK - after gap (with EventLoop context)
 	recv.lastPeriodicACK = 0 // Reset interval
-	ok, seq, _ = recv.periodicACK(30_000)
+	runInEventLoopContext(recv, func() {
+		ok, seq, _ = recv.periodicACK(30_000)
+	})
 	require.True(t, ok)
 	t.Logf("After second batch: ACK=%d, contiguousPoint=%d", seq.Val(), recv.contiguousPoint.Load())
 
@@ -316,8 +327,12 @@ func TestPeriodicACK_TSBPDExpiredGapSkip(t *testing.T) {
 	t.Logf("Before ACK: contiguousPoint=%d, lastACKSeq=%d, storeLen=%d",
 		recv.contiguousPoint.Load(), recv.lastACKSequenceNumber.Val(), recv.packetStore.Len())
 
-	// Run ACK with now > ACK interval (15_000 > 10_000) AND now > TSBPD of packets 10-14
-	ok, seq, _ := recv.periodicACK(15_000)
+	// Run ACK with now > ACK interval (15_000 > 10_000) AND now > TSBPD of packets 10-14 (with EventLoop context)
+	var ok bool
+	var seq circular.Number
+	runInEventLoopContext(recv, func() {
+		ok, seq, _ = recv.periodicACK(15_000)
+	})
 	t.Logf("After ACK: ok=%v, seq=%d, contiguousPoint=%d", ok, seq.Val(), recv.contiguousPoint.Load())
 
 	require.True(t, ok, "periodicACK should have returned ok=true (interval elapsed)")
@@ -377,7 +392,12 @@ func TestPeriodicACK_WraparoundSequence(t *testing.T) {
 	}
 	recv.maxSeenSequenceNumber = circular.New(3, packet.MAX_SEQUENCENUMBER)
 
-	ok, seq, _ := recv.periodicACK(15_000)
+	// Run with EventLoop context
+	var ok bool
+	var seq circular.Number
+	runInEventLoopContext(recv, func() {
+		ok, seq, _ = recv.periodicACK(15_000)
+	})
 	require.True(t, ok)
 	t.Logf("Wraparound ACK: seq=%d (expected 4)", seq.Val())
 

@@ -1,7 +1,9 @@
 package srt
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/randomizedcoder/gosrt/metrics"
@@ -54,9 +56,9 @@ func (c *srtConn) getTotalReceivedPackets() uint64 {
 }
 
 // watchPeerIdleTimeout watches for timeout using atomic counter checks
-func (c *srtConn) watchPeerIdleTimeout() {
+func (c *srtConn) watchPeerIdleTimeout(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-	// Get initial packet count
 	initialCount := c.getTotalReceivedPackets()
 
 	// Determine ticker interval based on timeout duration
@@ -111,7 +113,7 @@ func (c *srtConn) watchPeerIdleTimeout() {
 			}
 			// Note: We don't update initialCount here - that happens in the common logic below
 
-		case <-c.ctx.Done():
+		case <-ctx.Done():
 			// Connection closing
 			return
 		}
@@ -200,4 +202,3 @@ func (c *srtConn) close(reason metrics.CloseReason) {
 func (c *srtConn) log(topic string, message func() string) {
 	c.logger.Print(topic, c.socketId, 2, message)
 }
-

@@ -265,6 +265,15 @@ run_test "BackoffMinSleep flag" "-usepacketring -useeventloop -backoffminsleep 5
 run_test "BackoffMaxSleep flag" "-usepacketring -useeventloop -backoffmaxsleep 2ms" '"BackoffMaxSleep" *: *2000000' "$SERVER_BIN"
 run_test "Event loop full config" "-usepacketring -useeventloop -eventlooprateinterval 500ms -backoffcoldstartpkts 2000 -backoffminsleep 20us -backoffmaxsleep 500us" '"UseEventLoop" *: *true.*"EventLoopRateInterval" *: *500000000.*"BackoffColdStartPkts" *: *2000.*"BackoffMinSleep" *: *20000.*"BackoffMaxSleep" *: *500000' "$SERVER_BIN"
 
+# Test: Receiver control ring flags (Completely Lock-Free Receiver)
+run_test "UseRecvControlRing flag" "-usepacketring -useeventloop -userecvcontrolring" '"UseRecvControlRing" *: *true' "$SERVER_BIN"
+run_test "RecvControlRingSize flag" "-userecvcontrolring -recvcontrolringsize 256" '"RecvControlRingSize" *: *256' "$SERVER_BIN"
+run_test "RecvControlRingShards flag" "-userecvcontrolring -recvcontrolringshards 2" '"RecvControlRingShards" *: *2' "$SERVER_BIN"
+run_test "Recv control ring full config" "-usepacketring -useeventloop -userecvcontrolring -recvcontrolringsize 128 -recvcontrolringshards 1" '"UseRecvControlRing" *: *true.*"RecvControlRingSize" *: *128.*"RecvControlRingShards" *: *1' "$SERVER_BIN"
+
+# Test: Full lock-free EventLoop (sender + receiver control rings)
+run_test "Full lock-free EventLoop" "-usepacketring -useeventloop -usesendcontrolring -userecvcontrolring" '"UseEventLoop" *: *true.*"UseSendControlRing" *: *true.*"UseRecvControlRing" *: *true' "$SERVER_BIN"
+
 # Test 49: All flag types combined (excluding drifttracer=false due to known limitation)
 # Note: Put statisticsinterval first to ensure it's parsed correctly, then packetreorderalgorithm
 run_test "All flag types" "-statisticsinterval 10s -keepalivethreshold 0.6 -packetreorderalgorithm btree -btreedegree 32 -congestion file -latency 200 -fc 51200 -maxbw 100000000 -enforcedencryption true" '"StatisticsPrintInterval" *: *10000000000.*"KeepaliveThreshold" *: *0\.6.*"PacketReorderAlgorithm" *: *"btree".*"BTreeDegree" *: *32.*"Congestion" *: *"file".*"Latency" *: *200000000.*"FC" *: *51200.*"MaxBW" *: *100000000.*"EnforcedEncryption" *: *true' "$CLIENT_BIN"

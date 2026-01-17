@@ -4,6 +4,7 @@ package send
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -79,6 +80,11 @@ func TestDelivery_PacketBecameTooOld(t *testing.T) {
 	s.packetBtree.Insert(p3)
 
 	require.Equal(t, 4, s.packetBtree.Len())
+
+	// Must enter EventLoop context before calling EventLoop functions
+	// This is enforced by AssertEventLoopContext() in debug builds
+	s.EnterEventLoop()
+	defer s.ExitEventLoop()
 
 	// Time = 0: Only packet 0 is ready
 	currentTimeUs = 0
@@ -223,6 +229,10 @@ func TestDelivery_DeliveryStartPointAfterDrop(t *testing.T) {
 	s.packetBtree.Insert(createTestPacketWithTsbpd(103, 0))
 	s.packetBtree.Insert(createTestPacketWithTsbpd(104, 0))
 
+	// Must enter EventLoop context before calling EventLoop functions
+	s.EnterEventLoop()
+	defer s.ExitEventLoop()
+
 	// Deliver all
 	delivered, _ := s.deliverReadyPacketsEventLoop(currentTimeUs)
 	require.Equal(t, 4, delivered)
@@ -336,9 +346,11 @@ func TestDelivery_ConcurrentPushAndDrop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
+	var wg sync.WaitGroup
 	done := make(chan struct{})
+	wg.Add(1)
 	go func() {
-		s.EventLoop(ctx)
+		s.EventLoop(ctx, &wg) // wg.Done() called internally
 		close(done)
 	}()
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/randomizedcoder/gosrt/packet"
@@ -102,15 +103,34 @@ func (c *srtConn) Write(b []byte) (int, error) {
 		// Give the packet a deliver timestamp
 		p.Header().PktTsbpdTime = c.getTimestamp()
 
-		// Non-blocking write to the write queue.
-		// The ctx.Done() check here catches Close() during long writes.
-		// The writeLoop goroutine also checks ctx.Done() before sending.
+		// ═══════════════════════════════════════════════════════════════════════
+		// WRITE PATH DISPATCH
+		// When sender ring is enabled, use PushDirect for lower latency
+		// (bypasses writeQueue channel and writeQueueReader goroutine).
+		// Falls back to writeQueue channel for legacy (non-ring) mode.
+		// Reference: sender_lockfree_architecture.md Section 7.8
+		// ═══════════════════════════════════════════════════════════════════════
 		select {
 		case <-c.ctx.Done():
 			return 0, io.EOF
-		case c.writeQueue <- p:
 		default:
-			return 0, io.EOF
+		}
+
+		if c.snd.UseRing() {
+			// Direct push to lock-free ring (lower latency)
+			if !c.snd.PushDirect(p) {
+				// Ring full - drop packet
+				p.Decommission()
+				c.metrics.SendRingDropped.Add(1)
+				return 0, io.EOF
+			}
+		} else {
+			// Legacy path via writeQueue channel
+			select {
+			case c.writeQueue <- p:
+			default:
+				return 0, io.EOF
+			}
 		}
 
 		if c.writeBuffer.Len() == 0 {
@@ -222,7 +242,9 @@ func (c *srtConn) pop(p packet.Packet) {
 }
 
 // networkQueueReader reads the packets from the network queue in order to process them.
-func (c *srtConn) networkQueueReader(ctx context.Context) {
+func (c *srtConn) networkQueueReader(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	defer func() {
 		c.log("connection:close", func() string { return "left network queue reader loop" })
 	}()
@@ -239,7 +261,9 @@ func (c *srtConn) networkQueueReader(ctx context.Context) {
 
 // writeQueueReader reads the packets from the write queue and puts them into congestion
 // control for sending.
-func (c *srtConn) writeQueueReader(ctx context.Context) {
+func (c *srtConn) writeQueueReader(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	defer func() {
 		c.log("connection:close", func() string { return "left write queue reader loop" })
 	}()

@@ -6,6 +6,7 @@ package send
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/randomizedcoder/gosrt/circular"
@@ -33,7 +34,11 @@ import (
 //
 // The EventLoop is the ONLY goroutine that accesses SendPacketBtree,
 // ensuring single-threaded btree access with zero locks.
-func (s *sender) EventLoop(ctx context.Context) {
+//
+// wg is decremented on exit for graceful shutdown coordination.
+func (s *sender) EventLoop(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	m := s.metrics
 
 	// Track EventLoop entry attempts (diagnostic for intermittent failures)
@@ -80,25 +85,55 @@ func (s *sender) EventLoop(ctx context.Context) {
 			m.SendEventLoopDefaultRuns.Add(1)
 		}
 
-		// 1. Drain data ring → btree
+		// ═══════════════════════════════════════════════════════════════════════
+		// CONTROL PACKET PRIORITY PATTERN
+		// Service control packets BEFORE each major action to minimize ACK/NAK latency.
+		// This ensures RTT measurements are accurate by processing ACKACKs immediately.
+		// Reference: sender_lockfree_architecture.md Section 7.9.1
+		// ═══════════════════════════════════════════════════════════════════════
+
+		// Track total control packets for backoff calculation
+		totalControlDrained := 0
+
+		// ──────────────────────────────────────────────────────────────────────
+		// 1. SERVICE CONTROL RING FIRST (minimize ACK/NAK latency)
+		// ──────────────────────────────────────────────────────────────────────
+		if drained := s.processControlPacketsDelta(); drained > 0 {
+			m.SendEventLoopControlDrained.Add(uint64(drained))
+			totalControlDrained += drained
+		}
+
+		// ──────────────────────────────────────────────────────────────────────
+		// 2. Drain data ring → btree
+		// ──────────────────────────────────────────────────────────────────────
 		dataDrained := s.drainRingToBtreeEventLoop()
 		if dataDrained > 0 {
 			m.SendEventLoopDataDrained.Add(uint64(dataDrained))
 		}
 
-		// 2. Drain control ring → process ACK/NAK
-		controlDrained := s.processControlPacketsDelta()
-		if controlDrained > 0 {
-			m.SendEventLoopControlDrained.Add(uint64(controlDrained))
+		// ──────────────────────────────────────────────────────────────────────
+		// 3. SERVICE CONTROL RING AGAIN (may have arrived during drain)
+		// ──────────────────────────────────────────────────────────────────────
+		if drained := s.processControlPacketsDelta(); drained > 0 {
+			m.SendEventLoopControlDrained.Add(uint64(drained))
+			totalControlDrained += drained
 		}
 
-		// 3. Deliver ready packets (TSBPD)
+		// ──────────────────────────────────────────────────────────────────────
+		// 4. Deliver ready packets (TSBPD) + first transmissions (TransmitCount=0)
 		// CRITICAL: Use s.nowFn() for consistent time base with PktTsbpdTime
 		// PktTsbpdTime uses relative time (since connection start), so we must too.
-		// BUG FIX: time.Now().UnixMicro() was absolute time (~1.7e12 µs) causing
-		// all packets to appear "too old" and be dropped immediately.
+		// ──────────────────────────────────────────────────────────────────────
 		nowUs := s.nowFn()
 		delivered, nextDeliveryIn := s.deliverReadyPacketsEventLoop(nowUs)
+
+		// ──────────────────────────────────────────────────────────────────────
+		// 5. SERVICE CONTROL RING AFTER DELIVERY (may have arrived during delivery)
+		// ──────────────────────────────────────────────────────────────────────
+		if drained := s.processControlPacketsDelta(); drained > 0 {
+			m.SendEventLoopControlDrained.Add(uint64(drained))
+			totalControlDrained += drained
+		}
 
 		// ═══════════════════════════════════════════════════════════════════════
 		// OPTIMIZATION: Update SendBtreeLen ONCE per iteration (see Note 4)
@@ -108,11 +143,11 @@ func (s *sender) EventLoop(ctx context.Context) {
 			m.SendBtreeLen.Store(uint64(s.packetBtree.Len()))
 		}
 
-		// 4. TSBPD-aware sleep or adaptive backoff
+		// 6. TSBPD-aware sleep or adaptive backoff
 		sleepResult := s.calculateTsbpdSleepDuration(
 			nextDeliveryIn,
 			delivered,
-			controlDrained,
+			totalControlDrained, // Use total from all passes
 			s.backoffMinSleep,
 			s.backoffMaxSleep,
 		)
@@ -357,6 +392,8 @@ func (s *sender) deliverReadyPacketsEventLoop(nowUs uint64) (int, time.Duration)
 
 	// Iterate from delivery point and deliver ready packets
 	// Matches tickDeliverPacketsBtree() behavior for consistency
+	// Phase 3: Added TransmitCount check - only deliver packets with TransmitCount==0
+	// Reference: sender_lockfree_architecture.md Section 7.9.3
 	s.packetBtree.IterateFrom(uint32(startSeq), func(p packet.Packet) bool {
 		if !iterStarted {
 			iterStarted = true
@@ -383,27 +420,49 @@ func (s *sender) deliverReadyPacketsEventLoop(nowUs uint64) (int, time.Duration)
 			return false // Stop iteration
 		}
 
-		// Deliver packet
-		pktLen := p.Len()
+		// ═══════════════════════════════════════════════════════════════════
+		// TransmitCount check - only send if not already transmitted
+		// Packets with TransmitCount >= 1 stay in btree for NAK retransmit
+		// Reference: sender_lockfree_architecture.md Section 7.9.3
+		// ═══════════════════════════════════════════════════════════════════
 		seq := p.Header().PacketSequenceNumber.Val()
 
-		// Log packet delivery
-		if s.log != nil {
-			s.log("sender:eventloop:delivery:packet", func() string {
-				return fmt.Sprintf("seq=%d tsbpdTime=%d nowUs=%d", seq, tsbpdTime, nowUs)
-			})
+		if p.Header().TransmitCount == 0 {
+			// First transmission - send and mark as sent
+			pktLen := p.Len()
+
+			// Log packet delivery
+			if s.log != nil {
+				s.log("sender:eventloop:delivery:firstsend", func() string {
+					return fmt.Sprintf("seq=%d tsbpdTime=%d nowUs=%d transmitCount=0->1", seq, tsbpdTime, nowUs)
+				})
+			}
+
+			m.CongestionSendPkt.Add(1)
+			m.CongestionSendPktUnique.Add(1)
+			m.CongestionSendByte.Add(uint64(pktLen))
+			m.CongestionSendByteUnique.Add(uint64(pktLen))
+			m.CongestionSendUsSndDuration.Add(uint64(s.pktSndPeriod))
+			m.SendRateBytesSent.Add(pktLen)
+			m.SendFirstTransmit.Add(1) // Track first transmissions
+
+			s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
+			s.deliver(p)
+
+			// Mark as transmitted - packet stays in btree for potential NAK retransmit
+			p.Header().TransmitCount = 1
+
+			delivered++
+		} else {
+			// Already sent - skip (stays in btree for NAK retransmit)
+			m.SendAlreadySent.Add(1)
+
+			if s.log != nil {
+				s.log("sender:eventloop:delivery:alreadysent", func() string {
+					return fmt.Sprintf("seq=%d transmitCount=%d (skipped)", seq, p.Header().TransmitCount)
+				})
+			}
 		}
-
-		m.CongestionSendPkt.Add(1)
-		m.CongestionSendPktUnique.Add(1)
-		m.CongestionSendByte.Add(uint64(pktLen))
-		m.CongestionSendByteUnique.Add(uint64(pktLen))
-		m.CongestionSendUsSndDuration.Add(uint64(s.pktSndPeriod))
-		m.SendRateBytesSent.Add(pktLen)
-
-		s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
-		s.deliver(p)
-		delivered++
 
 		// Update delivery point to next sequence (same as tickDeliverPacketsBtree)
 		s.deliveryStartPoint.Store(uint64(circular.SeqAdd(seq, 1)))

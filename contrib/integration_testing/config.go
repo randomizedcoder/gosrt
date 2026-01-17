@@ -85,6 +85,17 @@ const (
 	// ConfigFullSendEL enables everything: receiver lockless + sender lockless
 	// This is the ultimate high-performance configuration
 	ConfigFullSendEL ConfigVariant = "FullSendEL"
+
+	// ========================================================================
+	// COMPLETELY LOCK-FREE RECEIVER VARIANTS (Phase 6: Receiver Control Ring)
+	// ========================================================================
+
+	// ConfigRecvControlRing enables receiver control ring only (on top of FullEventLoop)
+	ConfigRecvControlRing ConfigVariant = "RecvControlRing"
+
+	// ConfigFullELLockFree enables everything: completely lock-free receiver + sender
+	// This is the ultimate lock-free configuration with both sender and receiver control rings
+	ConfigFullELLockFree ConfigVariant = "FullELLockFree"
 )
 
 // GetSRTConfig returns an SRTConfig for a given ConfigVariant.
@@ -122,6 +133,11 @@ func GetSRTConfig(variant ConfigVariant) SRTConfig {
 		return ControlSRTConfig.WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoop()
 	case ConfigFullSendEL:
 		return HighPerfSRTConfig.WithPacketRing().WithEventLoop().WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoop()
+	// Completely Lock-Free Receiver variants
+	case ConfigRecvControlRing:
+		return HighPerfSRTConfig.WithPacketRing().WithEventLoop().WithRecvControlRing()
+	case ConfigFullELLockFree:
+		return HighPerfSRTConfig.WithPacketRing().WithEventLoop().WithRecvControlRing().WithSendBtree().WithSendRing().WithSendControlRing().WithSendEventLoop()
 	default:
 		return BaselineSRTConfig
 	}
@@ -392,6 +408,8 @@ type SRTConfig struct {
 	IoUringSendRingSize  int  // -iouringsendringsize
 	IoUringRecvRingSize  int  // -iouringrecvringsize
 	IoUringRecvBatchSize int  // -iouringrecvbatchsize
+	IoUringRecvRingCount int  // -iouringrecvringcount (Phase 1: multi_iouring_design.md)
+	IoUringSendRingCount int  // -iouringsendringcount (Phase 1: multi_iouring_design.md)
 
 	// Congestion control
 	Congestion string // -congestion (live, file)
@@ -462,6 +480,16 @@ type SRTConfig struct {
 	SendEventLoopBackoffMaxSleep time.Duration // -sendeventloopbackoffmaxsleep (default: 1ms)
 	SendTsbpdSleepFactor         float64       // -sendtsbpdsleepfactor (default: 0.9)
 	SendDropThresholdUs          uint64        // -senddropthresholdus (default: 1000000)
+
+	// ========================================================================
+	// COMPLETELY LOCK-FREE RECEIVER (Phase 6: Receiver Control Ring)
+	// ========================================================================
+	// See completely_lockfree_receiver.md and completely_lockfree_receiver_implementation_plan.md
+
+	// Receiver control ring (routes ACKACK/KEEPALIVE to EventLoop for lock-free processing)
+	UseRecvControlRing    bool // -recvcontrolring (requires -useeventloop)
+	RecvControlRingSize   int  // -recvcontrolringsize (default: 128)
+	RecvControlRingShards int  // -recvcontrolringshards (default: 1)
 
 	// Sender payload validation (Phase 5: Zero-copy)
 	ValidateSendPayloadSize bool // -validatesendpayloadsize (validate payload size)
@@ -537,6 +565,12 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 	if c.IoUringRecvBatchSize > 0 {
 		flags = append(flags, "-iouringrecvbatchsize", strconv.Itoa(c.IoUringRecvBatchSize))
+	}
+	if c.IoUringRecvRingCount > 1 {
+		flags = append(flags, "-iouringrecvringcount", strconv.Itoa(c.IoUringRecvRingCount))
+	}
+	if c.IoUringSendRingCount > 1 {
+		flags = append(flags, "-iouringsendringcount", strconv.Itoa(c.IoUringSendRingCount))
 	}
 
 	// Congestion control
@@ -678,6 +712,18 @@ func (c *SRTConfig) ToCliFlags() []string {
 	if c.SendDropThresholdUs > 0 {
 		flags = append(flags, "-senddropthresholdus", strconv.FormatUint(c.SendDropThresholdUs, 10))
 	}
+
+	// Receiver control ring (Completely Lock-Free Receiver)
+	if c.UseRecvControlRing {
+		flags = append(flags, "-userecvcontrolring")
+	}
+	if c.RecvControlRingSize > 0 {
+		flags = append(flags, "-recvcontrolringsize", strconv.Itoa(c.RecvControlRingSize))
+	}
+	if c.RecvControlRingShards > 0 {
+		flags = append(flags, "-recvcontrolringshards", strconv.Itoa(c.RecvControlRingShards))
+	}
+
 	if c.ValidateSendPayloadSize {
 		flags = append(flags, "-validatesendpayloadsize")
 	}
@@ -1455,6 +1501,40 @@ func (c SRTConfig) WithoutSendEventLoop() SRTConfig {
 	return c
 }
 
+// ============================================================================
+// COMPLETELY LOCK-FREE RECEIVER HELPERS (Phase 6: Receiver Control Ring)
+// ============================================================================
+
+// WithRecvControlRing enables the receiver control ring for ACKACK/KEEPALIVE processing.
+// This makes the receiver completely lock-free when combined with UseEventLoop.
+// Reference: completely_lockfree_receiver.md
+func (c SRTConfig) WithRecvControlRing() SRTConfig {
+	if !c.UseEventLoop {
+		panic("WithRecvControlRing requires UseEventLoop=true")
+	}
+	c.UseRecvControlRing = true
+	c.RecvControlRingSize = 128 // Default size (same as sender)
+	c.RecvControlRingShards = 1 // Default shards (same as sender)
+	return c
+}
+
+// WithRecvControlRingCustom enables the receiver control ring with custom settings.
+func (c SRTConfig) WithRecvControlRingCustom(size, shards int) SRTConfig {
+	if !c.UseEventLoop {
+		panic("WithRecvControlRingCustom requires UseEventLoop=true")
+	}
+	c.UseRecvControlRing = true
+	c.RecvControlRingSize = size
+	c.RecvControlRingShards = shards
+	return c
+}
+
+// WithoutRecvControlRing disables the receiver control ring.
+func (c SRTConfig) WithoutRecvControlRing() SRTConfig {
+	c.UseRecvControlRing = false
+	return c
+}
+
 // WithValidateSendPayloadSize enables payload size validation in sender Push().
 func (c SRTConfig) WithValidateSendPayloadSize() SRTConfig {
 	c.ValidateSendPayloadSize = true
@@ -1485,11 +1565,206 @@ func (c SRTConfig) WithLargeIoUringRecvRing() SRTConfig {
 	return c
 }
 
+// WithUltraHighThroughput configures for 500+ Mb/s throughput testing.
+// This increases all buffer sizes and flow control windows to handle extreme packet rates.
+// At 500 Mb/s with 1456 byte payloads: ~43,000 packets/sec
+func (c SRTConfig) WithUltraHighThroughput() SRTConfig {
+	// io_uring settings
+	c.IoUringRecvRingSize = 16384  // 2x larger than large
+	c.IoUringRecvBatchSize = 1024  // 2x larger batch
+
+	// SRT buffer settings
+	c.FC = 102400                  // 4x default flow control (25600 * 4)
+	c.RecvBuf = 64 * 1024 * 1024   // 64 MB receive buffer
+	c.SendBuf = 64 * 1024 * 1024   // 64 MB send buffer
+	c.Latency = 5000 * time.Millisecond      // 5 second latency buffer
+	c.RecvLatency = 5000 * time.Millisecond  // 5 second recv latency
+	c.PeerLatency = 5000 * time.Millisecond  // 5 second peer latency
+
+	// Packet ring - CRITICAL for high throughput!
+	// Default: 1024 * 4 = 4096 slots fills in ~95ms at 500 Mb/s
+	// Need: at least 1 second of buffer = 43000 packets
+	c.UsePacketRing = true
+	c.PacketRingSize = 16384       // 16x larger (16384 * 8 = 131k slots)
+	c.PacketRingShards = 8         // More shards for parallelism
+	c.PacketRingMaxRetries = 100   // More retries before giving up
+	c.PacketRingBackoffDuration = 50 * time.Microsecond // Faster retry
+
+	// Send ring - also needs to be larger
+	c.UseSendRing = true
+	c.SendRingSize = 8192          // 8x larger
+	c.SendRingShards = 4           // More shards
+
+	return c
+}
+
 // WithIoUringRecvRingCustom allows custom io_uring receive ring configuration.
 func (c SRTConfig) WithIoUringRecvRingCustom(ringSize, batchSize int) SRTConfig {
 	c.IoUringRecvRingSize = ringSize
 	c.IoUringRecvBatchSize = batchSize
 	return c
+}
+
+// ============================================================================
+// MULTIPLE IO_URING RINGS HELPERS (Phase 1: multi_iouring_design.md)
+// ============================================================================
+
+// WithMultipleRecvRings enables multiple io_uring receive rings.
+// REQUIRES: IoUringRecvEnabled=true
+// This enables parallel completion processing for reduced latency.
+// Valid values: 1-16 (power of 2 recommended)
+func (c SRTConfig) WithMultipleRecvRings(count int) SRTConfig {
+	if !c.IoUringRecvEnabled {
+		c.IoUringRecvEnabled = true
+	}
+	if count < 1 || count > 16 {
+		panic("IoUringRecvRingCount must be 1-16")
+	}
+	c.IoUringRecvRingCount = count
+	return c
+}
+
+// WithMultipleSendRings enables multiple io_uring send rings per connection.
+// REQUIRES: IoUringEnabled=true
+// This enables parallel send completion processing.
+// Valid values: 1-8 (power of 2 recommended)
+func (c SRTConfig) WithMultipleSendRings(count int) SRTConfig {
+	if !c.IoUringEnabled {
+		c.IoUringEnabled = true
+	}
+	if count < 1 || count > 8 {
+		panic("IoUringSendRingCount must be 1-8")
+	}
+	c.IoUringSendRingCount = count
+	return c
+}
+
+// WithParallelIoUring enables multiple rings for both send and receive paths.
+// This is the high-performance configuration for lowest latency.
+func (c SRTConfig) WithParallelIoUring(recvCount, sendCount int) SRTConfig {
+	return c.WithMultipleRecvRings(recvCount).WithMultipleSendRings(sendCount)
+}
+
+// ============================================================================
+// PERFORMANCE MAXIMIZATION HELPERS (500 Mb/s Target)
+// Reference: documentation/performance_maximization_500mbps.md
+// ============================================================================
+
+// WithAggressiveBuffers increases all buffer sizes 2x for 400+ Mb/s targets.
+// Use this when standard WithUltraHighThroughput() isn't enough.
+func (c SRTConfig) WithAggressiveBuffers() SRTConfig {
+	// Flow control - 2x
+	c.FC = 204800 // 8x default (25600 * 8)
+
+	// SRT buffers - 2x
+	c.RecvBuf = 128 * 1024 * 1024 // 128 MB
+	c.SendBuf = 128 * 1024 * 1024 // 128 MB
+
+	// Latency buffer - increased
+	c.Latency = 8000 * time.Millisecond    // 8 seconds
+	c.RecvLatency = 8000 * time.Millisecond
+	c.PeerLatency = 8000 * time.Millisecond
+
+	// Packet ring - 2x
+	c.UsePacketRing = true
+	c.PacketRingSize = 32768  // 2x (32k * 16 shards = 524k slots)
+	c.PacketRingShards = 16   // 2x
+	c.PacketRingMaxRetries = 200
+	c.PacketRingBackoffDuration = 25 * time.Microsecond
+
+	// Send ring - 2x
+	c.UseSendRing = true
+	c.SendRingSize = 16384 // 2x
+	c.SendRingShards = 8   // 2x
+
+	// io_uring recv - 2x
+	c.IoUringRecvRingSize = 32768  // 2x
+	c.IoUringRecvBatchSize = 2048  // 2x
+
+	return c
+}
+
+// WithAggressiveTimers reduces timer intervals for faster response at high throughput.
+// Lower intervals = more responsive but higher CPU usage.
+func (c SRTConfig) WithAggressiveTimers() SRTConfig {
+	// Timer intervals - halved
+	c.TickIntervalMs = 5          // 5ms tick (was 10)
+	c.PeriodicNakIntervalMs = 10  // 10ms NAK (was 20)
+	c.PeriodicAckIntervalMs = 5   // 5ms ACK (was 10)
+
+	// Receiver EventLoop backoff - reduced
+	c.BackoffMinSleep = 1 * time.Microsecond   // 1µs (was 10µs)
+	c.BackoffMaxSleep = 100 * time.Microsecond // 100µs (was 1ms)
+
+	// Sender EventLoop backoff - reduced
+	c.SendEventLoopBackoffMinSleep = 10 * time.Microsecond  // 10µs (was 100µs)
+	c.SendEventLoopBackoffMaxSleep = 100 * time.Microsecond // 100µs (was 1ms)
+	c.SendTsbpdSleepFactor = 0.95                           // Wake up closer to deadline
+
+	return c
+}
+
+// WithExtremeBuffers increases all buffer sizes 4x for 500 Mb/s targets.
+// WARNING: This uses significant memory (~1GB total buffers).
+func (c SRTConfig) WithExtremeBuffers() SRTConfig {
+	// Flow control - 4x
+	c.FC = 409600 // 16x default
+
+	// SRT buffers - 4x
+	c.RecvBuf = 256 * 1024 * 1024 // 256 MB
+	c.SendBuf = 256 * 1024 * 1024 // 256 MB
+
+	// Latency buffer - maximum
+	c.Latency = 10000 * time.Millisecond    // 10 seconds
+	c.RecvLatency = 10000 * time.Millisecond
+	c.PeerLatency = 10000 * time.Millisecond
+
+	// Packet ring - 4x
+	c.UsePacketRing = true
+	c.PacketRingSize = 65536  // 4x (65k * 32 shards = 2M slots!)
+	c.PacketRingShards = 32   // 4x
+	c.PacketRingMaxRetries = 500
+	c.PacketRingBackoffDuration = 10 * time.Microsecond
+
+	// Send ring - 4x
+	c.UseSendRing = true
+	c.SendRingSize = 32768 // 4x
+	c.SendRingShards = 16  // 4x
+
+	// io_uring recv - 4x
+	c.IoUringRecvRingSize = 65536 // 4x
+	c.IoUringRecvBatchSize = 4096 // 4x
+
+	return c
+}
+
+// WithExtremeTimers uses the most aggressive timer settings possible.
+// WARNING: This will use significant CPU. Only use for benchmarking.
+func (c SRTConfig) WithExtremeTimers() SRTConfig {
+	// Timer intervals - minimum practical
+	c.TickIntervalMs = 2         // 2ms tick
+	c.PeriodicNakIntervalMs = 5  // 5ms NAK
+	c.PeriodicAckIntervalMs = 2  // 2ms ACK
+
+	// Receiver EventLoop backoff - near zero
+	c.BackoffMinSleep = 100 * time.Nanosecond  // 100ns
+	c.BackoffMaxSleep = 10 * time.Microsecond  // 10µs
+
+	// Sender EventLoop backoff - near zero
+	c.SendEventLoopBackoffMinSleep = 1 * time.Microsecond // 1µs
+	c.SendEventLoopBackoffMaxSleep = 10 * time.Microsecond // 10µs
+	c.SendTsbpdSleepFactor = 0.99 // Wake up very close to deadline
+
+	return c
+}
+
+// With500MbpsOptimized applies all optimizations for 500 Mb/s throughput.
+// This is the recommended starting point for 500 Mb/s experiments.
+func (c SRTConfig) With500MbpsOptimized() SRTConfig {
+	return c.WithUltraHighThroughput().
+		WithAggressiveBuffers().
+		WithAggressiveTimers().
+		WithMultipleRecvRings(2) // 2 rings is the sweet spot
 }
 
 // ============================================================================

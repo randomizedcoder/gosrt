@@ -277,8 +277,9 @@ func TestSender_Init_Table(t *testing.T) {
 			}
 
 			// Test 8: control ring created when enabled
+			// Note: controlRing != nil means enabled (no separate bool)
 			if tc.UseControlRing {
-				require.NotNil(t, s.controlRing, "controlRing should be created when useControlRing=true")
+				require.NotNil(t, s.controlRing, "controlRing should be non-nil when UseSendControlRing=true")
 			}
 
 			// Test 9: metrics attached

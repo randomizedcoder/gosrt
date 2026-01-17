@@ -204,6 +204,11 @@ type receiver struct {
 	// Debug context tracking (Step 7.5.2: Runtime Verification)
 	// Only active in debug builds (-tags debug), zero-size struct in release builds.
 	debugCtx debugContext
+
+	// Callback to process connection-level control packets (ACKACK, KEEPALIVE)
+	// Set via SetProcessConnectionControlPackets() after receiver is created.
+	// Called by EventLoop to process control packets inline, eliminating polling latency.
+	processConnectionControlPackets func() int
 }
 
 // NewReceiver takes a Config and returns a new Receiver
@@ -342,6 +347,11 @@ func New(recvConfig Config) congestion.Receiver {
 		r.debug = true
 		r.logFunc = recvConfig.LogFunc
 	}
+
+	// Initialize control packet processing callback (for EventLoop mode)
+	// This allows connection-level control packets to be processed inline
+	// in the EventLoop rather than by a separate polling goroutine.
+	r.processConnectionControlPackets = recvConfig.ProcessConnectionControlPackets
 
 	// Initialize time provider for TSBPD delivery (Phase 9: ACK Optimization)
 	// Phase 10 Fix: When TsbpdTimeBase/StartTime are provided, use relative time

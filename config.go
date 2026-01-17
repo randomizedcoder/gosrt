@@ -256,6 +256,18 @@ type Config struct {
 	// Default: 256. Larger batches reduce syscall overhead but increase latency
 	IoUringRecvBatchSize int
 
+	// Number of io_uring receive rings to create (default: 1)
+	// Multiple rings allow parallel completion processing
+	// Valid values: 1-16 (power of 2 recommended)
+	// Reference: multi_iouring_design.md Phase 1
+	IoUringRecvRingCount int
+
+	// Number of io_uring send rings per connection (default: 1)
+	// Multiple rings allow parallel send completion processing
+	// Valid values: 1-8 (power of 2 recommended)
+	// Reference: multi_iouring_design.md Phase 1
+	IoUringSendRingCount int
+
 	// Statistics print interval for server connections
 	// If > 0, server will periodically print statistics for all active connections
 	// Default: 0 (disabled). Set to e.g. 10s to print statistics every 10 seconds
@@ -445,8 +457,24 @@ type Config struct {
 	SendControlRingSize int
 
 	// SendControlRingShards is the number of control ring shards.
-	// Default: 2 (one for ACK, one for NAK)
+	// Default: 1 (unified with receiver)
 	SendControlRingShards int
+
+	// --- Receiver Control Ring Configuration (Completely Lock-Free Receiver) ---
+
+	// UseRecvControlRing enables lock-free ring for ACKACK/KEEPALIVE routing.
+	// When enabled with UseEventLoop, the receiver is completely lock-free.
+	// Default: false (for backward compatibility)
+	UseRecvControlRing bool
+
+	// RecvControlRingSize is the receiver control ring capacity per shard.
+	// Will be rounded to power of 2 by the ring library.
+	// Default: 128
+	RecvControlRingSize int
+
+	// RecvControlRingShards is the number of receiver control ring shards.
+	// Default: 1
+	RecvControlRingShards int
 
 	// --- Sender EventLoop Configuration (Phase 4: Lockless Sender) ---
 
@@ -640,6 +668,8 @@ var defaultConfig Config = Config{
 	IoUringRecvRingSize:       512,
 	IoUringRecvInitialPending: 512,
 	IoUringRecvBatchSize:      256,
+	IoUringRecvRingCount:      1, // Default to 1 for backward compatibility
+	IoUringSendRingCount:      1, // Default to 1 for backward compatibility
 	StatisticsPrintInterval:   0, // Disabled by default
 	MetricsEnabled:            false,
 	MetricsListenAddr:         "",                      // Disabled by default
@@ -679,8 +709,13 @@ var defaultConfig Config = Config{
 
 	// Sender control ring defaults (Phase 3: Lockless Sender)
 	UseSendControlRing:    false, // Legacy path by default
-	SendControlRingSize:   256,   // Per-shard capacity
-	SendControlRingShards: 2,     // 2 shards (ACK/NAK separation)
+	SendControlRingSize:   128,   // Per-shard capacity (unified with receiver)
+	SendControlRingShards: 1,     // Single shard (unified with receiver)
+
+	// Receiver control ring defaults (Completely Lock-Free Receiver)
+	UseRecvControlRing:    false, // Legacy path by default
+	RecvControlRingSize:   128,   // Per-shard capacity
+	RecvControlRingShards: 1,     // Single shard
 
 	// Sender EventLoop defaults (Phase 4: Lockless Sender)
 	UseSendEventLoop:             false,                  // Legacy Tick() by default

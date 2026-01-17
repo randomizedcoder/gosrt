@@ -90,9 +90,11 @@ func TestEventLoop_StartStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Start EventLoop in goroutine
+	var wg sync.WaitGroup
 	done := make(chan struct{})
+	wg.Add(1)
 	go func() {
-		s.EventLoop(ctx)
+		s.EventLoop(ctx, &wg) // wg.Done() called internally
 		close(done)
 	}()
 
@@ -127,9 +129,11 @@ func TestEventLoop_DisabledNoOp(t *testing.T) {
 	defer cancel()
 
 	// Should return immediately
+	var wg sync.WaitGroup
 	done := make(chan struct{})
+	wg.Add(1)
 	go func() {
-		s.EventLoop(ctx)
+		s.EventLoop(ctx, &wg) // wg.Done() called internally
 		close(done)
 	}()
 
@@ -441,7 +445,9 @@ func TestEventLoop_IdleBackoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	s.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	s.EventLoop(ctx, &wg) // wg.Done() called internally
 
 	// Check idle backoff metrics
 	idleBackoffs := s.metrics.SendEventLoopIdleBackoffs.Load()
@@ -463,9 +469,11 @@ func TestEventLoop_Ring_BasicFlow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var wg sync.WaitGroup
 	done := make(chan struct{})
+	wg.Add(1)
 	go func() {
-		s.EventLoop(ctx)
+		s.EventLoop(ctx, &wg) // wg.Done() called internally
 		close(done)
 	}()
 
@@ -500,9 +508,11 @@ func TestEventLoop_Ring_HighThroughput(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var wg sync.WaitGroup
 	done := make(chan struct{})
+	wg.Add(1)
 	go func() {
-		s.EventLoop(ctx)
+		s.EventLoop(ctx, &wg) // wg.Done() called internally
 		close(done)
 	}()
 
@@ -537,7 +547,9 @@ func TestEventLoop_MetricsIncrement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	s.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	s.EventLoop(ctx, &wg) // wg.Done() called internally
 
 	// Check metrics were incremented
 	iterations := s.metrics.SendEventLoopIterations.Load()
@@ -638,7 +650,9 @@ func TestEventLoop_Wraparound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	s.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	s.EventLoop(ctx, &wg) // wg.Done() called internally
 
 	// Verify all packets were processed
 	drained := s.metrics.SendRingDrained.Load()
@@ -662,7 +676,9 @@ func TestEventLoop_DropTicker_Fires(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 
-	s.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	s.EventLoop(ctx, &wg) // wg.Done() called internally
 
 	// Check drop ticker fired
 	dropFires := s.metrics.SendEventLoopDropFires.Load()
@@ -716,9 +732,11 @@ func TestEventLoop_ConcurrentPush(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var eventLoopWg sync.WaitGroup
 	done := make(chan struct{})
+	eventLoopWg.Add(1)
 	go func() {
-		s.EventLoop(ctx)
+		s.EventLoop(ctx, &eventLoopWg) // wg.Done() called internally
 		close(done)
 	}()
 

@@ -67,8 +67,11 @@ func TestRace_SinglePusher(t *testing.T) {
 
 	require.Equal(t, int64(totalPackets), pushed.Load())
 
-	// Drain all
-	drained := s.drainRingToBtreeEventLoop()
+	// Drain all (with EventLoop context)
+	var drained int
+	runInEventLoopContext(s, func() {
+		drained = s.drainRingToBtreeEventLoop()
+	})
 
 	// Should have drained all pushed packets
 	require.Equal(t, totalPackets, drained)
@@ -116,6 +119,8 @@ func TestRace_PushWhileDraining(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		s.EnterEventLoop() // Enter context for entire goroutine
+		defer s.ExitEventLoop()
 		for {
 			select {
 			case <-stop:
@@ -132,8 +137,10 @@ func TestRace_PushWhileDraining(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	// Final drain
-	s.drainRingToBtreeEventLoop()
+	// Final drain (with EventLoop context)
+	runInEventLoopContext(s, func() {
+		s.drainRingToBtreeEventLoop()
+	})
 
 	// Should have some packets in btree
 	require.GreaterOrEqual(t, s.packetBtree.Len()+s.packetRing.Len(), 0)
@@ -186,6 +193,8 @@ func TestRace_PushWhileDelivering(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		s.EnterEventLoop() // Enter context for entire goroutine
+		defer s.ExitEventLoop()
 		for {
 			select {
 			case <-stop:
@@ -244,6 +253,8 @@ func TestRace_ACKWhileDelivering(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		s.EnterEventLoop() // Enter context for entire goroutine
+		defer s.ExitEventLoop()
 		ackSeq := uint32(0)
 		for {
 			select {
@@ -303,6 +314,8 @@ func TestRace_DropWhileDelivering(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		s.EnterEventLoop() // Enter context for entire goroutine
+		defer s.ExitEventLoop()
 		for {
 			select {
 			case <-stop:
@@ -379,6 +392,8 @@ func TestRace_MultipleOperations(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		s.EnterEventLoop() // Enter context for entire goroutine
+		defer s.ExitEventLoop()
 		for {
 			select {
 			case <-stop:
@@ -403,8 +418,10 @@ func TestRace_MultipleOperations(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	// Final cleanup (single-threaded now)
-	s.drainRingToBtreeEventLoop()
+	// Final cleanup (single-threaded now, with EventLoop context)
+	runInEventLoopContext(s, func() {
+		s.drainRingToBtreeEventLoop()
+	})
 
 	t.Log("MultipleOperations completed without race")
 }
@@ -946,6 +963,8 @@ func TestRace_ReadMetrics(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		s.EnterEventLoop() // Enter context for entire goroutine
+		defer s.ExitEventLoop()
 		for {
 			select {
 			case <-stop:

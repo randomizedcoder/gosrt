@@ -194,8 +194,12 @@ func TestSender_TSBPD_Delivery_Table(t *testing.T) {
 				s.packetBtree.Insert(pkt)
 			}
 
-			// Run delivery
-			delivered, nextDeliveryIn := s.deliverReadyPacketsEventLoop(tc.NowUs)
+			// Run delivery (with EventLoop context)
+			var delivered int
+			var nextDeliveryIn time.Duration
+			runInEventLoopContext(s, func() {
+				delivered, nextDeliveryIn = s.deliverReadyPacketsEventLoop(tc.NowUs)
+			})
 
 			// Verify delivered count
 			require.Equal(t, tc.ExpectedDelivered, delivered,
@@ -351,8 +355,10 @@ func TestSender_TSBPD_Drop_Table(t *testing.T) {
 
 			initialLen := s.packetBtree.Len()
 
-			// Run drop logic
-			s.dropOldPacketsEventLoop(tc.NowUs)
+			// Run drop logic (with EventLoop context)
+			runInEventLoopContext(s, func() {
+				s.dropOldPacketsEventLoop(tc.NowUs)
+			})
 
 			// Calculate dropped
 			dropped := initialLen - s.packetBtree.Len()

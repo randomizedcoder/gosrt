@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
+	ring "github.com/randomizedcoder/go-lock-free-ring"
 	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
-	ring "github.com/randomizedcoder/go-lock-free-ring"
 )
 
 // ============================================================================
@@ -48,8 +48,8 @@ func createHotPathReceiverWithSize(b *testing.B, withRing bool, withEventLoop bo
 
 	recvConfig := Config{
 		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		PeriodicACKInterval:    10_000,  // 10ms
-		PeriodicNAKInterval:    20_000,  // 20ms
+		PeriodicACKInterval:    10_000, // 10ms
+		PeriodicNAKInterval:    20_000, // 20ms
 		OnSendACK:              func(seq circular.Number, light bool) {},
 		OnSendNAK:              func(list []circular.Number) {},
 		OnDeliver:              func(p packet.Packet) {},
@@ -276,7 +276,7 @@ func BenchmarkHotPath_ContiguousScanWithGaps(b *testing.B) {
 			packetCount := 1000
 			for i := 0; i < packetCount; i++ {
 				// Skip some packets to create gaps
-				if (i % (100 / gapPercent)) == 0 && i > 0 {
+				if (i%(100/gapPercent)) == 0 && i > 0 {
 					continue
 				}
 				p := packet.NewPacket(addr)
@@ -388,10 +388,7 @@ func BenchmarkHotPath_EventLoopFull(b *testing.B) {
 	// Start EventLoop in background
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		recv.EventLoop(ctx)
-	}()
+	recv.EventLoop(ctx, &wg)
 
 	// Let it warm up
 	time.Sleep(100 * time.Millisecond)
@@ -745,4 +742,3 @@ func BenchmarkHotPath_PushParallelComparison(b *testing.B) {
 		})
 	}
 }
-

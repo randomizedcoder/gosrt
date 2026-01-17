@@ -106,6 +106,14 @@ type Config struct {
 	//   LogFunc("receiver:nak:debug", func() string { return "message" })
 	Debug   bool                        // Enable debug logging
 	LogFunc func(string, func() string) // Logging callback (lazy evaluation)
+
+	// ProcessConnectionControlPackets is called by EventLoop to process
+	// connection-level control packets (ACKACK, KEEPALIVE).
+	// Returns number of packets processed.
+	// Set by connection.go to c.drainRecvControlRing.
+	// This allows control packets to be processed inline in EventLoop
+	// rather than by a separate polling goroutine, eliminating latency.
+	ProcessConnectionControlPackets func() int
 }
 
 // adaptiveBackoff manages sleep duration during idle periods in the event loop.

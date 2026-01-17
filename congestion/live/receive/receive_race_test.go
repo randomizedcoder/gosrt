@@ -496,7 +496,7 @@ func TestRace_NakBtreeOperations(t *testing.T) {
 						p := createRacePacket(seq, addr, baseTimeUs)
 						recv.Push(p)
 						rm.pushCount.Add(1)
-						seq += 5 // Next gap
+						seq += 5                           // Next gap
 						time.Sleep(100 * time.Microsecond) // Slower rate
 					}
 				}
@@ -677,8 +677,8 @@ func TestRace_EventLoop_PushWithLoop(t *testing.T) {
 
 	recvConfig := Config{
 		InitialSequenceNumber:  circular.New(1, packet.MAX_SEQUENCENUMBER),
-		PeriodicACKInterval:    10_000,  // 10ms
-		PeriodicNAKInterval:    20_000,  // 20ms
+		PeriodicACKInterval:    10_000, // 10ms
+		PeriodicNAKInterval:    20_000, // 20ms
 		OnSendACK:              func(seq circular.Number, light bool) {},
 		OnSendNAK:              func(list []circular.Number) {},
 		OnDeliver:              func(p packet.Packet) { delivered.Add(1) },
@@ -703,10 +703,7 @@ func TestRace_EventLoop_PushWithLoop(t *testing.T) {
 	// Start EventLoop goroutine
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	// Multiple producers pushing concurrently
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
@@ -777,10 +774,7 @@ func TestRace_EventLoop_HighContention(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	// High-frequency producers
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
@@ -857,10 +851,7 @@ func TestRace_EventLoop_Wraparound(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	// Producer that wraps around - paced to avoid overwhelming the ring
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
@@ -938,10 +929,7 @@ func TestRace_EventLoop_LossRecovery(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
 	var pushed atomic.Int64
@@ -1003,4 +991,3 @@ func TestRace_EventLoop_LossRecovery(t *testing.T) {
 	t.Logf("EventLoop loss recovery race: pushed=%d, retransmits=%d, delivered=%d, NAKs=%d",
 		pushed.Load(), retransmits.Load(), delivered.Load(), nakCount.Load())
 }
-

@@ -12,9 +12,14 @@ import (
 //   - Reads: 50-800x faster
 //   - Mixed workload: 8x faster
 type rtt struct {
-	rttBits          atomic.Uint64 // float64 stored as bits
-	rttVarBits       atomic.Uint64 // float64 stored as bits
+	rttBits          atomic.Uint64 // float64 stored as bits (EWMA smoothed)
+	rttVarBits       atomic.Uint64 // float64 stored as bits (EWMA smoothed)
 	minNakIntervalUs atomic.Uint64 // minimum NAK interval in microseconds (from config)
+
+	// Raw RTT: last sample WITHOUT EWMA smoothing (for diagnostics)
+	// This shows the actual measured RTT from the most recent ACKACK.
+	// Useful for verifying arrival time capture is working correctly.
+	rttLastSampleUs atomic.Uint64 // Last RTT sample in microseconds (no smoothing)
 
 	// Pre-calculated RTO for suppression (updated when RTT changes, read on every NAK/retransmit)
 	// Callers: r.rtoUs.Load() for full RTO, r.rtoUs.Load()/2 for one-way delay
@@ -55,6 +60,10 @@ func (r *rtt) SetRTOMode(mode RTOMode, extraMargin float64) {
 func (r *rtt) Recalculate(rtt time.Duration) {
 	lastRTT := float64(rtt.Microseconds())
 
+	// Store raw sample (no smoothing) for diagnostics
+	// This allows verification that arrival time capture is correct
+	r.rttLastSampleUs.Store(uint64(lastRTT))
+
 	for {
 		oldRTTBits := r.rttBits.Load()
 		oldRTT := math.Float64frombits(oldRTTBits)
@@ -85,6 +94,13 @@ func (r *rtt) RTT() float64 {
 
 func (r *rtt) RTTVar() float64 {
 	return math.Float64frombits(r.rttVarBits.Load())
+}
+
+// RTTLastSample returns the most recent RTT sample in microseconds WITHOUT EWMA smoothing.
+// This is useful for diagnostics to verify arrival time capture is working correctly
+// and to distinguish network variance from EWMA smoothing effects.
+func (r *rtt) RTTLastSample() uint64 {
+	return r.rttLastSampleUs.Load()
 }
 
 func (r *rtt) NAKInterval() float64 {

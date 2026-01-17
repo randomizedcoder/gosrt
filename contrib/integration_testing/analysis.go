@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -1392,6 +1393,8 @@ type AnalysisResult struct {
 	PipelineBalance       PipelineBalanceResult       // Clean network pipeline verification
 	RateMetrics           RateMetricsResult           // Phase 1: Lockless rate metrics validation
 	EventLoopHealth       EventLoopHealthResult       // Phase 4: Lockless EventLoop health
+	RTTAnalysis           RTTAnalysisResult           // RTT smoothed vs raw analysis
+	IoUringHealth         IoUringHealthResult         // Phase 5: Multi-ring io_uring analysis
 
 	// Runtime stability (for long-running tests)
 	RuntimeStability []RuntimeStabilityResult
@@ -1416,6 +1419,8 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 	statisticalResult := ValidateStatistical(ts, config)
 	rateMetricsResult := VerifyRateMetrics(ts, config)    // Phase 1: Lockless rate validation
 	eventLoopResult := AnalyzeEventLoopHealth(ts, config) // Phase 4: EventLoop health
+	rttResult := AnalyzeRTT(ts, config)                   // RTT smoothed vs raw analysis
+	ioUringResult := AnalyzeIoUringHealth(ts, config)     // Phase 5: Multi-ring io_uring analysis
 
 	// FAIL-SAFE: Default to failed - only set to passed after ALL checks confirm success
 	result := AnalysisResult{
@@ -1428,6 +1433,8 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 		StatisticalValidation: statisticalResult,
 		RateMetrics:           rateMetricsResult,
 		EventLoopHealth:       eventLoopResult,
+		RTTAnalysis:           rttResult,
+		IoUringHealth:         ioUringResult,
 	}
 
 	// Compute derived metrics for reporting
@@ -1781,6 +1788,9 @@ func PrintAnalysisResult(result AnalysisResult) {
 
 	// EventLoop Health (Phase 4: Lockless)
 	PrintEventLoopHealth(result.EventLoopHealth)
+
+	// RTT Analysis (Raw vs Smoothed)
+	PrintRTTAnalysis(result.RTTAnalysis)
 
 	// Final Result
 	if result.Passed {
@@ -2191,6 +2201,11 @@ type ConnectionAnalysis struct {
 	// === TIMER HEALTH ===
 	PeriodicACKRuns int64 // periodic_ack_runs_total (~100/sec expected)
 	PeriodicNAKRuns int64 // periodic_nak_runs_total (~50/sec expected)
+
+	// === RTT METRICS ===
+	RTTMicroseconds           int64 // Final RTT value (EWMA smoothed)
+	RTTVarMicroseconds        int64 // Final RTT variance (EWMA smoothed)
+	RTTLastSampleMicroseconds int64 // Last raw RTT sample (NO smoothing, for diagnostics)
 
 	// === NAK DETAIL - RECEIVER (sends NAKs) ===
 	// RFC SRT Appendix A: NAK loss list encoding
@@ -2919,5 +2934,512 @@ func PrintEventLoopHealth(result EventLoopHealthResult) {
 	}
 	for _, w := range result.Warnings {
 		fmt.Printf("    ⚠ %s\n", w)
+	}
+}
+
+// ========== RTT Analysis (Phase: Raw RTT Metric) ==========
+
+// RTTAnalysisResult holds the result of RTT analysis
+// Compares EWMA-smoothed RTT with raw last sample to detect smoothing artifacts
+type RTTAnalysisResult struct {
+	Passed     bool
+	Applicable bool // false if no RTT data available
+
+	// Server metrics (receiver side calculates RTT from ACKACK)
+	ServerRTTSmoothed int64 // EWMA smoothed RTT (microseconds)
+	ServerRTTVar      int64 // EWMA smoothed RTT variance (microseconds)
+	ServerRTTRaw      int64 // Last raw sample (NO smoothing, microseconds)
+
+	// Client-Generator metrics (sender gets RTT from ACK packets)
+	ClientGenRTTSmoothed int64
+	ClientGenRTTVar      int64
+	ClientGenRTTRaw      int64
+
+	// Analysis
+	ServerSmoothingDelta    int64 // ServerRTTSmoothed - ServerRTTRaw (positive = smoothing inflated)
+	ClientGenSmoothingDelta int64
+	ServerRTTRatio          float64 // ServerRTTSmoothed / ServerRTTRaw (1.0 = identical)
+	ClientGenRTTRatio       float64
+
+	// Diagnostics
+	Observations []string
+	Warnings     []string
+}
+
+// AnalyzeRTT analyzes RTT metrics to detect smoothing artifacts
+// The raw RTT (last sample) should be very close to the smoothed RTT.
+// Large discrepancies indicate something unusual in the RTT measurement path.
+func AnalyzeRTT(ts *TestMetricsTimeSeries, config *TestConfig) RTTAnalysisResult {
+	result := RTTAnalysisResult{
+		Passed:     false, // Fail-safe: default to failed
+		Applicable: false,
+	}
+
+	// Get final snapshots
+	var serverFinal *MetricsSnapshot
+	var clientGenFinal *MetricsSnapshot
+
+	if len(ts.Server.Snapshots) > 0 {
+		serverFinal = ts.Server.Snapshots[len(ts.Server.Snapshots)-1]
+		if serverFinal != nil && serverFinal.Error != nil {
+			serverFinal = nil // Invalid snapshot
+		}
+	}
+	if len(ts.ClientGenerator.Snapshots) > 0 {
+		clientGenFinal = ts.ClientGenerator.Snapshots[len(ts.ClientGenerator.Snapshots)-1]
+		if clientGenFinal != nil && clientGenFinal.Error != nil {
+			clientGenFinal = nil // Invalid snapshot
+		}
+	}
+
+	if serverFinal == nil && clientGenFinal == nil {
+		result.Passed = true // No data - skip
+		return result
+	}
+
+	result.Applicable = true
+
+	// Extract RTT metrics from server
+	if serverFinal != nil && serverFinal.Metrics != nil {
+		result.ServerRTTSmoothed = int64(serverFinal.Metrics["gosrt_rtt_microseconds"])
+		result.ServerRTTVar = int64(serverFinal.Metrics["gosrt_rtt_var_microseconds"])
+		result.ServerRTTRaw = int64(serverFinal.Metrics["gosrt_rtt_last_sample_microseconds"])
+	}
+
+	// Extract RTT metrics from client-generator
+	if clientGenFinal != nil && clientGenFinal.Metrics != nil {
+		result.ClientGenRTTSmoothed = int64(clientGenFinal.Metrics["gosrt_rtt_microseconds"])
+		result.ClientGenRTTVar = int64(clientGenFinal.Metrics["gosrt_rtt_var_microseconds"])
+		result.ClientGenRTTRaw = int64(clientGenFinal.Metrics["gosrt_rtt_last_sample_microseconds"])
+	}
+
+	// Calculate deltas and ratios
+	result.ServerSmoothingDelta = result.ServerRTTSmoothed - result.ServerRTTRaw
+	result.ClientGenSmoothingDelta = result.ClientGenRTTSmoothed - result.ClientGenRTTRaw
+
+	if result.ServerRTTRaw > 0 {
+		result.ServerRTTRatio = float64(result.ServerRTTSmoothed) / float64(result.ServerRTTRaw)
+	}
+	if result.ClientGenRTTRaw > 0 {
+		result.ClientGenRTTRatio = float64(result.ClientGenRTTSmoothed) / float64(result.ClientGenRTTRaw)
+	}
+
+	// Analysis and observations
+	if result.ServerRTTSmoothed > 0 {
+		result.Observations = append(result.Observations,
+			fmt.Sprintf("Server: Smoothed=%dµs, Raw=%dµs, Var=%dµs",
+				result.ServerRTTSmoothed, result.ServerRTTRaw, result.ServerRTTVar))
+
+		// Check for significant deviation between smoothed and raw
+		if result.ServerRTTRaw > 0 {
+			deviation := float64(abs64(result.ServerSmoothingDelta)) / float64(result.ServerRTTRaw) * 100
+			if deviation > 50 {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("Server: Large smoothing deviation (%.0f%%) - smoothed=%dµs, raw=%dµs",
+						deviation, result.ServerRTTSmoothed, result.ServerRTTRaw))
+			}
+		}
+	}
+
+	if result.ClientGenRTTSmoothed > 0 {
+		result.Observations = append(result.Observations,
+			fmt.Sprintf("ClientGen: Smoothed=%dµs, Raw=%dµs, Var=%dµs",
+				result.ClientGenRTTSmoothed, result.ClientGenRTTRaw, result.ClientGenRTTVar))
+
+		// Check for significant deviation
+		if result.ClientGenRTTRaw > 0 {
+			deviation := float64(abs64(result.ClientGenSmoothingDelta)) / float64(result.ClientGenRTTRaw) * 100
+			if deviation > 50 {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("ClientGen: Large smoothing deviation (%.0f%%) - smoothed=%dµs, raw=%dµs",
+						deviation, result.ClientGenRTTSmoothed, result.ClientGenRTTRaw))
+			}
+		}
+	}
+
+	// Pass if we have valid RTT data (warnings don't cause failure)
+	result.Passed = result.ServerRTTSmoothed > 0 || result.ClientGenRTTSmoothed > 0
+
+	return result
+}
+
+// abs64 returns the absolute value of an int64
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// PrintRTTAnalysis prints the RTT analysis result
+func PrintRTTAnalysis(result RTTAnalysisResult) {
+	if !result.Applicable {
+		return // Not applicable - don't print
+	}
+
+	fmt.Println("\nRTT Analysis (Raw vs Smoothed):")
+	if result.Passed {
+		fmt.Println("  ✓ PASSED")
+	} else {
+		fmt.Println("  ✗ FAILED")
+	}
+
+	// Server RTT
+	if result.ServerRTTSmoothed > 0 {
+		fmt.Printf("    Server RTT:         %d µs (smoothed)\n", result.ServerRTTSmoothed)
+		fmt.Printf("    Server RTT Raw:     %d µs (last sample)\n", result.ServerRTTRaw)
+		fmt.Printf("    Server RTT Var:     %d µs\n", result.ServerRTTVar)
+		if result.ServerRTTRaw > 0 {
+			fmt.Printf("    Server Delta:       %+d µs (%.1fx)\n",
+				result.ServerSmoothingDelta, result.ServerRTTRatio)
+		}
+	}
+
+	// ClientGen RTT
+	if result.ClientGenRTTSmoothed > 0 {
+		fmt.Printf("    ClientGen RTT:      %d µs (smoothed)\n", result.ClientGenRTTSmoothed)
+		fmt.Printf("    ClientGen RTT Raw:  %d µs (last sample)\n", result.ClientGenRTTRaw)
+		fmt.Printf("    ClientGen RTT Var:  %d µs\n", result.ClientGenRTTVar)
+		if result.ClientGenRTTRaw > 0 {
+			fmt.Printf("    ClientGen Delta:    %+d µs (%.1fx)\n",
+				result.ClientGenSmoothingDelta, result.ClientGenRTTRatio)
+		}
+	}
+
+	for _, o := range result.Observations {
+		fmt.Printf("    → %s\n", o)
+	}
+	for _, w := range result.Warnings {
+		fmt.Printf("    ⚠ %s\n", w)
+	}
+}
+
+// ============================================================================
+// IoUring Multi-Ring Health Analysis (Phase 5: multi_iouring_design.md)
+// ============================================================================
+
+// IoUringHealthResult holds the result of io_uring multi-ring analysis
+// This validates that multi-ring configuration is working correctly
+type IoUringHealthResult struct {
+	Passed     bool
+	Applicable bool // false if io_uring is not enabled or single-ring
+
+	// Configuration
+	ListenerRecvRingCount int
+	DialerRecvRingCount   int
+	SendRingCount         int
+
+	// Per-ring completion counts (listener receive)
+	ListenerRecvByRing []uint64 // [ring0, ring1, ...] completion success counts
+	ListenerRecvTotal  uint64   // Sum across all rings
+
+	// Per-ring completion counts (dialer receive)
+	DialerRecvByRing []uint64
+	DialerRecvTotal  uint64
+
+	// Per-ring completion counts (send)
+	SendByRing []uint64
+	SendTotal  uint64
+
+	// Distribution analysis
+	ListenerDistribution DistributionAnalysis // How evenly distributed
+	DialerDistribution   DistributionAnalysis
+	SendDistribution     DistributionAnalysis
+
+	// Error counts per ring
+	ListenerErrorsByRing []uint64
+	DialerErrorsByRing   []uint64
+	SendErrorsByRing     []uint64
+
+	// Performance comparison (if baseline available)
+	BaselineRTT       int64   // RTT with 1 ring (from baseline test)
+	CurrentRTT        int64   // RTT with N rings
+	RTTImprovement    float64 // Percentage improvement (negative = better)
+	RTTImprovementAbs int64   // Absolute improvement in µs
+
+	// Diagnostics
+	Violations   []string
+	Warnings     []string
+	Observations []string
+}
+
+// DistributionAnalysis measures how evenly work is distributed across rings
+type DistributionAnalysis struct {
+	Min            uint64  // Minimum completions on any ring
+	Max            uint64  // Maximum completions on any ring
+	Mean           float64 // Average completions per ring
+	StdDev         float64 // Standard deviation
+	CoeffVariation float64 // StdDev/Mean (lower = more even, <0.1 is good)
+	Imbalance      float64 // (Max-Min)/Mean (lower = more balanced, <0.2 is good)
+}
+
+// AnalyzeIoUringHealth analyzes io_uring multi-ring performance
+// This is only applicable when IoUringRecvRingCount > 1 or IoUringSendRingCount > 1
+func AnalyzeIoUringHealth(ts *TestMetricsTimeSeries, config *TestConfig) IoUringHealthResult {
+	result := IoUringHealthResult{
+		Passed:     true, // Default pass (non-applicable is ok)
+		Applicable: false,
+	}
+
+	if config == nil {
+		return result
+	}
+
+	// Check if multi-ring is configured
+	// Note: ComponentConfig and SRTConfig are value types, so we check IoUringRecvRingCount directly
+	listenerRings := config.Server.SRT.IoUringRecvRingCount
+	dialerRings := config.ClientGenerator.SRT.IoUringRecvRingCount
+	sendRings := config.ClientGenerator.SRT.IoUringSendRingCount
+
+	if listenerRings <= 1 && dialerRings <= 1 && sendRings <= 1 {
+		return result // Single-ring mode - skip analysis
+	}
+
+	result.Applicable = true
+	result.Passed = false // Fail-safe - must validate
+	result.ListenerRecvRingCount = listenerRings
+	result.DialerRecvRingCount = dialerRings
+	result.SendRingCount = sendRings
+
+	// Get final snapshots (last snapshot in each time series)
+	var serverFinal *MetricsSnapshot
+	var clientGenFinal *MetricsSnapshot
+
+	if len(ts.Server.Snapshots) > 0 {
+		serverFinal = ts.Server.Snapshots[len(ts.Server.Snapshots)-1]
+		if serverFinal != nil && serverFinal.Error != nil {
+			serverFinal = nil // Invalid snapshot
+		}
+	}
+	if len(ts.ClientGenerator.Snapshots) > 0 {
+		clientGenFinal = ts.ClientGenerator.Snapshots[len(ts.ClientGenerator.Snapshots)-1]
+		if clientGenFinal != nil && clientGenFinal.Error != nil {
+			clientGenFinal = nil // Invalid snapshot
+		}
+	}
+
+	// Extract listener receive completions by ring
+	if listenerRings > 1 && serverFinal != nil {
+		result.ListenerRecvByRing = extractPerRingMetrics(serverFinal,
+			"gosrt_iouring_listener_recv_completion_success_per_ring_total", listenerRings)
+		result.ListenerRecvTotal = sumUint64(result.ListenerRecvByRing)
+		result.ListenerDistribution = analyzeDistribution(result.ListenerRecvByRing)
+
+		result.ListenerErrorsByRing = extractPerRingMetrics(serverFinal,
+			"gosrt_iouring_listener_recv_completion_error_per_ring_total", listenerRings)
+	}
+
+	// Extract dialer receive completions by ring
+	if dialerRings > 1 && clientGenFinal != nil {
+		result.DialerRecvByRing = extractPerRingMetrics(clientGenFinal,
+			"gosrt_iouring_dialer_recv_completion_success_per_ring_total", dialerRings)
+		result.DialerRecvTotal = sumUint64(result.DialerRecvByRing)
+		result.DialerDistribution = analyzeDistribution(result.DialerRecvByRing)
+
+		result.DialerErrorsByRing = extractPerRingMetrics(clientGenFinal,
+			"gosrt_iouring_dialer_recv_completion_error_per_ring_total", dialerRings)
+	}
+
+	// Extract send completions by ring (from client-generator)
+	if sendRings > 1 && clientGenFinal != nil {
+		result.SendByRing = extractPerRingMetrics(clientGenFinal,
+			"gosrt_iouring_send_completion_success_per_ring_total", sendRings)
+		result.SendTotal = sumUint64(result.SendByRing)
+		result.SendDistribution = analyzeDistribution(result.SendByRing)
+
+		result.SendErrorsByRing = extractPerRingMetrics(clientGenFinal,
+			"gosrt_iouring_send_completion_error_per_ring_total", sendRings)
+	}
+
+	// Extract RTT for comparison
+	if serverFinal != nil {
+		if rtt, ok := serverFinal.Metrics["gosrt_rtt_microseconds"]; ok {
+			result.CurrentRTT = int64(rtt)
+		}
+	}
+
+	// Generate observations and check for issues
+	result.analyzeAndReport()
+
+	return result
+}
+
+// extractPerRingMetrics extracts metrics for each ring from labeled counters
+func extractPerRingMetrics(snap *MetricsSnapshot, prefix string, ringCount int) []uint64 {
+	result := make([]uint64, ringCount)
+	for i := 0; i < ringCount; i++ {
+		// Look for metric with ring="N" label
+		ringLabel := fmt.Sprintf(`ring="%d"`, i)
+		for name, value := range snap.Metrics {
+			if strings.HasPrefix(name, prefix) && strings.Contains(name, ringLabel) {
+				result[i] = uint64(value)
+				break
+			}
+		}
+	}
+	return result
+}
+
+// analyzeDistribution computes distribution statistics
+func analyzeDistribution(values []uint64) DistributionAnalysis {
+	if len(values) == 0 {
+		return DistributionAnalysis{}
+	}
+
+	var sum uint64
+	min, max := values[0], values[0]
+	for _, v := range values {
+		sum += v
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
+		}
+	}
+
+	mean := float64(sum) / float64(len(values))
+
+	// Calculate standard deviation
+	var variance float64
+	for _, v := range values {
+		diff := float64(v) - mean
+		variance += diff * diff
+	}
+	variance /= float64(len(values))
+	stdDev := math.Sqrt(variance)
+
+	result := DistributionAnalysis{
+		Min:    min,
+		Max:    max,
+		Mean:   mean,
+		StdDev: stdDev,
+	}
+
+	if mean > 0 {
+		result.CoeffVariation = stdDev / mean
+		result.Imbalance = float64(max-min) / mean
+	}
+
+	return result
+}
+
+// sumUint64 sums a slice of uint64 values
+func sumUint64(values []uint64) uint64 {
+	var sum uint64
+	for _, v := range values {
+		sum += v
+	}
+	return sum
+}
+
+// analyzeAndReport generates observations, warnings, and violations
+func (r *IoUringHealthResult) analyzeAndReport() {
+	// Check listener distribution
+	if len(r.ListenerRecvByRing) > 1 {
+		r.Observations = append(r.Observations,
+			fmt.Sprintf("Listener recv rings: %d, total completions: %d",
+				r.ListenerRecvRingCount, r.ListenerRecvTotal))
+
+		for i, count := range r.ListenerRecvByRing {
+			pct := float64(0)
+			if r.ListenerRecvTotal > 0 {
+				pct = float64(count) / float64(r.ListenerRecvTotal) * 100
+			}
+			r.Observations = append(r.Observations,
+				fmt.Sprintf("  Ring %d: %d (%.1f%%)", i, count, pct))
+		}
+
+		// Check for imbalance
+		if r.ListenerDistribution.Imbalance > 0.5 {
+			r.Warnings = append(r.Warnings,
+				fmt.Sprintf("Listener ring imbalance: %.1f%% (max-min)/mean",
+					r.ListenerDistribution.Imbalance*100))
+		}
+
+		// Check for ring with zero completions (dead ring)
+		for i, count := range r.ListenerRecvByRing {
+			if count == 0 && r.ListenerRecvTotal > 0 {
+				r.Violations = append(r.Violations,
+					fmt.Sprintf("Listener ring %d received 0 completions (dead ring)", i))
+			}
+		}
+	}
+
+	// Check dialer distribution
+	if len(r.DialerRecvByRing) > 1 {
+		r.Observations = append(r.Observations,
+			fmt.Sprintf("Dialer recv rings: %d, total completions: %d",
+				r.DialerRecvRingCount, r.DialerRecvTotal))
+
+		// Check for imbalance
+		if r.DialerDistribution.Imbalance > 0.5 {
+			r.Warnings = append(r.Warnings,
+				fmt.Sprintf("Dialer ring imbalance: %.1f%% (max-min)/mean",
+					r.DialerDistribution.Imbalance*100))
+		}
+	}
+
+	// Check send distribution
+	if len(r.SendByRing) > 1 {
+		r.Observations = append(r.Observations,
+			fmt.Sprintf("Send rings: %d, total completions: %d",
+				r.SendRingCount, r.SendTotal))
+	}
+
+	// Check for errors on any ring
+	for i, errors := range r.ListenerErrorsByRing {
+		if errors > 0 {
+			r.Warnings = append(r.Warnings,
+				fmt.Sprintf("Listener ring %d had %d completion errors", i, errors))
+		}
+	}
+
+	// RTT observation
+	if r.CurrentRTT > 0 {
+		r.Observations = append(r.Observations,
+			fmt.Sprintf("Current RTT: %dµs", r.CurrentRTT))
+	}
+
+	// Pass if no violations
+	r.Passed = len(r.Violations) == 0
+}
+
+// CompareToBaseline compares current multi-ring RTT to a baseline single-ring RTT
+func (r *IoUringHealthResult) CompareToBaseline(baselineRTT int64) {
+	r.BaselineRTT = baselineRTT
+	if baselineRTT > 0 && r.CurrentRTT > 0 {
+		r.RTTImprovementAbs = baselineRTT - r.CurrentRTT
+		r.RTTImprovement = float64(r.RTTImprovementAbs) / float64(baselineRTT) * 100
+		r.Observations = append(r.Observations,
+			fmt.Sprintf("RTT improvement vs baseline: %+dµs (%.1f%%)",
+				r.RTTImprovementAbs, r.RTTImprovement))
+	}
+}
+
+// PrintIoUringHealth prints the io_uring health analysis result
+func PrintIoUringHealth(result IoUringHealthResult) {
+	if !result.Applicable {
+		return // Not applicable - don't print
+	}
+
+	fmt.Println("\nio_uring Multi-Ring Health:")
+	if result.Passed {
+		fmt.Println("  ✓ PASSED")
+	} else {
+		fmt.Println("  ✗ FAILED")
+	}
+
+	fmt.Printf("    Configuration: listener=%d recv, dialer=%d recv, send=%d rings\n",
+		result.ListenerRecvRingCount, result.DialerRecvRingCount, result.SendRingCount)
+
+	for _, o := range result.Observations {
+		fmt.Printf("    → %s\n", o)
+	}
+	for _, w := range result.Warnings {
+		fmt.Printf("    ⚠ %s\n", w)
+	}
+	for _, v := range result.Violations {
+		fmt.Printf("    ✗ %s\n", v)
 	}
 }

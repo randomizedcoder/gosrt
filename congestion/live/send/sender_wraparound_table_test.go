@@ -428,8 +428,11 @@ func TestSender_Wraparound_Delivery(t *testing.T) {
 				s.packetBtree.Insert(pkt)
 			}
 
-			// Run delivery
-			delivered, _ := s.deliverReadyPacketsEventLoop(tc.NowUs)
+			// Run delivery (with EventLoop context)
+			var delivered int
+			runInEventLoopContext(s, func() {
+				delivered, _ = s.deliverReadyPacketsEventLoop(tc.NowUs)
+			})
 
 			require.Equal(t, tc.ExpectedDelivered, delivered,
 				"delivered count mismatch")

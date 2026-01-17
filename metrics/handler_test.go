@@ -685,11 +685,12 @@ func TestPrometheusEventLoopMetrics(t *testing.T) {
 
 	// Set EventLoop metrics
 	m.EventLoopIterations.Store(100000)
-	m.EventLoopFullACKFires.Store(100)  // 100 Full ACK fires in 1 second
-	m.EventLoopNAKFires.Store(50)       // 50 NAK fires in 1 second
-	m.EventLoopRateFires.Store(10)      // 10 rate fires in 10 seconds
-	m.EventLoopDefaultRuns.Store(99800) // Most iterations are default
-	m.EventLoopIdleBackoffs.Store(500)  // 500 idle backoffs
+	m.EventLoopFullACKFires.Store(100)       // 100 Full ACK fires in 1 second
+	m.EventLoopNAKFires.Store(50)            // 50 NAK fires in 1 second
+	m.EventLoopRateFires.Store(10)           // 10 rate fires in 10 seconds
+	m.EventLoopDefaultRuns.Store(99800)      // Most iterations are default
+	m.EventLoopIdleBackoffs.Store(500)       // 500 idle backoffs
+	m.EventLoopControlProcessed.Store(3000)  // 3000 control packets (ACKACK, KEEPALIVE) processed inline
 
 	output := getPrometheusOutput(t)
 
@@ -712,6 +713,9 @@ func TestPrometheusEventLoopMetrics(t *testing.T) {
 	require.Contains(t, output,
 		`gosrt_eventloop_idle_backoffs_total{socket_id="0xe0e01234",instance="default"} 500`,
 		"EventLoop idle backoffs should be exported")
+	require.Contains(t, output,
+		`gosrt_eventloop_control_processed_total{socket_id="0xe0e01234",instance="default"} 3000`,
+		"EventLoop control processed should be exported")
 }
 
 // TestPrometheusAckBtreeMetrics verifies ACK btree metrics are correctly exported
@@ -804,104 +808,105 @@ func TestPrometheusSuppressionMetrics(t *testing.T) {
 }
 
 // TestPrometheusIoUringSubmissionMetrics verifies io_uring submission metrics are correctly exported
-// Phase 5: WaitCQETimeout Implementation - validates submission path metrics
+// Phase 5 Refactoring: Now uses unified per-ring metrics (even for single-ring mode)
+// See multi_iouring_design.md Section 5.12 for design details
 func TestPrometheusIoUringSubmissionMetrics(t *testing.T) {
 	socketId := uint32(0xABCD1234)
 	m := newTestConnectionMetrics()
+
+	// Initialize per-ring metrics (unified approach - always create array)
+	m.IoUringSendRingMetrics = NewIoUringRingMetrics(1)
+	m.IoUringSendRingCount = 1
+	m.IoUringDialerRecvRingMetrics = NewIoUringRingMetrics(1)
+	m.IoUringDialerRecvRingCount = 1
+
 	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
-	// Set submission metrics - success counters
-	m.IoUringSendSubmitSuccess.Store(5000)
-	m.IoUringListenerRecvSubmitSuccess.Store(10000)
-	m.IoUringDialerRecvSubmitSuccess.Store(5000)
+	// Set submission metrics on per-ring counters
+	m.IoUringSendRingMetrics[0].SubmitSuccess.Store(5000)
+	m.IoUringDialerRecvRingMetrics[0].SubmitSuccess.Store(5000)
 
 	// Set retry counters (occasional retries OK)
-	m.IoUringSendGetSQERetries.Store(3)
-	m.IoUringSendSubmitRetries.Store(1)
+	m.IoUringSendRingMetrics[0].GetSQERetries.Store(3)
+	m.IoUringSendRingMetrics[0].SubmitRetries.Store(1)
 
 	output := getPrometheusOutput(t)
 
-	// Verify submission success metrics are present
+	// Verify submission success metrics are present (now with ring label)
 	require.Contains(t, output,
-		`gosrt_iouring_send_submit_success_total{socket_id="0xabcd1234",instance="default"} 5000`,
-		"Send submit success should be exported")
+		`gosrt_iouring_send_submit_success_total{socket_id="0xabcd1234",instance="default",ring="0"} 5000`,
+		"Send submit success should be exported with ring label")
 	require.Contains(t, output,
-		`gosrt_iouring_listener_recv_submit_success_total{socket_id="0xabcd1234",instance="default"} 10000`,
-		"Listener recv submit success should be exported")
-	require.Contains(t, output,
-		`gosrt_iouring_dialer_recv_submit_success_total{socket_id="0xabcd1234",instance="default"} 5000`,
-		"Dialer recv submit success should be exported")
+		`gosrt_iouring_dialer_recv_submit_success_total{socket_id="0xabcd1234",instance="default",ring="0"} 5000`,
+		"Dialer recv submit success should be exported with ring label")
 
-	// Verify retry metrics are present
+	// Verify retry metrics are present (now with ring label)
 	require.Contains(t, output,
-		`gosrt_iouring_send_getsqe_retries_total{socket_id="0xabcd1234",instance="default"} 3`,
-		"GetSQE retries should be exported")
+		`gosrt_iouring_send_getsqe_retries_total{socket_id="0xabcd1234",instance="default",ring="0"} 3`,
+		"GetSQE retries should be exported with ring label")
 	require.Contains(t, output,
-		`gosrt_iouring_send_submit_retries_total{socket_id="0xabcd1234",instance="default"} 1`,
-		"Submit retries should be exported")
+		`gosrt_iouring_send_submit_retries_total{socket_id="0xabcd1234",instance="default",ring="0"} 1`,
+		"Submit retries should be exported with ring label")
 
-	// Error metrics should NOT appear (value is 0, writeCounterIfNonZero)
-	require.NotContains(t, output, "gosrt_iouring_send_submit_ring_full_total",
-		"Ring full should not appear when zero")
-	require.NotContains(t, output, "gosrt_iouring_send_submit_error_total",
-		"Submit error should not appear when zero")
+	// Verify ring count gauges are present
+	require.Contains(t, output, `gosrt_iouring_send_ring_count{socket_id="0xabcd1234",instance="default"} 1`,
+		"Send ring count gauge should be exported")
+	require.Contains(t, output, `gosrt_iouring_dialer_recv_ring_count{socket_id="0xabcd1234",instance="default"} 1`,
+		"Dialer recv ring count gauge should be exported")
 }
 
 // TestPrometheusIoUringCompletionMetrics verifies io_uring completion metrics are correctly exported
-// Phase 5: WaitCQETimeout Implementation - validates completion handler path metrics
+// Phase 5 Refactoring: Now uses unified per-ring metrics (even for single-ring mode)
+// See multi_iouring_design.md Section 5.12 for design details
 func TestPrometheusIoUringCompletionMetrics(t *testing.T) {
 	socketId := uint32(0xEFEF5678)
 	m := newTestConnectionMetrics()
+
+	// Initialize per-ring metrics (unified approach - always create array)
+	m.IoUringSendRingMetrics = NewIoUringRingMetrics(1)
+	m.IoUringSendRingCount = 1
+	m.IoUringDialerRecvRingMetrics = NewIoUringRingMetrics(1)
+	m.IoUringDialerRecvRingCount = 1
+
 	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
-	// Set completion metrics - success and healthy timeout
-	m.IoUringSendCompletionSuccess.Store(5000)
-	m.IoUringSendCompletionTimeout.Store(3000)   // Expected - healthy
-	m.IoUringSendCompletionEBADF.Store(1)        // Once at shutdown
-	m.IoUringSendCompletionCtxCancelled.Store(1) // Once at shutdown
-	m.IoUringListenerRecvCompletionSuccess.Store(10000)
-	m.IoUringListenerRecvCompletionTimeout.Store(3000)
-	m.IoUringListenerRecvCompletionEBADF.Store(1)
-	m.IoUringDialerRecvCompletionSuccess.Store(5000)
-	m.IoUringDialerRecvCompletionTimeout.Store(1500)
-	m.IoUringDialerRecvCompletionEBADF.Store(1)
+	// Set completion metrics - success and healthy timeout (on per-ring counters)
+	m.IoUringSendRingMetrics[0].CompletionSuccess.Store(5000)
+	m.IoUringSendRingMetrics[0].CompletionTimeout.Store(3000)   // Expected - healthy
+	m.IoUringSendRingMetrics[0].CompletionEBADF.Store(1)        // Once at shutdown
+	m.IoUringSendRingMetrics[0].CompletionCtxCancelled.Store(1) // Once at shutdown
+	m.IoUringDialerRecvRingMetrics[0].CompletionSuccess.Store(5000)
+	m.IoUringDialerRecvRingMetrics[0].CompletionTimeout.Store(1500)
+	m.IoUringDialerRecvRingMetrics[0].CompletionEBADF.Store(1)
 
 	output := getPrometheusOutput(t)
 
-	// Verify completion success metrics are present
+	// Verify completion success metrics are present (now with ring label)
 	require.Contains(t, output,
-		`gosrt_iouring_send_completion_success_total{socket_id="0xefef5678",instance="default"} 5000`,
-		"Send completion success should be exported")
+		`gosrt_iouring_send_completion_success_total{socket_id="0xefef5678",instance="default",ring="0"} 5000`,
+		"Send completion success should be exported with ring label")
 	require.Contains(t, output,
-		`gosrt_iouring_listener_recv_completion_success_total{socket_id="0xefef5678",instance="default"} 10000`,
-		"Listener recv completion success should be exported")
-	require.Contains(t, output,
-		`gosrt_iouring_dialer_recv_completion_success_total{socket_id="0xefef5678",instance="default"} 5000`,
-		"Dialer recv completion success should be exported")
+		`gosrt_iouring_dialer_recv_completion_success_total{socket_id="0xefef5678",instance="default",ring="0"} 5000`,
+		"Dialer recv completion success should be exported with ring label")
 
-	// Verify timeout metrics (healthy behavior)
+	// Verify timeout metrics (healthy behavior, now with ring label)
 	require.Contains(t, output,
-		`gosrt_iouring_send_completion_timeout_total{socket_id="0xefef5678",instance="default"} 3000`,
-		"Send completion timeout should be exported")
-	require.Contains(t, output,
-		`gosrt_iouring_listener_recv_completion_timeout_total{socket_id="0xefef5678",instance="default"} 3000`,
-		"Listener recv completion timeout should be exported")
+		`gosrt_iouring_send_completion_timeout_total{socket_id="0xefef5678",instance="default",ring="0"} 3000`,
+		"Send completion timeout should be exported with ring label")
 
-	// Verify shutdown metrics
+	// Verify shutdown metrics (now with ring label)
 	require.Contains(t, output,
-		`gosrt_iouring_send_completion_ebadf_total{socket_id="0xefef5678",instance="default"} 1`,
-		"Send completion EBADF should be exported")
+		`gosrt_iouring_send_completion_ebadf_total{socket_id="0xefef5678",instance="default",ring="0"} 1`,
+		"Send completion EBADF should be exported with ring label")
 	require.Contains(t, output,
-		`gosrt_iouring_send_completion_ctx_cancelled_total{socket_id="0xefef5678",instance="default"} 1`,
-		"Send completion ctx cancelled should be exported")
+		`gosrt_iouring_send_completion_ctx_cancelled_total{socket_id="0xefef5678",instance="default",ring="0"} 1`,
+		"Send completion ctx cancelled should be exported with ring label")
 
-	// Error metrics should NOT appear (value is 0)
-	require.NotContains(t, output, "gosrt_iouring_send_completion_error_total",
-		"Completion error should not appear when zero")
-	require.NotContains(t, output, "gosrt_iouring_send_completion_eintr_total",
-		"Completion EINTR should not appear when zero")
+	// Verify ring count gauges are present
+	require.Contains(t, output, `gosrt_iouring_send_ring_count{socket_id="0xefef5678",instance="default"} 1`,
+		"Send ring count gauge should be exported")
 }
 
 // TestPrometheusTSBPDAdvancementMetrics verifies TSBPD advancement metrics are correctly exported
@@ -1020,6 +1025,62 @@ func TestPrometheusOutputSize(t *testing.T) {
 			UnregisterConnection(uint32(0x50000000+i), CloseReasonGraceful)
 		}
 	}
+}
+
+// TestPrometheusRecvControlRingMetrics verifies receiver control ring metrics are exported
+// Completely Lock-Free Receiver: validates ACKACK/KEEPALIVE ring metrics
+func TestPrometheusRecvControlRingMetrics(t *testing.T) {
+	socketId := uint32(0xAC012345)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, newTestConnectionInfo(m, ""))
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set receiver control ring metrics - simulate typical operation
+	m.RecvControlRingPushedACKACK.Store(1000)     // 1000 ACKACKs pushed
+	m.RecvControlRingPushedKEEPALIVE.Store(100)   // 100 KEEPALIVEs pushed
+	m.RecvControlRingDroppedACKACK.Store(2)       // 2 ACKACKs dropped (ring full fallback)
+	m.RecvControlRingDroppedKEEPALIVE.Store(0)    // 0 KEEPALIVEs dropped
+	m.RecvControlRingDrained.Store(5000)          // 5000 drain operations
+	m.RecvControlRingProcessed.Store(1098)        // 1098 total processed
+	m.RecvControlRingProcessedACKACK.Store(998)   // 998 ACKACKs processed
+	m.RecvControlRingProcessedKEEPALIVE.Store(100) // 100 KEEPALIVEs processed
+
+	output := getPrometheusOutput(t)
+
+	// Verify push metrics
+	require.Contains(t, output,
+		`gosrt_recv_control_ring_pushed_ackack_total{socket_id="0xac012345",instance="default"} 1000`,
+		"RecvControlRingPushedACKACK should be exported")
+	require.Contains(t, output,
+		`gosrt_recv_control_ring_pushed_keepalive_total{socket_id="0xac012345",instance="default"} 100`,
+		"RecvControlRingPushedKEEPALIVE should be exported")
+
+	// Verify drop metrics (fallback path)
+	require.Contains(t, output,
+		`gosrt_recv_control_ring_dropped_ackack_total{socket_id="0xac012345",instance="default"} 2`,
+		"RecvControlRingDroppedACKACK should be exported")
+	// Note: KEEPALIVEs dropped = 0, should not appear due to zero filtering
+
+	// Verify drain/processed metrics
+	require.Contains(t, output,
+		`gosrt_recv_control_ring_drained_total{socket_id="0xac012345",instance="default"} 5000`,
+		"RecvControlRingDrained should be exported")
+	require.Contains(t, output,
+		`gosrt_recv_control_ring_processed_total{socket_id="0xac012345",instance="default"} 1098`,
+		"RecvControlRingProcessed should be exported")
+	require.Contains(t, output,
+		`gosrt_recv_control_ring_processed_ackack_total{socket_id="0xac012345",instance="default"} 998`,
+		"RecvControlRingProcessedACKACK should be exported")
+	require.Contains(t, output,
+		`gosrt_recv_control_ring_processed_keepalive_total{socket_id="0xac012345",instance="default"} 100`,
+		"RecvControlRingProcessedKEEPALIVE should be exported")
+
+	// Verify invariant: pushed == processed + dropped
+	pushedACKACK := m.RecvControlRingPushedACKACK.Load()
+	processedACKACK := m.RecvControlRingProcessedACKACK.Load()
+	droppedACKACK := m.RecvControlRingDroppedACKACK.Load()
+	require.Equal(t, pushedACKACK, processedACKACK+droppedACKACK,
+		"Invariant: pushed ACKACK should equal processed + dropped")
 }
 
 // TestPrometheusSenderTickBaselineMetrics verifies sender Tick baseline metrics are exported
@@ -1225,4 +1286,171 @@ func BenchmarkPrometheusHandlerParallel(b *testing.B) {
 			handler.ServeHTTP(rec, req)
 		}
 	})
+}
+
+// TestPrometheusSenderLockfreeMetrics tests the sender lockfree metrics exports
+// Reference: sender_lockfree_implementation_plan.md Phase 7
+func TestPrometheusSenderLockfreeMetrics(t *testing.T) {
+	socketId := uint32(0xDEADBEEF)
+	m := newTestConnectionMetrics()
+	RegisterConnection(socketId, newTestConnectionInfo(m, "test-sender"))
+	defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+	// Set TransmitCount metrics (Phase 3)
+	m.SendFirstTransmit.Store(1000)
+	m.SendAlreadySent.Store(50)
+
+	// Set sequence number metrics (Phase 2)
+	m.SendSeqAssigned.Store(5000)
+	m.SendSeqWraparound.Store(2)
+
+	// Get Prometheus output
+	output := getPrometheusOutput(t)
+
+	// Verify TransmitCount metrics
+	require.Contains(t, output, "gosrt_send_first_transmit_total",
+		"Should export first transmit metric")
+	require.Contains(t, output, "gosrt_send_already_sent_total",
+		"Should export already sent metric")
+
+	// Verify sequence metrics
+	require.Contains(t, output, "gosrt_send_seq_assigned_total",
+		"Should export sequence assigned metric")
+	require.Contains(t, output, "gosrt_send_seq_wraparound_total",
+		"Should export sequence wraparound metric")
+
+	// Verify values (check both metric name and socket ID)
+	// Note: socket ID is output in lowercase hex
+	require.Contains(t, output, `socket_id="0xdeadbeef"`,
+		"Should have correct socket ID")
+
+	// Verify non-zero values are exported
+	require.Contains(t, output, "1000",
+		"First transmit count should be 1000")
+	require.Contains(t, output, "5000",
+		"Seq assigned should be 5000")
+
+	t.Logf("Sender lockfree metrics verified successfully")
+}
+
+// TestPrometheusPerRingMetrics verifies multi-ring io_uring metrics are correctly exported
+// Phase 5 Refactoring: Now uses unified per-ring metrics for ALL ring counts (including single-ring)
+// See multi_iouring_design.md Section 5.5 for unified Prometheus format
+func TestPrometheusPerRingMetrics(t *testing.T) {
+	tests := []struct {
+		name      string
+		ringCount int
+		wantRings []string // All ring counts now have ring labels (unified approach)
+	}{
+		{"single_ring", 1, []string{`ring="0"`}},                                    // Unified: single-ring has ring label too
+		{"two_rings", 2, []string{`ring="0"`, `ring="1"`}},                          // Multi-ring
+		{"four_rings", 4, []string{`ring="0"`, `ring="1"`, `ring="2"`, `ring="3"`}}, // Multi-ring
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup connection with per-ring metrics
+			socketId := uint32(0xABABABAB)
+			m := newTestConnectionMetrics()
+
+			// Initialize per-ring metrics for send path (always create array - unified approach)
+			m.IoUringSendRingMetrics = NewIoUringRingMetrics(tt.ringCount)
+			m.IoUringSendRingCount = tt.ringCount
+
+			// Initialize per-ring metrics for dialer recv path (always create array - unified approach)
+			m.IoUringDialerRecvRingMetrics = NewIoUringRingMetrics(tt.ringCount)
+			m.IoUringDialerRecvRingCount = tt.ringCount
+
+			RegisterConnection(socketId, newTestConnectionInfo(m, "per-ring-test"))
+			defer UnregisterConnection(socketId, CloseReasonGraceful)
+
+			// Simulate traffic on each ring
+			for i, rm := range m.IoUringSendRingMetrics {
+				rm.CompletionSuccess.Add(uint64(100 * (i + 1)))
+				rm.PacketsProcessed.Add(uint64(100 * (i + 1)))
+			}
+			for i, rm := range m.IoUringDialerRecvRingMetrics {
+				rm.CompletionSuccess.Add(uint64(200 * (i + 1)))
+				rm.PacketsProcessed.Add(uint64(200 * (i + 1)))
+			}
+
+			// Get Prometheus output
+			output := getPrometheusOutput(t)
+
+			// Verify per-ring labels present for ALL ring counts (unified approach)
+			for _, ringLabel := range tt.wantRings {
+				require.Contains(t, output, ringLabel,
+					"Should contain ring label %s", ringLabel)
+			}
+
+			// Verify ring count gauges are always exported (unified approach)
+			require.Contains(t, output, "gosrt_iouring_send_ring_count",
+				"Should export send ring count gauge")
+			require.Contains(t, output, "gosrt_iouring_dialer_recv_ring_count",
+				"Should export dialer recv ring count gauge")
+
+			// Verify specific metric values for ring 0
+			require.Contains(t, output,
+				`gosrt_iouring_send_completion_success_total{socket_id="0xabababab",instance="per-ring-test",ring="0"} 100`,
+				"Ring 0 send completion success should be 100")
+			require.Contains(t, output,
+				`gosrt_iouring_dialer_recv_completion_success_total{socket_id="0xabababab",instance="per-ring-test",ring="0"} 200`,
+				"Ring 0 dialer recv completion success should be 200")
+
+			t.Logf("Per-ring metrics verified for %d rings (unified approach)", tt.ringCount)
+		})
+	}
+}
+
+// TestPrometheusListenerPerRingMetrics verifies listener-level per-ring metrics
+// Phase 5 Refactoring: Now uses unified per-ring metrics for ALL ring counts (including single-ring)
+// See multi_iouring_design.md Section 5.5 for unified Prometheus format
+func TestPrometheusListenerPerRingMetrics(t *testing.T) {
+	tests := []struct {
+		name      string
+		ringCount int
+		wantRings []string // All ring counts now have ring labels (unified approach)
+	}{
+		{"single_ring", 1, []string{`ring="0"`}},           // Unified: single-ring has ring label too
+		{"two_rings", 2, []string{`ring="0"`, `ring="1"`}}, // Multi-ring
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Get the global listener metrics
+			lm := GetListenerMetrics()
+
+			// Initialize per-ring metrics (always creates array - unified approach)
+			lm.InitListenerRecvRingMetrics(tt.ringCount)
+
+			// Simulate traffic on each ring
+			for i, rm := range lm.IoUringRecvRingMetrics {
+				rm.CompletionSuccess.Add(uint64(500 * (i + 1)))
+				rm.PacketsProcessed.Add(uint64(500 * (i + 1)))
+			}
+
+			// Get Prometheus output
+			output := getPrometheusOutput(t)
+
+			// Verify per-ring labels present for ALL ring counts (unified approach)
+			for _, ringLabel := range tt.wantRings {
+				require.Contains(t, output, ringLabel,
+					"Should contain ring label %s", ringLabel)
+			}
+
+			// Verify ring count gauge is always exported (unified approach)
+			require.Contains(t, output, "gosrt_iouring_listener_recv_ring_count",
+				"Should export listener recv ring count gauge")
+
+			// Verify specific metric value for ring 0
+			require.Contains(t, output, `gosrt_iouring_listener_recv_completion_success_total{ring="0"} 500`,
+				"Ring 0 listener recv completion success should be 500")
+
+			// Reset for next test
+			lm.IoUringRecvRingMetrics = nil
+			lm.IoUringRecvRingCount = 0
+
+			t.Logf("Listener per-ring metrics verified for %d rings (unified approach)", tt.ringCount)
+		})
+	}
 }

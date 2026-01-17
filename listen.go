@@ -154,14 +154,26 @@ type listener struct {
 	connWg     sync.WaitGroup  // Waitgroup for all connections
 
 	// io_uring receive path (Linux only)
+	// Multi-ring support: When IoUringRecvRingCount > 1, we create multiple
+	// independent io_uring rings, each with its own completion handler goroutine.
+	// This enables parallel completion processing across CPU cores.
+	// See multi_iouring_design.md Section 4.1 for design rationale.
+
+	// Legacy single-ring fields (used when IoUringRecvRingCount == 1)
 	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
-	recvRingFd      int                            // UDP socket file descriptor
+	recvRingFd      int                            // UDP socket file descriptor (shared)
 	recvCompletions map[uint64]*recvCompletionInfo // Maps request ID to completion info
 	recvCompLock    sync.Mutex                     // Protects recvCompletions map
 	recvRequestID   atomic.Uint64                  // Atomic counter for generating unique request IDs
-	recvCompCtx     context.Context                // Context for completion handler
-	recvCompCancel  context.CancelFunc             // Cancel function for completion handler
-	recvCompWg      sync.WaitGroup                 // WaitGroup for completion handler goroutine
+
+	// Multi-ring fields (used when IoUringRecvRingCount > 1)
+	// Each recvRingState owns its ring, completion map, and ID counter (no cross-ring locking)
+	recvRingStates []*recvRingState // Slice of independent ring states
+
+	// Shared by both single-ring and multi-ring modes
+	recvCompCtx    context.Context    // Context for completion handler(s)
+	recvCompCancel context.CancelFunc // Cancel function for completion handler(s)
+	recvCompWg     sync.WaitGroup     // WaitGroup for completion handler goroutine(s)
 }
 
 // Listen returns a new listener on the SRT protocol on the address with
@@ -250,7 +262,8 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 		// Error is already logged in initializeIoUringRecv()
 	} else {
 		// Check if io_uring was actually initialized (enabled and successful)
-		ioUringInitialized = (ln.recvRing != nil)
+		// Single-ring mode uses ln.recvRing, multi-ring mode uses ln.recvRingStates
+		ioUringInitialized = (ln.recvRing != nil) || (len(ln.recvRingStates) > 0)
 	}
 
 	// Start reader goroutine with listener context

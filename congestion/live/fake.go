@@ -41,7 +41,8 @@ type fakeLiveReceive struct {
 	lock sync.RWMutex
 }
 
-func NewFakeLiveReceive(recvConfig receive.Config) congestion.Receiver {
+func NewFakeLiveReceive(recvConfig receive.Config, wg *sync.WaitGroup) congestion.Receiver {
+	defer wg.Done()
 	// Phase 1: Lockless - Create metrics for rate tracking (even for fake receiver)
 	m := metrics.NewConnectionMetrics()
 
@@ -228,7 +229,8 @@ func (r *fakeLiveReceive) SetRTTProvider(rtt congestion.RTTProvider) {
 
 // EventLoop is a no-op for the fake receiver (Phase 4: Lockless Design).
 // The fake receiver doesn't use the event loop - it uses timer-driven Tick().
-func (r *fakeLiveReceive) EventLoop(ctx context.Context) {
+func (r *fakeLiveReceive) EventLoop(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
 	// No-op: fake receiver uses Tick() only
 }
 
@@ -236,4 +238,10 @@ func (r *fakeLiveReceive) EventLoop(ctx context.Context) {
 // The fake receiver always uses timer-driven Tick().
 func (r *fakeLiveReceive) UseEventLoop() bool {
 	return false
+}
+
+// SetProcessConnectionControlPackets is a no-op for the fake receiver.
+// The fake receiver doesn't process connection-level control packets.
+func (r *fakeLiveReceive) SetProcessConnectionControlPackets(fn func() int) {
+	// No-op: fake receiver doesn't use control packet callback
 }

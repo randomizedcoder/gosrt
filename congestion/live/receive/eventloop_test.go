@@ -119,10 +119,7 @@ func TestEventLoop_TimeBase_TSBPD_NoEarlyDelivery(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	r.EventLoop(ctx, &wg)
 
 	// Wait for EventLoop to process packets
 	time.Sleep(50 * time.Millisecond)
@@ -227,10 +224,7 @@ func TestEventLoop_TimeBase_ContiguousScan(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	r.EventLoop(ctx, &wg)
 
 	time.Sleep(50 * time.Millisecond)
 	cancel()
@@ -331,10 +325,7 @@ func TestEventLoop_TimeBase_GapScan(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	r.EventLoop(ctx, &wg)
 
 	time.Sleep(150 * time.Millisecond)
 	cancel()
@@ -395,9 +386,11 @@ func TestEventLoop_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Track when EventLoop exits
+	var wg sync.WaitGroup
+	wg.Add(1)
 	var exited atomic.Bool
 	go func() {
-		r.EventLoop(ctx)
+		r.EventLoop(ctx, &wg)
 		exited.Store(true)
 	}()
 
@@ -408,8 +401,9 @@ func TestEventLoop_ContextCancellation(t *testing.T) {
 	// Cancel context
 	cancel()
 
+	wg.Wait()
+
 	// EventLoop should exit within reasonable time
-	time.Sleep(50 * time.Millisecond)
 	require.True(t, exited.Load(), "EventLoop should have exited after context cancel")
 }
 
@@ -439,7 +433,11 @@ func TestEventLoop_MetricsIncrement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	r.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.EventLoop(ctx, &wg)
+
+	wg.Wait()
 
 	// Check metrics were incremented
 	iterations := testMetrics.EventLoopIterations.Load()
@@ -508,7 +506,11 @@ func TestEventLoop_Basic_PacketDelivery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	r.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.EventLoop(ctx, &wg)
+
+	wg.Wait()
 
 	// After 150ms (> 50ms TSBPD), all packets should be delivered
 	deliveredMu.Lock()
@@ -577,7 +579,11 @@ func TestEventLoop_ACK_Periodic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	r.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.EventLoop(ctx, &wg)
+
+	wg.Wait()
 
 	ackMu.Lock()
 	ackCount := len(ackSeqs)
@@ -650,7 +656,11 @@ func TestEventLoop_NAK_GapDetection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	r.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.EventLoop(ctx, &wg)
+
+	wg.Wait()
 
 	nakMu.Lock()
 	nakCount := len(nakedSeqs)
@@ -702,7 +712,11 @@ func TestEventLoop_IdleBackoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	r.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.EventLoop(ctx, &wg)
+
+	wg.Wait()
 
 	// Check idle backoff metrics
 	idleBackoffs := testMetrics.EventLoopIdleBackoffs.Load()
@@ -765,10 +779,7 @@ func TestEventLoop_Ring_BasicFlow(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	// Push packets while EventLoop is running (simulates io_uring)
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
@@ -848,10 +859,7 @@ func TestEventLoop_Ring_OutOfOrder(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	// Push packets out of order: 2, 0, 3, 1, 4
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
@@ -936,10 +944,7 @@ func TestEventLoop_Ring_HighThroughput(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	// Push 1000 packets as fast as possible
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
@@ -1024,10 +1029,7 @@ func TestEventLoop_IoUring_SimulatedReorder(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	// Simulate io_uring reordering: push packets in reverse batches
 	// Batch 1: 9,8,7,6,5 (late completions arrive first due to CQE batching)
@@ -1130,10 +1132,7 @@ func TestEventLoop_IoUring_LossRecovery(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
 
@@ -1247,10 +1246,7 @@ func TestEventLoop_IoUring_BurstLoss(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
 
@@ -1353,10 +1349,7 @@ func TestEventLoop_IoUring_TSBPD_Expiry(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
 
@@ -1465,10 +1458,7 @@ func TestEventLoop_NAK_TimeBase_Consistency(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.EventLoop(ctx)
-	}()
+	go r.EventLoop(ctx, &wg)
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
 
@@ -1649,7 +1639,9 @@ func TestEventLoop_LossRecovery_Wraparound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
 
-	go r.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.EventLoop(ctx, &wg)
 
 	// Wait for NAKs to be generated
 	time.Sleep(100 * time.Millisecond)
@@ -1672,6 +1664,8 @@ func TestEventLoop_LossRecovery_Wraparound(t *testing.T) {
 	// Wait for delivery
 	time.Sleep(600 * time.Millisecond)
 	cancel()
+
+	wg.Wait()
 
 	// Verify
 	nakMu.Lock()
@@ -1790,7 +1784,9 @@ func TestEventLoop_LossRecovery_HeavyLoss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
 
-	go r.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.EventLoop(ctx, &wg)
 
 	// Wait for NAKs
 	time.Sleep(150 * time.Millisecond)
@@ -1808,6 +1804,8 @@ func TestEventLoop_LossRecovery_HeavyLoss(t *testing.T) {
 	// Wait for delivery
 	time.Sleep(650 * time.Millisecond)
 	cancel()
+
+	wg.Wait()
 
 	nakMu.Lock()
 	nakCount := len(nakSeqs)
@@ -1934,7 +1932,9 @@ func TestEventLoop_LossRecovery_MultipleBursts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
 
-	go r.EventLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.EventLoop(ctx, &wg)
 
 	// Wait for NAKs
 	time.Sleep(100 * time.Millisecond)
@@ -1952,6 +1952,8 @@ func TestEventLoop_LossRecovery_MultipleBursts(t *testing.T) {
 	// Wait for delivery
 	time.Sleep(600 * time.Millisecond)
 	cancel()
+
+	wg.Wait()
 
 	nakMu.Lock()
 	nakCount := len(nakSeqs)

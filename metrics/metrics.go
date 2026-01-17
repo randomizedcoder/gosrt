@@ -11,6 +11,46 @@ const (
 	LockTimingSamples = 10
 )
 
+// IoUringRingMetrics holds metrics for a single io_uring ring.
+// Each ring has its own instance to avoid cache-line contention across cores.
+// See multi_iouring_design.md Section 5.2 for design rationale.
+type IoUringRingMetrics struct {
+	// Submit metrics
+	SubmitSuccess  atomic.Uint64 // Submit() succeeded
+	SubmitRingFull atomic.Uint64 // GetSQE returned nil (ring full)
+	SubmitError    atomic.Uint64 // Submit() failed
+	GetSQERetries  atomic.Uint64 // GetSQE required retry
+	SubmitRetries  atomic.Uint64 // Submit() required retry (EINTR/EAGAIN)
+
+	// Completion metrics
+	CompletionSuccess      atomic.Uint64 // WaitCQETimeout returned a completion
+	CompletionTimeout      atomic.Uint64 // ETIME: timeout expired (healthy)
+	CompletionEBADF        atomic.Uint64 // Ring closed (normal shutdown)
+	CompletionEINTR        atomic.Uint64 // Interrupted by signal
+	CompletionError        atomic.Uint64 // Other unexpected errors
+	CompletionCtxCancelled atomic.Uint64 // Context cancelled (shutdown)
+
+	// Packet processing
+	PacketsProcessed atomic.Uint64 // Packets successfully processed
+	BytesProcessed   atomic.Uint64 // Bytes processed
+}
+
+// NewIoUringRingMetrics creates metrics for the specified number of rings.
+// Returns nil if ringCount <= 1 (use existing single-ring metrics for backward compatibility).
+// NewIoUringRingMetrics creates metrics for the specified number of rings.
+// ALWAYS creates the array, even for ringCount=1 (unified approach).
+// This simplifies code by removing conditional "use old vs new" logic.
+func NewIoUringRingMetrics(ringCount int) []*IoUringRingMetrics {
+	if ringCount < 1 {
+		ringCount = 1 // Minimum 1 ring
+	}
+	metrics := make([]*IoUringRingMetrics, ringCount)
+	for i := 0; i < ringCount; i++ {
+		metrics[i] = &IoUringRingMetrics{}
+	}
+	return metrics
+}
+
 // ConnectionMetrics holds all metrics for a single connection
 // All counters use atomic.Uint64 for lock-free, high-performance increments
 type ConnectionMetrics struct {
@@ -276,8 +316,8 @@ type ConnectionMetrics struct {
 	NakSuppressedSeqs atomic.Uint64 // NAK entries skipped (already NAK'd recently, awaiting RTO)
 	NakAllowedSeqs    atomic.Uint64 // NAK entries that passed RTO threshold
 	RetransSuppressed atomic.Uint64 // Sender retransmissions skipped (already in flight)
-	RetransAllowed    atomic.Uint64 // Sender retransmissions that passed threshold
-	RetransFirstTime  atomic.Uint64 // First-time retransmissions (RetransmitCount was 0)
+	RetransAllowed    atomic.Uint64 // Sender retransmissions that passed RTO threshold
+	RetransFirstTime  atomic.Uint64 // NAK retransmits where TransmitCount was 0 (edge case - packet never first-sent)
 
 	// NAK btree metrics - FastNAK
 	NakFastTriggers       atomic.Uint64 // Times FastNAK triggered after silence
@@ -333,6 +373,10 @@ type ConnectionMetrics struct {
 
 	SendRingPushed       atomic.Uint64 // Packets successfully pushed to sender ring
 	SendRingDropped      atomic.Uint64 // Packets dropped due to sender ring full
+	SendSeqAssigned      atomic.Uint64 // Sequence numbers assigned (atomic 31-bit)
+	SendSeqWraparound    atomic.Uint64 // Times sequence wrapped past MAX_SEQUENCENUMBER
+	SendFirstTransmit    atomic.Uint64 // Packets sent with TransmitCount 0→1 (first send)
+	SendAlreadySent      atomic.Uint64 // Packets skipped in delivery (TransmitCount>=1)
 	SendRingDrained      atomic.Uint64 // Packets drained from sender ring to btree
 	SendBtreeInserted    atomic.Uint64 // Packets inserted into sender btree
 	SendBtreeDuplicates  atomic.Uint64 // Duplicate packets detected in sender btree
@@ -351,6 +395,20 @@ type ConnectionMetrics struct {
 	SendControlRingProcessed    atomic.Uint64 // Control packets processed by EventLoop (total)
 	SendControlRingProcessedACK atomic.Uint64 // ACKs processed by EventLoop
 	SendControlRingProcessedNAK atomic.Uint64 // NAKs processed by EventLoop
+
+	// ========================================================================
+	// Receiver Control Ring Metrics (Completely Lock-Free Receiver)
+	// ========================================================================
+	// Tracks receiver control packet (ACKACK/KEEPALIVE) ring buffer operations.
+
+	RecvControlRingPushedACKACK     atomic.Uint64 // ACKACKs successfully pushed to control ring
+	RecvControlRingPushedKEEPALIVE  atomic.Uint64 // KEEPALIVEs successfully pushed to control ring
+	RecvControlRingDroppedACKACK    atomic.Uint64 // ACKACKs dropped due to control ring full (fallback to locked path)
+	RecvControlRingDroppedKEEPALIVE atomic.Uint64 // KEEPALIVEs dropped due to control ring full (fallback to locked path)
+	RecvControlRingDrained          atomic.Uint64 // Control packets drained by EventLoop
+	RecvControlRingProcessed        atomic.Uint64 // Control packets processed by EventLoop (total)
+	RecvControlRingProcessedACKACK  atomic.Uint64 // ACKACKs processed by EventLoop
+	RecvControlRingProcessedKEEPALIVE atomic.Uint64 // KEEPALIVEs processed by EventLoop
 
 	// ========================================================================
 	// Sender EventLoop Metrics (Phase 4: Lockless Sender)
@@ -443,12 +501,18 @@ type ConnectionMetrics struct {
 	// Tracks EventLoop behavior for diagnosing ticker starvation issues.
 	// Key diagnostic: DefaultRuns / FullACKFires ratio (expected ~1000)
 
-	EventLoopIterations   atomic.Uint64 // Total loop iterations
-	EventLoopFullACKFires atomic.Uint64 // Times fullACKTicker.C case executed
-	EventLoopNAKFires     atomic.Uint64 // Times nakTicker.C case executed
-	EventLoopRateFires    atomic.Uint64 // Times rateTicker.C case executed
-	EventLoopDefaultRuns  atomic.Uint64 // Times default case executed
-	EventLoopIdleBackoffs atomic.Uint64 // Times idle backoff sleep triggered
+	EventLoopIterations      atomic.Uint64 // Total loop iterations
+	EventLoopFullACKFires    atomic.Uint64 // Times fullACKTicker.C case executed
+	EventLoopNAKFires        atomic.Uint64 // Times nakTicker.C case executed
+	EventLoopRateFires       atomic.Uint64 // Times rateTicker.C case executed
+	EventLoopDefaultRuns     atomic.Uint64 // Times default case executed
+	EventLoopIdleBackoffs    atomic.Uint64 // Times idle backoff sleep triggered
+	EventLoopControlProcessed atomic.Uint64 // Connection control packets processed (ACKACK, KEEPALIVE)
+
+	// Startup diagnostics (debug intermittent failures)
+	EventLoopEntered      atomic.Uint64 // Times EventLoop() was called
+	EventLoopExitedEarly  atomic.Uint64 // Times EventLoop returned early (useEventLoop=false)
+	EventLoopExitedNoRing atomic.Uint64 // Times EventLoop returned early (packetRing=nil)
 
 	// ========================================================================
 	// ACK Btree Metrics (Phase 4: ACK/ACKACK Redesign)
@@ -464,68 +528,28 @@ type ConnectionMetrics struct {
 	// ========================================================================
 	// Current RTT values as gauges (stored as microseconds)
 
-	RTTMicroseconds    atomic.Uint64 // Current RTT value in microseconds
-	RTTVarMicroseconds atomic.Uint64 // Current RTT variance in microseconds
+	RTTMicroseconds          atomic.Uint64 // Current RTT value in microseconds (EWMA smoothed)
+	RTTVarMicroseconds       atomic.Uint64 // Current RTT variance in microseconds (EWMA smoothed)
+	RTTLastSampleMicroseconds atomic.Uint64 // Last RTT sample in microseconds (NO smoothing, raw value)
 
 	// ========================================================================
-	// io_uring Submission Metrics (Phase 5: WaitCQETimeout Implementation)
+	// io_uring Metrics (Unified Per-Ring - Phase 5 Refactoring)
 	// ========================================================================
-	// Tracks each code path in the io_uring submission functions.
-	// Key diagnostic: Success should match packet counts
-	//                 RingFull/SubmitError should always be 0 (indicates ring sizing issue)
+	// ALWAYS uses per-ring arrays, even when ringCount=1.
+	// This replaced 33 legacy single-ring atomic counters.
+	// See multi_iouring_design.md Section 5.12 for migration details.
+	//
+	// Key diagnostic: SubmitSuccess should match packet counts
+	//                 RingFull/Error should always be 0
+	//                 CompletionTimeout indicates healthy timeout behavior
 
-	// Send submission paths (connection_linux.go:sendIoUring)
-	IoUringSendSubmitSuccess  atomic.Uint64 // Submit() succeeded
-	IoUringSendSubmitRingFull atomic.Uint64 // GetSQE returned nil after retries (ring full)
-	IoUringSendSubmitError    atomic.Uint64 // Submit() failed after retries
-	IoUringSendGetSQERetries  atomic.Uint64 // GetSQE required retry (transient ring full)
-	IoUringSendSubmitRetries  atomic.Uint64 // Submit() required retry (EINTR/EAGAIN)
+	// Per-ring metrics for send path (connection_linux.go)
+	IoUringSendRingMetrics []*IoUringRingMetrics
+	IoUringSendRingCount   int // Number of send rings
 
-	// Recv submission paths - Listener (listen_linux.go:submitRecvRequest)
-	IoUringListenerRecvSubmitSuccess  atomic.Uint64 // Submit() succeeded
-	IoUringListenerRecvSubmitRingFull atomic.Uint64 // GetSQE returned nil after retries
-	IoUringListenerRecvSubmitError    atomic.Uint64 // Submit() failed after retries
-	IoUringListenerRecvGetSQERetries  atomic.Uint64 // GetSQE required retry
-	IoUringListenerRecvSubmitRetries  atomic.Uint64 // Submit() required retry
-
-	// Recv submission paths - Dialer (dial_linux.go:submitRecvRequest)
-	IoUringDialerRecvSubmitSuccess  atomic.Uint64 // Submit() succeeded
-	IoUringDialerRecvSubmitRingFull atomic.Uint64 // GetSQE returned nil after retries
-	IoUringDialerRecvSubmitError    atomic.Uint64 // Submit() failed after retries
-	IoUringDialerRecvGetSQERetries  atomic.Uint64 // GetSQE required retry
-	IoUringDialerRecvSubmitRetries  atomic.Uint64 // Submit() required retry
-
-	// ========================================================================
-	// io_uring Completion Handler Metrics (Phase 5: WaitCQETimeout Implementation)
-	// ========================================================================
-	// Tracks each code path in the io_uring completion handlers.
-	// Key diagnostic: Success should match packet counts
-	//                 Timeout indicates healthy timeout behavior
-	//                 Error should always be 0
-
-	// Send completion handler paths (connection_linux.go:sendCompletionHandler)
-	IoUringSendCompletionSuccess      atomic.Uint64 // WaitCQETimeout returned a completion
-	IoUringSendCompletionTimeout      atomic.Uint64 // ETIME: timeout expired (healthy)
-	IoUringSendCompletionEBADF        atomic.Uint64 // Ring closed (normal shutdown)
-	IoUringSendCompletionEINTR        atomic.Uint64 // Interrupted by signal
-	IoUringSendCompletionError        atomic.Uint64 // Other unexpected errors
-	IoUringSendCompletionCtxCancelled atomic.Uint64 // Context cancelled (shutdown)
-
-	// Recv completion handler paths - Listener (listen_linux.go:getRecvCompletion)
-	IoUringListenerRecvCompletionSuccess      atomic.Uint64 // WaitCQETimeout returned a completion
-	IoUringListenerRecvCompletionTimeout      atomic.Uint64 // ETIME: timeout expired (healthy)
-	IoUringListenerRecvCompletionEBADF        atomic.Uint64 // Ring closed (normal shutdown)
-	IoUringListenerRecvCompletionEINTR        atomic.Uint64 // Interrupted by signal
-	IoUringListenerRecvCompletionError        atomic.Uint64 // Other unexpected errors
-	IoUringListenerRecvCompletionCtxCancelled atomic.Uint64 // Context cancelled (shutdown)
-
-	// Recv completion handler paths - Dialer (dial_linux.go:getRecvCompletion)
-	IoUringDialerRecvCompletionSuccess      atomic.Uint64 // WaitCQETimeout returned a completion
-	IoUringDialerRecvCompletionTimeout      atomic.Uint64 // ETIME: timeout expired (healthy)
-	IoUringDialerRecvCompletionEBADF        atomic.Uint64 // Ring closed (normal shutdown)
-	IoUringDialerRecvCompletionEINTR        atomic.Uint64 // Interrupted by signal
-	IoUringDialerRecvCompletionError        atomic.Uint64 // Other unexpected errors
-	IoUringDialerRecvCompletionCtxCancelled atomic.Uint64 // Context cancelled (shutdown)
+	// Per-ring metrics for dialer recv path (dial_linux.go)
+	IoUringDialerRecvRingMetrics []*IoUringRingMetrics
+	IoUringDialerRecvRingCount   int // Number of dialer recv rings
 }
 
 // ============================================================================

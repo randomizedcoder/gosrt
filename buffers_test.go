@@ -15,7 +15,7 @@ func TestGetBuffer(t *testing.T) {
 	buf := GetBuffer()
 	require.NotNil(t, buf)
 	require.NotNil(t, *buf)
-	require.Equal(t, DefaultRecvBufferSize, len(*buf))
+	require.Equal(t, MaxPayloadBufferSize, len(*buf))
 
 	// Return to pool
 	PutBuffer(buf)
@@ -27,7 +27,7 @@ func TestGetBuffer_Multiple(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		bufs[i] = GetBuffer()
 		require.NotNil(t, bufs[i])
-		require.Equal(t, DefaultRecvBufferSize, len(*bufs[i]))
+		require.Equal(t, MaxPayloadBufferSize, len(*bufs[i]))
 	}
 
 	// Return all to pool
@@ -48,36 +48,8 @@ func TestGetRecvBufferPool(t *testing.T) {
 	// Get and put via pool directly
 	buf := pool.Get().(*[]byte)
 	require.NotNil(t, buf)
-	require.Equal(t, DefaultRecvBufferSize, len(*buf))
+	require.Equal(t, MaxPayloadBufferSize, len(*buf))
 	pool.Put(buf)
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Payload Size Validation Tests
-// ═══════════════════════════════════════════════════════════════════════════════
-
-func TestValidatePayloadSize(t *testing.T) {
-	tests := []struct {
-		name     string
-		size     int
-		expected bool
-	}{
-		{"zero", 0, true},
-		{"small", 100, true},
-		{"typical_mpeg_ts", 1316, true},    // MaxPayloadSize
-		{"max_payload", MaxPayloadSize, true},
-		{"one_over", MaxPayloadSize + 1, false},
-		{"mtu_size", DefaultRecvBufferSize, false}, // Payload can't be full MTU
-		{"negative", -1, false},
-		{"large", 10000, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := ValidatePayloadSize(tt.size)
-			require.Equal(t, tt.expected, result, "size=%d", tt.size)
-		})
-	}
 }
 
 func TestValidateBufferSize(t *testing.T) {
@@ -89,9 +61,9 @@ func TestValidateBufferSize(t *testing.T) {
 		{"zero", 0, true},
 		{"small", 100, true},
 		{"typical_mpeg_ts", 1316, true},
-		{"max_payload", MaxPayloadSize, true},
-		{"mtu_size", DefaultRecvBufferSize, true}, // Buffer can be full MTU
-		{"one_over", DefaultRecvBufferSize + 1, false},
+		{"max_payload", MaxPayloadBufferSize, true},
+		{"mtu_size", MaxPayloadBufferSize, true}, // Buffer can be full MTU
+		{"one_over", MaxPayloadBufferSize + 1, false},
 		{"negative", -1, false},
 		{"large", 10000, false},
 	}
@@ -110,9 +82,7 @@ func TestValidateBufferSize(t *testing.T) {
 
 func TestConstants(t *testing.T) {
 	// Verify constants are sensible
-	require.Equal(t, 1500, DefaultRecvBufferSize, "MTU should be 1500")
-	require.Equal(t, 1316, MaxPayloadSize, "Max payload should be 1316 (7 MPEG-TS packets)")
-	require.Less(t, MaxPayloadSize, DefaultRecvBufferSize, "Payload must be smaller than buffer")
+	require.Equal(t, 1500, MaxPayloadBufferSize, "MTU should be 1500")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -139,10 +109,3 @@ func BenchmarkGetBuffer_NoReturn(b *testing.B) {
 		PutBuffer(buf)
 	}
 }
-
-func BenchmarkValidatePayloadSize(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		_ = ValidatePayloadSize(1316)
-	}
-}
-

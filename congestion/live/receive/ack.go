@@ -12,6 +12,8 @@ import (
 )
 
 func (r *receiver) periodicACKLocked(now uint64) (ok bool, seq circular.Number, lite bool) {
+	r.AssertTickContext() // Verify we're in Tick (locked) mode
+
 	r.lock.RLock()
 
 	// Early return check: Should we send ACK at all?
@@ -129,6 +131,8 @@ func (r *receiver) periodicACKLocked(now uint64) (ok bool, seq circular.Number, 
 //
 // Phase 10: Full implementation with timing and range consolidation.
 func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Number, lite bool) {
+	r.AssertEventLoopContext() // Verify we're in EventLoop (lock-free) mode
+
 	// Phase 1: Read-only work with read lock (allows concurrent Push() operations)
 	r.lock.RLock()
 

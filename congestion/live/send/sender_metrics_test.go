@@ -185,29 +185,34 @@ func TestMetrics_Table(t *testing.T) {
 				require.Equal(t, tc.ExpectedRingPushed, m.SendRingPushed.Load(),
 					"ring pushed mismatch")
 
-			case "drain":
-				// First push to ring
-				for i := 0; i < tc.PacketCount; i++ {
-					pkt := createTestPacketWithTsbpd(0, tc.PacketTsbpd)
-					s.pushRing(pkt)
-				}
-				// Then drain
+		case "drain":
+			// First push to ring
+			for i := 0; i < tc.PacketCount; i++ {
+				pkt := createTestPacketWithTsbpd(0, tc.PacketTsbpd)
+				s.pushRing(pkt)
+			}
+			// Then drain (with EventLoop context)
+			runInEventLoopContext(s, func() {
 				s.drainRingToBtreeEventLoop()
-				require.Equal(t, tc.ExpectedRingDrained, m.SendRingDrained.Load(),
-					"ring drained mismatch")
-				require.Equal(t, tc.ExpectedBtreeInserted, m.SendBtreeInserted.Load(),
-					"btree inserted mismatch")
+			})
+			require.Equal(t, tc.ExpectedRingDrained, m.SendRingDrained.Load(),
+				"ring drained mismatch")
+			require.Equal(t, tc.ExpectedBtreeInserted, m.SendBtreeInserted.Load(),
+				"btree inserted mismatch")
 
-			case "deliver":
-				// Insert directly into btree
-				for i := 0; i < tc.PacketCount; i++ {
-					seq := circular.SeqAdd(tc.ISN, uint32(i))
-					pkt := createTestPacketWithTsbpd(seq, tc.PacketTsbpd)
-					s.packetBtree.Insert(pkt)
-				}
-				delivered, _ := s.deliverReadyPacketsEventLoop(tc.NowUs)
-				require.Equal(t, int(tc.ExpectedDelivered), delivered,
-					"delivered mismatch")
+		case "deliver":
+			// Insert directly into btree
+			for i := 0; i < tc.PacketCount; i++ {
+				seq := circular.SeqAdd(tc.ISN, uint32(i))
+				pkt := createTestPacketWithTsbpd(seq, tc.PacketTsbpd)
+				s.packetBtree.Insert(pkt)
+			}
+			var delivered int
+			runInEventLoopContext(s, func() {
+				delivered, _ = s.deliverReadyPacketsEventLoop(tc.NowUs)
+			})
+			require.Equal(t, int(tc.ExpectedDelivered), delivered,
+				"delivered mismatch")
 
 			case "ack":
 				// Insert directly into btree
@@ -221,16 +226,18 @@ func TestMetrics_Table(t *testing.T) {
 				require.Equal(t, 0, s.packetBtree.Len(),
 					"btree should be empty after ACK")
 
-			case "drop":
-				// Insert directly into btree
-				for i := 0; i < tc.PacketCount; i++ {
-					seq := circular.SeqAdd(tc.ISN, uint32(i))
-					pkt := createTestPacketWithTsbpd(seq, tc.PacketTsbpd)
-					s.packetBtree.Insert(pkt)
-				}
+		case "drop":
+			// Insert directly into btree
+			for i := 0; i < tc.PacketCount; i++ {
+				seq := circular.SeqAdd(tc.ISN, uint32(i))
+				pkt := createTestPacketWithTsbpd(seq, tc.PacketTsbpd)
+				s.packetBtree.Insert(pkt)
+			}
+			runInEventLoopContext(s, func() {
 				s.dropOldPacketsEventLoop(tc.NowUs)
-				require.Equal(t, tc.ExpectedDropped, m.CongestionSendPktDrop.Load(),
-					"dropped mismatch")
+			})
+			require.Equal(t, tc.ExpectedDropped, m.CongestionSendPktDrop.Load(),
+				"dropped mismatch")
 			}
 		})
 	}
@@ -253,10 +260,12 @@ func TestMetrics_DeliveryAttempts(t *testing.T) {
 		UseSendEventLoop:       true,
 	}).(*sender)
 
-	// Run delivery 10 times
-	for i := 0; i < 10; i++ {
-		s.deliverReadyPacketsEventLoop(uint64(i * 1000))
-	}
+	// Run delivery 10 times (with EventLoop context)
+	runInEventLoopContext(s, func() {
+		for i := 0; i < 10; i++ {
+			s.deliverReadyPacketsEventLoop(uint64(i * 1000))
+		}
+	})
 
 	require.Equal(t, uint64(10), m.SendDeliveryAttempts.Load())
 }
@@ -284,8 +293,10 @@ func TestMetrics_IterStarted(t *testing.T) {
 		s.packetBtree.Insert(pkt)
 	}
 
-	// Run delivery - should start iteration
-	s.deliverReadyPacketsEventLoop(1_000_000)
+	// Run delivery - should start iteration (with EventLoop context)
+	runInEventLoopContext(s, func() {
+		s.deliverReadyPacketsEventLoop(1_000_000)
+	})
 
 	require.Equal(t, uint64(1), m.SendDeliveryIterStarted.Load(),
 		"should have started 1 iteration")
@@ -308,8 +319,10 @@ func TestMetrics_BtreeEmpty(t *testing.T) {
 		UseSendEventLoop:       true,
 	}).(*sender)
 
-	// Run delivery on empty btree
-	s.deliverReadyPacketsEventLoop(1_000_000)
+	// Run delivery on empty btree (with EventLoop context)
+	runInEventLoopContext(s, func() {
+		s.deliverReadyPacketsEventLoop(1_000_000)
+	})
 
 	require.Equal(t, uint64(1), m.SendDeliveryBtreeEmpty.Load(),
 		"should detect empty btree")
@@ -363,12 +376,14 @@ func TestMetrics_EventLoopCounters(t *testing.T) {
 		UseSendEventLoop:       true,
 	}).(*sender)
 
-	// Simulate EventLoop operations
-	s.drainRingToBtreeEventLoop()
-	require.Equal(t, uint64(1), m.SendEventLoopDrainAttempts.Load())
+	// Simulate EventLoop operations (with EventLoop context)
+	runInEventLoopContext(s, func() {
+		s.drainRingToBtreeEventLoop()
+		require.Equal(t, uint64(1), m.SendEventLoopDrainAttempts.Load())
 
-	s.drainRingToBtreeEventLoop()
-	require.Equal(t, uint64(2), m.SendEventLoopDrainAttempts.Load())
+		s.drainRingToBtreeEventLoop()
+		require.Equal(t, uint64(2), m.SendEventLoopDrainAttempts.Load())
+	})
 }
 
 // TestMetrics_ControlRing tests control ring metrics
@@ -427,8 +442,11 @@ func TestMetrics_SendRateBytes(t *testing.T) {
 	require.Equal(t, uint64(10), m.SendRingPushed.Load(),
 		"should count ring pushes")
 
-	// Drain to btree (this increments SendRateBytes)
-	drained := s.drainRingToBtreeEventLoop()
+	// Drain to btree (this increments SendRateBytes) - with EventLoop context
+	var drained int
+	runInEventLoopContext(s, func() {
+		drained = s.drainRingToBtreeEventLoop()
+	})
 	require.Equal(t, 10, drained, "should drain all packets")
 
 	// CongestionSendPktBuf should be incremented
@@ -465,7 +483,9 @@ func TestMetrics_DiagnosticMetrics(t *testing.T) {
 		s.packetBtree.Insert(pkt)
 	}
 
-	s.deliverReadyPacketsEventLoop(1_000_000)
+	runInEventLoopContext(s, func() {
+		s.deliverReadyPacketsEventLoop(1_000_000)
+	})
 
 	// Check diagnostic metrics
 	require.Greater(t, m.SendDeliveryLastNowUs.Load(), uint64(0),
@@ -497,10 +517,12 @@ func TestMetrics_NoDoubleCounting(t *testing.T) {
 		s.pushRing(pkt)
 	}
 
-	// Drain multiple times
-	s.drainRingToBtreeEventLoop()
-	s.drainRingToBtreeEventLoop()
-	s.drainRingToBtreeEventLoop()
+	// Drain multiple times (with EventLoop context)
+	runInEventLoopContext(s, func() {
+		s.drainRingToBtreeEventLoop()
+		s.drainRingToBtreeEventLoop()
+		s.drainRingToBtreeEventLoop()
+	})
 
 	// Should only insert once per packet
 	require.Equal(t, uint64(packetCount), m.SendBtreeInserted.Load(),
@@ -532,8 +554,11 @@ func TestMetrics_ConsistencyCheck(t *testing.T) {
 		s.pushRing(pkt)
 	}
 
-	s.drainRingToBtreeEventLoop()
-	delivered, _ := s.deliverReadyPacketsEventLoop(1_000_000)
+	var delivered int
+	runInEventLoopContext(s, func() {
+		s.drainRingToBtreeEventLoop()
+		delivered, _ = s.deliverReadyPacketsEventLoop(1_000_000)
+	})
 
 	// Consistency checks
 	require.Equal(t, uint64(packetCount), m.SendRingPushed.Load())

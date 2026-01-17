@@ -107,6 +107,26 @@ groups:
       - "deliverReadyPacketsWithTime"
 
   # ============================================================================
+  # RECEIVER CONTROL RING (Phase 6: Completely Lock-Free Receiver)
+  # ============================================================================
+
+  recv_control_ring:
+    description: "Receiver control ring processing (EventLoop mode)"
+    functions:
+      - "drainRecvControlRing"
+      - "recvControlRingLoop"
+      - "handleACKACK"
+      - "handleKeepAliveEventLoop"
+      - "dispatchACKACK"
+      - "dispatchKeepAlive"
+
+  recv_control_direct:
+    description: "Direct control packet handling (non-ring mode)"
+    functions:
+      - "handleACKACKLocked"
+      - "handleKeepAlive"
+
+  # ============================================================================
   # RECEIVER PUSH MODE GROUPS
   # ============================================================================
 
@@ -270,6 +290,9 @@ mutual_exclusion:
 
   # Receiver push is exclusive with tick
   - [receiver_push_direct, receiver_tick]
+
+  # Receiver control ring: Ring OR Direct (never both)
+  - [recv_control_ring, recv_control_direct]
 
   # NAK types: Single OR Range OR Btree lookup
   - [nak_single, nak_range, nak_btree]

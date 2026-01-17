@@ -3,6 +3,7 @@ package srt
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/randomizedcoder/gosrt/metrics"
@@ -261,7 +262,9 @@ func (c *srtConn) handleHSResponse(p packet.Packet) {
 	}
 }
 
-func (c *srtConn) sendHSRequests(ctx context.Context) {
+func (c *srtConn) sendHSRequests(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 

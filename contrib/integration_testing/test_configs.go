@@ -3381,6 +3381,443 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		StatsPeriod:    2 * time.Second, // Frequent stats to catch failures early
 		VerboseMetrics: true,
 	},
+
+	// ========================================================================
+	// COMPLETELY LOCK-FREE RECEIVER TESTS (Phase 6: Receiver Control Ring)
+	// ========================================================================
+	// Reference: completely_lockfree_receiver.md
+
+	// Test: Receiver control ring only at 5 Mb/s
+	{
+		Name:          "Isolation-5M-RecvControlRing",
+		Description:   "Receiver control ring (ACKACK/KEEPALIVE lock-free) at 5 Mb/s",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigRecvControlRing).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigRecvControlRing),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Completely lock-free at 5 Mb/s
+	{
+		Name:          "Isolation-5M-FullELLockFree",
+		Description:   "Completely lock-free (sender + receiver control rings) at 5 Mb/s",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Receiver control ring at 20 Mb/s
+	{
+		Name:          "Isolation-20M-RecvControlRing",
+		Description:   "Receiver control ring at 20 Mb/s stress test",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigRecvControlRing).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigRecvControlRing),
+		TestDuration:  30 * time.Second,
+		Bitrate:       20_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Completely lock-free at 20 Mb/s
+	{
+		Name:          "Isolation-20M-FullELLockFree",
+		Description:   "Completely lock-free at 20 Mb/s stress test",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree),
+		TestDuration:  30 * time.Second,
+		Bitrate:       20_000_000,
+		StatsPeriod:   5 * time.Second,
+	},
+
+	// Test: Completely lock-free at 50 Mb/s
+	{
+		Name:          "Isolation-50M-FullELLockFree",
+		Description:   "Completely lock-free at 50 Mb/s high-throughput test",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       50_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: Completely lock-free debug at 20 Mb/s
+	{
+		Name:           "Isolation-20M-FullELLockFree-Debug",
+		Description:    "DEBUG: 20M FullELLockFree with verbose logging",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithLogTopics("sender:eventloop,receiver,control:recv:ACKACK"),
+		TestServer:     GetSRTConfig(ConfigFullELLockFree).WithLogTopics("sender:eventloop,receiver,control:recv:ACKACK"),
+		TestDuration:   15 * time.Second,
+		Bitrate:        20_000_000,
+		StatsPeriod:    2 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// ========== Multi-Ring io_uring Tests (Phase 5: multi_iouring_design.md) ==========
+
+	// Test: 2 receive rings at 5 Mb/s
+	{
+		Name:          "Isolation-5M-MultiRing2",
+		Description:   "Multi-ring io_uring (2 recv rings) at 5 Mb/s",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: 4 receive rings at 5 Mb/s
+	{
+		Name:          "Isolation-5M-MultiRing4",
+		Description:   "Multi-ring io_uring (4 recv rings) at 5 Mb/s",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// Test: 4 receive rings + 2 send rings at 5 Mb/s
+	{
+		Name:          "Isolation-5M-MultiRing4-Send2",
+		Description:   "Multi-ring io_uring (4 recv + 2 send rings) at 5 Mb/s",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithParallelIoUring(4, 2),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4),
+		TestDuration:  30 * time.Second,
+		Bitrate:       5_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// DEBUG: Multi-ring send with verbose logging to diagnose 2-send-ring failure
+	{
+		Name:           "Isolation-5M-MultiRing4-Send2-Debug",
+		Description:    "DEBUG: Multi-ring io_uring (4 recv + 2 send) with verbose io_uring logging",
+		ControlCG:      ControlSRTConfig,
+		ControlServer:  ControlSRTConfig,
+		TestCG:         GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithParallelIoUring(4, 2).WithLogTopics("connection:io_uring,connection:send,connection:new"),
+		TestServer:     GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLogTopics("connection:io_uring,listen:recv"),
+		TestDuration:   10 * time.Second, // Shorter for debugging
+		Bitrate:        5_000_000,
+		StatsPeriod:    5 * time.Second,
+		VerboseMetrics: true,
+	},
+
+	// Test: 4 receive rings at 50 Mb/s high-throughput
+	{
+		Name:          "Isolation-50M-MultiRing4",
+		Description:   "Multi-ring io_uring (4 recv rings) at 50 Mb/s high-throughput",
+		ControlCG:     ControlSRTConfig,
+		ControlServer: ControlSRTConfig,
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       50_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ========== Multi-Ring Comparison Tests ==========
+	// These tests compare SINGLE-RING io_uring vs MULTI-RING io_uring
+	// to measure the actual benefit of multiple rings at high throughput.
+
+	// 100 Mb/s: Single-ring vs 2 recv rings
+	{
+		Name:          "Isolation-100M-Ring1-vs-Ring2",
+		Description:   "100 Mb/s: Single recv ring vs 2 recv rings (measure multi-ring benefit)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithLargeIoUringRecvRing(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithLargeIoUringRecvRing(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       100_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 100 Mb/s: Single-ring vs 4 recv rings
+	{
+		Name:          "Isolation-100M-Ring1-vs-Ring4",
+		Description:   "100 Mb/s: Single recv ring vs 4 recv rings (measure multi-ring benefit)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithLargeIoUringRecvRing(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithLargeIoUringRecvRing(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       100_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 100 Mb/s: 2 recv rings vs 4 recv rings
+	{
+		Name:          "Isolation-100M-Ring2-vs-Ring4",
+		Description:   "100 Mb/s: 2 recv rings vs 4 recv rings (diminishing returns?)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithLargeIoUringRecvRing(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithLargeIoUringRecvRing(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       100_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 200 Mb/s: Single-ring vs 2 recv rings
+	{
+		Name:          "Isolation-200M-Ring1-vs-Ring2",
+		Description:   "200 Mb/s: Single recv ring vs 2 recv rings (high throughput stress)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithLargeIoUringRecvRing(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithLargeIoUringRecvRing(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       200_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 200 Mb/s: Single-ring vs 4 recv rings
+	{
+		Name:          "Isolation-200M-Ring1-vs-Ring4",
+		Description:   "200 Mb/s: Single recv ring vs 4 recv rings (high throughput stress)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithLargeIoUringRecvRing(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithLargeIoUringRecvRing(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       200_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 200 Mb/s: 2 recv rings vs 4 recv rings
+	{
+		Name:          "Isolation-200M-Ring2-vs-Ring4",
+		Description:   "200 Mb/s: 2 recv rings vs 4 recv rings (find optimal ring count)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithLargeIoUringRecvRing(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithLargeIoUringRecvRing(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       200_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 100 Mb/s: With multi-ring SEND (1 send vs 2 send rings)
+	{
+		Name:          "Isolation-100M-Send1-vs-Send2",
+		Description:   "100 Mb/s: Single send ring vs 2 send rings (measure send parallelism)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithParallelIoUring(4, 2).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       100_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 200 Mb/s: Full multi-ring (4 recv + 2 send) vs single-ring
+	{
+		Name:          "Isolation-200M-Single-vs-Multi",
+		Description:   "200 Mb/s: Single-ring vs Full multi-ring (4 recv + 2 send) - ultimate comparison",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithLargeIoUringRecvRing(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithLargeIoUringRecvRing(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithParallelIoUring(4, 2).WithLargeIoUringRecvRing(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithLargeIoUringRecvRing(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       200_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ========== 300 Mb/s High Throughput Tests ==========
+
+	// 300 Mb/s: 2 recv rings vs 4 recv rings
+	{
+		Name:          "Isolation-300M-Ring2-vs-Ring4",
+		Description:   "300 Mb/s: 2 recv rings vs 4 recv rings (high throughput test)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       300_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ========== 400 Mb/s Very High Throughput Tests ==========
+
+	// 400 Mb/s: 2 recv rings vs 4 recv rings
+	{
+		Name:          "Isolation-400M-Ring2-vs-Ring4",
+		Description:   "400 Mb/s: 2 recv rings vs 4 recv rings (very high throughput test)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       400_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ========== 500 Mb/s Ultra-High Throughput Tests ==========
+	// These tests require larger buffers and flow control windows.
+
+	// 500 Mb/s: 2 recv rings vs 4 recv rings (does 4 rings help at extreme throughput?)
+	{
+		Name:          "Isolation-500M-Ring2-vs-Ring4",
+		Description:   "500 Mb/s: 2 recv rings vs 4 recv rings (ultra-high throughput stress test)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       500_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 500 Mb/s: 4 recv rings vs 8 recv rings (pushing parallelism limits)
+	{
+		Name:          "Isolation-500M-Ring4-vs-Ring8",
+		Description:   "500 Mb/s: 4 recv rings vs 8 recv rings (maximum parallelism test)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(8).WithUltraHighThroughput(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(8).WithUltraHighThroughput(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       500_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// ============================================================================
+	// PERFORMANCE MAXIMIZATION TESTS (500 Mb/s Target)
+	// Reference: documentation/performance_maximization_500mbps.md
+	// These tests use aggressive buffer and timer tuning to push throughput limits.
+	// ============================================================================
+
+	// ========== 400 Mb/s with Aggressive Tuning ==========
+
+	// 400 Mb/s: Standard vs Aggressive Buffers (test if buffers help)
+	{
+		Name:        "Isolation-400M-Standard-vs-AggressiveBuffers",
+		Description: "400 Mb/s: standard buffers vs aggressive 2x buffers",
+		ControlCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput().WithAggressiveBuffers(),
+		TestServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput().WithAggressiveBuffers(),
+		TestDuration: 60 * time.Second,
+		Bitrate:      400_000_000,
+		StatsPeriod:  10 * time.Second,
+	},
+
+	// 400 Mb/s: Standard vs Aggressive Timers (test if timers help)
+	{
+		Name:        "Isolation-400M-Standard-vs-AggressiveTimers",
+		Description: "400 Mb/s: standard timers vs aggressive fast timers",
+		ControlCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput().WithAggressiveTimers(),
+		TestServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput().WithAggressiveTimers(),
+		TestDuration: 60 * time.Second,
+		Bitrate:      400_000_000,
+		StatsPeriod:  10 * time.Second,
+	},
+
+	// 400 Mb/s: Full Aggressive (buffers + timers combined)
+	{
+		Name:        "Isolation-400M-Aggressive",
+		Description: "400 Mb/s: full aggressive tuning (buffers + timers)",
+		ControlCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput().
+			WithAggressiveBuffers().WithAggressiveTimers(),
+		TestServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput().
+			WithAggressiveBuffers().WithAggressiveTimers(),
+		TestDuration: 60 * time.Second,
+		Bitrate:      400_000_000,
+		StatsPeriod:  10 * time.Second,
+	},
+
+	// ========== 500 Mb/s with Aggressive and Extreme Tuning ==========
+
+	// 500 Mb/s: Aggressive Tuning (buffers + timers)
+	{
+		Name:        "Isolation-500M-Aggressive",
+		Description: "500 Mb/s: aggressive tuning (2x buffers + fast timers)",
+		ControlCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput().
+			WithAggressiveBuffers().WithAggressiveTimers(),
+		TestServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput().
+			WithAggressiveBuffers().WithAggressiveTimers(),
+		TestDuration: 60 * time.Second,
+		Bitrate:      500_000_000,
+		StatsPeriod:  10 * time.Second,
+	},
+
+	// 500 Mb/s: Extreme Tuning (4x buffers + extreme timers)
+	{
+		Name:        "Isolation-500M-Extreme",
+		Description: "500 Mb/s: extreme tuning (4x buffers + extreme timers)",
+		ControlCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).
+			WithExtremeBuffers().WithExtremeTimers(),
+		TestServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).
+			WithExtremeBuffers().WithExtremeTimers(),
+		TestDuration: 60 * time.Second,
+		Bitrate:      500_000_000,
+		StatsPeriod:  10 * time.Second,
+	},
+
+	// 500 Mb/s: Optimized preset (combines best practices)
+	{
+		Name:        "Isolation-500M-Optimized",
+		Description: "500 Mb/s: optimized preset with With500MbpsOptimized()",
+		ControlCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).
+			WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG: GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().
+			With500MbpsOptimized(),
+		TestServer: GetSRTConfig(ConfigFullELLockFree).
+			With500MbpsOptimized(),
+		TestDuration: 60 * time.Second,
+		Bitrate:      500_000_000,
+		StatsPeriod:  10 * time.Second,
+	},
 }
 
 // GetIsolationTestConfigByName finds an isolation test configuration by name

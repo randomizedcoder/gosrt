@@ -3,6 +3,7 @@
 package send
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -364,8 +365,12 @@ func TestSender_Delivery_Table(t *testing.T) {
 			require.Equal(t, uint64(tc.InitialSequenceNumber), s.deliveryStartPoint.Load(),
 				"deliveryStartPoint should be initialized to ISN")
 
-			// Run delivery
-			delivered, nextDeliveryIn := s.deliverReadyPacketsEventLoop(tc.NowUs)
+			// Run delivery (with EventLoop context)
+			var delivered int
+			var nextDeliveryIn time.Duration
+			runInEventLoopContext(s, func() {
+				delivered, nextDeliveryIn = s.deliverReadyPacketsEventLoop(tc.NowUs)
+			})
 
 			// Verify delivered count
 			require.Equal(t, tc.ExpectedDelivered, delivered,
@@ -447,8 +452,11 @@ func TestSender_Delivery_ISN_Mismatch_Bug(t *testing.T) {
 			// Set nowUs to make all packets ready
 			s.nowFn = func() uint64 { return 1_000_000 }
 
-			// Run delivery
-			delivered, _ := s.deliverReadyPacketsEventLoop(1_000_000)
+			// Run delivery (with EventLoop context)
+			var delivered int
+			runInEventLoopContext(s, func() {
+				delivered, _ = s.deliverReadyPacketsEventLoop(1_000_000)
+			})
 
 			// With the fix, all 3 packets should be delivered
 			require.Equal(t, 3, delivered,
@@ -520,8 +528,11 @@ func TestSender_Delivery_Wraparound(t *testing.T) {
 			// Set nowUs to make all packets ready
 			s.nowFn = func() uint64 { return 1_000_000 }
 
-			// Run delivery
-			delivered, _ := s.deliverReadyPacketsEventLoop(1_000_000)
+			// Run delivery (with EventLoop context)
+			var delivered int
+			runInEventLoopContext(s, func() {
+				delivered, _ = s.deliverReadyPacketsEventLoop(1_000_000)
+			})
 
 			require.Equal(t, tc.NumPackets, delivered, "all packets should be delivered")
 
@@ -541,3 +552,176 @@ func createTestPacketWithTsbpd(seq uint32, tsbpdTimeUs uint64) packet.Packet {
 	return p
 }
 
+// ============================================================================
+// TransmitCount-based delivery tests
+//
+// Tests for Phase 3: TransmitCount check in deliverReadyPacketsEventLoop
+// - TransmitCount == 0: First transmission - deliver and set to 1
+// - TransmitCount >= 1: Already sent - skip (stays for NAK retransmit)
+//
+// Reference: sender_lockfree_architecture.md Section 7.9.3
+// ============================================================================// TestDeliveryTransmitCount_Table tests the TransmitCount-based delivery logic
+func TestDeliveryTransmitCount_Table(t *testing.T) {
+	testCases := []struct {
+		Name                   string
+		InitialTransmitCount   uint32
+		ExpectDelivered        bool
+		ExpectFirstTransmit    uint64
+		ExpectAlreadySent      uint64
+		ExpectFinalTransmitCount uint32
+	}{
+		{
+			Name:                   "TransmitCount_0_delivers",
+			InitialTransmitCount:   0,
+			ExpectDelivered:        true,
+			ExpectFirstTransmit:    1,
+			ExpectAlreadySent:      0,
+			ExpectFinalTransmitCount: 1,
+		},
+		{
+			Name:                   "TransmitCount_1_skips",
+			InitialTransmitCount:   1,
+			ExpectDelivered:        false,
+			ExpectFirstTransmit:    0,
+			ExpectAlreadySent:      1,
+			ExpectFinalTransmitCount: 1, // Unchanged
+		},
+		{
+			Name:                   "TransmitCount_2_skips",
+			InitialTransmitCount:   2,
+			ExpectDelivered:        false,
+			ExpectFirstTransmit:    0,
+			ExpectAlreadySent:      1,
+			ExpectFinalTransmitCount: 2, // Unchanged
+		},
+		{
+			Name:                   "TransmitCount_high_skips",
+			InitialTransmitCount:   10,
+			ExpectDelivered:        false,
+			ExpectFirstTransmit:    0,
+			ExpectAlreadySent:      1,
+			ExpectFinalTransmitCount: 10, // Unchanged
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			m := &metrics.ConnectionMetrics{}
+			var deliveredCount atomic.Int32
+
+			s := NewSender(SendConfig{
+				InitialSequenceNumber:        circular.New(100, packet.MAX_SEQUENCENUMBER),
+				ConnectionMetrics:            m,
+				OnDeliver:                    func(p packet.Packet) { deliveredCount.Add(1) },
+				StartTime:                    time.Now(),
+				UseBtree:                     true,
+				BtreeDegree:                  32,
+				UseSendRing:                  true,
+				SendRingSize:                 1024,
+				SendRingShards:               1,
+				UseSendControlRing:           true,
+				UseSendEventLoop:             true,
+				SendEventLoopBackoffMinSleep: 100 * time.Microsecond,
+				SendEventLoopBackoffMaxSleep: 1 * time.Millisecond,
+			}).(*sender)
+
+			// Create packet with specific TransmitCount
+			pkt := createTestPacketWithTsbpd(100, 1000) // TSBPD = 1000µs
+			pkt.Header().TransmitCount = tc.InitialTransmitCount
+			s.packetBtree.Insert(pkt)
+
+			// Set delivery start point
+			s.deliveryStartPoint.Store(100)
+
+			// Deliver with nowUs > tsbpdTime (packet is ready) - with EventLoop context
+			nowUs := uint64(2000)
+			var delivered int
+			runInEventLoopContext(s, func() {
+				delivered, _ = s.deliverReadyPacketsEventLoop(nowUs)
+			})
+
+			// Check delivery
+			if tc.ExpectDelivered {
+				require.Equal(t, 1, delivered, "should deliver packet")
+				require.Equal(t, int32(1), deliveredCount.Load(), "deliver callback should be called")
+			} else {
+				require.Equal(t, 0, delivered, "should NOT deliver packet")
+				require.Equal(t, int32(0), deliveredCount.Load(), "deliver callback should NOT be called")
+			}
+
+			// Check metrics
+			require.Equal(t, tc.ExpectFirstTransmit, m.SendFirstTransmit.Load(),
+				"SendFirstTransmit metric mismatch")
+			require.Equal(t, tc.ExpectAlreadySent, m.SendAlreadySent.Load(),
+				"SendAlreadySent metric mismatch")
+
+			// Check final TransmitCount on packet
+			gotPkt := s.packetBtree.Get(100)
+			require.NotNil(t, gotPkt, "packet should still be in btree")
+			require.Equal(t, tc.ExpectFinalTransmitCount, gotPkt.Header().TransmitCount,
+				"TransmitCount should be updated correctly")
+		})
+	}
+}
+
+// TestDeliveryTransmitCount_MixedPackets tests a mix of sent and unsent packets
+func TestDeliveryTransmitCount_MixedPackets(t *testing.T) {
+	m := &metrics.ConnectionMetrics{}
+	var deliveredSeqs []uint32
+	var mu sync.Mutex
+
+	s := NewSender(SendConfig{
+		InitialSequenceNumber:        circular.New(100, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:            m,
+		OnDeliver: func(p packet.Packet) {
+			mu.Lock()
+			deliveredSeqs = append(deliveredSeqs, p.Header().PacketSequenceNumber.Val())
+			mu.Unlock()
+		},
+		StartTime:                    time.Now(),
+		UseBtree:                     true,
+		BtreeDegree:                  32,
+		UseSendRing:                  true,
+		SendRingSize:                 1024,
+		SendRingShards:               1,
+		UseSendControlRing:           true,
+		UseSendEventLoop:             true,
+		SendEventLoopBackoffMinSleep: 100 * time.Microsecond,
+		SendEventLoopBackoffMaxSleep: 1 * time.Millisecond,
+	}).(*sender)
+
+	// Insert 5 packets: alternating TransmitCount 0 and 1
+	// Seq 100: TC=0 (deliver)
+	// Seq 101: TC=1 (skip)
+	// Seq 102: TC=0 (deliver)
+	// Seq 103: TC=1 (skip)
+	// Seq 104: TC=0 (deliver)
+	for i := uint32(0); i < 5; i++ {
+		pkt := createTestPacketWithTsbpd(100+i, 1000) // All ready
+		if i%2 == 0 {
+			pkt.Header().TransmitCount = 0 // Will be delivered
+		} else {
+			pkt.Header().TransmitCount = 1 // Already sent, skip
+		}
+		s.packetBtree.Insert(pkt)
+	}
+
+	s.deliveryStartPoint.Store(100)
+
+	// Deliver (with EventLoop context)
+	var delivered int
+	runInEventLoopContext(s, func() {
+		delivered, _ = s.deliverReadyPacketsEventLoop(2000)
+	})
+
+	// Should deliver 3 packets (100, 102, 104)
+	require.Equal(t, 3, delivered)
+	require.Equal(t, uint64(3), m.SendFirstTransmit.Load())
+	require.Equal(t, uint64(2), m.SendAlreadySent.Load())
+
+	// Verify which packets were delivered
+	require.ElementsMatch(t, []uint32{100, 102, 104}, deliveredSeqs)
+
+	// All packets still in btree (for NAK retransmit)
+	require.Equal(t, 5, s.packetBtree.Len())
+}

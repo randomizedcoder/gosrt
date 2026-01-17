@@ -9,9 +9,23 @@ import (
 )
 
 // handlePacketDirect is called directly from io_uring completion handler
-// It uses a per-connection mutex to ensure sequential processing (same guarantee as channel-based approach)
-// The mutex is blocking to ensure no packets are dropped (never drop packets that successfully arrived from network)
+// In lock-free mode (UseEventLoop=true), packets are routed to lock-free rings:
+// - Data packets → packetRing → EventLoop drains
+// - Control packets → recvControlRing → EventLoop processes
+// In legacy mode, uses a per-connection mutex for sequential processing.
+// Reference: multi_iouring_design.md Phase 0
 func (c *srtConn) handlePacketDirect(p packet.Packet) {
+	// Phase 0: Check if we're in completely lock-free mode
+	// When UseEventLoop is enabled, all downstream operations are lock-free:
+	// - Data packets go to lock-free packetRing
+	// - Control packets go to lock-free recvControlRing
+	// No mutex needed - the rings provide thread-safe access
+	if c.recv != nil && c.recv.UseEventLoop() {
+		c.handlePacket(p)
+		return
+	}
+
+	// Legacy path: acquire mutex for sequential processing
 	// Block until mutex available - never drop packets
 	// Measure lock timing for debugging and performance monitoring
 	if c.metrics != nil && c.metrics.HandlePacketLockTiming != nil {
@@ -44,12 +58,16 @@ func (c *srtConn) handlePacketDirect(p packet.Packet) {
 // so no locking is required for map access.
 func (c *srtConn) initializeControlHandlers() {
 	// Main control type handlers
+	// Note: KEEPALIVE and ACKACK use dispatch functions that route to:
+	// - RecvControlRing (if enabled) for EventLoop processing
+	// - Locked handlers as fallback
+	// Reference: completely_lockfree_receiver.md Section 4.1
 	c.controlHandlers = map[packet.CtrlType]controlPacketHandler{
-		packet.CTRLTYPE_KEEPALIVE: (*srtConn).handleKeepAlive,
+		packet.CTRLTYPE_KEEPALIVE: (*srtConn).dispatchKeepAlive, // Routes to ring or locked handler
 		packet.CTRLTYPE_SHUTDOWN:  (*srtConn).handleShutdown,
 		packet.CTRLTYPE_NAK:       (*srtConn).handleNAK,
 		packet.CTRLTYPE_ACK:       (*srtConn).handleACK,
-		packet.CTRLTYPE_ACKACK:    (*srtConn).handleACKACK,
+		packet.CTRLTYPE_ACKACK:    (*srtConn).dispatchACKACK,   // Routes to ring or locked handler
 		packet.CTRLTYPE_USER:      (*srtConn).handleUserPacket, // Special handler for SubType dispatch
 	}
 
@@ -188,8 +206,90 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 	c.recv.Push(p)
 }
 
-// handleKeepAlive resets the idle timeout and sends a keepalive to the peer.
+// ═══════════════════════════════════════════════════════════════════════════
+// Control Packet Dispatch Functions (Phase 6: Completely Lock-Free Receiver)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// dispatchACKACK routes ACKACK to control ring or locked handler.
+// Simplified: just check recvControlRing != nil (no separate bool).
+//
+// Reference: completely_lockfree_receiver.md Section 4.1
+func (c *srtConn) dispatchACKACK(p packet.Packet) {
+	if c.recvControlRing != nil {
+		// Push to control ring for EventLoop processing
+		ackNum := p.Header().TypeSpecific
+		arrivalTime := time.Now()
+
+		if c.recvControlRing.PushACKACK(ackNum, arrivalTime) {
+			if c.metrics != nil {
+				c.metrics.RecvControlRingPushedACKACK.Add(1)
+			}
+			return
+		}
+
+		// Ring full - fall through to locked path
+		if c.metrics != nil {
+			c.metrics.RecvControlRingDroppedACKACK.Add(1)
+		}
+	}
+
+	// Locked path (ring disabled or full)
+	c.handleACKACKLocked(p)
+}
+
+// dispatchKeepAlive routes KEEPALIVE to control ring or locked handler.
+// Simplified: just check recvControlRing != nil (no separate bool).
+//
+// Reference: completely_lockfree_receiver.md Section 4.1
+func (c *srtConn) dispatchKeepAlive(p packet.Packet) {
+	if c.recvControlRing != nil {
+		if c.recvControlRing.PushKEEPALIVE() {
+			if c.metrics != nil {
+				c.metrics.RecvControlRingPushedKEEPALIVE.Add(1)
+			}
+			return
+		}
+
+		// Ring full - fall through to locked path
+		if c.metrics != nil {
+			c.metrics.RecvControlRingDroppedKEEPALIVE.Add(1)
+		}
+	}
+
+	// Locked path (ring disabled or full)
+	c.handleKeepAlive(p)
+}
+
+// handleKeepAliveEventLoop is the lock-free variant for EventLoop mode.
+// Called when KEEPALIVE packets arrive via RecvControlRing.
+//
+// This function is completely lock-free - it only updates atomic state.
+//
+// Reference: completely_lockfree_receiver.md Section 5.1
+func (c *srtConn) handleKeepAliveEventLoop() {
+	// TDD: This assert will fail until we properly set EventLoop context
+	// Reference: multi_iouring_design.md Phase 0.5
+	c.AssertEventLoopContext()
+
+	c.resetPeerIdleTimeout()
+
+	if c.metrics != nil {
+		c.metrics.RecvControlRingProcessedKEEPALIVE.Add(1)
+	}
+
+	c.log("control:recv:keepalive:eventloop", func() string {
+		return "keepalive processed via EventLoop"
+	})
+}
+
+// handleKeepAlive is the locking wrapper for Tick/legacy mode.
+// Called from io_uring handlers when control ring is NOT enabled.
+// Resets the idle timeout and sends a keepalive response to the peer.
 func (c *srtConn) handleKeepAlive(p packet.Packet) {
+	// TDD: This assert will fail until we properly set Tick context
+	// Reference: multi_iouring_design.md Phase 0.5
+	c.AssertTickContext()
+
 	c.log("control:recv:keepalive:dump", func() string { return p.Dump() })
 
 	// Note: Keepalive metrics are tracked via packet classifier in send/recv paths
@@ -365,48 +465,114 @@ func (c *srtConn) GetExtendedStatistics() *ExtendedStatistics {
 //
 // Cleanup: Entries in ackNumbers older than the current ACKACK are deleted
 // to prevent unbounded map growth from lost ACKACKs.
-func (c *srtConn) handleACKACK(p packet.Packet) {
-	c.log("control:recv:ACKACK:dump", func() string { return p.Dump() })
 
-	// Note: ACKACK metrics are tracked via packet classifier in recv path
-	// No need to increment here - metrics already tracked
+// handleACKACK is the lock-free variant for EventLoop mode.
+// Called when control packets arrive via RecvControlRing.
+//
+// Parameters:
+//   - ackNum: the ACK number from the ACKACK packet
+//   - arrivalTime: when the ACKACK arrived (captured at ring push time)
+//
+// This function is completely lock-free - the EventLoop is the single-threaded
+// consumer of the ackNumbers btree, so no synchronization is needed.
+//
+// Reference: completely_lockfree_receiver.md Section 5.1
+func (c *srtConn) handleACKACK(ackNum uint32, arrivalTime time.Time) {
+	// TDD: This assert will fail until we properly set EventLoop context
+	// Reference: multi_iouring_design.md Phase 0.5
+	c.AssertEventLoopContext()
 
-	ackNum := p.Header().TypeSpecific
+	// Note: NO LOCK - EventLoop is single-threaded consumer of ackNumbers btree
 
-	// ACK-5: Use btree for O(log n) lookup
-	now := time.Now()
-	c.ackLock.Lock()
 	entry := c.ackNumbers.Get(ackNum)
 	btreeLen := c.ackNumbers.Len()
+
 	if entry != nil {
-		// 4.10.  Round-Trip Time Estimation
-		rttDuration := now.Sub(entry.timestamp)
+		// 4.10. Round-Trip Time Estimation
+		rttDuration := arrivalTime.Sub(entry.timestamp)
 		c.recalculateRTT(rttDuration)
 
-		// DEBUG: Track ACKACK RTT calculation
 		c.log("control:recv:ACKACK:rtt:debug", func() string {
-			return fmt.Sprintf("ACKACK RTT: ackNum=%d, entryTimestamp=%s, now=%s, rtt=%v, btreeLen=%d",
-				ackNum, entry.timestamp.Format("15:04:05.000000"), now.Format("15:04:05.000000"),
+			return fmt.Sprintf("ACKACK RTT (EventLoop): ackNum=%d, entryTimestamp=%s, arrivalTime=%s, rtt=%v, btreeLen=%d",
+				ackNum, entry.timestamp.Format("15:04:05.000000"), arrivalTime.Format("15:04:05.000000"),
 				rttDuration, btreeLen)
 		})
 
 		c.ackNumbers.Delete(ackNum)
 		PutAckEntry(entry) // Return to pool
 	} else {
-		c.log("control:recv:ACKACK:error", func() string { return fmt.Sprintf("got unknown ACKACK (%d), btreeLen=%d", ackNum, btreeLen) })
+		c.log("control:recv:ACKACK:error", func() string {
+			return fmt.Sprintf("got unknown ACKACK (%d), btreeLen=%d", ackNum, btreeLen)
+		})
 		if c.metrics != nil {
 			c.metrics.PktRecvInvalid.Add(1)
-			c.metrics.AckBtreeUnknownACKACK.Add(1) // Phase 4: Track unknown ACKACK specifically
+			c.metrics.AckBtreeUnknownACKACK.Add(1)
 		}
 	}
 
-	// ACK-5: Use ExpireOlderThan for efficient bulk cleanup
-	// Remove all entries with ACK number < current (they're stale)
+	// Bulk cleanup of stale entries
+	expiredCount, expired := c.ackNumbers.ExpireOlderThan(ackNum)
+	btreeLenAfter := c.ackNumbers.Len()
+
+	// Update metrics
+	if c.metrics != nil {
+		c.metrics.AckBtreeEntriesExpired.Add(uint64(expiredCount))
+		c.metrics.AckBtreeSize.Store(uint64(btreeLenAfter))
+		// Note: RecvControlRingProcessedACKACK is incremented by drainRecvControlRing()
+		// after this function returns, not here (to avoid double-counting)
+	}
+
+	// Return expired entries to pool
+	PutAckEntries(expired)
+
+	c.recv.SetNAKInterval(uint64(c.rtt.NAKInterval()))
+}
+
+// handleACKACKLocked is the locking wrapper for Tick/legacy mode.
+// Called from io_uring handlers when control ring is NOT enabled.
+// Acquires c.ackLock to protect ackNumbers btree access.
+func (c *srtConn) handleACKACKLocked(p packet.Packet) {
+	// TDD: This assert will fail until we properly set Tick context
+	// Reference: multi_iouring_design.md Phase 0.5
+	c.AssertTickContext()
+
+	c.log("control:recv:ACKACK:dump", func() string { return p.Dump() })
+
+	ackNum := p.Header().TypeSpecific
+	arrivalTime := time.Now()
+
+	c.ackLock.Lock()
+	entry := c.ackNumbers.Get(ackNum)
+	btreeLen := c.ackNumbers.Len()
+
+	if entry != nil {
+		// 4.10. Round-Trip Time Estimation
+		rttDuration := arrivalTime.Sub(entry.timestamp)
+		c.recalculateRTT(rttDuration)
+
+		c.log("control:recv:ACKACK:rtt:debug", func() string {
+			return fmt.Sprintf("ACKACK RTT (Locked): ackNum=%d, rtt=%v, btreeLen=%d",
+				ackNum, rttDuration, btreeLen)
+		})
+
+		c.ackNumbers.Delete(ackNum)
+		PutAckEntry(entry) // Return to pool
+	} else {
+		c.log("control:recv:ACKACK:error", func() string {
+			return fmt.Sprintf("got unknown ACKACK (%d), btreeLen=%d", ackNum, btreeLen)
+		})
+		if c.metrics != nil {
+			c.metrics.PktRecvInvalid.Add(1)
+			c.metrics.AckBtreeUnknownACKACK.Add(1)
+		}
+	}
+
+	// Bulk cleanup of stale entries
 	expiredCount, expired := c.ackNumbers.ExpireOlderThan(ackNum)
 	btreeLenAfter := c.ackNumbers.Len()
 	c.ackLock.Unlock()
 
-	// Update ACK btree metrics (outside lock)
+	// Update metrics (outside lock)
 	if c.metrics != nil {
 		c.metrics.AckBtreeEntriesExpired.Add(uint64(expiredCount))
 		c.metrics.AckBtreeSize.Store(uint64(btreeLenAfter))
@@ -426,10 +592,13 @@ func (c *srtConn) recalculateRTT(rtt time.Duration) {
 	if c.metrics != nil {
 		c.metrics.RTTMicroseconds.Store(uint64(c.rtt.RTT()))
 		c.metrics.RTTVarMicroseconds.Store(uint64(c.rtt.RTTVar()))
+		// Raw RTT: last sample without EWMA smoothing (for diagnostics)
+		c.metrics.RTTLastSampleMicroseconds.Store(c.rtt.RTTLastSample())
 	}
 
 	c.log("connection:rtt", func() string {
-		return fmt.Sprintf("RTT=%.0fus RTTVar=%.0fus NAKInterval=%.0fms", c.rtt.RTT(), c.rtt.RTTVar(), c.rtt.NAKInterval()/1000)
+		return fmt.Sprintf("RTT=%.0fus RTTVar=%.0fus RTTRaw=%dus NAKInterval=%.0fms",
+			c.rtt.RTT(), c.rtt.RTTVar(), c.rtt.RTTLastSample(), c.rtt.NAKInterval()/1000)
 	})
 }
 
@@ -452,4 +621,3 @@ func (c *srtConn) getNextACKNumber() uint32 {
 		// CAS failed, another goroutine incremented - retry
 	}
 }
-

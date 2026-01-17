@@ -390,6 +390,9 @@ func printIsolationComparison(testName string, controlServer, testServer, contro
 			getMetricSum(testServer, "gosrt_rtt_microseconds", "")},
 		{"RTT Var (us)", getMetricSum(controlServer, "gosrt_rtt_var_microseconds", ""),
 			getMetricSum(testServer, "gosrt_rtt_var_microseconds", "")},
+		// Raw RTT: last sample WITHOUT EWMA smoothing (for diagnostics)
+		{"RTT Raw (us)", getMetricSum(controlServer, "gosrt_rtt_last_sample_microseconds", ""),
+			getMetricSum(testServer, "gosrt_rtt_last_sample_microseconds", "")},
 		// EventLoop metrics (only test server has these when using EventLoop)
 		{"EL Iterations", getMetricSum(controlServer, "gosrt_eventloop_iterations_total", ""),
 			getMetricSum(testServer, "gosrt_eventloop_iterations_total", "")},

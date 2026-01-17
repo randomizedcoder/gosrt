@@ -125,6 +125,13 @@ type sender struct {
 	lastACKedSequence  circular.Number // Highest sequence number that has been ACK'd
 	dropThreshold      uint64
 
+	// Atomic 31-bit sequence number (Phase 2: Lock-free sender)
+	// Used when useRing=true for thread-safe sequence assignment in Write() path.
+	// Formula: seq = (initialSeq + nextSeqOffset) & packet.MAX_SEQUENCENUMBER
+	// Reference: sender_lockfree_architecture.md Section 7.6
+	nextSeqOffset atomic.Uint32 // Offset from initialSeq (incremented atomically)
+	initialSeq    uint32        // Starting sequence number (set once at init)
+
 	// Legacy storage (list mode)
 	packetList *list.List
 	lossList   *list.List
@@ -151,7 +158,8 @@ type sender struct {
 	inputBW        float64 // bytes/s
 	overheadBW     float64 // percent
 
-	probeTime uint64
+	// Probe time for link capacity probing (atomic for concurrent PushDirect)
+	probeTime atomic.Uint64
 
 	// rate struct removed - now using metrics.ConnectionMetrics atomics (Phase 1: Lockless)
 
@@ -171,8 +179,10 @@ type sender struct {
 	packetRing *SendPacketRing
 
 	// Phase 3: Control packet ring
-	useControlRing bool
-	controlRing    *SendControlRing
+	// controlRing is the lock-free ring for ACK/NAK routing.
+	// nil means disabled, non-nil means enabled (no separate bool needed).
+	// Reference: completely_lockfree_receiver.md Section 6.1.2
+	controlRing *SendControlRing
 
 	// Phase 4: EventLoop
 	useEventLoop     bool
@@ -200,6 +210,7 @@ type sender struct {
 func NewSender(sendConfig SendConfig) congestion.Sender {
 	s := &sender{
 		nextSequenceNumber: sendConfig.InitialSequenceNumber,
+		initialSeq:         sendConfig.InitialSequenceNumber.Val(), // For atomic mode
 		dropThreshold:      sendConfig.DropThreshold,
 		lockTiming:         sendConfig.LockTimingMetrics,
 		metrics:            sendConfig.ConnectionMetrics,
@@ -281,7 +292,7 @@ func NewSender(sendConfig SendConfig) congestion.Sender {
 		if err != nil {
 			panic("failed to create send control ring: " + err.Error())
 		}
-		s.useControlRing = true
+		// Note: No separate useControlRing bool - controlRing != nil means enabled
 	}
 
 	// Phase 4: Initialize EventLoop if enabled

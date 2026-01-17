@@ -65,14 +65,26 @@ type dialer struct {
 	connWg     sync.WaitGroup  // Waitgroup for connection
 
 	// io_uring receive path (Linux only)
+	// Multi-ring support: When IoUringRecvRingCount > 1, we create multiple
+	// independent io_uring rings, each with its own completion handler goroutine.
+	// This enables parallel completion processing across CPU cores.
+	// See multi_iouring_design.md Section 4.2 for design rationale.
+
+	// Legacy single-ring fields (used when IoUringRecvRingCount == 1)
 	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
-	recvRingFd      int                            // UDP socket file descriptor
+	recvRingFd      int                            // UDP socket file descriptor (shared)
 	recvCompletions map[uint64]*recvCompletionInfo // Maps request ID to completion info
 	recvCompLock    sync.Mutex                     // Protects recvCompletions map
 	recvRequestID   atomic.Uint64                  // Atomic counter for generating unique request IDs
-	recvCompCtx     context.Context                // Context for completion handler
-	recvCompCancel  context.CancelFunc             // Cancel function for completion handler
-	recvCompWg      sync.WaitGroup                 // WaitGroup for completion handler goroutine
+
+	// Multi-ring fields (used when IoUringRecvRingCount > 1)
+	// Each dialerRecvRingState owns its ring, completion map, and ID counter (no cross-ring locking)
+	dialerRecvRingStates []*dialerRecvRingState // Slice of independent ring states
+
+	// Shared by both single-ring and multi-ring modes
+	recvCompCtx    context.Context    // Context for completion handler(s)
+	recvCompCancel context.CancelFunc // Cancel function for completion handler(s)
+	recvCompWg     sync.WaitGroup     // WaitGroup for completion handler goroutine(s)
 }
 
 type connResponse struct {
@@ -177,7 +189,8 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 		// Error is already logged in initializeIoUringRecv() (if logging available)
 	} else {
 		// Check if io_uring was actually initialized (enabled and successful)
-		ioUringInitialized = (dl.recvRing != nil)
+		// Single-ring mode uses dl.recvRing, multi-ring mode uses dl.dialerRecvRingStates
+		ioUringInitialized = (dl.recvRing != nil) || (len(dl.dialerRecvRingStates) > 0)
 	}
 
 	// create a new socket ID
@@ -319,6 +332,11 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 		dl.connLock.Lock()
 		dl.conn = response.conn
 		dl.connLock.Unlock()
+
+		// Initialize io_uring dialer recv metrics now that dl.conn is set
+		// This was deferred from initializeIoUringRecv* because dl.conn was nil
+		dl.initializeIoUringDialerRecvMetrics()
+
 		return dl, nil
 	case <-handshakeCtx.Done():
 		// Timeout occurred - error already sent to connChan by goroutine above

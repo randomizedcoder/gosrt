@@ -3,6 +3,7 @@ package srt
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/randomizedcoder/gosrt/crypto"
@@ -144,7 +145,9 @@ func (c *srtConn) handleKMResponse(p packet.Packet) {
 	c.kmConfirmed = true
 }
 
-func (c *srtConn) sendKMRequests(ctx context.Context) {
+func (c *srtConn) sendKMRequests(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 

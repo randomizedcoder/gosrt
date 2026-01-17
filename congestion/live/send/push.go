@@ -1,6 +1,7 @@
 package send
 
 import (
+	"github.com/randomizedcoder/gosrt/circular"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
 )
@@ -50,6 +51,72 @@ func (s *sender) Push(p packet.Packet) {
 	s.pushLocked(p)
 }
 
+// PushDirect pushes a packet directly to the lock-free ring.
+// Called from connection.Write() to bypass writeQueue channel for lower latency.
+// Returns false if ring is full (caller should handle - typically drop).
+//
+// Thread-safe: Uses atomic sequence number assignment.
+// Only valid when UseRing() returns true.
+//
+// Reference: sender_lockfree_architecture.md Section 7.8
+func (s *sender) PushDirect(p packet.Packet) bool {
+	if p == nil {
+		return false
+	}
+
+	// Validate payload size if enabled
+	if s.validatePayloadSize {
+		if p.Len() < 0 || p.Len() > maxPayloadSize {
+			s.metrics.SendPayloadSizeErrors.Add(1)
+			return false // Don't decommission - caller handles
+		}
+	}
+
+	// Must have ring enabled
+	if !s.useRing || s.packetRing == nil {
+		return false
+	}
+
+	m := s.metrics
+
+	// Assign sequence number atomically (thread-safe, 31-bit wraparound)
+	seqNum := s.assignSequenceNumber()
+	p.Header().PacketSequenceNumber = seqNum
+	p.Header().PacketPositionFlag = packet.SinglePacket
+	p.Header().OrderFlag = false
+	p.Header().MessageNumber = 1
+
+	// Initialize TransmitCount (never sent yet)
+	p.Header().TransmitCount = 0
+
+	// Set timestamp
+	p.Header().Timestamp = uint32(p.Header().PktTsbpdTime & uint64(packet.MAX_TIMESTAMP))
+
+	// Link capacity probing (atomic for concurrent access)
+	probe := seqNum.Val() & 0xF
+	switch probe {
+	case 0:
+		s.probeTime.Store(p.Header().PktTsbpdTime)
+	case 1:
+		p.Header().PktTsbpdTime = s.probeTime.Load()
+	}
+
+	// Push to ring (lock-free)
+	if !s.packetRing.Push(p) {
+		m.SendRingDropped.Add(1)
+		return false // Caller handles decommission
+	}
+
+	m.SendRingPushed.Add(1)
+	return true
+}
+
+// UseRing returns whether the lock-free ring is enabled.
+// When true, PushDirect() can be used for lower latency writes.
+func (s *sender) UseRing() bool {
+	return s.useRing && s.packetRing != nil
+}
+
 // pushLocked is called with lock held. Dispatches to btree or list.
 func (s *sender) pushLocked(p packet.Packet) {
 	if s.useBtree {
@@ -82,13 +149,13 @@ func (s *sender) pushBtree(p packet.Packet) {
 
 	p.Header().Timestamp = uint32(p.Header().PktTsbpdTime & uint64(packet.MAX_TIMESTAMP))
 
-	// Link capacity probing (same as list mode)
+	// Link capacity probing (atomic for concurrent access)
 	probe := p.Header().PacketSequenceNumber.Val() & 0xF
 	switch probe {
 	case 0:
-		s.probeTime = p.Header().PktTsbpdTime
+		s.probeTime.Store(p.Header().PktTsbpdTime)
 	case 1:
-		p.Header().PktTsbpdTime = s.probeTime
+		p.Header().PktTsbpdTime = s.probeTime.Load()
 	}
 
 	// Insert into btree (O(log n))
@@ -105,54 +172,80 @@ func (s *sender) pushBtree(p packet.Packet) {
 	m.CongestionSendPktFlightSize.Store(flightSize)
 }
 
-// pushRing pushes to lock-free ring (Phase 2: Ring mode)
-// Sequence number assignment happens here for deterministic ordering.
-// Reference: lockless_sender_implementation_plan.md Step 2.5
+// assignSequenceNumber atomically assigns a 31-bit sequence number.
+// Uses offset from initialSeq to handle wraparound correctly.
+// Formula: (initialSeq + offset) & packet.MAX_SEQUENCENUMBER
 //
-// BUG FIX (January 10, 2026): Sequence number was being incremented BEFORE
-// the ring push, causing sequence gaps when Push() failed due to ring full.
-// Now we only increment AFTER successful push to prevent gaps.
+// This is thread-safe and can be called from multiple goroutines.
+// Reference: sender_lockfree_architecture.md Section 7.6
+func (s *sender) assignSequenceNumber() circular.Number {
+	// Step 1: Atomically increment counter and get previous value
+	rawOffset := s.nextSeqOffset.Add(1) - 1
+
+	// Step 2: Add to initial sequence number
+	rawSeq := s.initialSeq + rawOffset
+
+	// Step 3: Mask to 31 bits using existing constant
+	// This ensures: 0x7FFFFFFF + 1 → 0x00000000 (not 0x80000000)
+	seq31 := rawSeq & packet.MAX_SEQUENCENUMBER
+
+	// Track wraparound for metrics
+	if rawSeq != seq31 {
+		s.metrics.SendSeqWraparound.Add(1)
+	}
+	s.metrics.SendSeqAssigned.Add(1)
+
+	return circular.New(seq31, packet.MAX_SEQUENCENUMBER)
+}
+
+// pushRing pushes to lock-free ring (Phase 2: Ring mode)
+// Sequence number assignment happens here using atomic 31-bit assignment.
+// Reference: sender_lockfree_architecture.md Section 7.6
+//
+// IMPORTANT: Sequence number is assigned BEFORE ring push attempt.
+// If ring push fails, the sequence number is "lost" (creates a gap).
+// This is acceptable because:
+// 1. Receiver handles gaps via NAK
+// 2. Prevents duplicate sequence numbers (more problematic than gaps)
+// 3. Atomic operation cannot be "undone"
 func (s *sender) pushRing(p packet.Packet) {
 	if p == nil {
 		return
 	}
 	m := s.metrics
 
-	// Assign sequence number BEFORE pushing to ring
-	// This ensures sequence numbers are assigned in Push() order
-	// Note: nextSequenceNumber access is NOT thread-safe, but Push() is
-	// typically called from a single goroutine (application writer)
-	currentSeq := s.nextSequenceNumber
-	p.Header().PacketSequenceNumber = currentSeq
+	// Assign sequence number atomically (thread-safe, 31-bit wraparound)
+	seqNum := s.assignSequenceNumber()
+	p.Header().PacketSequenceNumber = seqNum
 	p.Header().PacketPositionFlag = packet.SinglePacket
 	p.Header().OrderFlag = false
 	p.Header().MessageNumber = 1
-	// NOTE: Do NOT increment nextSequenceNumber here - wait for successful push
+
+	// Initialize TransmitCount (never sent yet)
+	// This enables first-send detection in EventLoop
+	p.Header().TransmitCount = 0
 
 	// Set timestamp
 	p.Header().Timestamp = uint32(p.Header().PktTsbpdTime & uint64(packet.MAX_TIMESTAMP))
 
-	// Link capacity probing
-	probe := currentSeq.Val() & 0xF
+	// Link capacity probing (atomic for concurrent access)
+	probe := seqNum.Val() & 0xF
 	switch probe {
 	case 0:
-		s.probeTime = p.Header().PktTsbpdTime
+		s.probeTime.Store(p.Header().PktTsbpdTime)
 	case 1:
-		p.Header().PktTsbpdTime = s.probeTime
+		p.Header().PktTsbpdTime = s.probeTime.Load()
 	}
 
 	// Push to ring (lock-free)
 	if !s.packetRing.Push(p) {
 		m.SendRingDropped.Add(1)
 		p.Decommission() // Return to pool
-		// CRITICAL: Do NOT increment sequence - next packet will reuse this sequence
-		// This prevents sequence gaps when ring is full
+		// Note: Sequence number already assigned (atomic). Gap is acceptable.
+		// Receiver will NAK, but we can't retransmit (packet not buffered).
 		return
 	}
 
-	// Only increment sequence AFTER successful push
-	// This ensures no sequence gaps even when packets are dropped due to ring full
-	s.nextSequenceNumber = s.nextSequenceNumber.Inc()
 	m.SendRingPushed.Add(1)
 }
 
@@ -189,12 +282,13 @@ func (s *sender) pushList(p packet.Packet) {
 	// PktTsbpdTime is used for the timing of sending the packets. Here we
 	// can modify it because it has already been used to set the packet's
 	// timestamp.
+	// (Atomic for consistency with other paths, though list mode is single-threaded)
 	probe := p.Header().PacketSequenceNumber.Val() & 0xF
 	switch probe {
 	case 0:
-		s.probeTime = p.Header().PktTsbpdTime
+		s.probeTime.Store(p.Header().PktTsbpdTime)
 	case 1:
-		p.Header().PktTsbpdTime = s.probeTime
+		p.Header().PktTsbpdTime = s.probeTime.Load()
 	}
 
 	s.packetList.PushBack(p)

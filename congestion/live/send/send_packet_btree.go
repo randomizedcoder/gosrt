@@ -106,6 +106,11 @@ func (bt *SendPacketBtree) Get(seq uint32) packet.Packet {
 // Uses reusable pivot to avoid allocation.
 // Reference: congestion/live/receive/packet_store_btree.go:121-132 (Remove)
 func (bt *SendPacketBtree) Delete(seq uint32) packet.Packet {
+	// Safety: check if tree is empty first to avoid nil root panic
+	// This can happen if Delete is called on an empty tree or during shutdown
+	if bt.tree == nil || bt.tree.Len() == 0 {
+		return nil
+	}
 	bt.lookupPivot.seqNum = circular.New(seq, packet.MAX_SEQUENCENUMBER)
 	removed, found := bt.tree.Delete(&bt.lookupPivot)
 	if !found {

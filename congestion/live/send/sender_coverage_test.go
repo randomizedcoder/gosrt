@@ -912,7 +912,12 @@ func TestFlush_WithRing(t *testing.T) {
 		pkt := createTestPacketWithTsbpd(0, 1000)
 		s.pushRing(pkt)
 	}
+
+	// Must enter EventLoop context before calling EventLoop functions
+	// This is enforced by AssertEventLoopContext() in debug builds
+	s.EnterEventLoop()
 	s.drainRingToBtreeEventLoop()
+	s.ExitEventLoop()
 
 	s.Flush()
 

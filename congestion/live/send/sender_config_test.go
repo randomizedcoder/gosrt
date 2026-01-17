@@ -309,11 +309,11 @@ func TestConfig_Table(t *testing.T) {
 			}
 
 			// Verify control ring
+			// Note: No separate useControlRing bool - controlRing != nil means enabled
 			if tc.ExpectControl {
-				require.True(t, s.useControlRing)
-				require.NotNil(t, s.controlRing)
+				require.NotNil(t, s.controlRing, "controlRing should be non-nil when control ring enabled")
 			} else {
-				require.False(t, s.useControlRing)
+				require.Nil(t, s.controlRing, "controlRing should be nil when control ring disabled")
 			}
 
 			// Verify EventLoop
@@ -482,6 +482,11 @@ func TestConfig_OnDeliver_Called(t *testing.T) {
 	// Push and deliver a packet
 	pkt := createTestPacketWithTsbpd(0, 100)
 	s.packetBtree.Insert(pkt)
+
+	// Must enter EventLoop context before calling EventLoop functions
+	// This is enforced by AssertEventLoopContext() in debug builds
+	s.EnterEventLoop()
+	defer s.ExitEventLoop()
 
 	delivered, _ := s.deliverReadyPacketsEventLoop(1_000_000)
 

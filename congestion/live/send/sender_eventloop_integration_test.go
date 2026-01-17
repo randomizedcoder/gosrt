@@ -62,8 +62,11 @@ func TestEventLoop_PushToDrain(t *testing.T) {
 	// Btree still empty (not drained yet)
 	require.Equal(t, 0, s.packetBtree.Len())
 
-	// Drain ring to btree
-	drained := s.drainRingToBtreeEventLoop()
+	// Drain ring to btree (with EventLoop context)
+	var drained int
+	runInEventLoopContext(s, func() {
+		drained = s.drainRingToBtreeEventLoop()
+	})
 	require.Equal(t, 10, drained)
 
 	// Now btree has packets, ring is empty
@@ -99,12 +102,15 @@ func TestEventLoop_DrainThenDeliver(t *testing.T) {
 		s.pushRing(pkt)
 	}
 
-	// Drain to btree
-	s.drainRingToBtreeEventLoop()
-	require.Equal(t, 5, s.packetBtree.Len())
+	// Drain to btree and deliver (with EventLoop context)
+	var delivered int
+	runInEventLoopContext(s, func() {
+		s.drainRingToBtreeEventLoop()
+		require.Equal(t, 5, s.packetBtree.Len())
 
-	// Deliver ready packets
-	delivered, _ := s.deliverReadyPacketsEventLoop(1_000_000)
+		// Deliver ready packets
+		delivered, _ = s.deliverReadyPacketsEventLoop(1_000_000)
+	})
 
 	require.Equal(t, 5, delivered)
 	require.Equal(t, int32(5), deliveredCount.Load())
@@ -151,14 +157,17 @@ func TestEventLoop_HighISN(t *testing.T) {
 				s.pushRing(pkt)
 			}
 
-			// Drain
-			drained := s.drainRingToBtreeEventLoop()
-			require.Equal(t, 5, drained)
+			// Drain and deliver (with EventLoop context)
+			var drained, delivered int
+			runInEventLoopContext(s, func() {
+				drained = s.drainRingToBtreeEventLoop()
+				require.Equal(t, 5, drained)
 
-			// Deliver - THIS IS THE CRITICAL TEST
-			// Before fix: IterateFrom(0) would fail to find packets at ~549M
-			// After fix: IterateFrom(ISN) correctly finds packets
-			delivered, _ := s.deliverReadyPacketsEventLoop(1_000_000)
+				// Deliver - THIS IS THE CRITICAL TEST
+				// Before fix: IterateFrom(0) would fail to find packets at ~549M
+				// After fix: IterateFrom(ISN) correctly finds packets
+				delivered, _ = s.deliverReadyPacketsEventLoop(1_000_000)
+			})
 
 			require.Equal(t, 5, delivered,
 				"BUG: Failed to deliver packets at high ISN %d. "+
@@ -231,8 +240,10 @@ func TestEventLoop_DropOld(t *testing.T) {
 	// Set time to 2 seconds (all packets are > 1 second old)
 	s.nowFn = func() uint64 { return 2_000_000 }
 
-	// Drop old packets
-	s.dropOldPacketsEventLoop(2_000_000)
+	// Drop old packets (with EventLoop context)
+	runInEventLoopContext(s, func() {
+		s.dropOldPacketsEventLoop(2_000_000)
+	})
 
 	// All should be dropped
 	require.Equal(t, 0, s.packetBtree.Len())
@@ -268,8 +279,10 @@ func TestEventLoop_UnderflowProtection(t *testing.T) {
 	// This triggers underflow protection
 	s.nowFn = func() uint64 { return 500_000 }
 
-	// Try to drop - should NOT drop due to underflow protection
-	s.dropOldPacketsEventLoop(500_000)
+	// Try to drop - should NOT drop due to underflow protection (with EventLoop context)
+	runInEventLoopContext(s, func() {
+		s.dropOldPacketsEventLoop(500_000)
+	})
 
 	// All should remain
 	require.Equal(t, 5, s.packetBtree.Len(),
@@ -350,12 +363,15 @@ func TestEventLoop_FullCycle(t *testing.T) {
 		s.pushRing(pkt)
 	}
 
-	// Drain
-	drained := s.drainRingToBtreeEventLoop()
-	require.Equal(t, 100, drained)
+	// Drain and deliver (with EventLoop context)
+	var drained, delivered int
+	runInEventLoopContext(s, func() {
+		drained = s.drainRingToBtreeEventLoop()
+		require.Equal(t, 100, drained)
 
-	// Deliver
-	delivered, _ := s.deliverReadyPacketsEventLoop(1_000_000)
+		// Deliver
+		delivered, _ = s.deliverReadyPacketsEventLoop(1_000_000)
+	})
 
 	require.Equal(t, 100, delivered)
 	require.Len(t, deliveredSeqs, 100)
@@ -397,18 +413,23 @@ func TestEventLoop_ConcurrentPushDrain(t *testing.T) {
 		done <- true
 	}()
 
-	// Drain multiple times while push is happening
+	// Drain multiple times while push is happening (with EventLoop context)
 	totalDrained := 0
-	for i := 0; i < 50; i++ {
-		drained := s.drainRingToBtreeEventLoop()
-		totalDrained += drained
-		time.Sleep(100 * time.Microsecond)
-	}
+	runInEventLoopContext(s, func() {
+		for i := 0; i < 50; i++ {
+			drained := s.drainRingToBtreeEventLoop()
+			totalDrained += drained
+			time.Sleep(100 * time.Microsecond)
+		}
+	})
 
 	<-done
 
-	// Final drain
-	drained := s.drainRingToBtreeEventLoop()
+	// Final drain (with EventLoop context)
+	var drained int
+	runInEventLoopContext(s, func() {
+		drained = s.drainRingToBtreeEventLoop()
+	})
 	totalDrained += drained
 
 	// Should have drained all 100 packets (eventually)

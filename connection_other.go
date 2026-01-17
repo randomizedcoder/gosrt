@@ -9,6 +9,10 @@ import (
 	"github.com/randomizedcoder/gosrt/packet"
 )
 
+// sendRingState is a stub type for non-Linux platforms
+// The actual type is defined in connection_linux.go
+type sendRingState struct{}
+
 // initializeIoUring is a stub for non-Linux platforms
 func (c *srtConn) initializeIoUring(config srtConnConfig) {
 	// io_uring is only available on Linux

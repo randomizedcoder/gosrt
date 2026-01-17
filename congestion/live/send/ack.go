@@ -13,7 +13,7 @@ import (
 // otherwise processes directly with locking.
 func (s *sender) ACK(sequenceNumber circular.Number) {
 	// Phase 3: Route through control ring for EventLoop processing
-	if s.useControlRing {
+	if s.controlRing != nil {
 		if s.controlRing.PushACK(sequenceNumber) {
 			s.metrics.SendControlRingPushedACK.Add(1)
 			return

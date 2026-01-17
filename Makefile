@@ -717,45 +717,110 @@ fuzz:
 	go test -fuzz=Fuzz -run=^Fuzz ./packet -fuzztime 30s
 
 ## ═══════════════════════════════════════════════════════════════════════════
-## DEBUG BUILD TARGETS (Lock-Free Verification)
+## DEBUG BUILD TARGETS (Lock-Free Context Verification)
 ## ═══════════════════════════════════════════════════════════════════════════
-## These targets build and test with runtime assertions enabled.
-## Debug builds verify EventLoop vs Tick context separation.
-## Reference: lockless_sender_implementation_plan.md Step 7.5.2
+##
+## WHAT ARE CONTEXT ASSERTS?
+## -------------------------
+## Context asserts verify that lock-free functions are called from the correct
+## execution context (EventLoop vs Tick). This prevents subtle bugs where:
+##   - A lock-free function (designed for single-threaded EventLoop) is called
+##     from multi-threaded Tick path, causing data races
+##   - A locking wrapper function (designed for Tick) is called from EventLoop,
+##     causing unnecessary lock overhead or potential deadlocks
+##
+## HOW THEY WORK:
+## --------------
+## 1. Debug builds (go build -tags debug) include runtime context tracking:
+##    - EnterEventLoop() / ExitEventLoop() - marks EventLoop context
+##    - EnterTick() / ExitTick() - marks Tick context
+##
+## 2. Functions call AssertEventLoopContext() or AssertTickContext() at entry:
+##    - If context is wrong, the assert PANICS with a clear error message
+##    - In release builds, these are no-op stubs (zero overhead)
+##
+## ASSERT COVERAGE:
+## ----------------
+## Connection level (connection_debug.go):
+##   - handleACKACK()           → AssertEventLoopContext (lock-free ACKACK)
+##   - handleACKACKLocked()     → AssertTickContext (locking wrapper)
+##   - handleKeepAliveEventLoop() → AssertEventLoopContext (lock-free keepalive)
+##   - handleKeepAlive()        → AssertTickContext (locking wrapper)
+##
+## Sender level (congestion/live/send/debug.go):
+##   - processControlPacketsDelta() → AssertEventLoopContext
+##   - drainRingToBtreeEventLoop()  → AssertEventLoopContext
+##   - deliverReadyPacketsEventLoop() → AssertEventLoopContext
+##   - dropOldPacketsEventLoop()    → AssertEventLoopContext
+##
+## Receiver level (congestion/live/receive/debug_context.go):
+##   - processOnePacket()       → AssertEventLoopContext
+##   - periodicACK()            → AssertEventLoopContext
+##   - periodicACKLocked()      → AssertTickContext
+##   - periodicNakBtreeLocked() → AssertTickContext
+##
+## References:
+##   - lockless_sender_implementation_plan.md Step 7.5.2
+##   - multi_iouring_design.md Section 5.5 (Context Assert Analysis)
+##   - completely_lockfree_receiver.md Section 5.7.5
+## ═══════════════════════════════════════════════════════════════════════════
 
-## test-debug: Run tests with debug assertions enabled
+## test-debug: Run ALL debug assertion tests (with race detector)
 ## This catches EventLoop/Tick context violations at runtime
+## Includes: connection, sender, and receiver assert tests
 test-debug:
-	@echo "=== Running tests with debug assertions ==="
-	go test -tags debug -race ./congestion/live/send/... -v
-	go test -tags debug -race ./congestion/live/receive/... -v
-	@echo "✅ Debug assertion tests passed"
+	@echo "=== Running ALL debug assertion tests (with race detector) ==="
+	@echo "Testing connection-level context asserts..."
+	go test -tags debug -race -v -run "TestConnectionDebugContext" .
+	@echo ""
+	@echo "Testing sender context asserts..."
+	go test -tags debug -race -v ./congestion/live/send/...
+	@echo ""
+	@echo "Testing receiver context asserts..."
+	go test -tags debug -race -v ./congestion/live/receive/...
+	@echo "✅ All debug assertion tests passed"
 
-## test-debug-quick: Quick debug test (no race detector)
+## test-debug-quick: Quick debug test (no race detector, faster)
 test-debug-quick:
-	@echo "=== Quick debug assertion tests ==="
-	go test -tags debug ./congestion/live/send/... -v
-	go test -tags debug ./congestion/live/receive/... -v
+	@echo "=== Quick debug assertion tests (no race detector) ==="
+	go test -tags debug -v -run "TestConnectionDebugContext" .
+	go test -tags debug -v ./congestion/live/send/...
+	go test -tags debug -v ./congestion/live/receive/...
+	@echo "✅ Quick debug tests passed"
 
-## build-debug: Build server/client with debug assertions
+## test-debug-connection: Test only connection-level context asserts
+## Use this to verify handleACKACK/handleKeepAlive context enforcement
+test-debug-connection:
+	@echo "=== Testing connection-level context asserts ==="
+	go test -tags debug -v -run "TestConnectionDebugContext" .
+	@echo "✅ Connection context asserts verified"
+
+## build-debug: Build server/client with debug assertions enabled
+## These binaries will PANIC if context violations occur at runtime
 build-debug:
 	@echo "=== Building with debug assertions ==="
+	@echo "NOTE: These binaries will panic on lock-free context violations"
 	cd contrib/server && CGO_ENABLED=0 go build -tags debug -o server-debug -gcflags="all=-N -l" -a
 	cd contrib/client && CGO_ENABLED=0 go build -tags debug -o client-debug -gcflags="all=-N -l" -a
 	cd contrib/client-generator && CGO_ENABLED=0 go build -tags debug -o client-generator-debug -gcflags="all=-N -l" -a
 	@echo "✅ Debug binaries built (use server-debug, client-debug, client-generator-debug)"
 
-## verify-lockfree-context: Verify context assertions compile and work
+## verify-lockfree-context: Verify all context assertions compile correctly
+## Checks both debug builds (with asserts) and release builds (with stubs)
 verify-lockfree-context:
-	@echo "=== Verifying lockfree context assertions ==="
+	@echo "=== Verifying lock-free context assertions ==="
+	@echo "Checking connection debug builds..."
+	go build -tags debug .
 	@echo "Checking send package debug builds..."
 	go build -tags debug ./congestion/live/send/...
 	@echo "Checking receive package debug builds..."
 	go build -tags debug ./congestion/live/receive/...
-	@echo "Checking release builds (stub functions)..."
+	@echo ""
+	@echo "Checking release builds (stub functions - zero overhead)..."
+	go build .
 	go build ./congestion/live/send/...
 	go build ./congestion/live/receive/...
-	@echo "✅ Lock-free context assertions verified"
+	@echo "✅ Lock-free context assertions verified (both debug and release)"
 
 ## vet: Analyze code for potential errors
 vet:
@@ -872,8 +937,8 @@ nixshell:
 # Benchmark targets
 .PHONY: bench-packet bench-packet-all bench-packet-pool bench-circular
 .PHONY: bench-receiver bench-receiver-realistic bench-receiver-full bench-nak-btree bench-seqless
-# Debug build targets
-.PHONY: test-debug test-debug-quick build-debug verify-lockfree-context
+# Debug build targets (lock-free context verification)
+.PHONY: test-debug test-debug-quick test-debug-connection build-debug verify-lockfree-context
 # Code quality targets
 .PHONY: vet fmt lint
 # Dependency management targets

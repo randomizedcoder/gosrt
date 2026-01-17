@@ -3,6 +3,7 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -872,6 +873,19 @@ func MetricsHandler() http.Handler {
 			writeCounterIfNonZero(b, "gosrt_eventloop_idle_backoffs_total",
 				metrics.EventLoopIdleBackoffs.Load(),
 				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_eventloop_control_processed_total",
+				metrics.EventLoopControlProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			// EventLoop startup diagnostics
+			writeCounterIfNonZero(b, "gosrt_eventloop_entered_total",
+				metrics.EventLoopEntered.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_eventloop_exited_early_total",
+				metrics.EventLoopExitedEarly.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_eventloop_exited_no_ring_total",
+				metrics.EventLoopExitedNoRing.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
 
 			// ========== Sender Tick Baseline Metrics (for burst detection) ==========
 			writeCounterIfNonZero(b, "gosrt_send_tick_runs_total",
@@ -903,6 +917,23 @@ func MetricsHandler() http.Handler {
 			writeCounterIfNonZero(b, "gosrt_send_ring_drain_seq_gap_total",
 				metrics.SendRingDrainSeqGap.Load(),
 				"socket_id", socketIdStr, "instance", instanceName)
+
+			// Sequence number metrics (Phase 2: Atomic 31-bit sequence)
+			writeCounterIfNonZero(b, "gosrt_send_seq_assigned_total",
+				metrics.SendSeqAssigned.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_seq_wraparound_total",
+				metrics.SendSeqWraparound.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// TransmitCount metrics (Phase 3: First-send detection)
+			writeCounterIfNonZero(b, "gosrt_send_first_transmit_total",
+				metrics.SendFirstTransmit.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_already_sent_total",
+				metrics.SendAlreadySent.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
 			writeGauge(b, "gosrt_send_btree_len",
 				float64(metrics.SendBtreeLen.Load()),
 				"socket_id", socketIdStr, "instance", instanceName)
@@ -931,6 +962,32 @@ func MetricsHandler() http.Handler {
 				"socket_id", socketIdStr, "instance", instanceName)
 			writeCounterIfNonZero(b, "gosrt_send_control_ring_processed_nak_total",
 				metrics.SendControlRingProcessedNAK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+
+			// Receiver Control Ring metrics (Completely Lock-Free Receiver)
+			writeCounterIfNonZero(b, "gosrt_recv_control_ring_pushed_ackack_total",
+				metrics.RecvControlRingPushedACKACK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_recv_control_ring_pushed_keepalive_total",
+				metrics.RecvControlRingPushedKEEPALIVE.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_recv_control_ring_dropped_ackack_total",
+				metrics.RecvControlRingDroppedACKACK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_recv_control_ring_dropped_keepalive_total",
+				metrics.RecvControlRingDroppedKEEPALIVE.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_recv_control_ring_drained_total",
+				metrics.RecvControlRingDrained.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_recv_control_ring_processed_total",
+				metrics.RecvControlRingProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_recv_control_ring_processed_ackack_total",
+				metrics.RecvControlRingProcessedACKACK.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_recv_control_ring_processed_keepalive_total",
+				metrics.RecvControlRingProcessedKEEPALIVE.Load(),
 				"socket_id", socketIdStr, "instance", instanceName)
 
 			// Sender EventLoop metrics (Phase 4)
@@ -1056,119 +1113,17 @@ func MetricsHandler() http.Handler {
 			writeGauge(b, "gosrt_rtt_var_microseconds",
 				float64(metrics.RTTVarMicroseconds.Load()),
 				"socket_id", socketIdStr, "instance", instanceName)
-
-			// ========== io_uring Submission Metrics (Phase 5: WaitCQETimeout) ==========
-			// Send submission paths
-			writeCounterIfNonZero(b, "gosrt_iouring_send_submit_success_total",
-				metrics.IoUringSendSubmitSuccess.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_submit_ring_full_total",
-				metrics.IoUringSendSubmitRingFull.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_submit_error_total",
-				metrics.IoUringSendSubmitError.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_getsqe_retries_total",
-				metrics.IoUringSendGetSQERetries.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_submit_retries_total",
-				metrics.IoUringSendSubmitRetries.Load(),
+			// Raw RTT: last sample WITHOUT EWMA smoothing (for diagnostics)
+			// This shows the actual measured RTT from the most recent ACKACK,
+			// useful for verifying arrival time capture is working correctly.
+			writeGauge(b, "gosrt_rtt_last_sample_microseconds",
+				float64(metrics.RTTLastSampleMicroseconds.Load()),
 				"socket_id", socketIdStr, "instance", instanceName)
 
-			// Recv submission paths - Listener
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_submit_success_total",
-				metrics.IoUringListenerRecvSubmitSuccess.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_submit_ring_full_total",
-				metrics.IoUringListenerRecvSubmitRingFull.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_submit_error_total",
-				metrics.IoUringListenerRecvSubmitError.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_getsqe_retries_total",
-				metrics.IoUringListenerRecvGetSQERetries.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_submit_retries_total",
-				metrics.IoUringListenerRecvSubmitRetries.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-
-			// Recv submission paths - Dialer
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_submit_success_total",
-				metrics.IoUringDialerRecvSubmitSuccess.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_submit_ring_full_total",
-				metrics.IoUringDialerRecvSubmitRingFull.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_submit_error_total",
-				metrics.IoUringDialerRecvSubmitError.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_getsqe_retries_total",
-				metrics.IoUringDialerRecvGetSQERetries.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_submit_retries_total",
-				metrics.IoUringDialerRecvSubmitRetries.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-
-			// ========== io_uring Completion Handler Metrics (Phase 5: WaitCQETimeout) ==========
-			// Send completion handler paths
-			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_success_total",
-				metrics.IoUringSendCompletionSuccess.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_timeout_total",
-				metrics.IoUringSendCompletionTimeout.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_ebadf_total",
-				metrics.IoUringSendCompletionEBADF.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_eintr_total",
-				metrics.IoUringSendCompletionEINTR.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_error_total",
-				metrics.IoUringSendCompletionError.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_ctx_cancelled_total",
-				metrics.IoUringSendCompletionCtxCancelled.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-
-			// Recv completion handler paths - Listener
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_success_total",
-				metrics.IoUringListenerRecvCompletionSuccess.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_timeout_total",
-				metrics.IoUringListenerRecvCompletionTimeout.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_ebadf_total",
-				metrics.IoUringListenerRecvCompletionEBADF.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_eintr_total",
-				metrics.IoUringListenerRecvCompletionEINTR.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_error_total",
-				metrics.IoUringListenerRecvCompletionError.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_ctx_cancelled_total",
-				metrics.IoUringListenerRecvCompletionCtxCancelled.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-
-			// Recv completion handler paths - Dialer
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_success_total",
-				metrics.IoUringDialerRecvCompletionSuccess.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_timeout_total",
-				metrics.IoUringDialerRecvCompletionTimeout.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_ebadf_total",
-				metrics.IoUringDialerRecvCompletionEBADF.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_eintr_total",
-				metrics.IoUringDialerRecvCompletionEINTR.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_error_total",
-				metrics.IoUringDialerRecvCompletionError.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_ctx_cancelled_total",
-				metrics.IoUringDialerRecvCompletionCtxCancelled.Load(),
-				"socket_id", socketIdStr, "instance", instanceName)
+			// ========== io_uring Per-Ring Metrics (Phase 5 Unified) ==========
+			// All io_uring metrics now use per-ring format, even for ringCount=1
+			// See multi_iouring_design.md Section 5.12 for details
+			writeConnectionPerRingMetrics(b, metrics, socketIdStr, instanceName)
 		}
 
 		w.Write([]byte(b.String()))
@@ -1242,4 +1197,178 @@ func writeListenerMetrics(b *strings.Builder) {
 	writeCounterIfNonZero(b, "gosrt_connections_closed_by_reason_total",
 		lm.ConnectionsClosedError.Load(),
 		"reason", "error")
+
+	// ========== Multi-Ring Metrics (Phase 5: multi_iouring_design.md) ==========
+	// Per-ring metrics for listener recv path. Only present when ringCount > 1.
+	writeListenerPerRingMetrics(b, lm)
+}
+
+// writeListenerPerRingMetrics writes per-ring io_uring metrics with ring index labels.
+// ALWAYS uses per-ring format, even for ringCount=1 (unified approach).
+// See multi_iouring_design.md Section 5.12 for format specification.
+func writeListenerPerRingMetrics(b *strings.Builder, lm *ListenerMetrics) {
+	// Always export ring count gauge
+	ringCount := lm.IoUringRecvRingCount
+	writeGauge(b, "gosrt_iouring_listener_recv_ring_count", float64(ringCount))
+
+	if lm.IoUringRecvRingMetrics == nil {
+		return // io_uring not enabled
+	}
+
+	// Per-ring counters (always have ring label, even for ringCount=1)
+	for ringIdx, rm := range lm.IoUringRecvRingMetrics {
+		ringStr := strconv.Itoa(ringIdx)
+
+		// Submit metrics
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_submit_success_total",
+			rm.SubmitSuccess.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_submit_ring_full_total",
+			rm.SubmitRingFull.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_submit_error_total",
+			rm.SubmitError.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_getsqe_retries_total",
+			rm.GetSQERetries.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_submit_retries_total",
+			rm.SubmitRetries.Load(), "ring", ringStr)
+
+		// Completion metrics
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_success_total",
+			rm.CompletionSuccess.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_timeout_total",
+			rm.CompletionTimeout.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_ebadf_total",
+			rm.CompletionEBADF.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_eintr_total",
+			rm.CompletionEINTR.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_error_total",
+			rm.CompletionError.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_ctx_cancelled_total",
+			rm.CompletionCtxCancelled.Load(), "ring", ringStr)
+
+		// Packet processing metrics
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_packets_processed_total",
+			rm.PacketsProcessed.Load(), "ring", ringStr)
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_bytes_processed_total",
+			rm.BytesProcessed.Load(), "ring", ringStr)
+	}
+}
+
+// writeConnectionPerRingMetrics writes per-ring io_uring metrics for a connection.
+// Covers send path (connection) and dialer recv path.
+// ALWAYS uses per-ring format, even for ringCount=1 (unified approach).
+// See multi_iouring_design.md Section 5.12 for format specification.
+func writeConnectionPerRingMetrics(b *strings.Builder, m *ConnectionMetrics, socketIdStr, instanceName string) {
+	// Send ring metrics (per-connection send path)
+	// Always export ring count gauge
+	ringCount := m.IoUringSendRingCount
+	writeGauge(b, "gosrt_iouring_send_ring_count",
+		float64(ringCount), "socket_id", socketIdStr, "instance", instanceName)
+
+	if m.IoUringSendRingMetrics != nil {
+		for ringIdx, rm := range m.IoUringSendRingMetrics {
+			ringStr := strconv.Itoa(ringIdx)
+
+			// Submit metrics
+			writeCounterIfNonZero(b, "gosrt_iouring_send_submit_success_total",
+				rm.SubmitSuccess.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_submit_ring_full_total",
+				rm.SubmitRingFull.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_submit_error_total",
+				rm.SubmitError.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_getsqe_retries_total",
+				rm.GetSQERetries.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_submit_retries_total",
+				rm.SubmitRetries.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+
+			// Completion metrics
+			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_success_total",
+				rm.CompletionSuccess.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_timeout_total",
+				rm.CompletionTimeout.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_ebadf_total",
+				rm.CompletionEBADF.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_eintr_total",
+				rm.CompletionEINTR.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_error_total",
+				rm.CompletionError.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_ctx_cancelled_total",
+				rm.CompletionCtxCancelled.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+
+			// Packet processing
+			writeCounterIfNonZero(b, "gosrt_iouring_send_packets_processed_total",
+				rm.PacketsProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_send_bytes_processed_total",
+				rm.BytesProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+		}
+	}
+
+	// Dialer recv ring metrics (per-connection recv path for clients)
+	// Always export ring count gauge
+	dialerRingCount := m.IoUringDialerRecvRingCount
+	writeGauge(b, "gosrt_iouring_dialer_recv_ring_count",
+		float64(dialerRingCount), "socket_id", socketIdStr, "instance", instanceName)
+
+	if m.IoUringDialerRecvRingMetrics != nil {
+		for ringIdx, rm := range m.IoUringDialerRecvRingMetrics {
+			ringStr := strconv.Itoa(ringIdx)
+
+			// Submit metrics
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_submit_success_total",
+				rm.SubmitSuccess.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_submit_ring_full_total",
+				rm.SubmitRingFull.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_submit_error_total",
+				rm.SubmitError.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_getsqe_retries_total",
+				rm.GetSQERetries.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_submit_retries_total",
+				rm.SubmitRetries.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+
+			// Completion metrics
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_success_total",
+				rm.CompletionSuccess.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_timeout_total",
+				rm.CompletionTimeout.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_ebadf_total",
+				rm.CompletionEBADF.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_eintr_total",
+				rm.CompletionEINTR.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_error_total",
+				rm.CompletionError.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_ctx_cancelled_total",
+				rm.CompletionCtxCancelled.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+
+			// Packet processing
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_packets_processed_total",
+				rm.PacketsProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_bytes_processed_total",
+				rm.BytesProcessed.Load(),
+				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
+		}
+	}
 }

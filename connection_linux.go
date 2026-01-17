@@ -17,6 +17,121 @@ import (
 	"github.com/randomizedcoder/gosrt/packet"
 )
 
+// sendRingState holds all state for a single send io_uring ring.
+// Each ring has its own dedicated completion handler goroutine.
+// Unlike receive paths, send requires a per-ring lock because:
+// - Sender goroutine writes to completion map during submit
+// - Completion handler reads/deletes from completion map
+// See multi_iouring_design.md Section 4.3 for design rationale.
+type sendRingState struct {
+	ring        *giouring.Ring                // io_uring ring
+	completions map[uint64]*sendCompletionInfo // Maps request ID to completion info
+	nextID      uint64                         // Request ID counter (atomic for multi-writer)
+	fd          int                            // Socket fd (shared, read-only)
+	ringIndex   int                            // Ring index for metrics/logging
+	compLock    sync.Mutex                     // Needed: sender writes, completer reads
+}
+
+// newSendRingState creates a new sendRingState with initialized completion map
+func newSendRingState(ring *giouring.Ring, fd int, ringIndex int) *sendRingState {
+	return &sendRingState{
+		ring:        ring,
+		completions: make(map[uint64]*sendCompletionInfo),
+		nextID:      0,
+		fd:          fd,
+		ringIndex:   ringIndex,
+	}
+}
+
+// getNextID returns the next request ID for this ring
+// Note: In multi-ring mode, this is called from sender goroutine with lock held
+func (srs *sendRingState) getNextID() uint64 {
+	srs.nextID++
+	return srs.nextID
+}
+
+// Helper functions for incrementing send per-ring metrics.
+// These use ConnectionMetrics.IoUringSendRingMetrics with per-ring counters.
+// See multi_iouring_design.md Section 5.12 for the unified metrics approach.
+
+func (c *srtConn) incrementSendGetSQERetries(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].GetSQERetries.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendSubmitRingFull(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].SubmitRingFull.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendSubmitRetries(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].SubmitRetries.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendSubmitError(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].SubmitError.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendSubmitSuccess(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].SubmitSuccess.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendCompletionCtxCancelled(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].CompletionCtxCancelled.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendCompletionEBADF(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].CompletionEBADF.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendCompletionTimeout(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].CompletionTimeout.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendCompletionEINTR(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].CompletionEINTR.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendCompletionError(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].CompletionError.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendCompletionSuccess(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].CompletionSuccess.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendPacketsProcessed(ringIdx int) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].PacketsProcessed.Add(1)
+	}
+}
+
+func (c *srtConn) incrementSendBytesProcessed(ringIdx int, bytes uint64) {
+	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
+		c.metrics.IoUringSendRingMetrics[ringIdx].BytesProcessed.Add(bytes)
+	}
+}
+
 // ioUringWaitTimeout is the timeout for WaitCQETimeout when waiting for completions.
 // The kernel blocks until either:
 //  1. A completion arrives (returns immediately - zero latency!)
@@ -41,19 +156,62 @@ const (
 	ioUringMaxSubmitRetries = 3
 )
 
-// initializeIoUring initializes the io_uring send ring for the connection
+// initializeIoUring initializes the io_uring send ring(s) for the connection
+// When IoUringSendRingCount > 1, creates multiple independent rings for parallel processing.
+// See multi_iouring_design.md Section 4.3 for design rationale.
 func (c *srtConn) initializeIoUring(config srtConnConfig) {
 	if !c.config.IoUringEnabled {
 		return
 	}
 
-	// Store socket FD
+	// Store socket FD (shared by all rings)
 	c.sendRingFd = config.socketFd
 
 	// Determine ring size (default: 64)
 	ringSize := uint32(64)
 	if c.config.IoUringSendRingSize > 0 {
 		ringSize = uint32(c.config.IoUringSendRingSize)
+	}
+
+	// Pre-compute sockaddr structure for UDP sends (reused for connection lifetime)
+	// The remote address is known and doesn't change during the connection
+	if c.remoteAddr != nil {
+		c.sendSockaddrLen = convertUDPAddrToSockaddr(c.remoteAddr, &c.sendSockaddr)
+	}
+
+	// Initialize per-connection send buffer pool (eliminates lock contention)
+	c.sendBufferPool = sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
+
+	// Create context for completion handler (inherits from connection context)
+	c.sendCompCtx, c.sendCompCancel = context.WithCancel(c.ctx)
+
+	// Determine ring count (default: 1)
+	ringCount := c.config.IoUringSendRingCount
+	if ringCount <= 0 {
+		ringCount = 1
+	}
+
+	// Multi-ring mode: create multiple independent ring states
+	if ringCount > 1 {
+		c.initializeIoUringSendMultiRing(ringSize, ringCount)
+		return
+	}
+
+	// Single-ring mode (legacy path)
+	c.initializeIoUringSendSingleRing(ringSize)
+}
+
+// initializeIoUringSendSingleRing initializes a single io_uring send ring (legacy path)
+func (c *srtConn) initializeIoUringSendSingleRing(ringSize uint32) {
+	// Initialize per-ring metrics (unified approach - even single-ring uses per-ring metrics)
+	// This MUST be done before starting handler, otherwise metric increments are silently dropped
+	if c.metrics != nil {
+		c.metrics.IoUringSendRingMetrics = metrics.NewIoUringRingMetrics(1)
+		c.metrics.IoUringSendRingCount = 1
 	}
 
 	// Create io_uring ring using giouring
@@ -70,24 +228,8 @@ func (c *srtConn) initializeIoUring(config srtConnConfig) {
 
 	c.sendRing = ring // Store as interface{} to allow conditional compilation
 
-	// Pre-compute sockaddr structure for UDP sends (reused for connection lifetime)
-	// The remote address is known and doesn't change during the connection
-	if c.remoteAddr != nil {
-		c.sendSockaddrLen = convertUDPAddrToSockaddr(c.remoteAddr, &c.sendSockaddr)
-	}
-
-	// Initialize per-connection send buffer pool (eliminates lock contention)
-	c.sendBufferPool = sync.Pool{
-		New: func() interface{} {
-			return new(bytes.Buffer)
-		},
-	}
-
 	// Initialize completion tracking
 	c.sendCompletions = make(map[uint64]*sendCompletionInfo)
-
-	// Create context for completion handler (inherits from connection context)
-	c.sendCompCtx, c.sendCompCancel = context.WithCancel(c.ctx)
 
 	// Start completion handler goroutine (polls CQEs directly)
 	c.sendCompWg.Add(1)
@@ -97,12 +239,69 @@ func (c *srtConn) initializeIoUring(config srtConnConfig) {
 	c.onSend = c.send
 }
 
-// cleanupIoUring cleans up the io_uring send ring for the connection
+// initializeIoUringSendMultiRing initializes multiple independent io_uring send rings
+// Each ring has its own completion handler for parallel processing.
+// See multi_iouring_design.md Section 4.3 for design rationale.
+func (c *srtConn) initializeIoUringSendMultiRing(ringSize uint32, ringCount int) {
+	// Initialize per-ring metrics FIRST (unified approach - always use per-ring metrics)
+	// This MUST be done before starting handlers, otherwise metric increments are silently dropped
+	if c.metrics != nil {
+		c.metrics.IoUringSendRingMetrics = metrics.NewIoUringRingMetrics(ringCount)
+		c.metrics.IoUringSendRingCount = ringCount
+	}
+
+	// Create slice for ring states
+	c.sendRingStates = make([]*sendRingState, 0, ringCount)
+
+	// Create each ring and its handler
+	for i := 0; i < ringCount; i++ {
+		// Create io_uring ring
+		ring := giouring.NewRing()
+		err := ring.QueueInit(ringSize, 0)
+		if err != nil {
+			// Cleanup any rings already created
+			c.cleanupIoUringSendMultiRing()
+			c.log("connection:io_uring:error", func() string {
+				return fmt.Sprintf("failed to create io_uring send ring %d: %v", i, err)
+			})
+			return
+		}
+
+		// Create ring state (owns completion map with per-ring lock)
+		state := newSendRingState(ring, c.sendRingFd, i)
+		c.sendRingStates = append(c.sendRingStates, state)
+
+		c.log("connection:io_uring:ring", func() string {
+			return fmt.Sprintf("send ring %d created successfully (fd=%d)", i, c.sendRingFd)
+		})
+
+		// Start independent completion handler for this ring
+		c.sendCompWg.Add(1)
+		go c.sendCompletionHandlerIndependent(c.sendCompCtx, state)
+	}
+
+	// Update onSend callback to use connection's io_uring send method
+	c.onSend = c.sendMultiRing
+
+	c.log("connection:io_uring:init", func() string {
+		return fmt.Sprintf("io_uring multi-ring send initialized: rings=%d (states=%d), ring_size=%d, fd=%d",
+			ringCount, len(c.sendRingStates), ringSize, c.sendRingFd)
+	})
+}
+
+// cleanupIoUring cleans up the io_uring send ring(s) for the connection
 // Following context_and_cancellation_design.md pattern:
-// 1. Cancel context (signals handler to exit)
-// 2. Wait for WaitGroup (handler has exited)
+// 1. Cancel context (signals handler(s) to exit)
+// 2. Wait for WaitGroup (handler(s) have exited)
 // 3. Only then clean up resources (QueueExit)
 func (c *srtConn) cleanupIoUring() {
+	// Multi-ring mode: use dedicated cleanup
+	if len(c.sendRingStates) > 0 {
+		c.cleanupIoUringSendMultiRing()
+		return
+	}
+
+	// Single-ring mode (legacy path)
 	if c.sendRing == nil {
 		return
 	}
@@ -270,9 +469,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		}
 
 		// Track retry (ring temporarily full)
-		if c.metrics != nil {
-			c.metrics.IoUringSendGetSQERetries.Add(1)
-		}
+		c.incrementSendGetSQERetries(0) // ringIdx=0 for single-ring mode
 
 		// Ring full - wait a bit and retry (completions may free up space)
 		if i < ioUringMaxGetSQERetries-1 {
@@ -290,8 +487,8 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		c.sendBufferPool.Put(sendBuffer)
 
 		// Track ring full error (packet dropped)
+		c.incrementSendSubmitRingFull(0) // ringIdx=0 for single-ring mode
 		if c.metrics != nil {
-			c.metrics.IoUringSendSubmitRingFull.Add(1)
 			// Use packetForMetrics if available, otherwise nil (will track as generic error)
 			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, metrics.DropReasonRingFull)
 		}
@@ -326,9 +523,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		}
 
 		// Track retry (transient error)
-		if c.metrics != nil {
-			c.metrics.IoUringSendSubmitRetries.Add(1)
-		}
+		c.incrementSendSubmitRetries(0) // ringIdx=0 for single-ring mode
 
 		// Transient error - wait and retry
 		if i < ioUringMaxSubmitRetries-1 {
@@ -346,8 +541,8 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		c.sendBufferPool.Put(sendBuffer)
 
 		// Track submit error
+		c.incrementSendSubmitError(0) // ringIdx=0 for single-ring mode
 		if c.metrics != nil {
-			c.metrics.IoUringSendSubmitError.Add(1)
 			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, metrics.DropReasonSubmit)
 		}
 
@@ -358,8 +553,8 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	}
 
 	// Request submitted successfully - track submission metrics
+	c.incrementSendSubmitSuccess(0) // ringIdx=0 for single-ring mode
 	if c.metrics != nil {
-		c.metrics.IoUringSendSubmitSuccess.Add(1)
 		c.metrics.PktSentSubmitted.Add(1) // Legacy counter for compatibility
 	}
 
@@ -405,9 +600,7 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			// Context cancelled - exit gracefully
-			if c.metrics != nil {
-				c.metrics.IoUringSendCompletionCtxCancelled.Add(1)
-			}
+			c.incrementSendCompletionCtxCancelled(0) // ringIdx=0 for single-ring mode
 			return
 		default:
 		}
@@ -417,32 +610,24 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 		if err != nil {
 			// EBADF means ring was closed via QueueExit()
 			if err == syscall.EBADF {
-				if c.metrics != nil {
-					c.metrics.IoUringSendCompletionEBADF.Add(1)
-				}
+				c.incrementSendCompletionEBADF(0) // ringIdx=0 for single-ring mode
 				return // Ring closed - normal shutdown
 			}
 
 			// ETIME means timeout expired - loop back to check ctx.Done()
 			if err == syscall.ETIME {
-				if c.metrics != nil {
-					c.metrics.IoUringSendCompletionTimeout.Add(1)
-				}
+				c.incrementSendCompletionTimeout(0) // ringIdx=0 for single-ring mode
 				continue
 			}
 
 			// EINTR is normal (interrupted by signal) - retry immediately
 			if err == syscall.EINTR {
-				if c.metrics != nil {
-					c.metrics.IoUringSendCompletionEINTR.Add(1)
-				}
+				c.incrementSendCompletionEINTR(0) // ringIdx=0 for single-ring mode
 				continue
 			}
 
 			// Other errors - log and continue
-			if c.metrics != nil {
-				c.metrics.IoUringSendCompletionError.Add(1)
-			}
+			c.incrementSendCompletionError(0) // ringIdx=0 for single-ring mode
 			c.log("connection:send:completion:error", func() string {
 				return fmt.Sprintf("error waiting for completion: %v", err)
 			})
@@ -450,9 +635,7 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 		}
 
 		// Success - completion received
-		if c.metrics != nil {
-			c.metrics.IoUringSendCompletionSuccess.Add(1)
-		}
+		c.incrementSendCompletionSuccess(0) // ringIdx=0 for single-ring mode
 
 		// Get request ID from completion user data
 		requestID := cqe.UserData
@@ -588,7 +771,7 @@ func (c *srtConn) drainCompletions() {
 	}
 }
 
-// send submits a packet to the connection's io_uring send ring
+// send submits a packet to the connection's io_uring send ring (single-ring mode)
 func (c *srtConn) send(p packet.Packet) {
 	// If io_uring is not enabled or ring is not available, fall back to original send
 	if c.sendRing == nil {
@@ -606,4 +789,373 @@ func (c *srtConn) send(p packet.Packet) {
 
 	// Call Linux-specific send implementation
 	c.sendIoUring(p)
+}
+
+// =============================================================================
+// Multi-Ring Support Functions
+// =============================================================================
+
+// sendMultiRing submits a packet to the connection's io_uring send rings (multi-ring mode)
+// Uses round-robin ring selection for load distribution
+func (c *srtConn) sendMultiRing(p packet.Packet) {
+	// DEBUG: Log entry to help trace packet flow
+	c.log("connection:send:multiring", func() string {
+		if p == nil {
+			return "sendMultiRing called with nil packet"
+		}
+		return fmt.Sprintf("sendMultiRing: isControl=%v, ctrlType=%d, rings=%d",
+			p.Header().IsControlPacket, p.Header().ControlType, len(c.sendRingStates))
+	})
+
+	// Check if connection is shutting down (context cancelled)
+	// This prevents accessing the io_uring rings after they're been closed
+	select {
+	case <-c.ctx.Done():
+		// Connection shutting down - don't try to send
+		p.Decommission()
+		return
+	default:
+		// Not shutting down - proceed
+	}
+
+	if len(c.sendRingStates) == 0 {
+		c.log("connection:send:error", func() string {
+			return "io_uring multi-ring not available, packet dropped"
+		})
+		if c.metrics != nil {
+			metrics.IncrementSendErrorMetrics(c.metrics, true, metrics.DropReasonIoUring)
+		}
+		p.Decommission()
+		return
+	}
+
+	// Select ring using round-robin
+	ringCount := uint32(len(c.sendRingStates))
+	idx := c.sendRingNextIdx.Add(1) % ringCount
+	state := c.sendRingStates[idx]
+
+	// Call multi-ring send implementation
+	c.sendIoUringToRing(state, p)
+}
+
+// sendIoUringToRing sends a packet using a specific ring (multi-ring mode)
+// Uses per-ring lock since sender and completer access concurrently
+func (c *srtConn) sendIoUringToRing(state *sendRingState, p packet.Packet) {
+	// Check if connection is shutting down (context cancelled)
+	// This prevents accessing the io_uring ring after it's been closed
+	select {
+	case <-c.ctx.Done():
+		// Connection shutting down - don't try to send
+		p.Decommission()
+		return
+	default:
+		// Not shutting down - proceed
+	}
+
+	ring := state.ring
+	if ring == nil {
+		p.Decommission()
+		return
+	}
+
+	// Get serialization buffer from per-connection pool
+	sendBuffer := c.sendBufferPool.Get().(*bytes.Buffer)
+
+	// DEBUG: Check packet state before marshal
+	// This helps diagnose use-after-decommission bugs
+	if p == nil {
+		sendBuffer.Reset()
+		c.sendBufferPool.Put(sendBuffer)
+		c.log("connection:send:error", func() string {
+			return "packet is nil (ring " + fmt.Sprint(state.ringIndex) + ")"
+		})
+		return
+	}
+
+	// Marshal packet into buffer
+	if err := p.Marshal(sendBuffer); err != nil {
+		sendBuffer.Reset()
+		c.sendBufferPool.Put(sendBuffer)
+		if c.metrics != nil {
+			metrics.IncrementSendMetrics(c.metrics, p, true, false, metrics.DropReasonMarshal)
+		}
+		// Log more details about the failing packet
+		c.log("connection:send:error", func() string {
+			return fmt.Sprintf("marshalling packet failed: %v (ring=%d, isControl=%v, ctrlType=%d)",
+				err, state.ringIndex, p.Header().IsControlPacket, p.Header().ControlType)
+		})
+		p.Decommission()
+		return
+	}
+
+	// Store packet for metrics tracking (before decommissioning control packets)
+	packetForMetrics := p
+	var controlType packet.CtrlType
+	isControlPacket := p.Header().IsControlPacket
+	if isControlPacket {
+		controlType = p.Header().ControlType
+		p.Decommission()
+		packetForMetrics = nil
+	}
+
+	// Get buffer bytes
+	bufferSlice := sendBuffer.Bytes()
+
+	// Get SQE with retry (under lock for multi-ring mode)
+	state.compLock.Lock()
+
+	var sqe *giouring.SubmissionQueueEntry
+	for i := 0; i < ioUringMaxGetSQERetries; i++ {
+		sqe = ring.GetSQE()
+		if sqe != nil {
+			break
+		}
+		c.incrementSendGetSQERetries(state.ringIndex) // per-ring metrics
+		if i < ioUringMaxGetSQERetries-1 {
+			state.compLock.Unlock()
+			time.Sleep(ioUringRetryBackoff)
+			state.compLock.Lock()
+		}
+	}
+
+	if sqe == nil {
+		state.compLock.Unlock()
+		c.log("connection:send:error", func() string {
+			return fmt.Sprintf("io_uring ring %d full after retries", state.ringIndex)
+		})
+		sendBuffer.Reset()
+		c.sendBufferPool.Put(sendBuffer)
+		c.incrementSendSubmitRingFull(state.ringIndex) // per-ring metrics
+		if c.metrics != nil {
+			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, metrics.DropReasonRingFull)
+		}
+		return
+	}
+
+	// Generate unique request ID (under lock)
+	requestID := state.getNextID()
+
+	// Prepare sendmsg operation
+	var iovec syscall.Iovec
+	iovec.Base = &bufferSlice[0]
+	iovec.SetLen(len(bufferSlice))
+
+	var msg syscall.Msghdr
+	msg.Name = (*byte)(unsafe.Pointer(&c.sendSockaddr))
+	msg.Namelen = c.sendSockaddrLen
+	msg.Iov = &iovec
+	msg.Iovlen = 1
+
+	sqe.PrepareSendMsg(state.fd, &msg, 0)
+	sqe.SetData64(requestID)
+
+	// Store completion info for later (under lock)
+	state.completions[requestID] = &sendCompletionInfo{
+		buffer:    sendBuffer,
+		packet:    packetForMetrics,
+		isIoUring: true,
+	}
+
+	// Submit to ring with retry (under lock)
+	var submitErr error
+	for i := 0; i < ioUringMaxSubmitRetries; i++ {
+		_, submitErr = ring.Submit()
+		if submitErr == nil {
+			break
+		}
+		if submitErr != syscall.EINTR && submitErr != syscall.EAGAIN {
+			break
+		}
+		c.incrementSendSubmitRetries(state.ringIndex) // per-ring metrics
+		if i < ioUringMaxSubmitRetries-1 {
+			time.Sleep(ioUringRetryBackoff)
+		}
+	}
+
+	if submitErr != nil {
+		delete(state.completions, requestID)
+		state.compLock.Unlock()
+		c.log("connection:send:submit:error", func() string {
+			return fmt.Sprintf("failed to submit to ring %d: %v", state.ringIndex, submitErr)
+		})
+		sendBuffer.Reset()
+		c.sendBufferPool.Put(sendBuffer)
+		c.incrementSendSubmitError(state.ringIndex) // per-ring metrics
+		if c.metrics != nil {
+			metrics.IncrementSendMetrics(c.metrics, packetForMetrics, true, false, metrics.DropReasonSubmit)
+		}
+		return
+	}
+
+	state.compLock.Unlock()
+
+	// Track success
+	c.incrementSendSubmitSuccess(state.ringIndex) // per-ring metrics
+	if c.metrics != nil {
+		c.metrics.PktSentSubmitted.Add(1)
+		if isControlPacket {
+			c.metrics.PktSentIoUring.Add(1)
+			metrics.IncrementSendControlMetric(c.metrics, controlType)
+		}
+	}
+}
+
+// sendCompletionHandlerIndependent is the completion handler for a specific send ring (multi-ring mode)
+// Uses per-ring lock since sender and completer access completion map concurrently
+// See multi_iouring_design.md Section 4.3 for design rationale.
+func (c *srtConn) sendCompletionHandlerIndependent(ctx context.Context, state *sendRingState) {
+	defer c.sendCompWg.Done()
+
+	ring := state.ring
+	if ring == nil {
+		return
+	}
+
+	for {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Block waiting for completion OR timeout
+		cqe, err := ring.WaitCQETimeout(&ioUringWaitTimeout)
+		if err != nil {
+			if err == syscall.EBADF {
+				c.incrementSendCompletionEBADF(state.ringIndex) // per-ring metrics
+				return
+			}
+			if err == syscall.ETIME {
+				c.incrementSendCompletionTimeout(state.ringIndex) // per-ring metrics
+				continue
+			}
+			if err == syscall.EINTR {
+				c.incrementSendCompletionEINTR(state.ringIndex) // per-ring metrics
+				continue
+			}
+			c.incrementSendCompletionError(state.ringIndex) // per-ring metrics
+			c.log("connection:send:completion:error", func() string {
+				return fmt.Sprintf("error waiting for completion (ring %d): %v", state.ringIndex, err)
+			})
+			continue
+		}
+
+		// Track successful completion wait
+		c.incrementSendCompletionSuccess(state.ringIndex) // per-ring metrics
+
+		// Get request ID and lookup completion info (under lock)
+		requestID := cqe.UserData
+
+		state.compLock.Lock()
+		compInfo, exists := state.completions[requestID]
+		if !exists {
+			state.compLock.Unlock()
+			c.log("connection:send:completion:error", func() string {
+				return fmt.Sprintf("completion for unknown request ID: %d (ring %d)", requestID, state.ringIndex)
+			})
+			ring.CQESeen(cqe)
+			continue
+		}
+		delete(state.completions, requestID)
+		state.compLock.Unlock()
+
+		// Process completion result
+		buffer := compInfo.buffer
+		if cqe.Res < 0 {
+			errno := -cqe.Res
+			c.log("connection:send:completion:error", func() string {
+				return fmt.Sprintf("send failed (ring %d): %s (errno %d)", state.ringIndex, syscall.Errno(errno).Error(), errno)
+			})
+			// Track send error
+			if c.metrics != nil {
+				if compInfo.packet != nil {
+					metrics.IncrementSendMetrics(c.metrics, compInfo.packet, compInfo.isIoUring, false, metrics.DropReasonIoUring)
+				} else {
+					metrics.IncrementSendErrorMetrics(c.metrics, compInfo.isIoUring, metrics.DropReasonIoUring)
+				}
+			}
+		} else {
+			bytesSent := int(cqe.Res)
+			if bytesSent < len(buffer.Bytes()) {
+				c.log("connection:send:completion:warning", func() string {
+					return fmt.Sprintf("partial send (ring %d): %d/%d bytes", state.ringIndex, bytesSent, len(buffer.Bytes()))
+				})
+				if c.metrics != nil {
+					if compInfo.packet != nil {
+						metrics.IncrementSendMetrics(c.metrics, compInfo.packet, compInfo.isIoUring, false, metrics.DropReasonIoUring)
+					} else {
+						metrics.IncrementSendErrorMetrics(c.metrics, compInfo.isIoUring, metrics.DropReasonIoUring)
+					}
+				}
+			}
+			// Full send success - already tracked in sendIoUringToRing() after successful submit
+		}
+
+		// Cleanup buffer only - do NOT decommission packet!
+		// Data packets remain in SendPacketBtree for potential NAK retransmit.
+		// Packets are only decommissioned when:
+		//   - ACK received → packet deleted from btree
+		//   - Drop threshold exceeded → packet dropped from btree
+		// Control packets were already decommissioned in sendIoUringToRing()
+		// (compInfo.packet is nil for control packets)
+		//
+		// BUG FIX: Previously, we called compInfo.packet.Decommission() here,
+		// which set payload to nil while packet was still in btree.
+		// NAK retransmits would then fail with "invalid payload" because
+		// the packet in btree had been decommissioned.
+		buffer.Reset()
+		c.sendBufferPool.Put(buffer)
+		// Note: compInfo.packet is nil for control packets (already decommissioned)
+		// For data packets, packet remains valid in btree until ACK/drop
+
+		ring.CQESeen(cqe)
+	}
+}
+
+// cleanupIoUringSendMultiRing cleans up multi-ring send resources
+func (c *srtConn) cleanupIoUringSendMultiRing() {
+	if len(c.sendRingStates) == 0 {
+		return
+	}
+
+	// Step 1: Cancel context
+	if c.sendCompCancel != nil {
+		c.sendCompCancel()
+	}
+
+	// Step 2: Wait for all handlers to exit
+	done := make(chan struct{})
+	go func() {
+		c.sendCompWg.Wait()
+		close(done)
+	}()
+
+	handlerExited := false
+	select {
+	case <-done:
+		handlerExited = true
+	case <-time.After(2 * time.Second):
+		c.log("connection:io_uring:cleanup", func() string {
+			return "CRITICAL: multi-ring completion handlers did not exit within 2s"
+		})
+	}
+
+	// Step 3: Clean up each ring state
+	if handlerExited {
+		for _, state := range c.sendRingStates {
+			if state.ring != nil {
+				state.ring.QueueExit()
+			}
+			// Return buffers to pool (handlers have exited)
+			state.compLock.Lock()
+			for _, compInfo := range state.completions {
+				compInfo.buffer.Reset()
+				c.sendBufferPool.Put(compInfo.buffer)
+			}
+			state.compLock.Unlock()
+		}
+	}
+
+	c.sendRingStates = nil
 }

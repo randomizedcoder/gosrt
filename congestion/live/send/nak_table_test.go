@@ -446,3 +446,188 @@ func TestSendNak_StrategyDifference(t *testing.T) {
 	// Verify HonorOrder respects NAK list order (ranges processed in order given)
 	require.Equal(t, []uint32{20, 21, 22, 5, 6, 7, 12, 13, 14}, honorSeqs)
 }
+
+// ============================================================================
+// TransmitCount Tests
+//
+// Verify NAK handler correctly increments TransmitCount on retransmit.
+// Reference: sender_lockfree_architecture.md Section 7.9.4
+// ============================================================================
+
+// TestNAK_TransmitCount_Increment verifies NAK increments TransmitCount
+func TestNAK_TransmitCount_Increment(t *testing.T) {
+	testCases := []struct {
+		name                    string
+		initialTransmitCount    uint32
+		expectedAfterRetransmit uint32
+	}{
+		{
+			name:                    "TC_0_becomes_1",
+			initialTransmitCount:    0, // Edge case: never first-sent
+			expectedAfterRetransmit: 1,
+		},
+		{
+			name:                    "TC_1_becomes_2",
+			initialTransmitCount:    1, // Normal: first-sent, now retransmit
+			expectedAfterRetransmit: 2,
+		},
+		{
+			name:                    "TC_2_becomes_3",
+			initialTransmitCount:    2, // Already retransmitted once
+			expectedAfterRetransmit: 3,
+		},
+		{
+			name:                    "TC_10_becomes_11",
+			initialTransmitCount:    10, // Many retransmits
+			expectedAfterRetransmit: 11,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &metrics.ConnectionMetrics{}
+			var retransmittedPkt packet.Packet
+
+			// Create sender with list mode (simpler for this test)
+			sendCfg := SendConfig{
+				ConnectionMetrics:     m,
+				InitialSequenceNumber: circular.New(100, packet.MAX_SEQUENCENUMBER),
+				OnDeliver: func(p packet.Packet) {
+					// Capture retransmitted packet
+					if p.Header().RetransmittedPacketFlag {
+						retransmittedPkt = p
+					}
+				},
+			}
+			s := NewSender(sendCfg).(*sender)
+
+			// Create packet and add directly to lossList
+			// (In production, packets move to lossList after delivery)
+			addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+			pkt := packet.NewPacket(addr)
+			pkt.Header().PacketSequenceNumber = circular.New(100, packet.MAX_SEQUENCENUMBER)
+			pkt.Header().TransmitCount = tc.initialTransmitCount
+			pkt.Header().PktTsbpdTime = 1000
+			s.lossList.PushBack(pkt)
+
+			// Send NAK for this packet (start/end pair format)
+			nakList := []circular.Number{
+				circular.New(100, packet.MAX_SEQUENCENUMBER), // start
+				circular.New(100, packet.MAX_SEQUENCENUMBER), // end (same = single packet)
+			}
+			retransCount := s.NAK(nakList)
+
+			// Verify retransmission occurred
+			require.Equal(t, uint64(1), retransCount, "should retransmit 1 packet")
+			require.NotNil(t, retransmittedPkt, "should have captured retransmitted packet")
+
+			// Verify TransmitCount was incremented
+			require.Equal(t, tc.expectedAfterRetransmit, retransmittedPkt.Header().TransmitCount,
+				"TransmitCount should be incremented")
+
+			// Verify RetransmittedPacketFlag is set
+			require.True(t, retransmittedPkt.Header().RetransmittedPacketFlag,
+				"RetransmittedPacketFlag should be true")
+		})
+	}
+}
+
+// TestNAK_TransmitCount_MultipleRetransmits verifies TransmitCount increments on each NAK
+func TestNAK_TransmitCount_MultipleRetransmits(t *testing.T) {
+	m := &metrics.ConnectionMetrics{}
+	var lastTransmitCount uint32
+
+	sendCfg := SendConfig{
+		ConnectionMetrics:     m,
+		InitialSequenceNumber: circular.New(100, packet.MAX_SEQUENCENUMBER),
+		OnDeliver: func(p packet.Packet) {
+			if p.Header().RetransmittedPacketFlag {
+				lastTransmitCount = p.Header().TransmitCount
+			}
+		},
+	}
+	s := NewSender(sendCfg).(*sender)
+
+	// Create packet with initial TransmitCount = 1 (already first-sent)
+	// and add directly to lossList
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+	pkt := packet.NewPacket(addr)
+	pkt.Header().PacketSequenceNumber = circular.New(100, packet.MAX_SEQUENCENUMBER)
+	pkt.Header().TransmitCount = 1 // Simulates first-send already happened
+	pkt.Header().PktTsbpdTime = 1000
+	s.lossList.PushBack(pkt)
+
+	nakList := []circular.Number{
+		circular.New(100, packet.MAX_SEQUENCENUMBER),
+		circular.New(100, packet.MAX_SEQUENCENUMBER),
+	}
+
+	// Multiple NAK retransmits - each should increment TransmitCount
+	for i := 0; i < 5; i++ {
+		s.NAK(nakList)
+		require.Equal(t, uint32(i+2), lastTransmitCount,
+			"TransmitCount after NAK %d should be %d", i+1, i+2)
+	}
+
+	t.Logf("Final TransmitCount after 5 NAKs: %d", lastTransmitCount)
+}
+
+// TestNAK_RetransFirstTime_Metric verifies RetransFirstTime fires only when TC was 0
+func TestNAK_RetransFirstTime_Metric(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		initialTransmitCount   uint32
+		expectRetransFirstTime bool
+	}{
+		{
+			name:                   "TC_0_fires_RetransFirstTime",
+			initialTransmitCount:   0,
+			expectRetransFirstTime: true, // TC becomes 1 after increment
+		},
+		{
+			name:                   "TC_1_no_RetransFirstTime",
+			initialTransmitCount:   1,
+			expectRetransFirstTime: false, // TC becomes 2
+		},
+		{
+			name:                   "TC_5_no_RetransFirstTime",
+			initialTransmitCount:   5,
+			expectRetransFirstTime: false, // TC becomes 6
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &metrics.ConnectionMetrics{}
+
+			sendCfg := SendConfig{
+				ConnectionMetrics:     m,
+				InitialSequenceNumber: circular.New(100, packet.MAX_SEQUENCENUMBER),
+				OnDeliver:             func(p packet.Packet) {},
+			}
+			s := NewSender(sendCfg).(*sender)
+
+			// Create packet and add directly to lossList
+			addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+			pkt := packet.NewPacket(addr)
+			pkt.Header().PacketSequenceNumber = circular.New(100, packet.MAX_SEQUENCENUMBER)
+			pkt.Header().TransmitCount = tc.initialTransmitCount
+			pkt.Header().PktTsbpdTime = 1000
+			s.lossList.PushBack(pkt)
+
+			nakList := []circular.Number{
+				circular.New(100, packet.MAX_SEQUENCENUMBER),
+				circular.New(100, packet.MAX_SEQUENCENUMBER),
+			}
+			s.NAK(nakList)
+
+			if tc.expectRetransFirstTime {
+				require.Equal(t, uint64(1), m.RetransFirstTime.Load(),
+					"RetransFirstTime should fire for TC=0")
+			} else {
+				require.Equal(t, uint64(0), m.RetransFirstTime.Load(),
+					"RetransFirstTime should NOT fire for TC>0")
+			}
+		})
+	}
+}

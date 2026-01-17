@@ -79,9 +79,30 @@ type ListenerMetrics struct {
 	ConnectionsClosedPeerIdle      atomic.Uint64 // Peer idle timeout expired
 	ConnectionsClosedContextCancel atomic.Uint64 // Parent context cancelled
 	ConnectionsClosedError         atomic.Uint64 // Error during operation
+
+	// ========================================================================
+	// io_uring Metrics (Unified Per-Ring - Phase 5 Refactoring)
+	// ========================================================================
+	// ALWAYS uses per-ring array, even when ringCount=1.
+	// This replaced legacy single-ring counters (see multi_iouring_design.md 5.12).
+
+	// Per-ring metrics for listener recv path (listen_linux.go)
+	IoUringRecvRingMetrics []*IoUringRingMetrics
+	IoUringRecvRingCount   int // Number of listener recv rings (for gauge export)
 }
 
 // NewListenerMetrics creates a new ListenerMetrics instance with all counters at zero.
 func NewListenerMetrics() *ListenerMetrics {
 	return &ListenerMetrics{}
+}
+
+// InitListenerRecvRingMetrics initializes per-ring metrics for the listener.
+// ALWAYS creates the per-ring array, even for ringCount=1 (unified approach).
+// Call this from io_uring initialization. Safe to call multiple times.
+func (lm *ListenerMetrics) InitListenerRecvRingMetrics(ringCount int) {
+	if ringCount < 1 {
+		ringCount = 1 // Minimum 1 ring
+	}
+	lm.IoUringRecvRingMetrics = NewIoUringRingMetrics(ringCount)
+	lm.IoUringRecvRingCount = ringCount
 }

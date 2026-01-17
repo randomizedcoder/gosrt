@@ -56,7 +56,7 @@ func (s *sender) tickDeliverPackets(now uint64) {
 	}
 
 	// Phase 3: Process control ring (if control ring mode enabled)
-	if s.useControlRing {
+	if s.controlRing != nil {
 		s.processControlRing()
 	}
 
