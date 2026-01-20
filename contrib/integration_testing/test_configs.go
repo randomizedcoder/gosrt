@@ -3644,6 +3644,20 @@ var IsolationTestConfigs = []IsolationTestConfig{
 
 	// ========== 300 Mb/s High Throughput Tests ==========
 
+	// 300 Mb/s: 1 recv ring vs 2 recv rings (both using full lock-free config)
+	// This is the recommended test for verifying 300 Mb/s stability since 4-ring doesn't work
+	{
+		Name:          "Isolation-300M-Ring1-vs-Ring2",
+		Description:   "300 Mb/s: 1 recv ring vs 2 recv rings (full lock-free, stable config)",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithUltraHighThroughput(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       300_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
 	// 300 Mb/s: 2 recv rings vs 4 recv rings
 	{
 		Name:          "Isolation-300M-Ring2-vs-Ring4",
@@ -3652,6 +3666,20 @@ var IsolationTestConfigs = []IsolationTestConfig{
 		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithUltraHighThroughput(),
 		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithUltraHighThroughput(),
 		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithUltraHighThroughput(),
+		TestDuration:  60 * time.Second,
+		Bitrate:       300_000_000,
+		StatsPeriod:   10 * time.Second,
+	},
+
+	// 300 Mb/s: 2 recv rings vs 4 recv rings with LEGACY EventLoop (no tight loop)
+	// Use this if the tight loop version fails - helps diagnose tight loop issues
+	{
+		Name:          "Isolation-300M-Ring2-vs-Ring4-LegacyEL",
+		Description:   "300 Mb/s: 2 vs 4 recv rings with legacy unbounded EventLoop",
+		ControlCG:     GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		ControlServer: GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(2).WithUltraHighThroughput(),
+		TestCG:        GetSRTConfig(ConfigFullELLockFree).WithHonorNakOrder().WithMultipleRecvRings(4).WithUltraHighThroughput().WithLegacyEventLoop(),
+		TestServer:    GetSRTConfig(ConfigFullELLockFree).WithMultipleRecvRings(4).WithUltraHighThroughput().WithLegacyEventLoop(),
 		TestDuration:  60 * time.Second,
 		Bitrate:       300_000_000,
 		StatsPeriod:   10 * time.Second,

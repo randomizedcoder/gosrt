@@ -43,6 +43,13 @@ func main() {
 	// Parse all flags (shared + client-generator-specific)
 	common.ParseFlags()
 
+	// Validate flag dependencies and auto-enable required flags
+	if warnings := common.ValidateFlagDependencies(); len(warnings) > 0 {
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "⚠ %s\n", w)
+		}
+	}
+
 	// Setup profiling if requested
 	var p func(*profile.Profile)
 	switch *profileFlag {

@@ -6,6 +6,7 @@ package send
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -65,7 +66,11 @@ func (s *sender) EventLoop(ctx context.Context, wg *sync.WaitGroup) {
 	defer s.cleanupOnShutdown()
 
 	// Drop ticker (periodic old packet cleanup)
-	dropInterval := 100 * time.Millisecond // Check every 100ms
+	// Use configured interval (microseconds -> time.Duration)
+	dropInterval := time.Duration(s.sendDropIntervalUs) * time.Microsecond
+	if dropInterval <= 0 {
+		dropInterval = 100 * time.Millisecond // Default: 100ms
+	}
 	dropTicker := time.NewTicker(dropInterval)
 	defer dropTicker.Stop()
 
@@ -94,29 +99,45 @@ func (s *sender) EventLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 		// Track total control packets for backoff calculation
 		totalControlDrained := 0
+		var dataDrained int
 
 		// ──────────────────────────────────────────────────────────────────────
-		// 1. SERVICE CONTROL RING FIRST (minimize ACK/NAK latency)
+		// Drain data ring → btree (with control interleave)
 		// ──────────────────────────────────────────────────────────────────────
-		if drained := s.processControlPacketsDelta(); drained > 0 {
-			m.SendEventLoopControlDrained.Add(uint64(drained))
-			totalControlDrained += drained
-		}
+		if s.maxDataPerIteration > 0 {
+			// ═══════════════════════════════════════════════════════════════════
+			// TIGHT LOOP MODE (eventloop_batch_sizing_design.md)
+			// Control ring is checked after EVERY data packet for minimum latency.
+			// At 350 Mb/s: 30,000 checks/sec × 2ns = 0.006% overhead
+			// But control latency drops from 1-2ms to ~500ns!
+			// ═══════════════════════════════════════════════════════════════════
+			dataDrained, totalControlDrained = s.drainRingToBtreeEventLoopTight()
+			if dataDrained > 0 {
+				m.SendEventLoopDataDrained.Add(uint64(dataDrained))
+			}
+		} else {
+			// ═══════════════════════════════════════════════════════════════════
+			// LEGACY UNBOUNDED MODE (for backward compatibility)
+			// Control checked 3× per iteration, but data drain is unbounded.
+			// ═══════════════════════════════════════════════════════════════════
 
-		// ──────────────────────────────────────────────────────────────────────
-		// 2. Drain data ring → btree
-		// ──────────────────────────────────────────────────────────────────────
-		dataDrained := s.drainRingToBtreeEventLoop()
-		if dataDrained > 0 {
-			m.SendEventLoopDataDrained.Add(uint64(dataDrained))
-		}
+			// 1. SERVICE CONTROL RING FIRST
+			if drained := s.processControlPacketsDelta(); drained > 0 {
+				m.SendEventLoopControlDrained.Add(uint64(drained))
+				totalControlDrained += drained
+			}
 
-		// ──────────────────────────────────────────────────────────────────────
-		// 3. SERVICE CONTROL RING AGAIN (may have arrived during drain)
-		// ──────────────────────────────────────────────────────────────────────
-		if drained := s.processControlPacketsDelta(); drained > 0 {
-			m.SendEventLoopControlDrained.Add(uint64(drained))
-			totalControlDrained += drained
+			// 2. Drain data ring → btree (unbounded)
+			dataDrained = s.drainRingToBtreeEventLoop()
+			if dataDrained > 0 {
+				m.SendEventLoopDataDrained.Add(uint64(dataDrained))
+			}
+
+			// 3. SERVICE CONTROL RING AGAIN
+			if drained := s.processControlPacketsDelta(); drained > 0 {
+				m.SendEventLoopControlDrained.Add(uint64(drained))
+				totalControlDrained += drained
+			}
 		}
 
 		// ──────────────────────────────────────────────────────────────────────
@@ -125,7 +146,7 @@ func (s *sender) EventLoop(ctx context.Context, wg *sync.WaitGroup) {
 		// PktTsbpdTime uses relative time (since connection start), so we must too.
 		// ──────────────────────────────────────────────────────────────────────
 		nowUs := s.nowFn()
-		delivered, nextDeliveryIn := s.deliverReadyPacketsEventLoop(nowUs)
+		delivered, _ := s.deliverReadyPacketsEventLoop(nowUs)
 
 		// ──────────────────────────────────────────────────────────────────────
 		// 5. SERVICE CONTROL RING AFTER DELIVERY (may have arrived during delivery)
@@ -143,19 +164,38 @@ func (s *sender) EventLoop(ctx context.Context, wg *sync.WaitGroup) {
 			m.SendBtreeLen.Store(uint64(s.packetBtree.Len()))
 		}
 
-		// 6. TSBPD-aware sleep or adaptive backoff
-		sleepResult := s.calculateTsbpdSleepDuration(
-			nextDeliveryIn,
-			delivered,
-			totalControlDrained, // Use total from all passes
-			s.backoffMinSleep,
-			s.backoffMaxSleep,
-		)
+		// 6. Adaptive backoff when idle
+		// Determine if we did work this iteration
+		hadActivity := delivered > 0 || totalControlDrained > 0 || dataDrained > 0
 
-		if sleepResult.Duration > 0 {
-			time.Sleep(sleepResult.Duration)
-			if sleepResult.Duration >= s.backoffMinSleep {
+		// ═══════════════════════════════════════════════════════════════════════
+		// ADAPTIVE BACKOFF (adaptive_eventloop_mode_design.md)
+		//
+		// CRITICAL: time.Sleep() has ~1ms minimum granularity on Linux!
+		// Even requesting 1µs results in ~1ms actual sleep.
+		// This caps EventLoop at ~1000 iter/sec, limiting throughput to ~350 Mb/s.
+		//
+		// Solution: Adaptive backoff that switches between modes:
+		// - YIELD mode: runtime.Gosched() - ~46M iter/sec (high throughput)
+		// - SLEEP mode: time.Sleep() - ~1K iter/sec (CPU friendly when idle)
+		//
+		// Strategy: Start in Yield, switch to Sleep after 1s idle, any activity
+		// immediately wakes back to Yield.
+		//
+		// This handles both:
+		// - High throughput (>300 Mb/s): stays in Yield mode
+		// - Low throughput (<20 Mb/s): relaxes to Sleep mode, saves CPU
+		// ═══════════════════════════════════════════════════════════════════════
+		if s.adaptiveBackoff != nil {
+			s.adaptiveBackoff.Wait(hadActivity)
+			if !hadActivity {
 				m.SendEventLoopIdleBackoffs.Add(1)
+			}
+		} else {
+			// Fallback: simple Gosched when no adaptive backoff configured
+			if !hadActivity {
+				m.SendEventLoopIdleBackoffs.Add(1)
+				runtime.Gosched()
 			}
 		}
 	}
@@ -345,6 +385,106 @@ func (s *sender) drainRingToBtreeEventLoop() int {
 	}
 
 	return drained
+}
+
+// drainRingToBtreeEventLoopTight drains packets with control-priority tight loop.
+// Checks control ring after EVERY data packet for minimum latency (~500ns).
+// Called from EventLoop - NO LOCKING (single-threaded btree access).
+//
+// Why tight loop? At 350+ Mb/s:
+// - Empty control ring check costs ~2ns (one atomic load)
+// - 30,000 checks/sec × 2ns = 60µs/sec = 0.006% overhead
+// - But control latency drops from ~1-2ms (unbounded) to ~500ns (tight)
+//
+// Reference: eventloop_batch_sizing_design.md "Tight Loop" section
+func (s *sender) drainRingToBtreeEventLoopTight() (int, int) {
+	// Step 7.5.2: Assert EventLoop context (no-op in release builds)
+	s.AssertEventLoopContext()
+
+	m := s.metrics
+	m.SendEventLoopDrainAttempts.Add(1)
+
+	if s.packetRing == nil {
+		m.SendEventLoopDrainRingNil.Add(1)
+		return 0, 0
+	}
+
+	// Diagnostic: Log ring length before drain attempt
+	ringLen := s.packetRing.Len()
+	if ringLen > 0 {
+		m.SendEventLoopDrainRingHadData.Add(1)
+	}
+
+	drained := 0
+	totalControlDrained := 0
+
+	// Tight loop: check control after EVERY data packet
+	for drained < s.maxDataPerIteration {
+		// 1. ALWAYS check control first (high priority, ~2ns when empty)
+		if controlDrained := s.processControlPacketsDelta(); controlDrained > 0 {
+			m.SendEventLoopControlDrained.Add(uint64(controlDrained))
+			totalControlDrained += controlDrained
+		}
+
+		// 2. Process ONE data packet
+		p, ok := s.packetRing.TryPop()
+		if !ok {
+			if drained == 0 {
+				m.SendEventLoopDrainRingEmpty.Add(1)
+			}
+			break // Data ring empty
+		}
+
+		// 3. Update metrics and insert to btree (same as unbounded version)
+		pktLen := p.Len()
+		m.CongestionSendPktBuf.Add(1)
+		m.CongestionSendByteBuf.Add(uint64(pktLen))
+		m.SendRateBytes.Add(pktLen)
+
+		// Sequence gap detection
+		currentSeq := uint64(p.Header().PacketSequenceNumber.Val())
+		tsbpdTime := p.Header().PktTsbpdTime
+		if s.lastInsertedSeqSet.Load() {
+			lastSeq := s.lastInsertedSeq.Load()
+			expectedSeq := (lastSeq + 1) & 0x7FFFFFFF
+			if currentSeq != expectedSeq {
+				m.SendRingDrainSeqGap.Add(1)
+				if s.log != nil {
+					s.log("sender:eventloop:drain:gap", func() string {
+						return fmt.Sprintf("SEQ GAP: expected=%d got=%d lastSeq=%d",
+							expectedSeq, currentSeq, lastSeq)
+					})
+				}
+			}
+		}
+		s.lastInsertedSeq.Store(currentSeq)
+		s.lastInsertedSeqSet.Store(true)
+
+		// Log packet drain for debugging
+		if s.log != nil {
+			s.log("sender:eventloop:drain:tight", func() string {
+				return fmt.Sprintf("drained seq=%d tsbpdTime=%d", currentSeq, tsbpdTime)
+			})
+		}
+
+		// Insert into btree - NO LOCKING
+		inserted, old := s.packetBtree.Insert(p)
+		if !inserted && old != nil {
+			m.SendBtreeDuplicates.Add(1)
+			old.Decommission()
+		}
+
+		m.SendBtreeInserted.Add(1)
+		m.SendRingDrained.Add(1)
+		drained++
+	}
+
+	// Track if we hit the cap (indicates high load)
+	if drained >= s.maxDataPerIteration {
+		m.SendEventLoopTightCapReached.Add(1)
+	}
+
+	return drained, totalControlDrained
 }
 
 // deliverReadyPacketsEventLoop delivers packets whose TSBPD time has passed.

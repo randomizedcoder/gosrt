@@ -481,6 +481,10 @@ type SRTConfig struct {
 	SendTsbpdSleepFactor         float64       // -sendtsbpdsleepfactor (default: 0.9)
 	SendDropThresholdUs          uint64        // -senddropthresholdus (default: 1000000)
 
+	// EventLoop tight loop configuration (eventloop_batch_sizing_design.md)
+	// -1 = library default (512), 0 = unbounded legacy mode, >0 = custom batch size
+	EventLoopMaxDataPerIteration int // -eventloopmaxdata
+
 	// ========================================================================
 	// COMPLETELY LOCK-FREE RECEIVER (Phase 6: Receiver Control Ring)
 	// ========================================================================
@@ -711,6 +715,12 @@ func (c *SRTConfig) ToCliFlags() []string {
 	}
 	if c.SendDropThresholdUs > 0 {
 		flags = append(flags, "-senddropthresholdus", strconv.FormatUint(c.SendDropThresholdUs, 10))
+	}
+	// EventLoop tight loop configuration
+	// Only emit if explicitly set (non-zero means custom value)
+	// -1 = library default, 0 = legacy unbounded, >0 = custom batch size
+	if c.EventLoopMaxDataPerIteration != 0 {
+		flags = append(flags, "-eventloopmaxdata", strconv.Itoa(c.EventLoopMaxDataPerIteration))
 	}
 
 	// Receiver control ring (Completely Lock-Free Receiver)
@@ -1453,14 +1463,17 @@ func (c SRTConfig) WithSendRingCustom(size, shards int) SRTConfig {
 
 // WithSendControlRing enables the lock-free sender control ring.
 // REQUIRES: UseSendRing=true
-// Default: 256 size, 2 shards
+// Default: 4096 size, 4 shards
+// NOTE: Increased from 256/2 after ACK-drop fix caused failures at 300+ Mb/s with 4 recv rings.
+// With EventLoop mode, dropped ACKs (when ring is full) can cause connection failures.
+// See: performance_testing_implementation_log.md "Isolation Test Regression" section.
 func (c SRTConfig) WithSendControlRing() SRTConfig {
 	if !c.UseSendRing {
 		c = c.WithSendRing()
 	}
 	c.UseSendControlRing = true
-	c.SendControlRingSize = 256
-	c.SendControlRingShards = 2
+	c.SendControlRingSize = 4096 // Was 256 - increased to prevent ACK drops at high throughput
+	c.SendControlRingShards = 4  // Was 2 - increased for better parallelism
 	return c
 }
 
@@ -1508,13 +1521,14 @@ func (c SRTConfig) WithoutSendEventLoop() SRTConfig {
 // WithRecvControlRing enables the receiver control ring for ACKACK/KEEPALIVE processing.
 // This makes the receiver completely lock-free when combined with UseEventLoop.
 // Reference: completely_lockfree_receiver.md
+// NOTE: Increased sizes from 128/1 after ACK-drop fix caused failures at 300+ Mb/s.
 func (c SRTConfig) WithRecvControlRing() SRTConfig {
 	if !c.UseEventLoop {
 		panic("WithRecvControlRing requires UseEventLoop=true")
 	}
 	c.UseRecvControlRing = true
-	c.RecvControlRingSize = 128 // Default size (same as sender)
-	c.RecvControlRingShards = 1 // Default shards (same as sender)
+	c.RecvControlRingSize = 2048 // Was 128 - increased to prevent control packet drops
+	c.RecvControlRingShards = 2  // Was 1 - increased for better parallelism
 	return c
 }
 
@@ -1538,6 +1552,23 @@ func (c SRTConfig) WithoutRecvControlRing() SRTConfig {
 // WithValidateSendPayloadSize enables payload size validation in sender Push().
 func (c SRTConfig) WithValidateSendPayloadSize() SRTConfig {
 	c.ValidateSendPayloadSize = true
+	return c
+}
+
+// WithLegacyEventLoop disables the tight loop, using unbounded drain mode.
+// This may help with stability at high parallelism (4+ recv rings) at the cost
+// of higher control latency (~1-2ms vs ~500ns).
+// Use this if experiencing issues with tight loop + high recv ring counts.
+func (c SRTConfig) WithLegacyEventLoop() SRTConfig {
+	c.EventLoopMaxDataPerIteration = 0 // 0 = unbounded legacy mode
+	return c
+}
+
+// WithTightLoopEventLoop enables the tight loop with a custom batch size.
+// Default is 512 when using library default (-1).
+// Use 0 for unbounded legacy mode.
+func (c SRTConfig) WithTightLoopEventLoop(batchSize int) SRTConfig {
+	c.EventLoopMaxDataPerIteration = batchSize
 	return c
 }
 

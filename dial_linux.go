@@ -621,10 +621,12 @@ func (dl *dialer) getRecvCompletion(ctx context.Context, ring *giouring.Ring) (*
 			return nil, nil
 		}
 
-		// ETIME means timeout expired - loop back to check ctx.Done()
+		// ETIME means timeout expired - return to allow handler to flush pending resubmits
+		// This is critical to prevent the ring from running dry at high throughput!
+		// Without this, the handler never gets a chance to resubmit pending requests on timeout.
 		if err == syscall.ETIME {
 			dl.incrementDialerRecvCompletionTimeout(0) // ringIdx=0 for single-ring mode
-			continue
+			return nil, nil // Return on timeout so handler can flush pending
 		}
 
 		// EINTR is normal (interrupted by signal) - retry immediately
@@ -750,6 +752,13 @@ func (dl *dialer) recvCompletionHandler(ctx context.Context) {
 
 		cqe, compInfo := dl.getRecvCompletion(ctx, ring)
 		if cqe == nil {
+			// CRITICAL: On timeout or error, flush any pending resubmits to prevent ring from running dry
+			// Without this, the ring can empty out and never receive more completions
+			// This mirrors the multi-ring handler behavior (completionResultTimeout case)
+			if pendingResubmits > 0 {
+				dl.submitRecvRequestBatch(pendingResubmits)
+				pendingResubmits = 0
+			}
 			continue
 		}
 

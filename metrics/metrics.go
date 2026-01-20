@@ -428,6 +428,7 @@ type ConnectionMetrics struct {
 	SendEventLoopACKsProcessed     atomic.Uint64 // ACKs processed by EventLoop
 	SendEventLoopNAKsProcessed     atomic.Uint64 // NAKs processed by EventLoop
 	SendEventLoopIdleBackoffs      atomic.Uint64 // Times EventLoop entered idle backoff
+	SendEventLoopTightCapReached   atomic.Uint64 // Times MaxDataPerIteration cap was hit (tight loop mode)
 	// Diagnostic metrics for drain debugging
 	SendEventLoopDrainAttempts     atomic.Uint64 // Times drain was called
 	SendEventLoopDrainRingNil      atomic.Uint64 // Times packetRing was nil

@@ -48,5 +48,6 @@ func (s *sender) AssertEventLoopNoLock() {}
 // AssertTickWithLock is a no-op in release builds.
 func (s *sender) AssertTickWithLock() {}
 
-
-
+// AssertNotEventLoopOnFallback is a no-op in release builds.
+// In debug builds, this panics if EventLoop is active during control ring fallback.
+func (s *sender) AssertNotEventLoopOnFallback(controlType string) {}

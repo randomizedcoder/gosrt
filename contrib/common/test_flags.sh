@@ -255,6 +255,8 @@ run_test "PacketRingRetryStrategy random" "-usepacketring -packetringretrystrate
 run_test "PacketRingRetryStrategy adaptive" "-usepacketring -packetringretrystrategy adaptive" '"PacketRingRetryStrategy" *: *"adaptive"' "$SERVER_BIN"
 run_test "PacketRingRetryStrategy spin" "-usepacketring -packetringretrystrategy spin" '"PacketRingRetryStrategy" *: *"spin"' "$SERVER_BIN"
 run_test "PacketRingRetryStrategy hybrid" "-usepacketring -packetringretrystrategy hybrid" '"PacketRingRetryStrategy" *: *"hybrid"' "$SERVER_BIN"
+run_test "PacketRingRetryStrategy autoadaptive" "-usepacketring -packetringretrystrategy autoadaptive" '"PacketRingRetryStrategy" *: *"autoadaptive"' "$SERVER_BIN"
+run_test "PacketRingRetryStrategy auto" "-usepacketring -packetringretrystrategy auto" '"PacketRingRetryStrategy" *: *"auto"' "$SERVER_BIN"
 run_test "Lock-free ring full config" "-usepacketring -packetringsize 4096 -packetringshards 4 -packetringmaxretries 15" '"UsePacketRing" *: *true.*"PacketRingSize" *: *4096.*"PacketRingShards" *: *4.*"PacketRingMaxRetries" *: *15' "$SERVER_BIN"
 
 # Test 43-48: Event loop flags (Phase 4: Lockless Design)

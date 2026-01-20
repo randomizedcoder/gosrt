@@ -27,6 +27,10 @@ func parseRetryStrategy(s string) ring.RetryStrategy {
 		return ring.SpinThenYield
 	case "hybrid":
 		return ring.Hybrid
+	case "autoadaptive", "auto":
+		// AutoAdaptive: Starts in Yield mode (fast), relaxes to Sleep when idle.
+		// Best for high-throughput (>300 Mb/s) scenarios.
+		return ring.AutoAdaptive
 	default:
 		// "", "sleep", "sleepbackoff", or unknown -> default
 		return ring.SleepBackoff

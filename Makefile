@@ -61,6 +61,23 @@ test-quick:
 test-flags: client server
 	@./contrib/common/test_flags.sh
 
+## test-adaptive-backoff: Run adaptive backoff unit tests
+## Tests the Yield/Sleep mode switching mechanism
+test-adaptive-backoff:
+	go test -v -timeout 60s -run TestAdaptiveBackoff ./congestion/live/send/
+
+## test-adaptive-backoff-race: Run adaptive backoff tests with race detector
+test-adaptive-backoff-race:
+	go test -v -race -timeout 60s -run TestAdaptiveBackoff ./congestion/live/send/
+
+## bench-adaptive-backoff: Run adaptive backoff benchmarks
+bench-adaptive-backoff:
+	go test -bench=BenchmarkAdaptiveBackoff -benchmem -timeout 60s ./congestion/live/send/
+
+## test-backoff-hypothesis: Run the backoff hypothesis test (confirms sleep bottleneck)
+test-backoff-hypothesis:
+	go test -v -timeout 30s -run TestBackoffHypothesis ./congestion/live/send/
+
 ## audit-metrics: Verify all metrics are defined, used, and exported to Prometheus
 ## Uses AST analysis to find discrepancies between metrics.go, usage, and handler.go
 audit-metrics:
@@ -874,6 +891,78 @@ client-generator:
 client-generator-debug:
 	cd contrib/client-generator && CGO_ENABLED=0 go build -o client-generator-debug -gcflags="all=-N -l" -a
 
+## ============================================================================
+## PERFORMANCE TESTING (No sudo required!)
+## ============================================================================
+## Automated performance testing to find maximum sustainable throughput.
+## Uses AIMD (Additive Increase, Multiplicative Decrease) search algorithm.
+## See documentation/performance_maximization_500mbps.md for details.
+
+## client-seeker: Build client-seeker binary (rate-adaptive traffic generator)
+client-seeker:
+	cd contrib/client-seeker && CGO_ENABLED=0 go build -o client-seeker -ldflags="-s -w" -a
+
+## performance: Build performance orchestrator binary
+performance:
+	cd contrib/performance && CGO_ENABLED=0 go build -o performance -ldflags="-s -w" -a
+
+## build-performance: Build all performance testing binaries
+.PHONY: build-performance
+build-performance: server client-seeker performance
+
+## test-performance: Run automated performance search (no sudo required!)
+## Usage: make test-performance
+## Options:
+##   INITIAL=200M    - Starting bitrate
+##   MAX=600M        - Maximum bitrate to test
+##   STEP=10M        - Additive increase step
+##   PRECISION=5M    - Search precision
+##   FC=102400       - Flow control window
+##   RECV_RINGS=2    - Number of receive io_uring rings
+##   VERBOSE=true    - Enable verbose output
+##   JSON=true       - Output results as JSON
+## Example:
+##   make test-performance INITIAL=100M MAX=400M FC=204800
+.PHONY: test-performance
+test-performance: build-performance
+	./contrib/performance/performance $(PERF_ARGS)
+
+## test-performance-quick: Quick performance test (smaller range, faster)
+## Good for CI or quick sanity checks
+.PHONY: test-performance-quick
+test-performance-quick: build-performance
+	./contrib/performance/performance INITIAL=100M MAX=200M STEP=20M PRECISION=10M TIMEOUT=2m $(PERF_ARGS)
+
+## test-backoff-hypothesis: Test if sleep is the EventLoop bottleneck
+## Compares iteration rates: NoWait vs Yield vs Spin vs Sleep
+## Result: Sleep caps at ~945/sec, Yield achieves 6.2M/sec (6581x faster!)
+.PHONY: test-backoff-hypothesis
+test-backoff-hypothesis:
+	go test -v -timeout 30s -run TestBackoffHypothesis ./congestion/live/send/
+
+## bench-backoff: Benchmark different backoff modes
+.PHONY: bench-backoff
+bench-backoff:
+	go test -bench=BenchmarkBackoffModes -benchtime=1s ./congestion/live/send/
+
+## test-performance-500: Full performance test targeting 500 Mb/s
+## Warning: May take 10+ minutes
+.PHONY: test-performance-500
+test-performance-500: build-performance
+	./contrib/performance/performance INITIAL=200M MAX=600M STEP=10M FC=204800 RECV_RINGS=4 VERBOSE=true $(PERF_ARGS)
+
+## test-performance-dry-run: Validate configuration without running
+.PHONY: test-performance-dry-run
+test-performance-dry-run: build-performance
+	./contrib/performance/performance -dry-run $(PERF_ARGS)
+
+## clean-performance: Remove performance testing binaries and sockets
+.PHONY: clean-performance
+clean-performance:
+	rm -f contrib/client-seeker/client-seeker
+	rm -f contrib/performance/performance
+	rm -f /tmp/srt_*.sock
+
 server-profile:
 	go tool pprof -http=0.0.0.0:8080 ./contrib/server/server-debug cpu.pprof
 
@@ -885,6 +974,8 @@ clean:
 	rm -f contrib/server/server contrib/server/server-debug
 	rm -f contrib/client/client contrib/client/client-debug
 	rm -f contrib/client-generator/client-generator contrib/client-generator/client-generator-debug
+	rm -f contrib/client-seeker/client-seeker
+	rm -f contrib/performance/performance
 	@echo "Clean complete. Run 'make client server client-generator' to rebuild."
 
 ## clean-all: Remove all built binaries and generated files
@@ -925,6 +1016,8 @@ nixshell:
 # Isolation testing targets (require root)
 .PHONY: test-isolation-list test-isolation test-isolation-all test-isolation-strategies
 .PHONY: test-isolation-sender-list test-isolation-sender-phases test-isolation-sender-server
+# Performance testing targets (no sudo required!)
+.PHONY: client-seeker performance build-performance clean-performance
 .PHONY: test-isolation-sender-all test-isolation-sender-quick
 .PHONY: test-isolation-sender-20m-debug test-isolation-sender-20m-repeat
 # Matrix-generated testing targets (parallel, require root)

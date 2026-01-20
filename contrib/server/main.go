@@ -75,6 +75,13 @@ func main() {
 	// Parse all flags (shared + server-specific)
 	common.ParseFlags()
 
+	// Validate flag dependencies and auto-enable required flags
+	if warnings := common.ValidateFlagDependencies(); len(warnings) > 0 {
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "⚠ %s\n", w)
+		}
+	}
+
 	// Test mode: print config and exit
 	if *testflags {
 		config := srt.DefaultConfig()

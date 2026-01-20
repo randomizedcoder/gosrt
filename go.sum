@@ -42,6 +42,8 @@ github.com/randomizedcoder/giouring v1.0.1 h1:SwdHz9b+3jfjcJ91x4+PkRZMSD5V6YON0g
 github.com/randomizedcoder/giouring v1.0.1/go.mod h1:Cms4fX07p9f3DZPSoJWwZhuF8+b6s/ckCeg9XtiR1ms=
 github.com/randomizedcoder/go-lock-free-ring v1.0.3 h1:Y3LVnS98BMZC7oaTvEsbLuKwP06iBgqxo7V6Vx/G+2E=
 github.com/randomizedcoder/go-lock-free-ring v1.0.3/go.mod h1:Vlxt5+13n/4mqwbHrYJF20R5RcyYumTXIMiSEL5POSk=
+github.com/randomizedcoder/go-lock-free-ring v1.0.4 h1:BmhAuW2L9SER/f0NMYZ/XppBooF8dw2Hko6zw7wutzs=
+github.com/randomizedcoder/go-lock-free-ring v1.0.4/go.mod h1:Vlxt5+13n/4mqwbHrYJF20R5RcyYumTXIMiSEL5POSk=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.4.0/go.mod h1:YvHI0jy2hoMjB+UWwv71VJQ9isScKT/TqJzVSSt89Yw=
 github.com/stretchr/testify v1.7.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=

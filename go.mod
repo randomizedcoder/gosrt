@@ -8,7 +8,7 @@ require (
 	github.com/montanaflynn/stats v0.7.1
 	github.com/pkg/profile v1.7.0
 	github.com/randomizedcoder/giouring v1.0.1
-	github.com/randomizedcoder/go-lock-free-ring v1.0.3
+	github.com/randomizedcoder/go-lock-free-ring v1.0.4
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.39.0
 	golang.org/x/time v0.14.0

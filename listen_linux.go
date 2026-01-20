@@ -709,10 +709,12 @@ func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) 
 			return nil, nil
 		}
 
-		// ETIME means timeout expired - loop back to check ctx.Done()
+		// ETIME means timeout expired - return to allow handler to flush pending resubmits
+		// This is critical to prevent the ring from running dry at high throughput!
+		// Without this, the handler never gets a chance to resubmit pending requests on timeout.
 		if err == syscall.ETIME {
 			ln.incrementListenerRecvCompletionTimeout(0) // ringIdx=0 for single-ring mode
-			continue
+			return nil, nil // Return on timeout so handler can flush pending
 		}
 
 		// EINTR is normal (interrupted by signal) - retry immediately
@@ -920,6 +922,11 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 			ln.log("listen:recv:error", func() string {
 				return fmt.Sprintf("failed to submit receive batch: %v", err)
 			})
+		} else {
+			// Track successful batch submissions
+			for range sqes {
+				ln.incrementListenerRecvSubmitSuccess(0) // ringIdx=0 for single-ring mode
+			}
 		}
 	}
 }
@@ -961,11 +968,12 @@ func (ln *listener) recvCompletionHandler(ctx context.Context) {
 		// Get single completion (process immediately for low latency)
 		cqe, compInfo := ln.getRecvCompletion(ctx, ring)
 		if cqe == nil {
-			// If we have pending resubmits but no completions, flush them
-			// This ensures we don't wait indefinitely for completions when we need to resubmit
-			if pendingResubmits > 0 && pendingResubmits < batchSize {
-				// Optional: Could add a timeout here, but for now just continue
-				// The pending resubmits will be flushed when batch size is reached or on shutdown
+			// CRITICAL: On timeout or error, flush any pending resubmits to prevent ring from running dry
+			// Without this, the ring can empty out and never receive more completions
+			// This mirrors the multi-ring handler behavior (completionResultTimeout case)
+			if pendingResubmits > 0 {
+				ln.submitRecvRequestBatch(pendingResubmits)
+				pendingResubmits = 0
 			}
 			continue // No completion available or error
 		}

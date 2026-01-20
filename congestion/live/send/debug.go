@@ -162,6 +162,42 @@ func (s *sender) AssertTickWithLock() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Control Ring Fallback Assertions
+//
+// These catch the bug where control ring overflow falls back to the locked path
+// while EventLoop is running. EventLoop is lock-free - it doesn't check the lock,
+// so the fallback "locked" path will race with EventLoop's btree iteration.
+//
+// Bug discovered: 2026-01-17 (4 recv rings + 350 Mb/s → btree panic)
+// See: sender_control_ring_overflow_test.go, performance_testing_implementation_log.md
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// AssertNotEventLoopOnFallback panics if EventLoop MODE is enabled when falling back
+// to locked path due to control ring overflow. This is a design violation:
+// EventLoop doesn't hold the lock, so the "locked" fallback path will race.
+//
+// Note: We check useEventLoop (config flag), not inEventLoop (runtime state).
+// If useEventLoop is true, the EventLoop goroutine exists and can race with us,
+// even if it's currently in a select/sleep at this exact microsecond.
+//
+// Use in ACK()/NAK() fallback paths when control ring is full.
+func (s *sender) AssertNotEventLoopOnFallback(controlType string) {
+	if s.useEventLoop {
+		eventLoopGo := s.debug.eventLoopGo.Load()
+		currentGo := getGoroutineID()
+		panic(fmt.Sprintf(
+			"LOCKFREE VIOLATION: %s control ring overflow with EventLoop mode enabled!\n"+
+				"  useEventLoop: true (config flag)\n"+
+				"  EventLoop goroutine: %d (0 = not tracked yet)\n"+
+				"  Current goroutine: %d\n"+
+				"  This is a RACE CONDITION: EventLoop iterates btree without lock,\n"+
+				"  but fallback path will call ackBtree/nakBtree which modifies btree.\n"+
+				"  FIX: Drop the %s instead of falling back when useEventLoop=true.",
+			controlType, eventLoopGo, currentGo, controlType))
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 

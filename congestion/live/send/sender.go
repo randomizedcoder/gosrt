@@ -111,6 +111,31 @@ type SendConfig struct {
 	// Default: 1000000 (1 second)
 	SendDropThresholdUs uint64
 
+	// SendDropIntervalUs is the drop ticker interval in microseconds.
+	// Controls how often the sender checks for and drops too-old packets.
+	// Default: 100000 (100ms)
+	SendDropIntervalUs uint64
+
+	// UseAdaptiveBackoff enables adaptive Sleep/Yield mode switching in EventLoop.
+	// When enabled, EventLoop starts in Yield mode (fast, ~6M iterations/sec) and
+	// automatically switches to Sleep mode (slow, ~1K iterations/sec) when idle.
+	// This provides high throughput when active while saving CPU when idle.
+	// See: documentation/adaptive_eventloop_mode_design.md
+	// Default: true when EventLoop is enabled
+	UseAdaptiveBackoff bool
+
+	// AdaptiveBackoffIdleThreshold is the duration without activity before switching to Sleep.
+	// Only used when UseAdaptiveBackoff is true.
+	// Default: 1 second
+	AdaptiveBackoffIdleThreshold time.Duration
+
+	// EventLoopMaxDataPerIteration caps data packets processed per EventLoop iteration.
+	// When > 0, enables "tight loop" mode: control ring is checked after EVERY data packet.
+	// This provides minimum control latency (~500ns) at negligible overhead (~0.006%).
+	// When 0, uses legacy unbounded drain (control latency can be 1-2ms).
+	// Default: 512
+	EventLoopMaxDataPerIteration int
+
 	// --- Phase 5: Zero-Copy Payload Pool ---
 
 	// ValidatePayloadSize enables payload size validation in Push().
@@ -185,11 +210,20 @@ type sender struct {
 	controlRing *SendControlRing
 
 	// Phase 4: EventLoop
-	useEventLoop     bool
-	backoffMinSleep  time.Duration
-	backoffMaxSleep  time.Duration
-	tsbpdSleepFactor float64
+	useEventLoop       bool
+	backoffMinSleep    time.Duration
+	backoffMaxSleep    time.Duration
+	tsbpdSleepFactor   float64
+	sendDropIntervalUs uint64 // Drop ticker interval (default: 100ms = 100000µs)
 	// dropThreshold is already defined at line 109
+
+	// Tight loop configuration (eventloop_batch_sizing_design.md)
+	// When > 0, control ring is checked after EVERY data packet for minimum latency
+	maxDataPerIteration int
+
+	// Adaptive backoff for EventLoop (Yield/Sleep mode switching)
+	// See: documentation/adaptive_eventloop_mode_design.md
+	adaptiveBackoff *adaptiveBackoff
 
 	// Phase 4: Time base for EventLoop
 	// CRITICAL: PktTsbpdTime uses relative time (since connection start), so
@@ -208,6 +242,18 @@ type sender struct {
 
 // NewSender takes a SendConfig and returns a new Sender
 func NewSender(sendConfig SendConfig) congestion.Sender {
+	// Auto-enable dependencies (prevents panic, makes configuration easier)
+	// Dependency chain: UseSendEventLoop → UseSendControlRing → UseSendRing → UseBtree
+	if sendConfig.UseSendEventLoop && !sendConfig.UseSendControlRing {
+		sendConfig.UseSendControlRing = true
+	}
+	if sendConfig.UseSendControlRing && !sendConfig.UseSendRing {
+		sendConfig.UseSendRing = true
+	}
+	if sendConfig.UseSendRing && !sendConfig.UseBtree {
+		sendConfig.UseBtree = true
+	}
+
 	s := &sender{
 		nextSequenceNumber: sendConfig.InitialSequenceNumber,
 		initialSeq:         sendConfig.InitialSequenceNumber.Val(), // For atomic mode
@@ -249,9 +295,7 @@ func NewSender(sendConfig SendConfig) congestion.Sender {
 
 	// Phase 2: Initialize ring if enabled
 	if sendConfig.UseSendRing {
-		if !sendConfig.UseBtree {
-			panic("UseSendRing requires UseBtree=true")
-		}
+		// Note: UseBtree is auto-enabled above if UseSendRing is set
 
 		ringSize := sendConfig.SendRingSize
 		if ringSize == 0 {
@@ -273,9 +317,7 @@ func NewSender(sendConfig SendConfig) congestion.Sender {
 
 	// Phase 3: Initialize control ring if enabled
 	if sendConfig.UseSendControlRing {
-		if !sendConfig.UseSendRing {
-			panic("UseSendControlRing requires UseSendRing=true")
-		}
+		// Note: UseSendRing is auto-enabled above if UseSendControlRing is set
 
 		controlRingSize := sendConfig.SendControlRingSize
 		if controlRingSize == 0 {
@@ -297,9 +339,7 @@ func NewSender(sendConfig SendConfig) congestion.Sender {
 
 	// Phase 4: Initialize EventLoop if enabled
 	if sendConfig.UseSendEventLoop {
-		if !sendConfig.UseSendControlRing {
-			panic("UseSendEventLoop requires UseSendControlRing=true")
-		}
+		// Note: UseSendControlRing is auto-enabled above if UseSendEventLoop is set
 
 		s.useEventLoop = true
 
@@ -326,6 +366,12 @@ func NewSender(sendConfig SendConfig) congestion.Sender {
 		}
 		// Otherwise keep the existing dropThreshold from sendConfig.DropThreshold
 
+		// Drop ticker interval configuration
+		s.sendDropIntervalUs = sendConfig.SendDropIntervalUs
+		if s.sendDropIntervalUs == 0 {
+			s.sendDropIntervalUs = 100_000 // Default: 100ms
+		}
+
 		// CRITICAL: Initialize time function for EventLoop
 		// PktTsbpdTime uses relative time (since connection start), so EventLoop
 		// must also use relative time for TSBPD comparisons.
@@ -346,6 +392,32 @@ func NewSender(sendConfig SendConfig) congestion.Sender {
 			}
 		}
 
+		// Initialize adaptive backoff (enabled by default for EventLoop)
+		// UseAdaptiveBackoff defaults to true when EventLoop is enabled
+		useAdaptive := sendConfig.UseAdaptiveBackoff
+		if !sendConfig.UseSendEventLoop {
+			// Explicit check: if EventLoop not set, neither was UseAdaptiveBackoff
+			// But since we're already inside UseSendEventLoop block, default is true
+			useAdaptive = true
+		}
+		if useAdaptive {
+			idleThreshold := sendConfig.AdaptiveBackoffIdleThreshold
+			if idleThreshold == 0 {
+				idleThreshold = DefaultIdleThreshold // 1 second default
+			}
+			s.adaptiveBackoff = newAdaptiveBackoffWithThreshold(idleThreshold)
+		}
+
+		// Tight loop configuration (eventloop_batch_sizing_design.md)
+		// Config values:
+		//   -1 = use default (512 for tight loop)
+		//   0  = unbounded legacy mode (no tight loop - use drainRingToBtreeEventLoop)
+		//   >0 = tight loop with specified batch size
+		s.maxDataPerIteration = sendConfig.EventLoopMaxDataPerIteration
+		if s.maxDataPerIteration < 0 {
+			s.maxDataPerIteration = 512 // Default: tight loop with 512 packet cap
+		}
+		// Note: 0 means "unbounded" - the EventLoop will use the legacy drainRingToBtreeEventLoop()
 	}
 
 	// CRITICAL FIX: Initialize deliveryStartPoint to ISN

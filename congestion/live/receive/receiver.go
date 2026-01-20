@@ -304,6 +304,10 @@ func New(recvConfig Config) congestion.Receiver {
 			MaxBackoffs:        recvConfig.PacketRingMaxBackoffs,
 			MaxBackoffDuration: 10 * time.Millisecond, // Cap for AdaptiveBackoff/Hybrid
 			BackoffMultiplier:  2.0,                   // Exponential growth factor
+			// AutoAdaptive strategy options (go-lock-free-ring v1.0.4)
+			AdaptiveIdleIterations:   100000,                 // Iterations before Yield→Sleep
+			AdaptiveWarmupIterations: 1000,                   // Skip idle count after success
+			AdaptiveSleepDuration:    100 * time.Microsecond, // Sleep duration in Sleep mode
 		}
 		// Apply defaults if not configured
 		if r.writeConfig.MaxRetries <= 0 {

@@ -312,6 +312,16 @@ type Config struct {
 	// Default: 10.
 	PeriodicAckIntervalMs uint64
 
+	// SendDropIntervalMs is the sender drop ticker interval in milliseconds
+	// Controls how often the sender checks for and drops too-old packets.
+	// Default: 100. Higher values reduce CPU but may delay dropping stale packets.
+	SendDropIntervalMs uint64
+
+	// EventLoopRateIntervalMs is the rate calculation interval in milliseconds
+	// Controls how often throughput/rate statistics are calculated in EventLoop mode.
+	// Default: 1000 (1 second).
+	EventLoopRateIntervalMs uint64
+
 	// UseNakBtree enables the NAK btree for efficient gap detection
 	// Auto-set to true when IoUringRecvEnabled=true
 	UseNakBtree bool
@@ -502,6 +512,28 @@ type Config struct {
 	// Default: 1000000 (1 second)
 	SendDropThresholdUs uint64
 
+	// --- Adaptive Backoff Configuration (adaptive_eventloop_mode_design.md) ---
+
+	// UseAdaptiveBackoff enables adaptive Yield/Sleep mode switching in EventLoop.
+	// When true (default with EventLoop), starts in Yield mode (~6M ops/sec) for
+	// high throughput, automatically switches to Sleep mode (~1K ops/sec) when idle.
+	// Default: true when EventLoop is enabled
+	UseAdaptiveBackoff bool
+
+	// AdaptiveBackoffIdleThreshold is the duration without activity before switching to Sleep.
+	// Only used when UseAdaptiveBackoff is true.
+	// Default: 1 second
+	AdaptiveBackoffIdleThreshold time.Duration
+
+	// --- EventLoop Tight Loop Configuration (eventloop_batch_sizing_design.md) ---
+
+	// EventLoopMaxDataPerIteration caps data packets processed per EventLoop iteration.
+	// When > 0, enables "tight loop" mode: control ring is checked after EVERY data packet.
+	// This provides minimum control latency (~500ns) at negligible overhead (~0.006%).
+	// When 0, uses legacy unbounded drain (control latency can be 1-2ms).
+	// Default: 512 (tight loop enabled)
+	EventLoopMaxDataPerIteration int
+
 	// --- Zero-Copy Payload Pool Configuration (Phase 5: Lockless Sender) ---
 
 	// ValidateSendPayloadSize enables payload size validation in Push().
@@ -562,6 +594,8 @@ type Config struct {
 	//   "adaptive"    - AdaptiveBackoff: exponential backoff with jitter
 	//   "spin"        - SpinThenYield: yield CPU instead of sleep (lowest latency)
 	//   "hybrid"      - Hybrid: NextShard + AdaptiveBackoff
+	//   "autoadaptive" or "auto" - AutoAdaptive: Yield when active, Sleep when idle
+	//                   ⭐ RECOMMENDED for high-throughput (>300 Mb/s) scenarios
 	// Default: "" (uses SleepBackoff)
 	PacketRingRetryStrategy string
 
@@ -677,10 +711,12 @@ var defaultConfig Config = Config{
 	ShutdownDelay:             5 * time.Second,         // 5 seconds
 
 	// NAK btree defaults
-	TickIntervalMs:           10,    // 10ms TSBPD tick
-	PeriodicNakIntervalMs:    20,    // 20ms periodic NAK
-	PeriodicAckIntervalMs:    10,    // 10ms periodic ACK
-	UseNakBtree:              false, // Auto-set when IoUringRecvEnabled=true
+	TickIntervalMs:          10,   // 10ms TSBPD tick
+	PeriodicNakIntervalMs:   20,   // 20ms periodic NAK
+	PeriodicAckIntervalMs:   10,   // 10ms periodic ACK
+	SendDropIntervalMs:      100,  // 100ms sender drop check
+	EventLoopRateIntervalMs: 1000, // 1s rate calculation
+	UseNakBtree:             false, // Auto-set when IoUringRecvEnabled=true
 	SuppressImmediateNak:     false, // Auto-set when IoUringRecvEnabled=true
 	NakRecentPercent:         0.10,  // 10% of TSBPD delay
 	NakMergeGap:              3,     // Merge gaps of 3 or less
@@ -723,6 +759,16 @@ var defaultConfig Config = Config{
 	SendEventLoopBackoffMaxSleep: 1 * time.Millisecond,   // 1ms maximum sleep
 	SendTsbpdSleepFactor:         0.9,                    // Wake up at 90% of next TSBPD
 	SendDropThresholdUs:          0,                      // 0 = use auto-calculated (1.25 * peerTsbpdDelay)
+
+	// Adaptive Backoff defaults (adaptive_eventloop_mode_design.md)
+	// DISABLED: The lock-free ring now has AutoAdaptive strategy (v1.0.4)
+	// which handles Sleep/Yield switching at the ring level.
+	// Having both layers caused inconsistent performance.
+	UseAdaptiveBackoff:           true, // Adaptive Yield/Sleep for both high and low throughput
+	AdaptiveBackoffIdleThreshold: 1 * time.Second, // 1 second idle before switching to Sleep
+
+	// EventLoop tight loop defaults (eventloop_batch_sizing_design.md)
+	EventLoopMaxDataPerIteration: 512, // Enables tight loop with control check every packet
 
 	// Zero-copy payload pool defaults (Phase 5: Lockless Sender)
 	ValidateSendPayloadSize: false, // No validation by default (backward compat)

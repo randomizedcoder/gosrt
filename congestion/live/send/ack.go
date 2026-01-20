@@ -11,6 +11,10 @@ import (
 // ACK is the public API for receiving ACKs.
 // Routes through control ring (if enabled) for EventLoop processing,
 // otherwise processes directly with locking.
+//
+// IMPORTANT (Bug fix 2026-01-17): In EventLoop mode, we must NOT fall back
+// to the locked path when the ring is full. EventLoop is designed to be
+// lock-free - it doesn't check the lock. See: sender_control_ring_overflow_test.go
 func (s *sender) ACK(sequenceNumber circular.Number) {
 	// Phase 3: Route through control ring for EventLoop processing
 	if s.controlRing != nil {
@@ -18,12 +22,22 @@ func (s *sender) ACK(sequenceNumber circular.Number) {
 			s.metrics.SendControlRingPushedACK.Add(1)
 			return
 		}
-		// Ring full - fallback to direct processing with lock
+		// Ring full
 		s.metrics.SendControlRingDroppedACK.Add(1)
-		// Fall through to locked path
+
+		// CRITICAL: In EventLoop mode, do NOT fall back to locked path!
+		// EventLoop doesn't hold the lock, so this would race with btree iteration.
+		// Dropping an ACK is safe - sender will receive the next periodic ACK shortly.
+		if s.useEventLoop {
+			return
+		}
+		// Tick mode - safe to use locked fallback (Tick holds the lock)
+
+		// DEBUG ASSERT: Should never reach here in EventLoop mode (fix above should return)
+		s.AssertNotEventLoopOnFallback("ACK")
 	}
 
-	// Legacy path with locking
+	// Legacy/Tick path with locking
 	if s.lockTiming != nil {
 		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {
 			s.ackLocked(sequenceNumber)
@@ -59,7 +73,7 @@ func (s *sender) ackBtree(sequenceNumber circular.Number) {
 	// Decommission removed packets
 	for _, p := range packets {
 		pktLen := p.Len()
-		m.CongestionSendPktBuf.Add(^uint64(0))                    // Decrement by 1
+		m.CongestionSendPktBuf.Add(^uint64(0))                   // Decrement by 1
 		m.CongestionSendByteBuf.Add(^uint64(uint64(pktLen) - 1)) // Subtract pktLen
 		p.Decommission()
 	}

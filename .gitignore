@@ -1,12 +1,36 @@
-/contrib/server/server*
-/contrib/client/client*
-server*
-client*
+# Binaries
+/contrib/server/server
+/contrib/client/client
+/contrib/client-generator/client-generator
+/contrib/client-seeker/client-seeker
+/contrib/performance/performance
+
+# Root-level binaries (from legacy builds)
+/server
+/client
+/client-generator
+
+# Build output directories
+/bin/
+
+# Legacy patterns
 integration_testing
+
+# Profiling output
 *.prof
 *.pprof
 *.out
-*.html
+*.pprofserver
+
+# Media files (test output)
 *.ts
 *.mp4
-*.pprofserver
+
+# Generated HTML reports
+*.html
+
+# Unix sockets (test artifacts)
+*.sock
+
+# Log files
+*.log

@@ -2,6 +2,7 @@ package common
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"time"
 
@@ -76,9 +77,11 @@ var (
 	IoUringSendRingCount = flag.Int("iouringsendringcount", 1, "Number of io_uring send rings per connection (1-8)")
 
 	// Timer interval configuration flags
-	TickIntervalMs        = flag.Uint64("tickintervalms", 0, "TSBPD delivery tick interval in milliseconds (default: 10)")
-	PeriodicNakIntervalMs = flag.Uint64("periodicnakintervalms", 0, "Periodic NAK timer interval in milliseconds (default: 20)")
-	PeriodicAckIntervalMs = flag.Uint64("periodicackintervalms", 0, "Periodic ACK timer interval in milliseconds (default: 10)")
+	TickIntervalMs          = flag.Uint64("tickintervalms", 0, "TSBPD delivery tick interval in milliseconds (default: 10)")
+	PeriodicNakIntervalMs   = flag.Uint64("periodicnakintervalms", 0, "Periodic NAK timer interval in milliseconds (default: 20)")
+	PeriodicAckIntervalMs   = flag.Uint64("periodicackintervalms", 0, "Periodic ACK timer interval in milliseconds (default: 10)")
+	SendDropIntervalMs      = flag.Uint64("senddropintervalms", 0, "Sender drop ticker interval in milliseconds (default: 100)")
+	EventLoopRateIntervalMs = flag.Uint64("eventlooprateintervalms", 0, "Rate calculation interval in milliseconds (default: 1000)")
 
 	// NAK btree configuration flags
 	UseNakBtree              = flag.Bool("usenakbtree", false, "Enable NAK btree for efficient gap detection (auto-enabled with -iouringrecvenabled)")
@@ -120,6 +123,18 @@ var (
 	SendTsbpdSleepFactor         = flag.Float64("sendtsbpdsleepfactor", 0.9, "Sender TSBPD sleep factor (default: 0.9)")
 	SendDropThresholdUs          = flag.Uint64("senddropthresholdus", 0, "Sender drop threshold in microseconds (0 = auto-calculated from 1.25 * peerTsbpdDelay)")
 
+	// Adaptive Backoff flags (adaptive_eventloop_mode_design.md)
+	// Switches between Yield (~6M ops/sec) and Sleep (~1K ops/sec) based on activity
+	UseAdaptiveBackoff           = flag.Bool("useadaptivebackoff", true, "Enable adaptive Yield/Sleep mode switching in EventLoop (Yield=high throughput, Sleep=CPU friendly when idle)")
+	AdaptiveBackoffIdleThreshold = flag.Duration("adaptivebackoffidlethreshold", 1*time.Second, "Duration without activity before switching to Sleep mode (default: 1s)")
+
+	// EventLoop Tight Loop flags (eventloop_batch_sizing_design.md)
+	// Enables control-priority tight loop: control ring checked after EVERY data packet
+	// -1 = use library default (512 for tight loop)
+	// 0 = unbounded legacy mode (no tight loop)
+	// >0 = tight loop with specified batch size
+	EventLoopMaxDataPerIteration = flag.Int("eventloopmaxdata", -1, "Max data packets per EventLoop iteration (-1 = default 512, 0 = unbounded legacy, >0 = custom)")
+
 	// Zero-copy payload pool flags (Phase 5: Lockless Sender)
 	ValidateSendPayloadSize = flag.Bool("validatesendpayloadsize", false, "Validate payload size in Push() (rejects > 1316 bytes)")
 
@@ -156,7 +171,8 @@ var (
 			"'random' (try random shards - best load distribution), "+
 			"'adaptive' (exponential backoff with jitter), "+
 			"'spin' (yield CPU instead of sleep - lowest latency, highest CPU), "+
-			"'hybrid' (next + adaptive). "+
+			"'hybrid' (next + adaptive), "+
+			"'autoadaptive' or 'auto' (⭐ RECOMMENDED for >300 Mb/s: Yield when active, Sleep when idle). "+
 			"Empty string uses default 'sleep' strategy.")
 
 	// Event loop configuration flags (Phase 4: Lockless Design)
@@ -219,7 +235,100 @@ var (
 			"(e.g., /tmp/srt_metrics_server.sock). "+
 			"If not specified, no UDS metrics listener is opened. "+
 			"UDS allows metrics collection from processes in isolated network namespaces.")
+
+	// ════════════════════════════════════════════════════════════════════════════
+	// Performance Test Flags
+	// Used by: contrib/performance/, contrib/client-seeker/
+	// Reference: performance_tools_flag_unification.md
+	// ════════════════════════════════════════════════════════════════════════════
+
+	// Search parameters (used by performance orchestrator)
+	TestInitialBitrate = flag.Int64("initial", 200_000_000,
+		"Starting bitrate for performance search in bps (default: 200M). "+
+			"Supports suffixes: K, M, G (e.g., -initial 350M)")
+	TestMinBitrate = flag.Int64("min-bitrate", 50_000_000,
+		"Minimum bitrate floor in bps (default: 50M)")
+	TestMaxBitrate = flag.Int64("max-bitrate", 600_000_000,
+		"Maximum bitrate ceiling in bps (default: 600M)")
+	TestStepSize = flag.Int64("step", 10_000_000,
+		"Additive increase step in bps (default: 10M)")
+	TestPrecision = flag.Int64("precision", 5_000_000,
+		"Search stops when high-low < precision (default: 5M)")
+	TestSearchTimeout = flag.Duration("search-timeout", 10*time.Minute,
+		"Maximum search time (default: 10m)")
+	TestDecreasePercent = flag.Float64("decrease", 0.25,
+		"Multiplicative decrease on failure (default: 0.25 = 25%)")
+
+	// Stability evaluation parameters
+	TestWarmUpDuration = flag.Duration("warmup", 2*time.Second,
+		"Warm-up duration after bitrate change (default: 2s)")
+	TestStabilityWindow = flag.Duration("stability-window", 5*time.Second,
+		"Stability evaluation window (default: 5s)")
+	TestSampleInterval = flag.Duration("sample-interval", 500*time.Millisecond,
+		"Prometheus scrape interval (default: 500ms)")
+
+	// Stability thresholds
+	TestMaxGapRate = flag.Float64("max-gap-rate", 0.01,
+		"Max gaps per second for stability (default: 0.01)")
+	TestMaxNAKRate = flag.Float64("max-nak-rate", 0.02,
+		"Max NAKs per second for stability (default: 0.02)")
+	TestMaxRTTMs = flag.Float64("max-rtt", 100,
+		"Max RTT in milliseconds for stability (default: 100)")
+	TestMinThroughput = flag.Float64("min-throughput", 0.95,
+		"Min throughput ratio vs target (default: 0.95)")
+
+	// Test output options
+	TestVerbose = flag.Bool("test-verbose", false,
+		"Enable verbose test output")
+	TestJSONOutput = flag.Bool("test-json", false,
+		"Output results as JSON")
+	TestOutputFile = flag.String("test-output", "",
+		"Path for test result output file")
+	TestProfileDir = flag.String("profile-dir", "/tmp/srt_profiles",
+		"Directory for CPU/heap profile captures")
+	TestStatusInterval = flag.Duration("status-interval", 5*time.Second,
+		"Interval for printing progress status during search (default: 5s, 0=disabled)")
+
+	// Client-seeker specific flags
+	SeekerTarget = flag.String("target", "",
+		"SRT target URL for client-seeker (e.g., srt://127.0.0.1:6000/stream)")
+	SeekerControlUDS = flag.String("control-socket", "/tmp/srt_seeker_control.sock",
+		"Unix domain socket path for seeker control commands")
+	SeekerMetricsUDS = flag.String("metrics-socket", "/tmp/srt_seeker_metrics.sock",
+		"Unix domain socket path for seeker Prometheus metrics")
+	SeekerWatchdogTimeout = flag.Duration("watchdog-timeout", 10*time.Second,
+		"Watchdog timeout - stop if no heartbeat received (default: 10s)")
+	SeekerHeartbeatInterval = flag.Duration("heartbeat-interval", 2*time.Second,
+		"Expected heartbeat interval from orchestrator (default: 2s)")
 )
+
+// testOnlyFlags lists flags that should NOT be passed to subprocesses.
+// These are orchestrator/test-specific parameters.
+var testOnlyFlags = map[string]bool{
+	"initial":            true,
+	"min-bitrate":        true,
+	"max-bitrate":        true,
+	"step":               true,
+	"precision":          true,
+	"search-timeout":     true,
+	"decrease":           true,
+	"warmup":             true,
+	"stability-window":   true,
+	"sample-interval":    true,
+	"max-gap-rate":       true,
+	"max-nak-rate":       true,
+	"max-rtt":            true,
+	"min-throughput":     true,
+	"test-verbose":       true,
+	"test-json":          true,
+	"test-output":        true,
+	"profile-dir":        true,
+	"target":             true,
+	"control-socket":     true,
+	"metrics-socket":     true,
+	"watchdog-timeout":   true,
+	"heartbeat-interval": true,
+}
 
 // ParseFlags parses command-line flags and populates FlagSet map
 // with flags that were explicitly set by the user.
@@ -397,6 +506,12 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	if FlagSet["periodicackintervalms"] {
 		config.PeriodicAckIntervalMs = *PeriodicAckIntervalMs
 	}
+	if FlagSet["senddropintervalms"] {
+		config.SendDropIntervalMs = *SendDropIntervalMs
+	}
+	if FlagSet["eventlooprateintervalms"] {
+		config.EventLoopRateIntervalMs = *EventLoopRateIntervalMs
+	}
 
 	// NAK btree flags
 	if FlagSet["usenakbtree"] {
@@ -484,6 +599,19 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	}
 	if FlagSet["senddropthresholdus"] {
 		config.SendDropThresholdUs = *SendDropThresholdUs
+	}
+
+	// Adaptive Backoff flags (adaptive_eventloop_mode_design.md)
+	if FlagSet["useadaptivebackoff"] {
+		config.UseAdaptiveBackoff = *UseAdaptiveBackoff
+	}
+	if FlagSet["adaptivebackoffidlethreshold"] {
+		config.AdaptiveBackoffIdleThreshold = *AdaptiveBackoffIdleThreshold
+	}
+
+	// EventLoop Tight Loop flags (eventloop_batch_sizing_design.md)
+	if FlagSet["eventloopmaxdata"] {
+		config.EventLoopMaxDataPerIteration = *EventLoopMaxDataPerIteration
 	}
 
 	// Zero-copy payload pool flags (Phase 5: Lockless Sender)
@@ -584,4 +712,146 @@ func ApplyFlagsToConfig(config *srt.Config) {
 	if FlagSet["name"] {
 		config.InstanceName = *InstanceName
 	}
+}
+
+// BuildFlagArgs returns CLI arguments for all explicitly-set flags.
+// Used by the performance orchestrator to spawn subprocesses (server, client-seeker)
+// with the same SRT configuration.
+//
+// Excludes test-only flags (search params, stability thresholds, etc.) that are
+// orchestrator-specific and shouldn't be passed to subprocesses.
+//
+// Example output: ["-fc=102400", "-rcvbuf=67108864", "-useeventloop", ...]
+func BuildFlagArgs() []string {
+	var args []string
+	flag.Visit(func(f *flag.Flag) {
+		// Skip test-only flags (not for subprocesses)
+		if testOnlyFlags[f.Name] {
+			return
+		}
+		// Format: -name=value
+		args = append(args, fmt.Sprintf("-%s=%s", f.Name, f.Value.String()))
+	})
+	return args
+}
+
+// BuildFlagArgsFiltered returns CLI arguments for explicitly-set flags,
+// excluding the specified flag names.
+//
+// Use this when you need to override certain flags for a subprocess.
+// Example: exclude "-addr" when spawning server on a different port.
+func BuildFlagArgsFiltered(exclude ...string) []string {
+	excludeMap := make(map[string]bool)
+	for _, name := range exclude {
+		excludeMap[name] = true
+	}
+
+	var args []string
+	flag.Visit(func(f *flag.Flag) {
+		// Skip test-only flags
+		if testOnlyFlags[f.Name] {
+			return
+		}
+		// Skip excluded flags
+		if excludeMap[f.Name] {
+			return
+		}
+		args = append(args, fmt.Sprintf("-%s=%s", f.Name, f.Value.String()))
+	})
+	return args
+}
+
+// IsTestFlag returns true if the flag name is a test-only flag.
+func IsTestFlag(name string) bool {
+	return testOnlyFlags[name]
+}
+
+// PrintFlagSummary prints a summary of explicitly-set flags for debugging.
+func PrintFlagSummary() {
+	fmt.Println("=== Explicitly Set Flags ===")
+	flag.Visit(func(f *flag.Flag) {
+		category := "SRT"
+		if testOnlyFlags[f.Name] {
+			category = "TEST"
+		}
+		fmt.Printf("  [%s] -%s = %s\n", category, f.Name, f.Value.String())
+	})
+	fmt.Println("============================")
+}
+
+// ValidateFlagDependencies checks flag combinations and auto-enables dependencies.
+// It returns a list of warnings for any auto-enabled flags.
+// Call this after flag.Parse() to ensure consistent configuration.
+func ValidateFlagDependencies() []string {
+	var warnings []string
+
+	// Sender dependency chain: UseSendEventLoop → UseSendControlRing → UseSendRing → UseSendBtree
+	if FlagSet["usesendeventloop"] && *UseSendEventLoop {
+		if !FlagSet["usesendcontrolring"] || !*UseSendControlRing {
+			*UseSendControlRing = true
+			if !FlagSet["usesendcontrolring"] {
+				warnings = append(warnings, "Auto-enabled -usesendcontrolring (required by -usesendeventloop)")
+			}
+		}
+	}
+	if FlagSet["usesendcontrolring"] && *UseSendControlRing {
+		if !FlagSet["usesendring"] || !*UseSendRing {
+			*UseSendRing = true
+			if !FlagSet["usesendring"] {
+				warnings = append(warnings, "Auto-enabled -usesendring (required by -usesendcontrolring)")
+			}
+		}
+	}
+	if FlagSet["usesendring"] && *UseSendRing {
+		if !FlagSet["usesendbtree"] || !*UseSendBtree {
+			*UseSendBtree = true
+			if !FlagSet["usesendbtree"] {
+				warnings = append(warnings, "Auto-enabled -usesendbtree (required by -usesendring)")
+			}
+		}
+	}
+
+	// Receiver dependency chain: UseEventLoop → UsePacketRing
+	if FlagSet["useeventloop"] && *UseEventLoop {
+		if !FlagSet["usepacketring"] || !*UsePacketRing {
+			*UsePacketRing = true
+			if !FlagSet["usepacketring"] {
+				warnings = append(warnings, "Auto-enabled -usepacketring (required by -useeventloop)")
+			}
+		}
+	}
+
+	// Receiver control ring dependency: UseRecvControlRing → UseEventLoop → UsePacketRing
+	if FlagSet["userecvcontrolring"] && *UseRecvControlRing {
+		if !FlagSet["useeventloop"] || !*UseEventLoop {
+			*UseEventLoop = true
+			if !FlagSet["useeventloop"] {
+				warnings = append(warnings, "Auto-enabled -useeventloop (required by -userecvcontrolring)")
+			}
+		}
+		if !FlagSet["usepacketring"] || !*UsePacketRing {
+			*UsePacketRing = true
+			if !FlagSet["usepacketring"] {
+				warnings = append(warnings, "Auto-enabled -usepacketring (required by -userecvcontrolring)")
+			}
+		}
+	}
+
+	// io_uring receive rings require io_uring to be enabled
+	if FlagSet["iouringrecvringcount"] && *IoUringRecvRingCount > 1 {
+		if !FlagSet["iouringenabled"] || !*IoUringEnabled {
+			*IoUringEnabled = true
+			if !FlagSet["iouringenabled"] {
+				warnings = append(warnings, "Auto-enabled -iouringenabled (required by -iouringrecvringcount)")
+			}
+		}
+		if !FlagSet["iouringrecvenabled"] || !*IoUringRecvEnabled {
+			*IoUringRecvEnabled = true
+			if !FlagSet["iouringrecvenabled"] {
+				warnings = append(warnings, "Auto-enabled -iouringrecvenabled (required by -iouringrecvringcount)")
+			}
+		}
+	}
+
+	return warnings
 }

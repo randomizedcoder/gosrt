@@ -439,18 +439,18 @@ func TestRace_MultipleOperations(t *testing.T) {
 func TestRace_Tick_Push(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:            m,
-		OnDeliver:                    func(p packet.Packet) {},
-		StartTime:                    time.Now(),
-		UseBtree:                     true,
-		BtreeDegree:                  32,
-		UseSendRing:                  false, // Use locked path
-		UseSendControlRing:           false,
-		UseSendEventLoop:             false, // Use Tick() not EventLoop
-		SendDropThresholdUs:          10_000_000,
-		DropThreshold:                10_000_000,
-		LockTimingMetrics:            &metrics.LockTimingMetrics{}, // Enable lock timing
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		BtreeDegree:           32,
+		UseSendRing:           false, // Use locked path
+		UseSendControlRing:    false,
+		UseSendEventLoop:      false, // Use Tick() not EventLoop
+		SendDropThresholdUs:   10_000_000,
+		DropThreshold:         10_000_000,
+		LockTimingMetrics:     &metrics.LockTimingMetrics{}, // Enable lock timing
 	}).(*sender)
 
 	var nowUs atomic.Uint64
@@ -503,15 +503,15 @@ func TestRace_Tick_Push(t *testing.T) {
 func TestRace_Tick_ACK(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:            m,
-		OnDeliver:                    func(p packet.Packet) {},
-		StartTime:                    time.Now(),
-		UseBtree:                     true,
-		UseSendRing:                  false,
-		UseSendControlRing:           false,
-		UseSendEventLoop:             false,
-		LockTimingMetrics:            &metrics.LockTimingMetrics{},
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           false,
+		UseSendControlRing:    false,
+		UseSendEventLoop:      false,
+		LockTimingMetrics:     &metrics.LockTimingMetrics{},
 	}).(*sender)
 
 	var nowUs atomic.Uint64
@@ -572,15 +572,15 @@ func TestRace_Tick_NAK(t *testing.T) {
 
 	m := &metrics.ConnectionMetrics{}
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:            m,
-		OnDeliver:                    func(p packet.Packet) { retransmitted.Add(1) },
-		StartTime:                    time.Now(),
-		UseBtree:                     true,
-		UseSendRing:                  false,
-		UseSendControlRing:           false,
-		UseSendEventLoop:             false,
-		LockTimingMetrics:            &metrics.LockTimingMetrics{},
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) { retransmitted.Add(1) },
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           false,
+		UseSendControlRing:    false,
+		UseSendEventLoop:      false,
+		LockTimingMetrics:     &metrics.LockTimingMetrics{},
 	}).(*sender)
 
 	var nowUs atomic.Uint64
@@ -644,17 +644,17 @@ func TestRace_Tick_NAK(t *testing.T) {
 func TestRace_Tick_Push_ACK_NAK(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:            m,
-		OnDeliver:                    func(p packet.Packet) {},
-		StartTime:                    time.Now(),
-		UseBtree:                     true,
-		UseSendRing:                  false,
-		UseSendControlRing:           false,
-		UseSendEventLoop:             false,
-		SendDropThresholdUs:          10_000_000,
-		DropThreshold:                10_000_000,
-		LockTimingMetrics:            &metrics.LockTimingMetrics{},
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           false,
+		UseSendControlRing:    false,
+		UseSendEventLoop:      false,
+		SendDropThresholdUs:   10_000_000,
+		DropThreshold:         10_000_000,
+		LockTimingMetrics:     &metrics.LockTimingMetrics{},
 	}).(*sender)
 
 	var nowUs atomic.Uint64
@@ -745,21 +745,21 @@ func TestRace_Tick_Push_ACK_NAK(t *testing.T) {
 func TestRace_Tick_WithRing(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:            m,
-		OnDeliver:                    func(p packet.Packet) {},
-		StartTime:                    time.Now(),
-		UseBtree:                     true,
-		BtreeDegree:                  32,
-		UseSendRing:                  true, // Ring mode - Push is lock-free
-		SendRingSize:                 1024,
-		SendRingShards:               1,
-		UseSendControlRing:           true,
-		SendControlRingSize:          256,
-		UseSendEventLoop:             false, // Use Tick() not EventLoop
-		SendDropThresholdUs:          10_000_000,
-		DropThreshold:                10_000_000,
-		LockTimingMetrics:            &metrics.LockTimingMetrics{},
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		BtreeDegree:           32,
+		UseSendRing:           true, // Ring mode - Push is lock-free
+		SendRingSize:          1024,
+		SendRingShards:        1,
+		UseSendControlRing:    true,
+		SendControlRingSize:   256,
+		UseSendEventLoop:      false, // Use Tick() not EventLoop
+		SendDropThresholdUs:   10_000_000,
+		DropThreshold:         10_000_000,
+		LockTimingMetrics:     &metrics.LockTimingMetrics{},
 	}).(*sender)
 
 	var nowUs atomic.Uint64
@@ -828,17 +828,17 @@ func TestRace_Tick_WithRing(t *testing.T) {
 func TestRace_Tick_ListMode(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:            m,
-		OnDeliver:                    func(p packet.Packet) {},
-		StartTime:                    time.Now(),
-		UseBtree:                     false, // List mode
-		UseSendRing:                  false,
-		UseSendControlRing:           false,
-		UseSendEventLoop:             false,
-		SendDropThresholdUs:          10_000_000,
-		DropThreshold:                10_000_000,
-		LockTimingMetrics:            &metrics.LockTimingMetrics{},
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              false, // List mode
+		UseSendRing:           false,
+		UseSendControlRing:    false,
+		UseSendEventLoop:      false,
+		SendDropThresholdUs:   10_000_000,
+		DropThreshold:         10_000_000,
+		LockTimingMetrics:     &metrics.LockTimingMetrics{},
 	}).(*sender)
 
 	var nowUs atomic.Uint64
@@ -984,3 +984,8 @@ func TestRace_ReadMetrics(t *testing.T) {
 	t.Log("Metrics read concurrently without race")
 }
 
+// ============================================================================
+// Control Ring Overflow Tests
+// ============================================================================
+// NOTE: These tests have been moved to sender_control_ring_overflow_test.go
+// See: TestRace_ControlRingOverflow_ACK, TestRace_ControlRingOverflow_NAK, etc.

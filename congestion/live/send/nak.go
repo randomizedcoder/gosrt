@@ -12,6 +12,10 @@ import (
 // Routes through control ring (if enabled) for EventLoop processing,
 // otherwise processes directly with locking.
 // Returns the number of packets retransmitted (0 if routed to ring).
+//
+// IMPORTANT (Bug fix 2026-01-17): In EventLoop mode, we must NOT fall back
+// to the locked path when the ring is full. EventLoop is designed to be
+// lock-free - it doesn't check the lock. See: sender_control_ring_overflow_test.go
 func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 	if len(sequenceNumbers) == 0 {
 		return 0
@@ -23,12 +27,22 @@ func (s *sender) NAK(sequenceNumbers []circular.Number) uint64 {
 			s.metrics.SendControlRingPushedNAK.Add(1)
 			return 0 // Actual count tracked when EventLoop processes
 		}
-		// Ring full - fallback to direct processing with lock
+		// Ring full
 		s.metrics.SendControlRingDroppedNAK.Add(1)
-		// Fall through to locked path
+
+		// CRITICAL: In EventLoop mode, do NOT fall back to locked path!
+		// EventLoop doesn't hold the lock, so this would race with btree iteration.
+		// Dropping a NAK is safe - receiver will send NAK again if packet still missing.
+		if s.useEventLoop {
+			return 0
+		}
+		// Tick mode - safe to use locked fallback (Tick holds the lock)
+
+		// DEBUG ASSERT: Should never reach here in EventLoop mode (fix above should return)
+		s.AssertNotEventLoopOnFallback("NAK")
 	}
 
-	// Legacy path with locking
+	// Legacy/Tick path with locking
 	if s.lockTiming != nil {
 		var result uint64
 		metrics.WithWLockTiming(s.lockTiming, &s.lock, func() {

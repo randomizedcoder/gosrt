@@ -650,7 +650,7 @@ func createReceiver(c *srtConn) congestion.Receiver {
 
 		// Event loop configuration (Phase 4: Lockless Design)
 		UseEventLoop:          c.config.UseEventLoop,
-		EventLoopRateInterval: c.config.EventLoopRateInterval,
+		EventLoopRateInterval: c.getEventLoopRateInterval(),
 		BackoffColdStartPkts:  c.config.BackoffColdStartPkts,
 		BackoffMinSleep:       c.config.BackoffMinSleep,
 		BackoffMaxSleep:       c.config.BackoffMaxSleep,
@@ -668,6 +668,15 @@ func createReceiver(c *srtConn) congestion.Receiver {
 		Debug:   c.config.ReceiverDebug,
 		LogFunc: c.log,
 	})
+}
+
+// getEventLoopRateInterval returns the EventLoop rate calculation interval.
+// Prefers EventLoopRateIntervalMs (CLI flag) over EventLoopRateInterval (time.Duration).
+func (c *srtConn) getEventLoopRateInterval() time.Duration {
+	if c.config.EventLoopRateIntervalMs > 0 {
+		return time.Duration(c.config.EventLoopRateIntervalMs) * time.Millisecond
+	}
+	return c.config.EventLoopRateInterval
 }
 
 // createSender initializes the sender with connection-specific configuration.
@@ -713,6 +722,14 @@ func createSender(c *srtConn) congestion.Sender {
 		SendEventLoopBackoffMaxSleep: c.config.SendEventLoopBackoffMaxSleep,
 		SendTsbpdSleepFactor:         c.config.SendTsbpdSleepFactor,
 		SendDropThresholdUs:          c.config.SendDropThresholdUs,
+		SendDropIntervalUs:           c.config.SendDropIntervalMs * 1000, // Convert ms to µs
+
+		// Adaptive Backoff (adaptive_eventloop_mode_design.md)
+		UseAdaptiveBackoff:           c.config.UseAdaptiveBackoff,
+		AdaptiveBackoffIdleThreshold: c.config.AdaptiveBackoffIdleThreshold,
+
+		// Tight Loop (eventloop_batch_sizing_design.md)
+		EventLoopMaxDataPerIteration: c.config.EventLoopMaxDataPerIteration,
 
 		// Phase 5: Zero-copy payload pool
 		ValidatePayloadSize: c.config.ValidateSendPayloadSize,
