@@ -3331,6 +3331,82 @@ This would make the EventLoop truly lock-free with only atomic operations and sy
 
 ---
 
+## EXPERIMENT: Skip Select Every N Iterations (FAILED)
+
+**Date**: 2026-01-19
+
+### Hypothesis
+
+If we skip the `select{}` statement every N iterations (e.g., 1000), we can reduce the 19% CPU overhead while still checking timers periodically.
+
+### Implementation
+
+Added counter-based select skipping to both EventLoops:
+
+```go
+// Sender EventLoop
+const selectCheckInterval = 1000
+for i := uint64(0); ; i++ {
+    if i%selectCheckInterval == 0 {
+        select {
+        case <-ctx.Done(): return
+        case <-dropTicker.C: ...
+        default:
+        }
+    }
+    // ... packet processing ...
+}
+```
+
+### Test Results
+
+| Interval | RTT | ACKs Sent | Throughput | Result |
+|----------|-----|-----------|------------|--------|
+| Baseline (no skip) | 7.67ms | ~6000/min | 350 Mb/s | ✅ Working |
+| 1000 | 47ms | 28 in 18s | ~32 Mb/s | ❌ BROKEN |
+| 100 | 6544ms | 42 in 35s | ~20 Mb/s | ❌ WORSE |
+
+### Root Cause: Ticker Channel Buffer Overflow
+
+**The approach is fundamentally flawed with `time.Ticker` channels.**
+
+Go's `time.Ticker` has an internal buffer of 1:
+1. Tick 1 arrives → stored in buffer
+2. Tick 2 arrives → **DROPPED** (buffer full, tick 1 not read)
+3. Ticks 3, 4, 5... → **ALL DROPPED**
+4. When we finally read → only get 1 tick, missed all others
+
+This caused:
+- ACK timer fires being lost → sender doesn't get ACKs
+- NAK timer fires being lost → no retransmission requests
+- RTT explodes because ACKs are sparse
+- Connection eventually fails due to idle timeout
+
+### Key Insight
+
+**You cannot skip reading from a `time.Ticker` channel without losing events.**
+
+The only valid approaches are:
+1. **Always read the select** (current behavior, 19% overhead)
+2. **Replace tickers with time-based atomic checks** (proper fix)
+
+The second approach uses:
+```go
+nowUs := s.nowFn()
+if nowUs - s.lastDropCheck.Load() >= s.dropIntervalUs {
+    s.lastDropCheck.Store(nowUs)
+    s.dropOldPacketsEventLoop(nowUs)
+}
+```
+
+This eliminates channels entirely - no buffer, no lost events.
+
+### Conclusion
+
+**REVERTED** - The "skip select" approach doesn't work. Must implement proper atomic polling to eliminate select{} overhead.
+
+---
+
 # Current Status Summary (2026-01-19)
 
 ## Performance Milestones Achieved

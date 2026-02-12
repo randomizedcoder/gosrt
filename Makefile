@@ -19,10 +19,13 @@ SHORTCOMMIT := $(shell echo $(COMMIT) | head -c 7)
 GOEXPERIMENT ?= jsonv2,greenteagc
 export GOEXPERIMENT
 
-.PHONY: all check code-audit code-audit-seq code-audit-metrics code-audit-test test test-quick audit-metrics
+.PHONY: all build check code-audit code-audit-seq code-audit-metrics code-audit-test test test-quick audit-metrics
 .PHONY: coverage coverage-html coverage-check coverage-by-package
 
 all: build
+
+## build: Build all main binaries (client, server, client-generator)
+build: client server client-generator
 
 ## check: Run all static analysis checks (code-audit, lint)
 ## This prevents unsafe patterns from being introduced
@@ -73,10 +76,6 @@ test-adaptive-backoff-race:
 ## bench-adaptive-backoff: Run adaptive backoff benchmarks
 bench-adaptive-backoff:
 	go test -bench=BenchmarkAdaptiveBackoff -benchmem -timeout 60s ./congestion/live/send/
-
-## test-backoff-hypothesis: Run the backoff hypothesis test (confirms sleep bottleneck)
-test-backoff-hypothesis:
-	go test -v -timeout 30s -run TestBackoffHypothesis ./congestion/live/send/
 
 ## audit-metrics: Verify all metrics are defined, used, and exported to Prometheus
 ## Uses AST analysis to find discrepancies between metrics.go, usage, and handler.go
@@ -514,6 +513,7 @@ network-cleanup:
 network-status:
 	@cd contrib/integration_testing/network && sudo ./status.sh
 
+## test-congestion-live: Run congestion/live package tests
 test-congestion-live:
 	go test -v ./congestion/live
 
@@ -580,7 +580,8 @@ ci-race:
 		echo "Review /tmp/race_results.txt for details"; \
 		exit 1; \
 	else \
-		echo "";
+		echo "✅ No races detected - CI passed"; \
+	fi
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## CODE COVERAGE ENFORCEMENT
@@ -651,9 +652,7 @@ ci-full: ci coverage-check
 	@echo ""
 	@echo "════════════════════════════════════════"
 	@echo "✅ Full CI Pipeline Passed"
-	@echo "════════════════════════════════════════" \
-		echo "✅ No races detected - CI passed"; \
-	fi
+	@echo "════════════════════════════════════════"
 
 ## bench-receiver: Run receiver benchmarks (config comparison)
 bench-receiver:
@@ -727,7 +726,7 @@ bench-circular:
 	@echo "=== Circular Number Comparison Benchmarks ==="
 	go test -bench=BenchmarkLt -benchmem -benchtime=2s ./circular | tee /tmp/bench-circular.txt
 	@echo ""
-	@echo "Results saved to /tmp/bench-packet-pool.txt"
+	@echo "Results saved to /tmp/bench-circular.txt"
 
 ## fuzz: Run fuzz tests
 fuzz:
@@ -873,6 +872,7 @@ client:
 client-debug:
 	cd contrib/client && CGO_ENABLED=0 go build -o client-debug -gcflags="all=-N -l" -a
 
+## client-all: Build both client and client-debug binaries
 client-all: client client-debug
 
 ## server: Build import binary
@@ -963,9 +963,11 @@ clean-performance:
 	rm -f contrib/performance/performance
 	rm -f /tmp/srt_*.sock
 
+## server-profile: Open pprof web UI for server CPU profile
 server-profile:
 	go tool pprof -http=0.0.0.0:8080 ./contrib/server/server-debug cpu.pprof
 
+## server-all: Build both server and server-debug binaries
 server-all: server server-debug
 
 ## clean: Remove all built binaries (forces rebuild on next test)
