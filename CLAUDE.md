@@ -11,11 +11,13 @@ GoSRT is a pure-Go implementation of the SRT (Secure Reliable Transport) protoco
 ## Build Commands
 
 ```bash
-make build              # Build with Go 1.25+ experimental features (jsonv2, greenteagc)
+make build              # Build with Go 1.26+ (greenteagc GC default, jsonv2 experimental)
 make client server      # Build production binaries
 make client-debug server-debug  # Build with debug symbols (for profiling)
 make build-performance  # Build performance testing tools
 ```
+
+**Pure Go - No CGO Required**: All binaries are built with `CGO_ENABLED=0`. The io_uring integration (`giouring`) uses pure Go syscalls, not liburing. This enables fully static binaries with no C dependencies.
 
 ## Testing
 
