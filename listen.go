@@ -8,10 +8,11 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	srtnet "github.com/datarhei/gosrt/net"
-	"github.com/datarhei/gosrt/packet"
+	srtnet "github.com/randomizedcoder/gosrt/net"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // ConnType represents the kind of connection as returned
@@ -123,13 +124,15 @@ type listener struct {
 
 	backlog  chan packet.Packet
 	connReqs map[uint32]*connRequest
-	conns    map[uint32]*srtConn
-	lock     sync.RWMutex
+	conns    sync.Map     // key: uint32 (socketId), value: *srtConn
+	lock     sync.RWMutex // Used for doneErr and doneChan, not for conns
 
 	start time.Time
 
 	rcvQueue chan packet.Packet
 
+	// sndMutex is only used as fallback when io_uring is disabled or unavailable.
+	// When io_uring is enabled, each connection has its own send path without mutex.
 	sndMutex sync.Mutex
 	sndData  bytes.Buffer
 
@@ -144,6 +147,33 @@ type listener struct {
 	doneChan chan struct{}
 	doneErr  error
 	doneOnce sync.Once
+
+	// Context and waitgroup for graceful shutdown
+	ctx        context.Context // Context for listener (inherited from server)
+	shutdownWg *sync.WaitGroup // Server waitgroup (from Server)
+	connWg     sync.WaitGroup  // Waitgroup for all connections
+
+	// io_uring receive path (Linux only)
+	// Multi-ring support: When IoUringRecvRingCount > 1, we create multiple
+	// independent io_uring rings, each with its own completion handler goroutine.
+	// This enables parallel completion processing across CPU cores.
+	// See multi_iouring_design.md Section 4.1 for design rationale.
+
+	// Legacy single-ring fields (used when IoUringRecvRingCount == 1)
+	recvRing        interface{}                    // *giouring.Ring on Linux, nil on others
+	recvRingFd      int                            // UDP socket file descriptor (shared)
+	recvCompletions map[uint64]*recvCompletionInfo // Maps request ID to completion info
+	recvCompLock    sync.Mutex                     // Protects recvCompletions map
+	recvRequestID   atomic.Uint64                  // Atomic counter for generating unique request IDs
+
+	// Multi-ring fields (used when IoUringRecvRingCount > 1)
+	// Each recvRingState owns its ring, completion map, and ID counter (no cross-ring locking)
+	recvRingStates []*recvRingState // Slice of independent ring states
+
+	// Shared by both single-ring and multi-ring modes
+	recvCompCtx    context.Context    // Context for completion handler(s)
+	recvCompCancel context.CancelFunc // Cancel function for completion handler(s)
+	recvCompWg     sync.WaitGroup     // WaitGroup for completion handler goroutine(s)
 }
 
 // Listen returns a new listener on the SRT protocol on the address with
@@ -153,10 +183,10 @@ type listener struct {
 //
 // Examples:
 //
-//	Listen("srt", "127.0.0.1:3000", DefaultConfig())
+//	Listen(ctx, "srt", "127.0.0.1:3000", DefaultConfig(), shutdownWg)
 //
 // In case of an error, the returned Listener is nil and the error is non-nil.
-func Listen(network, address string, config Config) (Listener, error) {
+func Listen(ctx context.Context, network, address string, config Config, shutdownWg *sync.WaitGroup) (Listener, error) {
 	if network != "srt" {
 		return nil, fmt.Errorf("listen: the network must be 'srt'")
 	}
@@ -169,8 +199,16 @@ func Listen(network, address string, config Config) (Listener, error) {
 		config.Logger = NewLogger(nil)
 	}
 
+	// Increment waitgroup early, before any code that might call Close()
+	// This ensures shutdownWg.Done() in Close() won't cause a negative counter
+	if shutdownWg != nil {
+		shutdownWg.Add(1)
+	}
+
 	ln := &listener{
-		config: config,
+		config:     config,
+		ctx:        ctx,
+		shutdownWg: shutdownWg,
 	}
 
 	lc := net.ListenConfig{
@@ -191,11 +229,16 @@ func Listen(network, address string, config Config) (Listener, error) {
 	}
 
 	ln.connReqs = make(map[uint32]*connRequest)
-	ln.conns = make(map[uint32]*srtConn)
+	// ln.conns is sync.Map - zero value is ready to use, no initialization needed
 
 	ln.backlog = make(chan packet.Packet, 128)
 
-	ln.rcvQueue = make(chan packet.Packet, 2048)
+	// Determine receive queue buffer size (default: 2048 if not configured)
+	rcvQueueSize := config.ReceiveQueueSize
+	if rcvQueueSize <= 0 {
+		rcvQueueSize = 2048
+	}
+	ln.rcvQueue = make(chan packet.Packet, rcvQueueSize)
 
 	syncookie, err := srtnet.NewSYNCookie(ln.addr.String(), nil)
 	if err != nil {
@@ -208,24 +251,40 @@ func Listen(network, address string, config Config) (Listener, error) {
 
 	ln.start = time.Now()
 
-	var readerCtx context.Context
-	readerCtx, ln.stopReader = context.WithCancel(context.Background())
-	go ln.reader(readerCtx)
+	// Phase 2: Zero-copy uses the shared globalRecvBufferPool (see buffers.go)
+	// This single pool is shared across ALL listeners and dialers for maximum reuse
 
-	go func() {
-		buffer := make([]byte, config.MSS) // MTU size
+	// Initialize io_uring receive ring (if enabled)
+	// This is a no-op on non-Linux platforms
+	ioUringInitialized := false
+	if err := ln.initializeIoUringRecv(); err != nil {
+		// Log error but don't fail - fall back to ReadFrom()
+		// Error is already logged in initializeIoUringRecv()
+	} else {
+		// Check if io_uring was actually initialized (enabled and successful)
+		// Single-ring mode uses ln.recvRing, multi-ring mode uses ln.recvRingStates
+		ioUringInitialized = (ln.recvRing != nil) || (len(ln.recvRingStates) > 0)
+	}
 
-		for {
-			if ln.isShutdown() {
-				ln.markDone(ErrListenerClosed)
-				return
-			}
+	// Start reader goroutine with listener context
+	// Note: reader will exit when ln.ctx is cancelled (via server context cancellation)
+	go ln.reader(ln.ctx)
 
-			ln.pc.SetReadDeadline(time.Now().Add(3 * time.Second))
-			n, addr, err := ln.pc.ReadFrom(buffer)
-			if err != nil {
-				if errors.Is(err, os.ErrDeadlineExceeded) {
-					continue
+	// Only start ReadFrom() goroutine if io_uring is NOT enabled or failed to initialize
+	// When io_uring is enabled and initialized, the completion handler processes packets
+	if !ioUringInitialized {
+		go func() {
+			defer func() {
+				ln.log("listen", func() string { return "ReadFrom goroutine exited" })
+			}()
+
+			for {
+				// Check for context cancellation first
+				select {
+				case <-ln.ctx.Done():
+					ln.markDone(ErrListenerClosed)
+					return
+				default:
 				}
 
 				if ln.isShutdown() {
@@ -233,226 +292,68 @@ func Listen(network, address string, config Config) (Listener, error) {
 					return
 				}
 
-				ln.markDone(err)
-				return
-			}
+				// Phase 2: Zero-copy - get buffer from shared global pool
+				bufferPtr := GetRecvBufferPool().Get().(*[]byte)
 
-			p, err := packet.NewPacketFromData(addr, buffer[:n])
-			if err != nil {
-				continue
-			}
+				ln.pc.SetReadDeadline(time.Now().Add(3 * time.Second))
+				n, addr, err := ln.pc.ReadFrom(*bufferPtr)
+				if err != nil {
+					// Return buffer to pool on read error
+					GetRecvBufferPool().Put(bufferPtr)
 
-			// non-blocking
-			select {
-			case ln.rcvQueue <- p:
-			default:
-				ln.log("listen", func() string { return "receive queue is full" })
+					if errors.Is(err, os.ErrDeadlineExceeded) {
+						continue
+					}
+
+					// Check context again after read error
+					select {
+					case <-ln.ctx.Done():
+						ln.markDone(ErrListenerClosed)
+						return
+					default:
+					}
+
+					if ln.isShutdown() {
+						ln.markDone(ErrListenerClosed)
+						return
+					}
+
+					ln.markDone(err)
+					return
+				}
+
+				// Phase 2: Zero-copy - unmarshal directly referencing the pooled buffer
+				p := packet.NewPacket(addr)
+				if err := p.UnmarshalZeroCopy(bufferPtr, n, addr); err != nil {
+					// Parse error - return buffer to pool via DecommissionWithBuffer
+					p.DecommissionWithBuffer(GetRecvBufferPool())
+					continue
+				}
+
+				// NOTE: Buffer is NOT returned to pool here! It's referenced by the packet.
+				// Buffer will be returned by receiver.releasePacketFully() after delivery.
+
+				// non-blocking
+				select {
+				case <-ln.ctx.Done():
+					// Context cancelled - return buffer and decommission packet
+					p.DecommissionWithBuffer(GetRecvBufferPool())
+					ln.markDone(ErrListenerClosed)
+					return
+				case ln.rcvQueue <- p:
+					// Success - packet queued (metrics tracked in reader())
+				default:
+					ln.log("listen", func() string { return "receive queue is full" })
+					// Queue full - return buffer and decommission packet
+					p.DecommissionWithBuffer(GetRecvBufferPool())
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return ln, nil
 }
 
-func (ln *listener) Accept2() (ConnRequest, error) {
-	if ln.isShutdown() {
-		return nil, ErrListenerClosed
-	}
-
-	for {
-		select {
-		case <-ln.doneChan:
-			return nil, ln.error()
-
-		case p := <-ln.backlog:
-			req := newConnRequest(ln, p)
-			if req == nil {
-				break
-			}
-
-			return req, nil
-		}
-	}
-}
-
-func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
-	for {
-		req, err := ln.Accept2()
-		if err != nil {
-			return nil, REJECT, err
-		}
-
-		if acceptFn == nil {
-			req.Reject(REJ_PEER)
-			continue
-		}
-
-		mode := acceptFn(req)
-		if mode != PUBLISH && mode != SUBSCRIBE {
-			// Figure out the reason
-			reason := REJ_PEER
-			if req.(*connRequest).rejectionReason > 0 {
-				reason = req.(*connRequest).rejectionReason
-			}
-			req.Reject(reason)
-			continue
-		}
-
-		conn, err := req.Accept()
-		if err != nil {
-			continue
-		}
-
-		return conn, mode, nil
-	}
-}
-
-// markDone marks the listener as done by closing
-// the done channel & sets the error
-func (ln *listener) markDone(err error) {
-	ln.doneOnce.Do(func() {
-		ln.lock.Lock()
-		defer ln.lock.Unlock()
-		ln.doneErr = err
-		close(ln.doneChan)
-	})
-}
-
-// error returns the error that caused the listener to be done
-// if it's nil then the listener is not done
-func (ln *listener) error() error {
-	ln.lock.Lock()
-	defer ln.lock.Unlock()
-	return ln.doneErr
-}
-
-func (ln *listener) handleShutdown(socketId uint32) {
-	ln.lock.Lock()
-	delete(ln.conns, socketId)
-	ln.lock.Unlock()
-}
-
-func (ln *listener) isShutdown() bool {
-	ln.shutdownLock.RLock()
-	defer ln.shutdownLock.RUnlock()
-
-	return ln.shutdown
-}
-
-func (ln *listener) Close() {
-	ln.shutdownOnce.Do(func() {
-		ln.shutdownLock.Lock()
-		ln.shutdown = true
-		ln.shutdownLock.Unlock()
-
-		ln.lock.RLock()
-		for _, conn := range ln.conns {
-			if conn == nil {
-				continue
-			}
-			conn.close()
-		}
-		ln.lock.RUnlock()
-
-		ln.stopReader()
-
-		ln.log("listen", func() string { return "closing socket" })
-
-		ln.pc.Close()
-	})
-}
-
-func (ln *listener) Addr() net.Addr {
-	addrString := "0.0.0.0:0"
-	if ln.addr != nil {
-		addrString = ln.addr.String()
-	}
-
-	addr, _ := net.ResolveUDPAddr("udp", addrString)
-	return addr
-}
-
-func (ln *listener) reader(ctx context.Context) {
-	defer func() {
-		ln.log("listen", func() string { return "left reader loop" })
-	}()
-
-	ln.log("listen", func() string { return "reader loop started" })
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case p := <-ln.rcvQueue:
-			if ln.isShutdown() {
-				break
-			}
-
-			ln.log("packet:recv:dump", func() string { return p.Dump() })
-
-			if p.Header().DestinationSocketId == 0 {
-				if p.Header().IsControlPacket && p.Header().ControlType == packet.CTRLTYPE_HANDSHAKE {
-					select {
-					case ln.backlog <- p:
-					default:
-						ln.log("handshake:recv:error", func() string { return "backlog is full" })
-					}
-				}
-				break
-			}
-
-			ln.lock.RLock()
-			conn, ok := ln.conns[p.Header().DestinationSocketId]
-			ln.lock.RUnlock()
-
-			if !ok || conn == nil {
-				// ignore the packet, we don't know the destination
-				break
-			}
-
-			if !ln.config.AllowPeerIpChange {
-				if p.Header().Addr.String() != conn.RemoteAddr().String() {
-					// ignore the packet, it's not from the expected peer
-					// https://haivision.github.io/srt-rfc/draft-sharabayko-srt.html#name-security-considerations
-					break
-				}
-			}
-
-			conn.push(p)
-		}
-	}
-}
-
-// Send a packet to the wire. This function must be synchronous in order to allow to safely call Packet.Decommission() afterward.
-func (ln *listener) send(p packet.Packet) {
-	ln.sndMutex.Lock()
-	defer ln.sndMutex.Unlock()
-
-	ln.sndData.Reset()
-
-	if err := p.Marshal(&ln.sndData); err != nil {
-		p.Decommission()
-		ln.log("packet:send:error", func() string { return "marshalling packet failed" })
-		return
-	}
-
-	buffer := ln.sndData.Bytes()
-
-	ln.log("packet:send:dump", func() string { return p.Dump() })
-
-	// Write the packet's contents to the wire
-	ln.pc.WriteTo(buffer, p.Header().Addr)
-
-	if p.Header().IsControlPacket {
-		// Control packets can be decommissioned because they will not be sent again (data packets might be retransferred)
-		p.Decommission()
-	}
-}
-
-func (ln *listener) log(topic string, message func() string) {
-	if ln.config.Logger == nil {
-		return
-	}
-
-	ln.config.Logger.Print(topic, 0, 2, message)
-}
+// Note: Accept2() and Accept() are in listen_accept.go
+// Note: markDone, error, handleShutdown, getConnections, isShutdown, Close, Addr are in listen_lifecycle.go
+// Note: reader, send, sendWithMetrics, sendBrokenLookup, log are in listen_io.go

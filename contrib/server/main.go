@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -9,9 +11,17 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
-	srt "github.com/datarhei/gosrt"
+	srt "github.com/randomizedcoder/gosrt"
+	"github.com/randomizedcoder/gosrt/contrib/common"
 	"github.com/pkg/profile"
+)
+
+const (
+	KM_PRE_ANNOUNCE = 200
+	KM_REFRESH_RATE = 10000
 )
 
 // server is an implementation of the Server framework
@@ -44,19 +54,59 @@ func (s *server) Shutdown() {
 	s.server.Shutdown()
 }
 
+var (
+	// Server-specific flags
+	addr        = flag.String("addr", "", "address to listen on")
+	app         = flag.String("app", "", "path prefix for streamid")
+	token       = flag.String("token", "", "token query param for streamid")
+	passphrase  = flag.String("passphrase", "", "passphrase for de- and enrcypting the data")
+	logtopics   = flag.String("logtopics", "", "topics for the log output")
+	profileFlag = flag.String("profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	profilePath = flag.String("profilepath", ".", "directory to write profile files to")
+	testflags   = flag.Bool("testflags", false, "Test mode: parse flags, apply to config, print config as JSON, and exit")
+	printConfig = flag.Bool("printconfig", false, "Print config")
+)
+
 func main() {
 	s := server{
 		channels: make(map[string]srt.PubSub),
 	}
 
-	flag.StringVar(&s.addr, "addr", "", "address to listen on")
-	flag.StringVar(&s.app, "app", "", "path prefix for streamid")
-	flag.StringVar(&s.token, "token", "", "token query param for streamid")
-	flag.StringVar(&s.passphrase, "passphrase", "", "passphrase for de- and enrcypting the data")
-	flag.StringVar(&s.logtopics, "logtopics", "", "topics for the log output")
-	flag.StringVar(&s.profile, "profile", "", "enable profiling (cpu, mem, allocs, heap, rate, mutex, block, thread, trace)")
+	// Parse all flags (shared + server-specific)
+	common.ParseFlags()
 
-	flag.Parse()
+	// Validate flag dependencies and auto-enable required flags
+	if warnings := common.ValidateFlagDependencies(); len(warnings) > 0 {
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "⚠ %s\n", w)
+		}
+	}
+
+	// Test mode: print config and exit
+	if *testflags {
+		config := srt.DefaultConfig()
+		common.ApplyFlagsToConfig(&config)
+		// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
+		if common.FlagSet["passphrase"] {
+			config.Passphrase = *passphrase
+		}
+		// Print config as JSON
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+		os.Exit(0)
+	}
+
+	// Set server fields from flags
+	s.addr = *addr
+	s.app = *app
+	s.token = *token
+	s.passphrase = *passphrase
+	s.logtopics = *logtopics
+	s.profile = *profileFlag
 
 	if len(s.addr) == 0 {
 		fmt.Fprintf(os.Stderr, "Provide a listen address with -addr\n")
@@ -64,7 +114,7 @@ func main() {
 	}
 
 	var p func(*profile.Profile)
-	switch s.profile {
+	switch *profileFlag {
 	case "cpu":
 		p = profile.CPUProfile
 	case "mem":
@@ -87,53 +137,143 @@ func main() {
 	}
 
 	if p != nil {
-		defer profile.Start(profile.ProfilePath("."), profile.NoShutdownHook, p).Stop()
+		defer profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p).Stop()
 	}
 
 	config := srt.DefaultConfig()
 
-	if len(s.logtopics) != 0 {
-		config.Logger = srt.NewLogger(strings.Split(s.logtopics, ","))
+	// Apply CLI flags (shared flags)
+	common.ApplyFlagsToConfig(&config)
+
+	// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
+	if common.FlagSet["passphrase"] {
+		config.Passphrase = *passphrase
 	}
 
-	config.KMPreAnnounce = 200
-	config.KMRefreshRate = 10000
+	if len(*logtopics) != 0 {
+		config.Logger = srt.NewLogger(strings.Split(*logtopics, ","))
+	}
 
-	s.server = &srt.Server{
+	config.KMPreAnnounce = KM_PRE_ANNOUNCE
+	config.KMRefreshRate = KM_REFRESH_RATE
+
+	if *printConfig {
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+	}
+
+	// ============================================================
+	// Create context that cancels on signal (replaces setupSignalHandler)
+	// ============================================================
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Single waitgroup for all goroutines
+	var wg sync.WaitGroup
+
+	// ============================================================
+	// Start Prometheus Metrics Server(s) (if configured)
+	// ============================================================
+	if err := common.StartMetricsServers(ctx, &wg, *common.PromHTTPAddr, *common.PromUDSPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start metrics server: %v\n", err)
+		os.Exit(1)
+	}
+
+	// ============================================================
+	// Start Logger Goroutine (if enabled)
+	// ============================================================
+	if config.Logger != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for m := range config.Logger.Listen() {
+				fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n",
+					m.SocketId, m.Topic, m.File, m.Line, m.Message)
+			}
+		}()
+	}
+
+	// ============================================================
+	// Start Statistics Ticker (if enabled)
+	// ============================================================
+	if config.StatisticsPrintInterval > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(config.StatisticsPrintInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					connections := s.server.GetConnections()
+					common.PrintConnectionStatistics(connections,
+						config.StatisticsPrintInterval.String(), nil)
+				}
+			}
+		}()
+	}
+
+	// ============================================================
+	// Setup and Start SRT Server
+	// ============================================================
+	s.server = srt.NewServer(ctx, &wg, srt.ServerConfig{
 		Addr:            s.addr,
+		Config:          &config,
 		HandleConnect:   s.handleConnect,
 		HandlePublish:   s.handlePublish,
 		HandleSubscribe: s.handleSubscribe,
-		Config:          &config,
-	}
+	})
 
 	fmt.Fprintf(os.Stderr, "Listening on %s\n", s.addr)
 
+	// Run SRT server
+	wg.Add(1)
 	go func() {
-		if config.Logger == nil {
-			return
-		}
-
-		for m := range config.Logger.Listen() {
-			fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n", m.SocketId, m.Topic, m.File, m.Line, m.Message)
-		}
-	}()
-
-	go func() {
+		defer wg.Done()
 		if err := s.ListenAndServe(); err != nil && err != srt.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "SRT Server: %s\n", err)
 			os.Exit(2)
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt)
-	<-quit
+	// ============================================================
+	// Wait for Shutdown Signal
+	// ============================================================
+	<-ctx.Done()
+	shutdownStart := time.Now()
+	fmt.Fprintf(os.Stderr, "\nShutdown signal received\n")
 
-	s.Shutdown()
-
+	// ============================================================
+	// Cleanup
+	// ============================================================
+	// Close logger so its goroutine can exit (channel will close)
 	if config.Logger != nil {
 		config.Logger.Close()
+	}
+
+	// ============================================================
+	// Wait for All Goroutines with Timeout
+	// ============================================================
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		elapsedMs := time.Since(shutdownStart).Milliseconds()
+		fmt.Fprintf(os.Stderr, "Graceful shutdown complete after %dms\n", elapsedMs)
+	case <-time.After(config.ShutdownDelay):
+		elapsedMs := time.Since(shutdownStart).Milliseconds()
+		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
 	}
 }
 

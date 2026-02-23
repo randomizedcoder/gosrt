@@ -5,9 +5,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/datarhei/gosrt/crypto"
-	"github.com/datarhei/gosrt/packet"
-	"github.com/datarhei/gosrt/rand"
+	"github.com/randomizedcoder/gosrt/crypto"
+	"github.com/randomizedcoder/gosrt/metrics"
+	"github.com/randomizedcoder/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/rand"
 )
 
 // ConnRequest is an incoming connection request
@@ -70,6 +71,17 @@ type connRequest struct {
 }
 
 func newConnRequest(ln *listener, p packet.Packet) *connRequest {
+	if p == nil {
+		ln.log("handshake:recv:error", func() string { return "packet is nil" })
+		return nil
+	}
+
+	header := p.Header()
+	if header == nil {
+		ln.log("handshake:recv:error", func() string { return "packet header is nil" })
+		return nil
+	}
+
 	cif := &packet.CIFHandshake{}
 
 	err := p.UnmarshalCIF(cif)
@@ -84,11 +96,11 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 
 	// Assemble the response (4.3.1.  Caller-Listener Handshake)
 
-	p.Header().ControlType = packet.CTRLTYPE_HANDSHAKE
-	p.Header().SubType = 0
-	p.Header().TypeSpecific = 0
-	p.Header().Timestamp = uint32(time.Since(ln.start).Microseconds())
-	p.Header().DestinationSocketId = cif.SRTSocketId
+	header.ControlType = packet.CTRLTYPE_HANDSHAKE
+	header.SubType = 0
+	header.TypeSpecific = 0
+	header.Timestamp = uint32(time.Since(ln.start).Microseconds())
+	header.DestinationSocketId = cif.SRTSocketId
 
 	cif.PeerIP.FromNetAddr(ln.addr)
 
@@ -104,7 +116,15 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		//cif.maxTransmissionUnitSize = 0
 		//cif.maxFlowWindowSize = 0
 		//cif.SRTSocketId = 0
-		cif.SynCookie = ln.syncookie.Get(p.Header().Addr.String())
+		if ln.syncookie == nil {
+			ln.log("handshake:recv:error", func() string { return "syncookie is nil" })
+			return nil
+		}
+		if header.Addr == nil {
+			ln.log("handshake:recv:error", func() string { return "packet address is nil" })
+			return nil
+		}
+		cif.SynCookie = ln.syncookie.Get(header.Addr.String())
 
 		p.MarshalCIF(cif)
 
@@ -114,7 +134,15 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		ln.send(p)
 	} else if cif.HandshakeType == packet.HSTYPE_CONCLUSION {
 		// Verify the SYN cookie
-		if !ln.syncookie.Verify(cif.SynCookie, p.Header().Addr.String()) {
+		if ln.syncookie == nil {
+			ln.log("handshake:recv:error", func() string { return "syncookie is nil" })
+			return nil
+		}
+		if header.Addr == nil {
+			ln.log("handshake:recv:error", func() string { return "packet address is nil" })
+			return nil
+		}
+		if !ln.syncookie.Verify(cif.SynCookie, header.Addr.String()) {
 			cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 			ln.log("handshake:recv:error", func() string { return "invalid SYN cookie" })
 			p.MarshalCIF(cif)
@@ -272,14 +300,19 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 
 		// We received a duplicate request: reject silently
 		if exists {
+			// Informational: duplicate handshake request (not an error, but tracked)
+			metrics.GetListenerMetrics().HandshakeDuplicateRequest.Add(1)
 			return nil
 		}
 
 		// Already reserve a socketId for this connection
+		// Note: generateSocketId() uses sync.Map which handles locking internally
+		// We still need lock for connReqs map operations
 		ln.lock.Lock()
 		socketId, err := req.generateSocketId()
 		if err == nil {
-			ln.conns[socketId] = nil
+			// sync.Map handles locking internally
+			ln.conns.Store(socketId, nil)
 			req.socketId = socketId
 		}
 		ln.lock.Unlock()
@@ -351,6 +384,8 @@ func (req *connRequest) Reject(reason RejectionReason) {
 	defer req.ln.lock.Unlock()
 
 	if _, hasReq := req.ln.connReqs[req.peerSocketId]; !hasReq {
+		// Programming error: Reject() called on non-existent request
+		metrics.GetListenerMetrics().HandshakeRejectNotFound.Add(1)
 		return
 	}
 
@@ -368,7 +403,8 @@ func (req *connRequest) Reject(reason RejectionReason) {
 	req.ln.send(p)
 
 	delete(req.ln.connReqs, req.peerSocketId)
-	delete(req.ln.conns, req.socketId)
+	// sync.Map handles locking internally
+	req.ln.conns.Delete(req.socketId)
 }
 
 // generateSocketId generates an SRT SocketID that can be used for this connection
@@ -380,9 +416,12 @@ func (req *connRequest) generateSocketId() (uint32, error) {
 		}
 
 		// check that the socket id is not already in use
-		if _, found := req.ln.conns[socketId]; !found {
+		// sync.Map handles locking internally
+		if _, found := req.ln.conns.Load(socketId); !found {
 			return socketId, nil
 		}
+		// Informational: socket ID collision (expected in rare cases, tracked)
+		metrics.GetListenerMetrics().SocketIdCollision.Add(1)
 	}
 
 	return 0, fmt.Errorf("could not generate unused socketid")
@@ -398,6 +437,8 @@ func (req *connRequest) Accept() (Conn, error) {
 	defer req.ln.lock.Unlock()
 
 	if _, hasReq := req.ln.connReqs[req.peerSocketId]; !hasReq {
+		// Programming error: Accept() called on non-existent request
+		metrics.GetListenerMetrics().HandshakeAcceptNotFound.Add(1)
 		return nil, fmt.Errorf("connection already accepted")
 	}
 
@@ -419,7 +460,33 @@ func (req *connRequest) Accept() (Conn, error) {
 
 	req.config.Passphrase = req.passphrase
 
-	// Create a new connection
+	// Extract socket FD for io_uring (if enabled)
+	var socketFd int
+	if req.config.IoUringEnabled {
+		var err error
+		socketFd, err = getUDPConnFD(req.ln.pc)
+		if err != nil {
+			req.ln.log("connection:io_uring:error", func() string {
+				return fmt.Sprintf("failed to extract socket FD: %v", err)
+			})
+			// Continue without io_uring - will fall back to regular sends
+		}
+	}
+
+	// Create metrics FIRST - this allows building onSend closure before connection creation,
+	// eliminating the initialization race condition.
+	connMetrics := createConnectionMetrics(req.ln.addr, req.socketId, req.config.InstanceName,
+		req.addr, req.config.StreamId, req.peerSocketId, req.start)
+
+	// Build onSend closure with pre-created metrics.
+	// This is the fallback path used when io_uring is disabled.
+	// (io_uring path replaces onSend with c.send in connection_linux.go)
+	onSend := func(p packet.Packet) {
+		req.ln.sendWithMetrics(p, connMetrics)
+	}
+
+	// Create a new connection with fully initialized onSend and metrics
+	req.ln.connWg.Add(1) // Increment waitgroup before creating connection
 	conn := newSRTConn(srtConnConfig{
 		version:                     req.handshake.Version,
 		localAddr:                   req.ln.addr,
@@ -434,9 +501,15 @@ func (req *connRequest) Accept() (Conn, error) {
 		initialPacketSequenceNumber: req.handshake.InitialPacketSequenceNumber,
 		crypto:                      req.crypto,
 		keyBaseEncryption:           packet.EvenKeyEncrypted,
-		onSend:                      req.ln.send,
+		onSend:                      onSend,                // Fully initialized - no race!
+		sendFilter:                  req.config.SendFilter, // Optional test filter
 		onShutdown:                  req.ln.handleShutdown,
 		logger:                      req.config.Logger,
+		socketFd:                    socketFd,
+		parentCtx:                   req.ln.ctx,
+		parentWg:                    &req.ln.connWg,
+		metrics:                     connMetrics,         // Pre-created - no race!
+		recvBufferPool:              GetRecvBufferPool(), // Phase 2: shared global pool
 	})
 
 	req.ln.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })
@@ -471,7 +544,8 @@ func (req *connRequest) Accept() (Conn, error) {
 	req.ln.log("handshake:send:cif", func() string { return req.handshake.String() })
 	req.ln.send(p)
 
-	req.ln.conns[req.socketId] = conn
+	// sync.Map handles locking internally
+	req.ln.conns.Store(req.socketId, conn)
 	delete(req.ln.connReqs, req.peerSocketId)
 
 	return conn, nil

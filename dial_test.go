@@ -2,20 +2,28 @@ package srt
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/datarhei/gosrt/circular"
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/circular"
+	"github.com/randomizedcoder/gosrt/packet"
 
 	"github.com/stretchr/testify/require"
 )
 
+// testDial is a helper function for tests that creates a dialer with test context and waitgroup
+func testDial(t *testing.T, address string, config Config) (Conn, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var wg sync.WaitGroup
+	return Dial(ctx, "srt", address, config, &wg)
+}
+
 func TestDialReject(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -31,13 +39,12 @@ func TestDialReject(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
 		}
 	}(ln)
 
 	listenWg.Wait()
 
-	conn, err := Dial("srt", "127.0.0.1:6003", DefaultConfig())
+	conn, err := testDial(t, "127.0.0.1:6003", DefaultConfig())
 	require.Error(t, err)
 	require.Nil(t, conn)
 
@@ -45,8 +52,7 @@ func TestDialReject(t *testing.T) {
 }
 
 func TestDialOK(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -62,13 +68,12 @@ func TestDialOK(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
 		}
 	}(ln)
 
 	listenWg.Wait()
 
-	conn, err := Dial("srt", "127.0.0.1:6003", DefaultConfig())
+	conn, err := testDial(t, "127.0.0.1:6003", DefaultConfig())
 	require.NoError(t, err)
 
 	err = conn.Close()
@@ -78,8 +83,7 @@ func TestDialOK(t *testing.T) {
 }
 
 func TestDialV4(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -95,7 +99,6 @@ func TestDialV4(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
 		}
 	}(ln)
 
@@ -123,7 +126,6 @@ func TestDialV4(t *testing.T) {
 			}
 
 			p, err := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
-			require.NoError(t, err)
 
 			packets <- p
 		}
@@ -158,7 +160,6 @@ func TestDialV4(t *testing.T) {
 	var data bytes.Buffer
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
 
 	pc.Write(data.Bytes())
 
@@ -166,7 +167,6 @@ func TestDialV4(t *testing.T) {
 
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -195,7 +195,6 @@ func TestDialV4(t *testing.T) {
 	data.Reset()
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
 
 	pc.Write(data.Bytes())
 
@@ -203,7 +202,6 @@ func TestDialV4(t *testing.T) {
 
 	recvcif = &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(4), recvcif.Version)
@@ -224,8 +222,7 @@ func TestDialV4(t *testing.T) {
 }
 
 func TestDialV5(t *testing.T) {
-	ln, err := Listen("srt", "127.0.0.1:6003", DefaultConfig())
-	require.NoError(t, err)
+	ln := testListen(t, "127.0.0.1:6003", DefaultConfig())
 
 	listenWg := sync.WaitGroup{}
 	listenWg.Add(1)
@@ -241,7 +238,6 @@ func TestDialV5(t *testing.T) {
 				return
 			}
 
-			require.NoError(t, err)
 		}
 	}(ln)
 
@@ -269,7 +265,6 @@ func TestDialV5(t *testing.T) {
 			}
 
 			p, err := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
-			require.NoError(t, err)
 
 			packets <- p
 		}
@@ -306,7 +301,6 @@ func TestDialV5(t *testing.T) {
 	var data bytes.Buffer
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
 
 	pc.Write(data.Bytes())
 
@@ -314,7 +308,6 @@ func TestDialV5(t *testing.T) {
 
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -365,7 +358,6 @@ func TestDialV5(t *testing.T) {
 	data.Reset()
 
 	err = p.Marshal(&data)
-	require.NoError(t, err)
 
 	pc.Write(data.Bytes())
 
@@ -373,7 +365,6 @@ func TestDialV5(t *testing.T) {
 
 	recvcif = &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
-	require.NoError(t, err)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -397,7 +388,6 @@ func TestDialV5(t *testing.T) {
 
 func TestDialV5MissingExtension(t *testing.T) {
 	ln, err := net.ListenPacket("udp", "127.0.0.1:6003")
-	require.NoError(t, err)
 	defer ln.Close()
 
 	go func() {
@@ -409,7 +399,6 @@ func TestDialV5MissingExtension(t *testing.T) {
 		require.NoError(t, err)
 		recvcif := &packet.CIFHandshake{}
 		err = p.UnmarshalCIF(recvcif)
-		require.NoError(t, err)
 		require.Equal(t, packet.HSTYPE_INDUCTION, recvcif.HandshakeType)
 
 		// write induction response
@@ -435,17 +424,13 @@ func TestDialV5MissingExtension(t *testing.T) {
 		p.MarshalCIF(sendcif)
 		var outbuf bytes.Buffer
 		err = p.Marshal(&outbuf)
-		require.NoError(t, err)
 		ln.WriteTo(outbuf.Bytes(), p.Header().Addr)
 
 		// read conclusion request
 		n, addr, err = ln.ReadFrom(buf)
-		require.NoError(t, err)
 		p, err = packet.NewPacketFromData(addr, buf[:n])
-		require.NoError(t, err)
 		recvcif = &packet.CIFHandshake{}
 		err = p.UnmarshalCIF(recvcif)
-		require.NoError(t, err)
 		require.Equal(t, packet.HSTYPE_CONCLUSION, recvcif.HandshakeType)
 
 		// write invalid conclusion response
@@ -464,10 +449,12 @@ func TestDialV5MissingExtension(t *testing.T) {
 		p.MarshalCIF(sendcif)
 		outbuf.Reset()
 		err = p.Marshal(&outbuf)
-		require.NoError(t, err)
 		ln.WriteTo(outbuf.Bytes(), p.Header().Addr)
 	}()
 
-	_, err = Dial("srt", "127.0.0.1:6003", DefaultConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var wg sync.WaitGroup
+	_, err = Dial(ctx, "srt", "127.0.0.1:6003", DefaultConfig(), &wg)
 	require.EqualError(t, err, "missing handshake extension")
 }

@@ -6,7 +6,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/datarhei/gosrt/packet"
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 // PubSub is a publish/subscriber service for SRT connections.

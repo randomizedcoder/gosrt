@@ -112,6 +112,6 @@ type StatisticsInstantaneous struct {
 	MsRecvTsbPdDelay      uint64  // Timestamp-based Packet Delivery Delay value set on the socket via SRTO_RCVLATENCY or SRTO_LATENCY
 	PktReorderTolerance   uint64  // Instant value of the packet reorder tolerance
 	PktRecvAvgBelatedTime uint64  // Accumulated difference between the current time and the time-to-play of a packet that is received late
-	PktSendLossRate       float64 // Percentage of resent data vs. sent data
-	PktRecvLossRate       float64 // Percentage of retransmitted data vs. received data
+	PktSendRetransRate float64 // Retransmission rate: bytesRetrans/bytesSent * 100 (NOT loss rate)
+	PktRecvRetransRate float64 // Retransmission rate: bytesRetrans/bytesRecv * 100 (NOT loss rate)
 }

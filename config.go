@@ -1,10 +1,9 @@
 package srt
 
 import (
-	"fmt"
-	"net/url"
-	"strconv"
 	"time"
+
+	"github.com/randomizedcoder/gosrt/packet"
 )
 
 const (
@@ -19,6 +18,29 @@ const (
 	MAX_STREAMID_SIZE   = 512
 	SRT_VERSION         = 0x010401
 )
+
+// RTOMode defines the RTO calculation strategy for NAK/retransmit suppression.
+// Used for both NAK suppression (full RTO) and retransmit suppression (RTO/2).
+type RTOMode uint8
+
+const (
+	RTORttRttVar       RTOMode = iota // RTT + RTTVar (balanced default)
+	RTORtt4RttVar                     // RTT + 4*RTTVar (RFC 6298 conservative)
+	RTORttRttVarMargin                // (RTT + RTTVar) * (1 + ExtraRTTMargin)
+)
+
+// String returns the string representation of RTOMode.
+func (m RTOMode) String() string {
+	switch m {
+	case RTORtt4RttVar:
+		return "rtt_4rttvar"
+	case RTORttRttVarMargin:
+		return "rtt_rttvar_margin"
+	default:
+		// RTORttRttVar (0) is the default, and any unknown value defaults to it
+		return "rtt_rttvar"
+	}
+}
 
 // Config is the configuration for a SRT connection
 type Config struct {
@@ -131,6 +153,13 @@ type Config struct {
 	// SRTO_PEERIDLETIMEO
 	PeerIdleTimeout time.Duration
 
+	// KeepaliveThreshold is the fraction of PeerIdleTimeout at which to send
+	// proactive keepalive packets. This keeps connections alive during idle periods.
+	// Default: 0.75 (75% of PeerIdleTimeout).
+	// Set to 0 or negative to disable proactive keepalives.
+	// Valid range: 0.0 to 1.0 (0 = disabled, values >= 1.0 are treated as disabled)
+	KeepaliveThreshold float64
+
 	// Minimum receiver latency to be requested by sender.
 	// SRTO_PEERLATENCY
 	PeerLatency time.Duration
@@ -155,6 +184,11 @@ type Config struct {
 	// SRTO_STREAMID
 	StreamId string
 
+	// InstanceName is a user-defined label for this connection/server instance
+	// Used in logging, metrics labels, and JSON statistics output
+	// Default: "" (empty = not set)
+	InstanceName string
+
 	// Drop too late packets.
 	// SRTO_TLPKTDROP
 	TooLatePacketDrop bool
@@ -172,47 +206,591 @@ type Config struct {
 
 	// if a new IP starts sending data on an existing socket id, allow it
 	AllowPeerIpChange bool
+
+	// Enable io_uring for per-connection send queues (requires Linux kernel 5.1+)
+	// When enabled, each connection uses its own io_uring ring for asynchronous sends
+	IoUringEnabled bool
+
+	// Size of the io_uring ring for per-connection send queues (must be power of 2, 16-1024)
+	// Default: 64. Smaller rings use less memory but may limit throughput per connection
+	IoUringSendRingSize int
+
+	// Size of the network queue channel buffer (packets from network)
+	// Default: 1024. Larger buffers reduce packet drops but use more memory
+	NetworkQueueSize int
+
+	// Size of the write queue channel buffer (packets from application writes)
+	// Default: 1024. Larger buffers reduce write blocking but use more memory
+	WriteQueueSize int
+
+	// Size of the read queue channel buffer (packets ready for application reads)
+	// Default: 1024. Larger buffers reduce read blocking but use more memory
+	ReadQueueSize int
+
+	// Size of the receive queue channel buffer (packets from network before routing to connections)
+	// Used by listener and dialer. Default: 2048. Larger buffers reduce packet drops but use more memory
+	ReceiveQueueSize int
+
+	// Packet reordering algorithm for congestion control receiver
+	// "list" (default) uses container/list.List - simpler, O(n) insertions
+	// "btree" uses github.com/google/btree - better for large buffers/high reordering, O(log n) operations
+	PacketReorderAlgorithm string
+
+	// B-tree degree for packet reordering (only used if PacketReorderAlgorithm == "btree")
+	// Default: 32. Higher values use more memory but may reduce tree height
+	BTreeDegree int
+
+	// Enable io_uring for receive operations (requires Linux kernel 5.1+)
+	// When enabled, replaces blocking ReadFrom() with asynchronous io_uring RecvMsg
+	IoUringRecvEnabled bool
+
+	// Size of the io_uring receive ring (must be power of 2, 64-32768)
+	// Default: 512. Larger rings allow more pending receives but use more memory
+	IoUringRecvRingSize int
+
+	// Initial number of pending receive requests at startup
+	// Default: ring size (full ring). Must be <= IoUringRecvRingSize
+	IoUringRecvInitialPending int
+
+	// Batch size for resubmitting receive requests after completions
+	// Default: 256. Larger batches reduce syscall overhead but increase latency
+	IoUringRecvBatchSize int
+
+	// Number of io_uring receive rings to create (default: 1)
+	// Multiple rings allow parallel completion processing
+	// Valid values: 1-16 (power of 2 recommended)
+	// Reference: multi_iouring_design.md Phase 1
+	IoUringRecvRingCount int
+
+	// Number of io_uring send rings per connection (default: 1)
+	// Multiple rings allow parallel send completion processing
+	// Valid values: 1-8 (power of 2 recommended)
+	// Reference: multi_iouring_design.md Phase 1
+	IoUringSendRingCount int
+
+	// Statistics print interval for server connections
+	// If > 0, server will periodically print statistics for all active connections
+	// Default: 0 (disabled). Set to e.g. 10s to print statistics every 10 seconds
+	StatisticsPrintInterval time.Duration
+
+	// Metrics configuration
+	// Enable metrics collection and expose /metrics endpoint
+	MetricsEnabled bool
+
+	// HTTP address for /metrics endpoint (e.g., ":9090")
+	// If empty, metrics server is not started
+	// Default: "" (disabled)
+	MetricsListenAddr string
+
+	// Handshake timeout for complete handshake exchange (induction + conclusion)
+	// Must be less than PeerIdleTimeout
+	// Default: 1.5 seconds (SRT is designed for low loss/low RTT networks)
+	HandshakeTimeout time.Duration
+
+	// Shutdown delay - time to wait for graceful shutdown after signal before application exit
+	// Default: 5 seconds
+	ShutdownDelay time.Duration
+
+	// Local address to bind to when dialing (client only)
+	// Format: "IP" or "IP:port" (e.g., "127.0.0.20" or "127.0.0.20:0")
+	// If empty, the system chooses an ephemeral address
+	// Only used by Dial(), not Listen()
+	LocalAddr string
+
+	// --- NAK btree Configuration (for io_uring receive path) ---
+
+	// Timer intervals (replaces hardcoded 10ms/20ms values)
+	// TickIntervalMs is the TSBPD delivery tick interval in milliseconds
+	// Default: 10. Lower = lower latency but higher CPU. Higher = higher latency but lower CPU.
+	TickIntervalMs uint64
+
+	// PeriodicNakIntervalMs is the periodic NAK timer interval in milliseconds
+	// Default: 20. Lower = faster loss recovery but more NAK overhead.
+	PeriodicNakIntervalMs uint64
+
+	// PeriodicAckIntervalMs is the periodic ACK timer interval in milliseconds
+	// Default: 10.
+	PeriodicAckIntervalMs uint64
+
+	// SendDropIntervalMs is the sender drop ticker interval in milliseconds
+	// Controls how often the sender checks for and drops too-old packets.
+	// Default: 100. Higher values reduce CPU but may delay dropping stale packets.
+	SendDropIntervalMs uint64
+
+	// EventLoopRateIntervalMs is the rate calculation interval in milliseconds
+	// Controls how often throughput/rate statistics are calculated in EventLoop mode.
+	// Default: 1000 (1 second).
+	EventLoopRateIntervalMs uint64
+
+	// UseNakBtree enables the NAK btree for efficient gap detection
+	// Auto-set to true when IoUringRecvEnabled=true
+	UseNakBtree bool
+
+	// SuppressImmediateNak prevents immediate NAK on gap detection
+	// Auto-set to true when IoUringRecvEnabled=true (required to handle io_uring reordering)
+	SuppressImmediateNak bool
+
+	// NakRecentPercent is the percentage of TSBPD delay for "too recent" threshold
+	// Packets within this threshold won't be added to NAK btree yet
+	// Default: 0.10 (10% of TSBPD delay)
+	NakRecentPercent float64
+
+	// NakMergeGap is the maximum sequence gap to merge in NAK consolidation
+	// Adjacent missing sequences within this gap are merged into ranges
+	// Default: 3
+	NakMergeGap uint32
+
+	// NakConsolidationBudgetUs is the max time for NAK consolidation in microseconds
+	// Default: 2000 (2ms)
+	NakConsolidationBudgetUs uint64
+
+	// FastNakEnabled enables the FastNAK optimization
+	// When enabled, NAK is triggered immediately after silent period ends
+	// Default: true when NAK btree is enabled
+	FastNakEnabled bool
+
+	// FastNakThresholdMs is the silent period to trigger FastNAK in milliseconds
+	// Default: 50ms (typical Starlink outage is ~60ms)
+	FastNakThresholdMs uint64
+
+	// FastNakRecentEnabled adds recent gap immediately on FastNAK trigger
+	// Detects sequence jump after outage and adds missing range to NAK btree
+	// Default: true
+	FastNakRecentEnabled bool
+
+	// HonorNakOrder makes sender retransmit packets in NAK packet order
+	// When enabled, oldest/most-urgent packets are retransmitted first
+	// Default: false (existing behavior: newest-first)
+	HonorNakOrder bool
+
+	// --- RTO-based Suppression Configuration (Phase 6: RTO Suppression) ---
+
+	// RTOMode controls how RTO is calculated for NAK/retransmit suppression.
+	// Options:
+	//   RTORttRttVar (0, default): RTT + RTTVar (balanced)
+	//   RTORtt4RttVar (1): RTT + 4*RTTVar (RFC 6298 conservative)
+	//   RTORttRttVarMargin (2): (RTT + RTTVar) * (1 + ExtraRTTMargin)
+	// Default: RTORttRttVar
+	RTOMode RTOMode
+
+	// ExtraRTTMargin is the extra margin for RTORttRttVarMargin mode.
+	// Specified as a multiplier (0.1 = 10% extra margin).
+	// Only used when RTOMode = RTORttRttVarMargin.
+	// Default: 0.10 (10%)
+	ExtraRTTMargin float64
+
+	// --- NAK Btree Expiry Configuration (nak_btree_expiry_optimization.md) ---
+
+	// NakExpiryMargin adds extra margin when expiring NAK btree entries.
+	// Specified as a percentage (0.1 = 10% extra margin).
+	//
+	// Formula: expiryThreshold = now + (RTO * (1 + NakExpiryMargin))
+	//
+	// Higher values = more conservative (keep NAK entries longer, favor recovery).
+	// Lower values = more aggressive (expire entries earlier, reduce phantom NAKs).
+	//
+	// Values:
+	//   0.0:  Baseline - expire at exactly now + RTO
+	//   0.05: 5% margin - slightly conservative
+	//   0.10: 10% margin (default) - moderately conservative
+	//   0.25: 25% margin - more conservative
+	//   0.50: 50% margin - very conservative (high-jitter networks)
+	//
+	// Default: 0.10 (10% - prefer potential repair over phantom NAK reduction)
+	NakExpiryMargin float64
+
+	// EWMAWarmupThreshold is the minimum number of packets needed before
+	// inter-packet interval EWMA is considered "warm" (reliable).
+	//
+	// Rationale:
+	// - EWMA with α=0.125 reaches ~95% of true value after ~24 samples
+	// - Default of 32 provides safety margin for variance
+	// - At 1000 pps, this is only 32ms of data
+	// - At 100 pps (low bitrate), this is 320ms
+	//
+	// Values:
+	//   0:  Disable warm-up check (always use EWMA, even if cold)
+	//   16: Fast warm-up (high-rate streams, less accuracy)
+	//   32: Default (balanced)
+	//   64: Slow warm-up (low-rate streams, more accuracy)
+	//
+	// During warm-up (sampleCount < threshold), we use conservative
+	// fallback estimation (tsbpdDelay as worst-case estimate).
+	//
+	// Default: 32
+	EWMAWarmupThreshold uint32
+
+	// --- Sender Lockless Configuration (Phase 1: Lockless Sender) ---
+
+	// UseSendBtree enables btree for sender packet storage.
+	// When enabled, replaces linked lists with O(log n) btree operations.
+	// Provides faster NAK lookup and ACK processing.
+	// Default: false (use linked lists)
+	UseSendBtree bool
+
+	// SendBtreeDegree is the B-tree degree for sender packet storage.
+	// Higher values use more memory but may reduce tree height.
+	// Default: 32 (same as receiver btree)
+	SendBtreeDegree int
+
+	// --- Sender Lock-Free Ring Configuration (Phase 2: Lockless Sender) ---
+
+	// UseSendRing enables lock-free ring for sender Push() operations.
+	// When enabled, Push() writes to ring (lock-free), Tick()/EventLoop drains to btree.
+	// REQUIRES: UseSendBtree=true
+	// Default: false
+	UseSendRing bool
+
+	// SendRingSize is the ring capacity per shard.
+	// Will be rounded to power of 2 by the ring library.
+	// Default: 1024
+	SendRingSize int
+
+	// SendRingShards is the number of ring shards.
+	// - 1 shard: strict FIFO ordering (default, suitable for single producer)
+	// - N shards: higher throughput with multiple producers (btree sorts by seq#)
+	// Default: 1 (preserves strict ordering)
+	SendRingShards int
+
+	// --- Sender Control Packet Ring Configuration (Phase 3: Lockless Sender) ---
+
+	// UseSendControlRing enables lock-free ring for ACK/NAK routing.
+	// When enabled, control packets are queued to EventLoop via ring.
+	// CRITICAL: Required for lock-free sender EventLoop.
+	// REQUIRES: UseSendRing=true
+	// Default: false
+	UseSendControlRing bool
+
+	// SendControlRingSize is the control ring capacity per shard.
+	// Will be rounded to power of 2 by the ring library.
+	// Default: 256
+	SendControlRingSize int
+
+	// SendControlRingShards is the number of control ring shards.
+	// Default: 1 (unified with receiver)
+	SendControlRingShards int
+
+	// --- Receiver Control Ring Configuration (Completely Lock-Free Receiver) ---
+
+	// UseRecvControlRing enables lock-free ring for ACKACK/KEEPALIVE routing.
+	// When enabled with UseEventLoop, the receiver is completely lock-free.
+	// Default: false (for backward compatibility)
+	UseRecvControlRing bool
+
+	// RecvControlRingSize is the receiver control ring capacity per shard.
+	// Will be rounded to power of 2 by the ring library.
+	// Default: 128
+	RecvControlRingSize int
+
+	// RecvControlRingShards is the number of receiver control ring shards.
+	// Default: 1
+	RecvControlRingShards int
+
+	// --- Sender EventLoop Configuration (Phase 4: Lockless Sender) ---
+
+	// UseSendEventLoop enables continuous event loop for sender.
+	// When enabled, replaces Tick() with continuous EventLoop.
+	// REQUIRES: UseSendBtree, UseSendRing, UseSendControlRing all enabled.
+	// Default: false
+	UseSendEventLoop bool
+
+	// SendEventLoopBackoffMinSleep is minimum sleep during idle periods.
+	// Default: 100µs
+	SendEventLoopBackoffMinSleep time.Duration
+
+	// SendEventLoopBackoffMaxSleep is maximum sleep during idle periods.
+	// Default: 1ms
+	SendEventLoopBackoffMaxSleep time.Duration
+
+	// SendTsbpdSleepFactor is the multiplier for TSBPD-aware sleep.
+	// Sleep = nextDeliveryIn * SendTsbpdSleepFactor
+	// Default: 0.9 (wake up slightly before next packet is due)
+	SendTsbpdSleepFactor float64
+
+	// SendDropThresholdUs is the threshold for dropping old packets (microseconds).
+	// Packets older than this are dropped.
+	// Default: 1000000 (1 second)
+	SendDropThresholdUs uint64
+
+	// --- Adaptive Backoff Configuration (adaptive_eventloop_mode_design.md) ---
+
+	// UseAdaptiveBackoff enables adaptive Yield/Sleep mode switching in EventLoop.
+	// When true (default with EventLoop), starts in Yield mode (~6M ops/sec) for
+	// high throughput, automatically switches to Sleep mode (~1K ops/sec) when idle.
+	// Default: true when EventLoop is enabled
+	UseAdaptiveBackoff bool
+
+	// AdaptiveBackoffIdleThreshold is the duration without activity before switching to Sleep.
+	// Only used when UseAdaptiveBackoff is true.
+	// Default: 1 second
+	AdaptiveBackoffIdleThreshold time.Duration
+
+	// --- EventLoop Tight Loop Configuration (eventloop_batch_sizing_design.md) ---
+
+	// EventLoopMaxDataPerIteration caps data packets processed per EventLoop iteration.
+	// When > 0, enables "tight loop" mode: control ring is checked after EVERY data packet.
+	// This provides minimum control latency (~500ns) at negligible overhead (~0.006%).
+	// When 0, uses legacy unbounded drain (control latency can be 1-2ms).
+	// Default: 512 (tight loop enabled)
+	EventLoopMaxDataPerIteration int
+
+	// --- Zero-Copy Payload Pool Configuration (Phase 5: Lockless Sender) ---
+
+	// ValidateSendPayloadSize enables payload size validation in Push().
+	// When enabled, payloads exceeding MaxPayloadSize (1316 bytes) are rejected.
+	// This prevents buffer overflows when using pooled buffers.
+	// Default: false (no validation for backward compatibility)
+	ValidateSendPayloadSize bool
+
+	// --- Testing Configuration ---
+
+	// SendFilter is an optional function called before each packet is sent.
+	// If set and returns false, the packet is dropped (not sent).
+	// This is primarily for testing (e.g., simulating packet loss).
+	// Must be set BEFORE Dial()/Accept() - cannot be modified after connection starts.
+	// Default: nil (no filtering)
+	SendFilter func(p packet.Packet) bool `json:"-"` // Not serializable
+
+	// --- Lock-Free Ring Buffer (Phase 3: Lockless Design) ---
+
+	// UsePacketRing enables lock-free ring buffer for packet handoff between
+	// io_uring completion handlers and the receiver Tick() event loop.
+	// When enabled, Push() writes to the ring (lock-free), and Tick() drains
+	// the ring before processing (single-threaded, no locks needed).
+	// Default: false (use legacy locked path)
+	UsePacketRing bool
+
+	// PacketRingSize is the capacity of the lock-free ring buffer (per shard).
+	// Total ring capacity = PacketRingSize * PacketRingShards
+	// Must be a power of 2. Default: 1024
+	PacketRingSize int
+
+	// PacketRingShards is the number of shards for the lock-free ring.
+	// More shards reduce contention between concurrent producers.
+	// Must be a power of 2. Default: 4
+	PacketRingShards int
+
+	// PacketRingMaxRetries is the maximum number of immediate retries
+	// before starting backoff when the ring is full.
+	// Default: 10
+	PacketRingMaxRetries int
+
+	// PacketRingBackoffDuration is the delay between backoff retries
+	// when the ring is full.
+	// Default: 100µs
+	PacketRingBackoffDuration time.Duration
+
+	// PacketRingMaxBackoffs is the maximum number of backoff iterations
+	// before giving up and dropping the packet.
+	// 0 = unlimited (keep retrying until success)
+	// Default: 0
+	PacketRingMaxBackoffs int
+
+	// PacketRingRetryStrategy determines how ring writes handle full shards.
+	// Options:
+	//   "" or "sleep" - SleepBackoff: retry same shard, then sleep (default)
+	//   "next"        - NextShard: try all shards before sleeping
+	//   "random"      - RandomShard: try random shards (best load distribution)
+	//   "adaptive"    - AdaptiveBackoff: exponential backoff with jitter
+	//   "spin"        - SpinThenYield: yield CPU instead of sleep (lowest latency)
+	//   "hybrid"      - Hybrid: NextShard + AdaptiveBackoff
+	//   "autoadaptive" or "auto" - AutoAdaptive: Yield when active, Sleep when idle
+	//                   ⭐ RECOMMENDED for high-throughput (>300 Mb/s) scenarios
+	// Default: "" (uses SleepBackoff)
+	PacketRingRetryStrategy string
+
+	// --- Event Loop (Phase 4: Lockless Design) ---
+
+	// UseEventLoop enables continuous event loop processing instead of
+	// timer-driven Tick() for lower latency and smoother CPU utilization.
+	// When enabled, packets are processed immediately as they arrive from
+	// the ring buffer, and delivered as soon as TSBPD allows.
+	// REQUIRES: UsePacketRing=true (event loop consumes from ring)
+	// Default: false (use timer-driven Tick())
+	UseEventLoop bool
+
+	// EventLoopRateInterval is the interval for rate metric calculation
+	// in the event loop. Uses a separate ticker from ACK/NAK.
+	// Default: 1s
+	EventLoopRateInterval time.Duration
+
+	// BackoffColdStartPkts is the number of packets to receive before
+	// the adaptive backoff engages. During cold start, minimum sleep
+	// is used to ensure responsiveness during connection establishment.
+	// Default: 1000
+	BackoffColdStartPkts int
+
+	// BackoffMinSleep is the minimum sleep duration during idle periods
+	// in the event loop. Lower values = more responsive, higher CPU.
+	// Default: 10µs
+	BackoffMinSleep time.Duration
+
+	// BackoffMaxSleep is the maximum sleep duration during idle periods
+	// in the event loop. Higher values = lower CPU, less responsive.
+	// Default: 1ms
+	BackoffMaxSleep time.Duration
+
+	// --- ACK Optimization Configuration (Phase 5: ACK Optimization) ---
+
+	// LightACKDifference controls how often Light ACK packets are sent.
+	// A Light ACK is sent when the contiguous sequence has advanced by
+	// at least this many packets since the last Light ACK.
+	// RFC recommends 64, but higher values reduce overhead at high bitrates.
+	// Default: 64 (RFC recommendation)
+	// Suggested for high bitrate (200Mb/s+): 256
+	// Range: 1-5000
+	LightACKDifference uint32
+
+	// --- Debug Configuration ---
+
+	// ReceiverDebug enables debug logging in the receiver for investigation.
+	// When enabled, receiver logs NAK dispatch decisions, ring buffer operations,
+	// and gap detection events. Uses the connection's logging function.
+	// Default: false (no debug logging)
+	ReceiverDebug bool
 }
 
 // DefaultConfig is the default configuration for a SRT connection
 // if no individual configuration has been provided.
 var defaultConfig Config = Config{
-	Congestion:            "live",
-	ConnectionTimeout:     3 * time.Second,
-	DriftTracer:           true,
-	EnforcedEncryption:    true,
-	FC:                    25600,
-	GroupConnect:          false,
-	GroupStabilityTimeout: 0,
-	InputBW:               0,
-	IPTOS:                 0,
-	IPTTL:                 0,
-	IPv6Only:              -1,
-	KMPreAnnounce:         1 << 12,
-	KMRefreshRate:         1 << 24,
-	Latency:               -1,
-	LossMaxTTL:            0,
-	MaxBW:                 -1,
-	MessageAPI:            false,
-	MinVersion:            SRT_VERSION,
-	MSS:                   MAX_MSS_SIZE,
-	NAKReport:             true,
-	OverheadBW:            25,
-	PacketFilter:          "",
-	Passphrase:            "",
-	PayloadSize:           MAX_PAYLOAD_SIZE,
-	PBKeylen:              16,
-	PeerIdleTimeout:       2 * time.Second,
-	PeerLatency:           120 * time.Millisecond,
-	ReceiverBufferSize:    0,
-	ReceiverLatency:       120 * time.Millisecond,
-	SendBufferSize:        0,
-	SendDropDelay:         1 * time.Second,
-	StreamId:              "",
-	TooLatePacketDrop:     true,
-	TransmissionType:      "live",
-	TSBPDMode:             true,
-	AllowPeerIpChange:     false,
+	Congestion:                "live",
+	ConnectionTimeout:         3 * time.Second,
+	DriftTracer:               true,
+	EnforcedEncryption:        true,
+	FC:                        25600,
+	GroupConnect:              false,
+	GroupStabilityTimeout:     0,
+	InputBW:                   0,
+	IPTOS:                     0,
+	IPTTL:                     0,
+	IPv6Only:                  -1,
+	KMPreAnnounce:             1 << 12,
+	KMRefreshRate:             1 << 24,
+	Latency:                   -1,
+	LossMaxTTL:                0,
+	MaxBW:                     -1,
+	MessageAPI:                false,
+	MinVersion:                SRT_VERSION,
+	MSS:                       MAX_MSS_SIZE,
+	NAKReport:                 true,
+	OverheadBW:                25,
+	PacketFilter:              "",
+	Passphrase:                "",
+	PayloadSize:               MAX_PAYLOAD_SIZE,
+	PBKeylen:                  16,
+	PeerIdleTimeout:           2 * time.Second,
+	KeepaliveThreshold:        0.75, // Send keepalive at 75% of PeerIdleTimeout
+	PeerLatency:               120 * time.Millisecond,
+	ReceiverBufferSize:        0,
+	ReceiverLatency:           120 * time.Millisecond,
+	SendBufferSize:            0,
+	SendDropDelay:             1 * time.Second,
+	StreamId:                  "",
+	TooLatePacketDrop:         true,
+	TransmissionType:          "live",
+	TSBPDMode:                 true,
+	AllowPeerIpChange:         false,
+	IoUringEnabled:            false,
+	IoUringSendRingSize:       64,
+	NetworkQueueSize:          1024,
+	WriteQueueSize:            1024,
+	ReadQueueSize:             1024,
+	ReceiveQueueSize:          2048,
+	PacketReorderAlgorithm:    "list",
+	BTreeDegree:               32,
+	IoUringRecvEnabled:        false,
+	IoUringRecvRingSize:       512,
+	IoUringRecvInitialPending: 512,
+	IoUringRecvBatchSize:      256,
+	IoUringRecvRingCount:      1, // Default to 1 for backward compatibility
+	IoUringSendRingCount:      1, // Default to 1 for backward compatibility
+	StatisticsPrintInterval:   0, // Disabled by default
+	MetricsEnabled:            false,
+	MetricsListenAddr:         "",                      // Disabled by default
+	HandshakeTimeout:          1500 * time.Millisecond, // 1.5 seconds (must be < PeerIdleTimeout)
+	ShutdownDelay:             5 * time.Second,         // 5 seconds
+
+	// NAK btree defaults
+	TickIntervalMs:          10,   // 10ms TSBPD tick
+	PeriodicNakIntervalMs:   20,   // 20ms periodic NAK
+	PeriodicAckIntervalMs:   10,   // 10ms periodic ACK
+	SendDropIntervalMs:      100,  // 100ms sender drop check
+	EventLoopRateIntervalMs: 1000, // 1s rate calculation
+	UseNakBtree:             false, // Auto-set when IoUringRecvEnabled=true
+	SuppressImmediateNak:     false, // Auto-set when IoUringRecvEnabled=true
+	NakRecentPercent:         0.10,  // 10% of TSBPD delay
+	NakMergeGap:              3,     // Merge gaps of 3 or less
+	NakConsolidationBudgetUs: 2000,  // 2ms consolidation budget
+	FastNakEnabled:           false, // Auto-set when UseNakBtree=true
+	FastNakThresholdMs:       50,    // 50ms silent period triggers FastNAK
+	FastNakRecentEnabled:     false, // Auto-set when FastNakEnabled=true
+	HonorNakOrder:            false, // Existing behavior: newest-first
+
+	// RTO-based suppression defaults (Phase 6)
+	RTOMode:        RTORttRttVar, // RTT + RTTVar (balanced)
+	ExtraRTTMargin: 0.10,         // 10% extra margin (only for RTORttRttVarMargin mode)
+
+	// NAK btree expiry defaults (nak_btree_expiry_optimization.md)
+	NakExpiryMargin:     0.10, // 10% margin - slightly conservative, favors recovery
+	EWMAWarmupThreshold: 32,   // 32 samples before EWMA considered warm
+
+	// Sender lockless defaults (Phase 1: Lockless Sender)
+	UseSendBtree:    false, // Legacy linked lists by default
+	SendBtreeDegree: 32,    // Same as receiver btree
+
+	// Sender lock-free ring defaults (Phase 2: Lockless Sender)
+	UseSendRing:    false, // Legacy path by default
+	SendRingSize:   1024,  // Per-shard capacity
+	SendRingShards: 1,     // Single shard for strict ordering
+
+	// Sender control ring defaults (Phase 3: Lockless Sender)
+	UseSendControlRing:    false, // Legacy path by default
+	SendControlRingSize:   128,   // Per-shard capacity (unified with receiver)
+	SendControlRingShards: 1,     // Single shard (unified with receiver)
+
+	// Receiver control ring defaults (Completely Lock-Free Receiver)
+	UseRecvControlRing:    false, // Legacy path by default
+	RecvControlRingSize:   128,   // Per-shard capacity
+	RecvControlRingShards: 1,     // Single shard
+
+	// Sender EventLoop defaults (Phase 4: Lockless Sender)
+	UseSendEventLoop:             false,                  // Legacy Tick() by default
+	SendEventLoopBackoffMinSleep: 100 * time.Microsecond, // 100µs minimum sleep
+	SendEventLoopBackoffMaxSleep: 1 * time.Millisecond,   // 1ms maximum sleep
+	SendTsbpdSleepFactor:         0.9,                    // Wake up at 90% of next TSBPD
+	SendDropThresholdUs:          0,                      // 0 = use auto-calculated (1.25 * peerTsbpdDelay)
+
+	// Adaptive Backoff defaults (adaptive_eventloop_mode_design.md)
+	// DISABLED: The lock-free ring now has AutoAdaptive strategy (v1.0.4)
+	// which handles Sleep/Yield switching at the ring level.
+	// Having both layers caused inconsistent performance.
+	UseAdaptiveBackoff:           true, // Adaptive Yield/Sleep for both high and low throughput
+	AdaptiveBackoffIdleThreshold: 1 * time.Second, // 1 second idle before switching to Sleep
+
+	// EventLoop tight loop defaults (eventloop_batch_sizing_design.md)
+	EventLoopMaxDataPerIteration: 512, // Enables tight loop with control check every packet
+
+	// Zero-copy payload pool defaults (Phase 5: Lockless Sender)
+	ValidateSendPayloadSize: false, // No validation by default (backward compat)
+
+	// Lock-free ring buffer defaults (Phase 3)
+	UsePacketRing:             false,                  // Legacy path by default
+	PacketRingSize:            1024,                   // Per-shard capacity
+	PacketRingShards:          4,                      // 4 shards = 4096 total capacity
+	PacketRingMaxRetries:      10,                     // Immediate retries before backoff
+	PacketRingBackoffDuration: 100 * time.Microsecond, // 100µs backoff delay
+	PacketRingMaxBackoffs:     0,                      // 0 = unlimited backoffs
+	PacketRingRetryStrategy:   "random",               // RandomShard - best RTT in benchmarks
+
+	// Event loop defaults (Phase 4)
+	UseEventLoop:          false,                 // Timer-driven Tick() by default
+	EventLoopRateInterval: 1 * time.Second,       // Rate calculation every 1s
+	BackoffColdStartPkts:  1000,                  // 1000 packets before backoff engages
+	BackoffMinSleep:       10 * time.Microsecond, // 10µs minimum sleep
+	BackoffMaxSleep:       1 * time.Millisecond,  // 1ms maximum sleep
+
+	// ACK optimization defaults (Phase 5)
+	LightACKDifference: 64, // RFC recommendation: send Light ACK every 64 packets
 }
 
 // DefaultConfig returns the default configuration for Dial and Listen.
@@ -220,528 +798,5 @@ func DefaultConfig() Config {
 	return defaultConfig
 }
 
-// UnmarshalURL takes a SRT URL and parses out the configuration. A SRT URL is
-// srt://[host]:[port]?[key1]=[value1]&[key2]=[value2]... It returns the host:port
-// of the URL.
-func (c *Config) UnmarshalURL(srturl string) (string, error) {
-	u, err := url.Parse(srturl)
-	if err != nil {
-		return "", err
-	}
-
-	if u.Scheme != "srt" {
-		return "", fmt.Errorf("the URL doesn't seem to be an srt:// URL")
-	}
-
-	return u.Host, c.UnmarshalQuery(u.RawQuery)
-}
-
-// UnmarshalQuery parses a query string and interprets it as a configuration
-// for a SRT connection. The key in each key/value pair corresponds to the
-// respective field in the Config type, but with only lower case letters. Bool
-// values can be represented as "true"/"false", "on"/"off", "yes"/"no", or "0"/"1".
-func (c *Config) UnmarshalQuery(query string) error {
-	v, err := url.ParseQuery(query)
-	if err != nil {
-		return err
-	}
-
-	// https://github.com/Haivision/srt/blob/master/docs/apps/srt-live-transmit.md
-
-	if s := v.Get("congestion"); len(s) != 0 {
-		c.Congestion = s
-	}
-
-	if s := v.Get("conntimeo"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.ConnectionTimeout = time.Duration(d) * time.Millisecond
-		}
-	}
-
-	if s := v.Get("drifttracer"); len(s) != 0 {
-		switch s {
-		case "yes", "on", "true", "1":
-			c.DriftTracer = true
-		case "no", "off", "false", "0":
-			c.DriftTracer = false
-		}
-	}
-
-	if s := v.Get("enforcedencryption"); len(s) != 0 {
-		switch s {
-		case "yes", "on", "true", "1":
-			c.EnforcedEncryption = true
-		case "no", "off", "false", "0":
-			c.EnforcedEncryption = false
-		}
-	}
-
-	if s := v.Get("fc"); len(s) != 0 {
-		if d, err := strconv.ParseUint(s, 10, 32); err == nil {
-			c.FC = uint32(d)
-		}
-	}
-
-	if s := v.Get("groupconnect"); len(s) != 0 {
-		switch s {
-		case "yes", "on", "true", "1":
-			c.GroupConnect = true
-		case "no", "off", "false", "0":
-			c.GroupConnect = false
-		}
-	}
-
-	if s := v.Get("groupstabtimeo"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.GroupStabilityTimeout = time.Duration(d) * time.Millisecond
-		}
-	}
-
-	if s := v.Get("inputbw"); len(s) != 0 {
-		if d, err := strconv.ParseInt(s, 10, 64); err == nil {
-			c.InputBW = d
-		}
-	}
-
-	if s := v.Get("iptos"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.IPTOS = d
-		}
-	}
-
-	if s := v.Get("ipttl"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.IPTTL = d
-		}
-	}
-
-	if s := v.Get("ipv6only"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.IPv6Only = d
-		}
-	}
-
-	if s := v.Get("kmpreannounce"); len(s) != 0 {
-		if d, err := strconv.ParseUint(s, 10, 64); err == nil {
-			c.KMPreAnnounce = d
-		}
-	}
-
-	if s := v.Get("kmrefreshrate"); len(s) != 0 {
-		if d, err := strconv.ParseUint(s, 10, 64); err == nil {
-			c.KMRefreshRate = d
-		}
-	}
-
-	if s := v.Get("latency"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.Latency = time.Duration(d) * time.Millisecond
-		}
-	}
-
-	if s := v.Get("lossmaxttl"); len(s) != 0 {
-		if d, err := strconv.ParseUint(s, 10, 32); err == nil {
-			c.LossMaxTTL = uint32(d)
-		}
-	}
-
-	if s := v.Get("maxbw"); len(s) != 0 {
-		if d, err := strconv.ParseInt(s, 10, 64); err == nil {
-			c.MaxBW = d
-		}
-	}
-
-	if s := v.Get("mininputbw"); len(s) != 0 {
-		if d, err := strconv.ParseInt(s, 10, 64); err == nil {
-			c.MinInputBW = d
-		}
-	}
-
-	if s := v.Get("messageapi"); len(s) != 0 {
-		switch s {
-		case "yes", "on", "true", "1":
-			c.MessageAPI = true
-		case "no", "off", "false", "0":
-			c.MessageAPI = false
-		}
-	}
-
-	// minversion is ignored
-
-	if s := v.Get("mss"); len(s) != 0 {
-		if d, err := strconv.ParseUint(s, 10, 32); err == nil {
-			c.MSS = uint32(d)
-		}
-	}
-
-	if s := v.Get("nakreport"); len(s) != 0 {
-		switch s {
-		case "yes", "on", "true", "1":
-			c.NAKReport = true
-		case "no", "off", "false", "0":
-			c.NAKReport = false
-		}
-	}
-
-	if s := v.Get("oheadbw"); len(s) != 0 {
-		if d, err := strconv.ParseInt(s, 10, 64); err == nil {
-			c.OverheadBW = d
-		}
-	}
-
-	if s := v.Get("packetfilter"); len(s) != 0 {
-		c.PacketFilter = s
-	}
-
-	if s := v.Get("passphrase"); len(s) != 0 {
-		c.Passphrase = s
-	}
-
-	if s := v.Get("payloadsize"); len(s) != 0 {
-		if d, err := strconv.ParseUint(s, 10, 32); err == nil {
-			c.PayloadSize = uint32(d)
-		}
-	}
-
-	if s := v.Get("pbkeylen"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.PBKeylen = d
-		}
-	}
-
-	if s := v.Get("peeridletimeo"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.PeerIdleTimeout = time.Duration(d) * time.Millisecond
-		}
-	}
-
-	if s := v.Get("peerlatency"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.PeerLatency = time.Duration(d) * time.Millisecond
-		}
-	}
-
-	if s := v.Get("rcvbuf"); len(s) != 0 {
-		if d, err := strconv.ParseUint(s, 10, 32); err == nil {
-			c.ReceiverBufferSize = uint32(d)
-		}
-	}
-
-	if s := v.Get("rcvlatency"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.ReceiverLatency = time.Duration(d) * time.Millisecond
-		}
-	}
-
-	// retransmitalgo not implemented (there's only one)
-
-	if s := v.Get("sndbuf"); len(s) != 0 {
-		if d, err := strconv.ParseUint(s, 10, 32); err == nil {
-			c.SendBufferSize = uint32(d)
-		}
-	}
-
-	if s := v.Get("snddropdelay"); len(s) != 0 {
-		if d, err := strconv.Atoi(s); err == nil {
-			c.SendDropDelay = time.Duration(d) * time.Millisecond
-		}
-	}
-
-	if s := v.Get("streamid"); len(s) != 0 {
-		c.StreamId = s
-	}
-
-	if s := v.Get("tlpktdrop"); len(s) != 0 {
-		switch s {
-		case "yes", "on", "true", "1":
-			c.TooLatePacketDrop = true
-		case "no", "off", "false", "0":
-			c.TooLatePacketDrop = false
-		}
-	}
-
-	if s := v.Get("transtype"); len(s) != 0 {
-		c.TransmissionType = s
-	}
-
-	if s := v.Get("tsbpdmode"); len(s) != 0 {
-		switch s {
-		case "yes", "on", "true", "1":
-			c.TSBPDMode = true
-		case "no", "off", "false", "0":
-			c.TSBPDMode = false
-		}
-	}
-
-	return nil
-}
-
-// MarshalURL returns the SRT URL for this config and the given address (host:port).
-func (c *Config) MarshalURL(address string) string {
-	return "srt://" + address + "?" + c.MarshalQuery()
-}
-
-// MarshalQuery returns the corresponding query string for a configuration.
-func (c *Config) MarshalQuery() string {
-	q := url.Values{}
-
-	if c.Congestion != defaultConfig.Congestion {
-		q.Set("congestion", c.Congestion)
-	}
-
-	if c.ConnectionTimeout != defaultConfig.ConnectionTimeout {
-		q.Set("conntimeo", strconv.FormatInt(c.ConnectionTimeout.Milliseconds(), 10))
-	}
-
-	if c.DriftTracer != defaultConfig.DriftTracer {
-		q.Set("drifttracer", strconv.FormatBool(c.DriftTracer))
-	}
-
-	if c.EnforcedEncryption != defaultConfig.EnforcedEncryption {
-		q.Set("enforcedencryption", strconv.FormatBool(c.EnforcedEncryption))
-	}
-
-	if c.FC != defaultConfig.FC {
-		q.Set("fc", strconv.FormatUint(uint64(c.FC), 10))
-	}
-
-	if c.GroupConnect != defaultConfig.GroupConnect {
-		q.Set("groupconnect", strconv.FormatBool(c.GroupConnect))
-	}
-
-	if c.GroupStabilityTimeout != defaultConfig.GroupStabilityTimeout {
-		q.Set("groupstabtimeo", strconv.FormatInt(c.GroupStabilityTimeout.Milliseconds(), 10))
-	}
-
-	if c.InputBW != defaultConfig.InputBW {
-		q.Set("inputbw", strconv.FormatInt(c.InputBW, 10))
-	}
-
-	if c.IPTOS != defaultConfig.IPTOS {
-		q.Set("iptos", strconv.FormatInt(int64(c.IPTOS), 10))
-	}
-
-	if c.IPTTL != defaultConfig.IPTTL {
-		q.Set("ipttl", strconv.FormatInt(int64(c.IPTTL), 10))
-	}
-
-	if c.IPv6Only != defaultConfig.IPv6Only {
-		q.Set("ipv6only", strconv.FormatInt(int64(c.IPv6Only), 10))
-	}
-
-	if len(c.Passphrase) != 0 {
-		if c.KMPreAnnounce != defaultConfig.KMPreAnnounce {
-			q.Set("kmpreannounce", strconv.FormatUint(c.KMPreAnnounce, 10))
-		}
-
-		if c.KMRefreshRate != defaultConfig.KMRefreshRate {
-			q.Set("kmrefreshrate", strconv.FormatUint(c.KMRefreshRate, 10))
-		}
-	}
-
-	if c.Latency != defaultConfig.Latency {
-		q.Set("latency", strconv.FormatInt(c.Latency.Milliseconds(), 10))
-	}
-
-	if c.LossMaxTTL != defaultConfig.LossMaxTTL {
-		q.Set("lossmaxttl", strconv.FormatInt(int64(c.LossMaxTTL), 10))
-	}
-
-	if c.MaxBW != defaultConfig.MaxBW {
-		q.Set("maxbw", strconv.FormatInt(c.MaxBW, 10))
-	}
-
-	if c.MinInputBW != defaultConfig.InputBW {
-		q.Set("mininputbw", strconv.FormatInt(c.MinInputBW, 10))
-	}
-
-	if c.MessageAPI != defaultConfig.MessageAPI {
-		q.Set("messageapi", strconv.FormatBool(c.MessageAPI))
-	}
-
-	if c.MSS != defaultConfig.MSS {
-		q.Set("mss", strconv.FormatUint(uint64(c.MSS), 10))
-	}
-
-	if c.NAKReport != defaultConfig.NAKReport {
-		q.Set("nakreport", strconv.FormatBool(c.NAKReport))
-	}
-
-	if c.OverheadBW != defaultConfig.OverheadBW {
-		q.Set("oheadbw", strconv.FormatInt(c.OverheadBW, 10))
-	}
-
-	if c.PacketFilter != defaultConfig.PacketFilter {
-		q.Set("packetfilter", c.PacketFilter)
-	}
-
-	if len(c.Passphrase) != 0 {
-		q.Set("passphrase", c.Passphrase)
-	}
-
-	if c.PayloadSize != defaultConfig.PayloadSize {
-		q.Set("payloadsize", strconv.FormatUint(uint64(c.PayloadSize), 10))
-	}
-
-	if c.PBKeylen != defaultConfig.PBKeylen {
-		q.Set("pbkeylen", strconv.FormatInt(int64(c.PBKeylen), 10))
-	}
-
-	if c.PeerIdleTimeout != defaultConfig.PeerIdleTimeout {
-		q.Set("peeridletimeo", strconv.FormatInt(c.PeerIdleTimeout.Milliseconds(), 10))
-	}
-
-	if c.PeerLatency != defaultConfig.PeerLatency {
-		q.Set("peerlatency", strconv.FormatInt(c.PeerLatency.Milliseconds(), 10))
-	}
-
-	if c.ReceiverBufferSize != defaultConfig.ReceiverBufferSize {
-		q.Set("rcvbuf", strconv.FormatInt(int64(c.ReceiverBufferSize), 10))
-	}
-
-	if c.ReceiverLatency != defaultConfig.ReceiverLatency {
-		q.Set("rcvlatency", strconv.FormatInt(c.ReceiverLatency.Milliseconds(), 10))
-	}
-
-	if c.SendBufferSize != defaultConfig.SendBufferSize {
-		q.Set("sndbuf", strconv.FormatInt(int64(c.SendBufferSize), 10))
-	}
-
-	if c.SendDropDelay != defaultConfig.SendDropDelay {
-		q.Set("snddropdelay", strconv.FormatInt(c.SendDropDelay.Milliseconds(), 10))
-	}
-
-	if len(c.StreamId) != 0 {
-		q.Set("streamid", c.StreamId)
-	}
-
-	if c.TooLatePacketDrop != defaultConfig.TooLatePacketDrop {
-		q.Set("tlpktdrop", strconv.FormatBool(c.TooLatePacketDrop))
-	}
-
-	if c.TransmissionType != defaultConfig.TransmissionType {
-		q.Set("transtype", c.TransmissionType)
-	}
-
-	if c.TSBPDMode != defaultConfig.TSBPDMode {
-		q.Set("tsbpdmode", strconv.FormatBool(c.TSBPDMode))
-	}
-
-	return q.Encode()
-}
-
-// Validate validates a configuration, returns an error if a field
-// has an invalid value.
-func (c *Config) Validate() error {
-	if c.TransmissionType != "live" {
-		return fmt.Errorf("config: TransmissionType must be 'live'")
-	}
-
-	c.Congestion = "live"
-	c.NAKReport = true
-	c.TooLatePacketDrop = true
-	c.TSBPDMode = true
-
-	if c.Congestion != "live" {
-		return fmt.Errorf("config: Congestion mode must be 'live'")
-	}
-
-	if c.ConnectionTimeout <= 0 {
-		return fmt.Errorf("config: ConnectionTimeout must be greater than 0")
-	}
-
-	if c.GroupConnect {
-		return fmt.Errorf("config: GroupConnect is not supported")
-	}
-
-	if c.IPTOS > 0 && c.IPTOS > 255 {
-		return fmt.Errorf("config: IPTOS must be lower than 255")
-	}
-
-	if c.IPTTL > 0 && c.IPTTL > 255 {
-		return fmt.Errorf("config: IPTTL must be between 1 and 255")
-	}
-
-	if c.IPv6Only > 0 {
-		return fmt.Errorf("config: IPv6Only is not supported")
-	}
-
-	if c.KMRefreshRate != 0 {
-		if c.KMPreAnnounce < 1 || c.KMPreAnnounce > c.KMRefreshRate/2 {
-			return fmt.Errorf("config: KMPreAnnounce must be greater than 1 and smaller than KMRefreshRate/2")
-		}
-	}
-
-	if c.Latency >= 0 {
-		c.PeerLatency = c.Latency
-		c.ReceiverLatency = c.Latency
-	}
-
-	if c.MinVersion != SRT_VERSION {
-		return fmt.Errorf("config: MinVersion must be %#06x", SRT_VERSION)
-	}
-
-	if c.MSS < MIN_MSS_SIZE || c.MSS > MAX_MSS_SIZE {
-		return fmt.Errorf("config: MSS must be between %d and %d (both inclusive)", MIN_MSS_SIZE, MAX_MSS_SIZE)
-	}
-
-	if !c.NAKReport {
-		return fmt.Errorf("config: NAKReport must be enabled")
-	}
-
-	if c.OverheadBW < 10 || c.OverheadBW > 100 {
-		return fmt.Errorf("config: OverheadBW must be between 10 and 100")
-	}
-
-	if len(c.PacketFilter) != 0 {
-		return fmt.Errorf("config: PacketFilter are not supported")
-	}
-
-	if len(c.Passphrase) != 0 {
-		if len(c.Passphrase) < MIN_PASSPHRASE_SIZE || len(c.Passphrase) > MAX_PASSPHRASE_SIZE {
-			return fmt.Errorf("config: Passphrase must be between %d and %d bytes long", MIN_PASSPHRASE_SIZE, MAX_PASSPHRASE_SIZE)
-		}
-	}
-
-	if c.PayloadSize < MIN_PAYLOAD_SIZE || c.PayloadSize > MAX_PAYLOAD_SIZE {
-		return fmt.Errorf("config: PayloadSize must be between %d and %d (both inclusive)", MIN_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE)
-	}
-
-	if c.PayloadSize > c.MSS-uint32(SRT_HEADER_SIZE+UDP_HEADER_SIZE) {
-		return fmt.Errorf("config: PayloadSize must not be larger than %d (MSS - %d)", c.MSS-uint32(SRT_HEADER_SIZE+UDP_HEADER_SIZE), SRT_HEADER_SIZE-UDP_HEADER_SIZE)
-	}
-
-	if c.PBKeylen != 16 && c.PBKeylen != 24 && c.PBKeylen != 32 {
-		return fmt.Errorf("config: PBKeylen must be 16, 24, or 32 bytes")
-	}
-
-	if c.PeerLatency < 0 {
-		return fmt.Errorf("config: PeerLatency must be greater than 0")
-	}
-
-	if c.ReceiverLatency < 0 {
-		return fmt.Errorf("config: ReceiverLatency must be greater than 0")
-	}
-
-	if c.SendDropDelay < 0 {
-		return fmt.Errorf("config: SendDropDelay must be greater than 0")
-	}
-
-	if len(c.StreamId) > MAX_STREAMID_SIZE {
-		return fmt.Errorf("config: StreamId must be shorter than or equal to %d bytes", MAX_STREAMID_SIZE)
-	}
-
-	if !c.TooLatePacketDrop {
-		return fmt.Errorf("config: TooLatePacketDrop must be enabled")
-	}
-
-	if c.TransmissionType != "live" {
-		return fmt.Errorf("config: TransmissionType must be 'live'")
-	}
-
-	if !c.TSBPDMode {
-		return fmt.Errorf("config: TSBPDMode must be enabled")
-	}
-
-	return nil
-}
+// Note: ApplyAutoConfiguration() and Validate() are in config_validate.go
+// Note: Marshal/Unmarshal functions are in config_marshal.go

@@ -13,18 +13,19 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/datarhei/gosrt/circular"
-	srtnet "github.com/datarhei/gosrt/net"
+	"github.com/randomizedcoder/gosrt/circular"
+	srtnet "github.com/randomizedcoder/gosrt/net"
 )
 
-const MAX_SEQUENCENUMBER uint32 = 0b01111111_11111111_11111111_11111111
-const MAX_TIMESTAMP uint32 = 0b11111111_11111111_11111111_11111111
-const MAX_PAYLOAD_SIZE = 1456
-
-// Table 1: SRT Control Packet Types
-type CtrlType uint16
-
 const (
+	MAX_SEQUENCENUMBER uint32 = 0b01111111_11111111_11111111_11111111
+	MAX_TIMESTAMP      uint32 = 0b11111111_11111111_11111111_11111111
+	MAX_PAYLOAD_SIZE          = 1456
+
+	// HeaderSize is the size of the SRT packet header in bytes.
+	// Used by zero-copy path to compute payload slice: (*recvBuffer)[HeaderSize:n]
+	HeaderSize = 16
+
 	CTRLTYPE_HANDSHAKE CtrlType = 0x0000
 	CTRLTYPE_KEEPALIVE CtrlType = 0x0001
 	CTRLTYPE_ACK       CtrlType = 0x0002
@@ -36,6 +37,9 @@ const (
 	CRTLTYPE_PEERERROR CtrlType = 0x0008 // unimplemented, receiver->sender (only for file transfers)
 	CTRLTYPE_USER      CtrlType = 0x7FFF
 )
+
+// Table 1: SRT Control Packet Types
+type CtrlType uint16
 
 func (h CtrlType) String() string {
 	switch h {
@@ -214,6 +218,26 @@ type Packet interface {
 
 	// Decommission frees the payload. The packet shouldn't be uses afterwards.
 	Decommission()
+
+	// DecommissionWithBuffer returns the packet's receive buffer to the provided pool,
+	// then decommissions the packet. Used by zero-copy path (Phase 2: Lockless Design).
+	// Safe to call even if packet has no tracked buffer (legacy path).
+	DecommissionWithBuffer(bufferPool *sync.Pool)
+
+	// HasRecvBuffer returns true if the packet has a tracked receive buffer (zero-copy path).
+	HasRecvBuffer() bool
+
+	// GetRecvBuffer returns the tracked receive buffer for pool return.
+	// Returns nil if packet is from legacy path.
+	GetRecvBuffer() *[]byte
+
+	// ClearRecvBuffer clears the buffer reference after pool return.
+	ClearRecvBuffer()
+
+	// UnmarshalZeroCopy parses the packet using zero-copy - stores buffer reference
+	// instead of copying data. Used by Phase 2: Lockless Design.
+	// IMPORTANT: Sets recvBuffer BEFORE validation for proper cleanup on error.
+	UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error
 }
 
 //  3. Packet Structure
@@ -238,6 +262,11 @@ type PacketHeader struct {
 	RetransmittedPacketFlag bool             // This flag is clear when a packet is transmitted the first time. The flag is set to "1" when a packet is retransmitted.
 	MessageNumber           uint32           // The sequential number of consecutive data packets that form a message (see PP field).
 
+	// Transmission tracking (sender-side) - NOT transmitted on wire
+	// These fields track transmission state for first-send detection and RTO suppression
+	LastRetransmitTimeUs uint64 // Timestamp when last retransmitted (microseconds since epoch)
+	TransmitCount        uint32 // Number of times transmitted (0=never, 1=first send, 2+=retransmit)
+
 	// common fields
 
 	Timestamp           uint32 // microseconds
@@ -248,6 +277,14 @@ type pkt struct {
 	header PacketHeader
 
 	payload *bytes.Buffer
+
+	// Zero-copy fields (Phase 2: Lockless Design)
+	// When set, the packet references a pooled buffer directly instead of copying data.
+	// recvBuffer holds the original buffer from recvBufferPool (for returning to pool).
+	// n holds the number of bytes received (from ReadFromUDP or io_uring CQE.Res).
+	// Payload is computed on-demand via GetPayload(): (*recvBuffer)[HeaderSize:n]
+	recvBuffer *[]byte // Original buffer from recvBufferPool (nil in legacy path)
+	n          int     // Bytes received - named 'n' per Go convention (io.Reader, net.Conn)
 }
 
 type pool struct {
@@ -277,6 +314,46 @@ func (p *pool) Put(b *bytes.Buffer) {
 
 var payloadPool *pool = newPool()
 
+// packetPool pools pkt structs to reduce allocations in the hot path
+var packetPool = sync.Pool{
+	New: func() interface{} {
+		return &pkt{
+			header: PacketHeader{
+				// Initialize with safe defaults
+				PacketSequenceNumber:  circular.New(0, MAX_SEQUENCENUMBER),
+				PacketPositionFlag:    SinglePacket,
+				OrderFlag:             false,
+				KeyBaseEncryptionFlag: UnencryptedPacket,
+				MessageNumber:         1,
+			},
+			payload: nil, // Will be set from payloadPool
+		}
+	},
+}
+
+// DEPRECATED: NewPacketFromData - replaced by UnmarshalZeroCopy (Phase 2: Lockless Design)
+// This function copied packet data into a new buffer. The new UnmarshalZeroCopy
+// references the pooled buffer directly, eliminating the copy and extending
+// buffer lifetime until packet delivery.
+//
+// Kept for historical reference - can be removed after migration is validated.
+//
+// func NewPacketFromData(addr net.Addr, rawdata []byte) (Packet, error) {
+// 	p := NewPacket(addr)
+//
+// 	if len(rawdata) != 0 {
+// 		if err := p.Unmarshal(rawdata); err != nil {
+// 			p.Decommission()
+// 			return nil, fmt.Errorf("invalid data: %w", err)
+// 		}
+// 	}
+//
+// 	return p, nil
+// }
+
+// NewPacketFromData creates a packet by COPYING data from rawdata.
+// DEPRECATED: Use NewPacket() + UnmarshalZeroCopy() for zero-copy path.
+// This function is kept for backwards compatibility with existing code.
 func NewPacketFromData(addr net.Addr, rawdata []byte) (Packet, error) {
 	p := NewPacket(addr)
 
@@ -291,28 +368,150 @@ func NewPacketFromData(addr net.Addr, rawdata []byte) (Packet, error) {
 }
 
 func NewPacket(addr net.Addr) Packet {
-	p := &pkt{
-		header: PacketHeader{
-			Addr:                  addr,
-			PacketSequenceNumber:  circular.New(0, MAX_SEQUENCENUMBER),
-			PacketPositionFlag:    SinglePacket,
-			OrderFlag:             false,
-			KeyBaseEncryptionFlag: UnencryptedPacket,
-			MessageNumber:         1,
-		},
-		payload: payloadPool.Get(),
-	}
+	// Get from pool (hot path - must be fast)
+	// Object is already clean from Decommission()
+	p := packetPool.Get().(*pkt)
+
+	// Only set the address (required parameter)
+	// All other fields are already reset from Decommission()
+	p.header.Addr = addr
+
+	// Get payload from pool (already resets in payloadPool.Get())
+	p.payload = payloadPool.Get()
 
 	return p
 }
 
 func (p *pkt) Decommission() {
 	if p.payload == nil {
+		// Already decommissioned or invalid - don't return to pool
 		return
 	}
 
+	// Reset all fields to safe defaults BEFORE returning to pool
+	// This ensures objects in pool are always clean and ready
+	// Reset happens in cold path (after processing), not hot path (during allocation)
+	p.header.Addr = nil
+	p.header.IsControlPacket = false
+	p.header.PktTsbpdTime = 0
+	p.header.ControlType = 0
+	p.header.SubType = 0
+	p.header.TypeSpecific = 0
+	p.header.PacketSequenceNumber = circular.New(0, MAX_SEQUENCENUMBER)
+	p.header.PacketPositionFlag = SinglePacket
+	p.header.OrderFlag = false
+	p.header.KeyBaseEncryptionFlag = UnencryptedPacket
+	p.header.RetransmittedPacketFlag = false
+	p.header.MessageNumber = 1
+	p.header.LastRetransmitTimeUs = 0 // Reset retransmit tracking (Phase 6: RTO Suppression)
+	p.header.TransmitCount = 0        // Reset transmission count (0 = never sent)
+	p.header.Timestamp = 0
+	p.header.DestinationSocketId = 0
+
+	// Return payload to pool (payloadPool.Get() already resets it)
 	payloadPool.Put(p.payload)
 	p.payload = nil
+
+	// Clear zero-copy fields (Phase 2: Lockless Design)
+	// Note: recvBuffer is NOT returned to pool here - that's done by
+	// DecommissionWithBuffer() or releasePacketFully() which have the pool reference
+	p.recvBuffer = nil
+	p.n = 0
+
+	// Return packet struct to pool (now clean and ready for reuse)
+	packetPool.Put(p)
+}
+
+// ========== Zero-Copy Support (Phase 2: Lockless Design) ==========
+
+// UnmarshalZeroCopy parses a packet using zero-copy - the buffer reference is
+// stored for later pool return. No data is copied.
+//
+// Parameters:
+//   - buf: Pointer to the pooled buffer (from recvBufferPool)
+//   - n: Number of bytes received (from ReadFromUDP or io_uring CQE.Res)
+//   - addr: Source address of the packet
+//
+// IMPORTANT: This sets recvBuffer and n BEFORE validation, ensuring
+// DecommissionWithBuffer() can always return the buffer even if parsing fails.
+//
+// Payload access is via Data() or direct: (*recvBuffer)[HeaderSize:n]
+func (p *pkt) UnmarshalZeroCopy(buf *[]byte, n int, addr net.Addr) error {
+	// Store buffer reference and length FIRST (before any validation that might fail)
+	// This ensures DecommissionWithBuffer() can always return the buffer
+	p.recvBuffer = buf
+	p.n = n
+	p.header.Addr = addr
+
+	// Validate minimum size
+	if n < HeaderSize {
+		return fmt.Errorf("packet too short (%d bytes, need %d)", n, HeaderSize)
+	}
+
+	// Parse header directly from buffer (no intermediate slice needed)
+	// We access (*buf) directly - no need for data := (*buf)[:n]
+	data := *buf
+
+	p.header.IsControlPacket = (data[0] & 0x80) != 0
+
+	if p.header.IsControlPacket {
+		p.header.ControlType = CtrlType(binary.BigEndian.Uint16(data[0:2]) & ^uint16(1<<15))
+		p.header.SubType = CtrlSubType(binary.BigEndian.Uint16(data[2:4]))
+		p.header.TypeSpecific = binary.BigEndian.Uint32(data[4:8])
+	} else {
+		p.header.PacketSequenceNumber = circular.New(binary.BigEndian.Uint32(data[0:4]), MAX_SEQUENCENUMBER)
+		p.header.PacketPositionFlag = PacketPosition((data[4] & 0b11000000) >> 6)
+		p.header.OrderFlag = (data[4] & 0b00100000) != 0
+		p.header.KeyBaseEncryptionFlag = PacketEncryption((data[4] & 0b00011000) >> 3)
+		p.header.RetransmittedPacketFlag = (data[4] & 0b00000100) != 0
+		p.header.MessageNumber = binary.BigEndian.Uint32(data[4:8]) & ^uint32(0b11111100<<24)
+	}
+
+	p.header.Timestamp = binary.BigEndian.Uint32(data[8:12])
+	p.header.DestinationSocketId = binary.BigEndian.Uint32(data[12:16])
+
+	// NOTE: No payload copy! Payload is computed on-demand via Data()
+	// Data() returns (*recvBuffer)[HeaderSize:n] for zero-copy path
+	return nil
+}
+
+// DecommissionWithBuffer returns the buffer to the provided pool, then
+// returns the packet struct to the packet pool.
+// Safe to call even if recvBuffer is nil (handles both legacy and zero-copy paths).
+//
+// Use this in error paths where the receiver isn't available.
+func (p *pkt) DecommissionWithBuffer(bufferPool *sync.Pool) {
+	if p.recvBuffer != nil && bufferPool != nil {
+		// Return buffer to pool WITHOUT modifying slice length.
+		// The buffer will be overwritten during next receive.
+		//
+		// IMPORTANT: Do NOT zero the slice length like `*p.recvBuffer = (*p.recvBuffer)[:0]`
+		// This would cause panics in io_uring path when accessing buffer[0] for iovec.Base.
+		// See: lockless_phase4_implementation.md "Defect Analysis: Zero-Length Buffer Pool Bug"
+		// See: TestDecommissionWithBuffer/buffer_length_preserved_after_pool_return
+		bufferPool.Put(p.recvBuffer)
+		p.recvBuffer = nil
+		p.n = 0
+	}
+	p.Decommission()
+}
+
+// GetRecvBuffer returns the original pool buffer reference (for zero-copy path).
+// Returns nil for legacy (copying) path.
+func (p *pkt) GetRecvBuffer() *[]byte {
+	return p.recvBuffer
+}
+
+// HasRecvBuffer returns true if packet has a tracked pool buffer (zero-copy path).
+func (p *pkt) HasRecvBuffer() bool {
+	return p.recvBuffer != nil
+}
+
+// ClearRecvBuffer clears the buffer reference after pool return.
+// Does NOT return buffer to pool - caller must do that first.
+func (p *pkt) ClearRecvBuffer() {
+	p.recvBuffer = nil
+	p.n = 0
 }
 
 func (p pkt) String() string {
@@ -358,17 +557,45 @@ func (p *pkt) SetData(data []byte) {
 	p.payload.Write(data)
 }
 
+// Data returns the payload data, handling BOTH zero-copy and legacy paths.
+// - Zero-copy path (recvBuffer set): computes slice from recvBuffer
+// - Legacy path (payload set): returns payload.Bytes() directly
 func (p *pkt) Data() []byte {
-	return p.payload.Bytes()
+	// Zero-copy path: compute payload from recvBuffer
+	if p.recvBuffer != nil {
+		if p.n <= HeaderSize {
+			return nil
+		}
+		return (*p.recvBuffer)[HeaderSize:p.n]
+	}
+	// Legacy path: return stored payload
+	if p.payload != nil {
+		return p.payload.Bytes()
+	}
+	return nil
 }
 
+// Len returns the payload length, handling BOTH zero-copy and legacy paths.
+// - Zero-copy path: returns n - HeaderSize
+// - Legacy path: returns payload.Len()
 func (p *pkt) Len() uint64 {
-	return uint64(p.payload.Len())
+	// Zero-copy path
+	if p.recvBuffer != nil {
+		if p.n <= HeaderSize {
+			return 0
+		}
+		return uint64(p.n - HeaderSize)
+	}
+	// Legacy path
+	if p.payload != nil {
+		return uint64(p.payload.Len())
+	}
+	return 0
 }
 
 func (p *pkt) Unmarshal(data []byte) error {
-	if len(data) < 16 {
-		return fmt.Errorf("data too short to unmarshal")
+	if len(data) < HeaderSize {
+		return fmt.Errorf("data too short to unmarshal (%d bytes, need %d)", len(data), HeaderSize)
 	}
 
 	p.header.IsControlPacket = (data[0] & 0x80) != 0
@@ -461,7 +688,8 @@ func (p *pkt) UnmarshalCIF(c CIF) error {
 		return nil
 	}
 
-	return c.Unmarshal(p.payload.Bytes())
+	// Phase 2: Use Data() which handles both zero-copy and legacy paths
+	return c.Unmarshal(p.Data())
 }
 
 // CIF reepresents a control information field

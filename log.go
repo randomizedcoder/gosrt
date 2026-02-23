@@ -3,6 +3,7 @@ package srt
 import (
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,7 @@ type Logger interface {
 type logger struct {
 	logQueue chan Log
 	topics   map[string]bool
+	closed   atomic.Uint32 // 0 = open, 1 = closed
 }
 
 // NewLogger returns a Logger that only listens on the given list of topics.
@@ -73,6 +75,11 @@ func (l *logger) HasTopic(topic string) bool {
 }
 
 func (l *logger) Print(topic string, socketId uint32, skip int, message func() string) {
+	// Check if logger is closed - safe to call after Close()
+	if l.closed.Load() == 1 {
+		return
+	}
+
 	if !l.HasTopic(topic) {
 		return
 	}
@@ -89,10 +96,18 @@ func (l *logger) Print(topic string, socketId uint32, skip int, message func() s
 	}
 
 	// Write to log queue, but don't block if it's full
-	select {
-	case l.logQueue <- msg:
-	default:
-	}
+	// Use recover to safely handle closed channel (race condition protection)
+	func() {
+		defer func() {
+			// Silently recover from panic if channel is closed
+			_ = recover()
+		}()
+		select {
+		case l.logQueue <- msg:
+		default:
+			// Channel full - silently drop message
+		}
+	}()
 }
 
 func (l *logger) Listen() <-chan Log {
@@ -100,6 +115,9 @@ func (l *logger) Listen() <-chan Log {
 }
 
 func (l *logger) Close() {
+	// Mark as closed first (atomic, prevents new messages from being queued)
+	l.closed.Store(1)
+	// Then close the channel (allows readers to detect closure)
 	close(l.logQueue)
 }
 
