@@ -34,3 +34,10 @@ integration_testing
 
 # Log files
 *.log
+
+# Disk images (VM data, Prometheus storage, etc.)
+*.img
+
+# Nix build outputs
+result
+result-*
