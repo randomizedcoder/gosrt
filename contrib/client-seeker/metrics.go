@@ -68,7 +68,12 @@ func (ms *MetricsServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/metrics", ms.metricsHandler)
 	mux.HandleFunc("/health", ms.healthHandler)
 
-	ms.server = &http.Server{Handler: mux}
+	ms.server = &http.Server{
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 
 	// Start server in goroutine
 	go func() {

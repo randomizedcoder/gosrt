@@ -58,8 +58,11 @@ func StartMetricsServers(ctx context.Context, wg *sync.WaitGroup, httpAddr, udsP
 // "Prometheus HTTP Server Shutdown Pattern".
 func startHTTPMetricsServer(ctx context.Context, wg *sync.WaitGroup, addr string, handler http.Handler) error {
 	promSrv := &http.Server{
-		Addr:    addr,
-		Handler: handler,
+		Addr:         addr,
+		Handler:      handler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	// Shutdown watcher - triggers clean shutdown when context cancelled
@@ -101,7 +104,10 @@ func startUDSMetricsServer(ctx context.Context, wg *sync.WaitGroup, socketPath s
 	}
 
 	promSrv := &http.Server{
-		Handler: handler,
+		Handler:      handler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	// Shutdown watcher - triggers clean shutdown when context cancelled
