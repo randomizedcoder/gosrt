@@ -8,6 +8,9 @@ import (
 )
 
 func TestWatchdog_NormalOperation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping time-sensitive watchdog test in short mode")
+	}
 	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	bm := NewBitrateManager(100_000_000, 1_000_000, 1_000_000_000)
 	cs := NewControlServer(socketPath, bm, nil)
@@ -45,6 +48,9 @@ func TestWatchdog_NormalOperation(t *testing.T) {
 }
 
 func TestWatchdog_SoftLanding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping time-sensitive watchdog test in short mode")
+	}
 	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	bm := NewBitrateManager(100_000_000, 1_000_000, 1_000_000_000)
 	cs := NewControlServer(socketPath, bm, nil)
@@ -84,6 +90,9 @@ func TestWatchdog_SoftLanding(t *testing.T) {
 }
 
 func TestWatchdog_Recovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping time-sensitive watchdog test in short mode")
+	}
 	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	bm := NewBitrateManager(100_000_000, 1_000_000, 1_000_000_000)
 	cs := NewControlServer(socketPath, bm, nil)
@@ -137,6 +146,9 @@ func TestWatchdog_Recovery(t *testing.T) {
 }
 
 func TestWatchdog_CriticalStop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping time-sensitive watchdog test in short mode")
+	}
 	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	bm := NewBitrateManager(100_000_000, 1_000_000, 1_000_000_000)
 	cs := NewControlServer(socketPath, bm, nil)

@@ -144,7 +144,7 @@ var handshakeTests = []HandshakeTestCase{
 	{
 		Name:          "Corner_MinimumLatency",
 		StreamId:      "min-latency",
-		Latency:       20 * time.Millisecond, // RFC minimum
+		Latency:       50 * time.Millisecond, // Minimum practical latency (must be > 2 * PeriodicNakInterval)
 		ExpectSuccess: true,
 	},
 	{

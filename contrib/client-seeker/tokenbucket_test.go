@@ -145,6 +145,9 @@ func TestTokenBucket_Refill_Accumulator(t *testing.T) {
 // TestTokenBucket_RateAccuracy_100Mbps tests rate accuracy at 100 Mb/s.
 // This is a warm-up test before the critical 500 Mb/s test.
 func TestTokenBucket_RateAccuracy_100Mbps(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping time-sensitive rate accuracy test in short mode")
+	}
 	targetBps := int64(100_000_000) // 100 Mb/s
 	tb := NewTokenBucket(targetBps, RefillHybrid)
 
@@ -183,6 +186,9 @@ func TestTokenBucket_RateAccuracy_100Mbps(t *testing.T) {
 //
 // Success criteria: ±1% accuracy at 500 Mb/s
 func TestTokenBucket_RateAccuracy_500Mbps(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping time-sensitive rate accuracy test in short mode")
+	}
 	targetBps := int64(500_000_000) // 500 Mb/s
 	tb := NewTokenBucket(targetBps, RefillHybrid)
 
@@ -460,6 +466,9 @@ func TestTokenBucket_ZeroRate(t *testing.T) {
 
 // TestTokenBucket_HighPrecision tests that we can achieve sub-millisecond precision.
 func TestTokenBucket_HighPrecision(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping time-sensitive high precision test in short mode")
+	}
 	// At 500 Mb/s, we need ~23µs precision per packet
 	// This test verifies the mechanism works
 

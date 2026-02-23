@@ -57,9 +57,6 @@ func TestHandlePacketDirect_LockFreeMode(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Track whether handlePacket was called
-			var handlePacketCalled atomic.Bool
-
 			// Create a minimal srtConn with the mock receiver
 			c := &srtConn{
 				recv: &mockReceiverForHandlers{useEventLoop: tc.useEventLoop},
@@ -136,7 +133,6 @@ func TestHandlePacketDirect_LockFreeMode(t *testing.T) {
 				}
 			}
 
-			_ = handlePacketCalled // Suppress unused warning
 		})
 	}
 }

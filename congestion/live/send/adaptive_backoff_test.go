@@ -36,18 +36,22 @@ func TestAdaptiveBackoff_InitialModeSwitchesIsZero(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: Mode Transitions
+// Test: Mode Transitions (Iteration-Based)
+//
+// The adaptive backoff uses iteration counting, not wall-clock time.
+// These tests use small iteration thresholds for deterministic behavior.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAdaptiveBackoff_YieldToSleep_AfterIdleThreshold(t *testing.T) {
-	// Use short threshold for testing
-	ab := newAdaptiveBackoffWithThreshold(50 * time.Millisecond)
+	// Use small thresholds for testing
+	const idleThreshold = 10
+	const warmupThreshold = 3
+	ab := newAdaptiveBackoffWithIterations(idleThreshold, warmupThreshold)
 	require.Equal(t, EventLoopModeYield, ab.Mode())
 
-	// Simulate idle iterations (no activity)
-	for i := 0; i < 10; i++ {
+	// Simulate idle iterations (no activity) - need idleThreshold + warmupThreshold + 1
+	for i := 0; i < idleThreshold+warmupThreshold+1; i++ {
 		ab.Wait(false)
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Should have transitioned to Sleep
@@ -56,7 +60,7 @@ func TestAdaptiveBackoff_YieldToSleep_AfterIdleThreshold(t *testing.T) {
 }
 
 func TestAdaptiveBackoff_SleepToYield_OnAnyActivity(t *testing.T) {
-	ab := newAdaptiveBackoffWithThreshold(10 * time.Millisecond)
+	ab := newAdaptiveBackoffWithIterations(10, 3)
 
 	// Force into Sleep mode
 	ab.SetMode(EventLoopModeSleep)
@@ -71,12 +75,11 @@ func TestAdaptiveBackoff_SleepToYield_OnAnyActivity(t *testing.T) {
 }
 
 func TestAdaptiveBackoff_YieldStaysYield_WithContinuousActivity(t *testing.T) {
-	ab := newAdaptiveBackoffWithThreshold(50 * time.Millisecond)
+	ab := newAdaptiveBackoffWithIterations(10, 3)
 
-	// Continuous activity for longer than idle threshold
-	for i := 0; i < 20; i++ {
+	// Continuous activity - should never transition
+	for i := 0; i < 50; i++ {
 		ab.Wait(true)
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	require.Equal(t, EventLoopModeYield, ab.Mode(), "Should stay in Yield with continuous activity")
@@ -84,12 +87,12 @@ func TestAdaptiveBackoff_YieldStaysYield_WithContinuousActivity(t *testing.T) {
 }
 
 func TestAdaptiveBackoff_SleepStaysSleep_WhenIdle(t *testing.T) {
-	ab := newAdaptiveBackoffWithThreshold(10 * time.Millisecond)
+	ab := newAdaptiveBackoffWithIterations(10, 3)
 	ab.SetMode(EventLoopModeSleep)
 	initialSwitches := ab.ModeSwitches()
 
 	// Multiple idle iterations
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 20; i++ {
 		ab.Wait(false)
 	}
 
@@ -98,53 +101,67 @@ func TestAdaptiveBackoff_SleepStaysSleep_WhenIdle(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: Edge Cases
+// Test: Edge Cases (Iteration-Based)
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAdaptiveBackoff_NoThrashing_WithIntermittentActivity(t *testing.T) {
-	ab := newAdaptiveBackoffWithThreshold(100 * time.Millisecond)
+	const idleThreshold = 10
+	const warmupThreshold = 3
+	ab := newAdaptiveBackoffWithIterations(idleThreshold, warmupThreshold)
 
-	// Intermittent activity (gaps < threshold)
-	for i := 0; i < 10; i++ {
-		ab.Wait(true) // Activity
-		time.Sleep(30 * time.Millisecond)
-		ab.Wait(false) // Brief idle
-		time.Sleep(30 * time.Millisecond)
+	// Intermittent activity - activity resets counters before idle threshold reached
+	for i := 0; i < 20; i++ {
+		ab.Wait(true)  // Activity resets idle counter
+		ab.Wait(false) // One idle iteration
+		ab.Wait(false) // Two idle iterations (still within warmup)
 	}
 
 	require.Equal(t, EventLoopModeYield, ab.Mode(), "Should stay in Yield with intermittent activity")
 	require.Equal(t, uint64(0), ab.ModeSwitches(), "No mode switches with gaps < threshold")
 }
 
-func TestAdaptiveBackoff_ActivityResetsIdleTimer(t *testing.T) {
-	ab := newAdaptiveBackoffWithThreshold(100 * time.Millisecond)
+func TestAdaptiveBackoff_ActivityResetsIdleCounter(t *testing.T) {
+	const idleThreshold = 10
+	const warmupThreshold = 3
+	ab := newAdaptiveBackoffWithIterations(idleThreshold, warmupThreshold)
 
-	// Idle for 80ms (close to threshold)
-	time.Sleep(80 * time.Millisecond)
-	ab.Wait(false)
+	// Partial idle (close to threshold but not exceeding)
+	// Note: initial warmupRemaining is 0, so idle counts immediately
+	for i := 0; i < idleThreshold-2; i++ {
+		ab.Wait(false)
+	}
+	require.Equal(t, EventLoopModeYield, ab.Mode(), "Should still be Yield")
 
-	// Activity resets the timer
+	// Activity resets the counter and sets warmup period
 	ab.Wait(true)
 
-	// Idle for another 80ms (would exceed threshold if timer wasn't reset)
-	time.Sleep(80 * time.Millisecond)
-	ab.Wait(false)
+	// Now we have warmup iterations to burn first, plus idleThreshold
+	// Total needed: warmupThreshold + idleThreshold = 13 to trigger Sleep
+	// We'll do fewer than that
+	for i := 0; i < idleThreshold-2; i++ {
+		ab.Wait(false)
+	}
 
-	// Should still be in Yield because activity reset the timer
-	require.Equal(t, EventLoopModeYield, ab.Mode(), "Activity should reset idle timer")
+	// Should still be in Yield because:
+	// 1. Activity reset idle counter to 0
+	// 2. Set warmupRemaining to 3
+	// 3. We did 8 iterations: 3 burn warmup + 5 idle (< 10 threshold)
+	require.Equal(t, EventLoopModeYield, ab.Mode(), "Activity should reset idle counter")
 }
 
 func TestAdaptiveBackoff_ConfigurableIdleThreshold(t *testing.T) {
-	// Short threshold
-	abShort := newAdaptiveBackoffWithThreshold(20 * time.Millisecond)
-	time.Sleep(30 * time.Millisecond)
-	abShort.Wait(false)
+	// Short threshold (5 idle iterations to Sleep)
+	abShort := newAdaptiveBackoffWithIterations(5, 2) // 5 + 2 + 1 = 8 iterations to Sleep
+	for i := 0; i < 8; i++ {
+		abShort.Wait(false)
+	}
 	require.Equal(t, EventLoopModeSleep, abShort.Mode(), "Short threshold should trigger quickly")
 
-	// Long threshold
-	abLong := newAdaptiveBackoffWithThreshold(500 * time.Millisecond)
-	time.Sleep(30 * time.Millisecond)
-	abLong.Wait(false)
+	// Long threshold (100 idle iterations to Sleep)
+	abLong := newAdaptiveBackoffWithIterations(100, 10) // Would need 111 iterations
+	for i := 0; i < 50; i++ {
+		abLong.Wait(false)
+	}
 	require.Equal(t, EventLoopModeYield, abLong.Mode(), "Long threshold should not trigger yet")
 }
 
@@ -166,16 +183,26 @@ func TestAdaptiveBackoff_SetMode(t *testing.T) {
 }
 
 func TestAdaptiveBackoff_ResetActivity(t *testing.T) {
-	ab := newAdaptiveBackoffWithThreshold(50 * time.Millisecond)
+	const idleThreshold = 10
+	const warmupThreshold = 3
+	ab := newAdaptiveBackoffWithIterations(idleThreshold, warmupThreshold)
 
-	// Idle for longer than threshold
-	time.Sleep(60 * time.Millisecond)
+	// Accumulate some idle iterations (close to threshold)
+	// Initial warmupRemaining is 0, so idle counts immediately
+	for i := 0; i < idleThreshold-2; i++ {
+		ab.Wait(false)
+	}
+	require.Equal(t, EventLoopModeYield, ab.Mode(), "Should still be Yield before reset")
 
-	// Reset activity before Wait
+	// Reset activity before more iterations
 	ab.ResetActivity()
-	ab.Wait(false)
 
-	// Should still be in Yield because activity was reset
+	// Now several more iterations - without reset, this would trigger Sleep
+	for i := 0; i < 5; i++ {
+		ab.Wait(false)
+	}
+
+	// Should still be in Yield because ResetActivity cleared the idle counter
 	require.Equal(t, EventLoopModeYield, ab.Mode(), "ResetActivity should prevent Sleep transition")
 }
 
@@ -233,100 +260,105 @@ func TestAdaptiveBackoff_ConcurrentModeRead(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Table-Driven Tests: Activity Scenarios
+// Table-Driven Tests: Activity Scenarios (Iteration-Based)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// activityEvent represents one iteration of the EventLoop
-type activityEvent struct {
-	delayMs     int  // Delay before this event (milliseconds)
-	hadActivity bool // Were packets processed this iteration?
+// iterationEvent represents a sequence of Wait() calls
+type iterationEvent struct {
+	count       int  // Number of Wait() calls to make
+	hadActivity bool // Activity status for each Wait() call
 }
 
 func TestAdaptiveBackoff_ActivityScenarios(t *testing.T) {
+	// Use small iteration thresholds for fast, deterministic tests.
+	// idleThreshold: iterations without activity before Sleep
+	// warmupThreshold: iterations to stay in Yield after activity
+	const (
+		idleThreshold   = 10
+		warmupThreshold = 3
+	)
+
 	tests := []struct {
-		name            string
-		idleThresholdMs int
-		events          []activityEvent
-		expectedMode    EventLoopMode
-		minSwitches     uint64
-		maxSwitches     uint64
+		name         string
+		events       []iterationEvent
+		expectedMode EventLoopMode
+		minSwitches  uint64
+		maxSwitches  uint64
 	}{
 		{
-			name:            "Continuous activity stays Yield",
-			idleThresholdMs: 100,
-			events: []activityEvent{
-				{0, true}, {20, true}, {20, true}, {20, true}, {20, true},
+			name: "Continuous activity stays Yield",
+			events: []iterationEvent{
+				{5, true}, {5, true}, {5, true}, {5, true}, {5, true},
 			},
 			expectedMode: EventLoopModeYield,
 			minSwitches:  0,
 			maxSwitches:  0,
 		},
 		{
-			name:            "Continuous idle transitions to Sleep",
-			idleThresholdMs: 50,
-			events: []activityEvent{
-				{0, false}, {20, false}, {20, false}, {20, false},
+			name: "Continuous idle transitions to Sleep",
+			events: []iterationEvent{
+				// Need idleThreshold + warmupThreshold iterations to trigger Sleep
+				{idleThreshold + warmupThreshold + 1, false},
 			},
 			expectedMode: EventLoopModeSleep,
 			minSwitches:  1,
 			maxSwitches:  1,
 		},
 		{
-			name:            "Burst then idle",
-			idleThresholdMs: 50,
-			events: []activityEvent{
-				{0, true}, {10, true}, {10, true}, // Burst
-				{20, false}, {20, false}, {20, false}, // Idle > threshold
+			name: "Burst then idle",
+			events: []iterationEvent{
+				{3, true}, {3, true}, {3, true}, // Burst (resets idle counter each time)
+				{idleThreshold + warmupThreshold + 1, false}, // Idle > threshold
 			},
 			expectedMode: EventLoopModeSleep,
 			minSwitches:  1,
 			maxSwitches:  1,
 		},
 		{
-			name:            "Intermittent activity stays Yield",
-			idleThresholdMs: 100,
-			events: []activityEvent{
-				{0, true}, {30, false}, {30, true}, {30, false}, {30, true},
+			name: "Intermittent activity stays Yield",
+			events: []iterationEvent{
+				{3, true},
+				{warmupThreshold, false}, // Idle but within warmup
+				{3, true},                // Activity resets
+				{warmupThreshold, false}, // Idle but within warmup
+				{3, true},                // Activity keeps us in Yield
 			},
 			expectedMode: EventLoopModeYield,
 			minSwitches:  0,
 			maxSwitches:  0,
 		},
 		{
-			name:            "Sleep wakes immediately on activity",
-			idleThresholdMs: 30,
-			events: []activityEvent{
-				{0, false}, {40, false}, // Go to Sleep
-				{10, true}, // Wake up
+			name: "Sleep wakes immediately on activity",
+			events: []iterationEvent{
+				{idleThreshold + warmupThreshold + 1, false}, // Go to Sleep
+				{1, true}, // Wake up immediately
 			},
 			expectedMode: EventLoopModeYield,
 			minSwitches:  2, // Yield→Sleep→Yield
 			maxSwitches:  2,
 		},
 		{
-			name:            "Activity after long idle",
-			idleThresholdMs: 30,
-			events: []activityEvent{
-				{0, false}, {50, false}, // Sleep
-				{50, false},             // Stay asleep
-				{10, true},              // Wake
-				{10, true},              // Stay awake
+			name: "Activity after long idle",
+			events: []iterationEvent{
+				{idleThreshold + warmupThreshold + 1, false}, // Go to Sleep
+				{5, false},  // Stay asleep (more idle iterations)
+				{1, true},   // Wake
+				{5, true},   // Stay awake
 			},
 			expectedMode: EventLoopModeYield,
-			minSwitches:  2,
+			minSwitches:  2, // Yield→Sleep→Yield
 			maxSwitches:  2,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ab := newAdaptiveBackoffWithThreshold(time.Duration(tc.idleThresholdMs) * time.Millisecond)
+			ab := newAdaptiveBackoffWithIterations(idleThreshold, warmupThreshold)
 
 			for _, event := range tc.events {
-				if event.delayMs > 0 {
-					time.Sleep(time.Duration(event.delayMs) * time.Millisecond)
+				for i := 0; i < event.count; i++ {
+					ab.Wait(event.hadActivity)
 				}
-				ab.Wait(event.hadActivity)
 			}
 
 			require.Equal(t, tc.expectedMode, ab.Mode(), "Final mode mismatch")

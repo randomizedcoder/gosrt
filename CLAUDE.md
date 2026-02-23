@@ -791,6 +791,140 @@ GoSRT uses `github.com/google/btree` (generic btree) extensively for packet buff
 
 See `documentation/btree_*.md` and `documentation/design_nak_btree*.md` for full design details.
 
+## Nix Flake Infrastructure
+
+GoSRT includes a Nix flake for MicroVM-based integration testing. See `documentation/nix_microvm_design.md` and `documentation/nix_microvm_implementation_plan.md` for full details.
+
+### Nix Commands
+
+```bash
+# Validate flake
+nix flake check --no-build
+
+# Show flake outputs
+nix flake show
+
+# Evaluate library exports
+nix eval .#lib.serverIp      # "10.50.3.2"
+nix eval .#lib.roleNames     # All 8 role names
+
+# Build packages
+nix build .#gosrt-debug      # Debug build with assertions
+nix build .#gosrt-prod       # Production build
+nix build .#gosrt-perf       # Performance build with pprof
+
+# Enter development shell
+nix develop
+```
+
+### MicroVM Management Commands
+
+```bash
+# Network setup (requires sudo)
+sudo nix run .#srt-network-setup -- "$USER"    # Create namespaces, bridges, TAPs
+sudo nix run .#srt-network-teardown            # Remove all network resources
+
+# VM lifecycle
+nix run .#srt-tmux-all                 # Start all VMs in tmux session
+nix run .#srt-tmux-attach              # Attach to tmux session
+nix run .#srt-tmux-clear               # Kill tmux session (without stopping VMs)
+nix run .#srt-vm-stop                  # Stop all VMs (tmux session persists)
+nix run .#srt-vm-stop-and-clear-tmux   # Stop all VMs AND kill tmux session (clean restart)
+nix run .#srt-vm-check                 # Show VM status (running/stopped)
+nix run .#srt-vm-wait                  # Wait for VMs to be ready (SSH accessible)
+
+# Per-VM access
+nix run .#srt-ssh-server               # SSH into server VM (password: srt)
+nix run .#srt-ssh-publisher            # SSH into publisher VM
+nix run .#srt-ssh-subscriber           # SSH into subscriber VM
+nix run .#srt-console-server           # Serial console (Ctrl+C to disconnect)
+
+# Integration tests
+nix run .#srt-integration-smoke        # Quick health check
+nix run .#srt-integration-basic        # VM and service verification
+nix run .#srt-integration-full         # Complete test suite
+```
+
+**Typical workflow:**
+```bash
+# Fresh start
+sudo nix run .#srt-network-setup -- "$USER"
+nix run .#srt-tmux-all
+nix run .#srt-vm-wait
+nix run .#srt-integration-full
+
+# Clean restart (after making changes)
+nix run .#srt-vm-stop-and-clear-tmux   # Stops VMs and clears tmux
+nix run .#srt-tmux-all                 # Start fresh
+```
+
+### CRITICAL: Never Use `--impure`
+
+**NEVER use `--impure` or `builtins.getFlake` in Nix commands.** These break reproducibility and are not idiomatic Nix.
+
+```bash
+# WRONG - breaks reproducibility
+nix eval --impure --expr '(builtins.getFlake "...").lib.serverIp'
+
+# CORRECT - pure evaluation
+nix eval .#lib.serverIp
+```
+
+If you find yourself needing `--impure`, the flake structure is wrong. Fix the flake instead:
+- Library exports should be at flake top-level (not per-system)
+- Use `specialArgs` to pass values to NixOS modules
+- Use overlays for package customization
+
+### Key Nix Files
+
+| File | Purpose |
+|------|---------|
+| `flake.nix` | Main entry point, defines outputs |
+| `nix/constants.nix` | Role definitions, base config |
+| `nix/lib.nix` | Computed values (IPs, MACs, ports) |
+| `nix/overlays/gosrt.nix` | Binary flavors (prod, debug, perf) |
+| `nix/modules/srt-test.nix` | Impairment scenarios |
+| `nix/modules/srt-network.nix` | Declarative nftables |
+
+### Nix Idioms to Follow
+
+1. **Data-driven**: Define facts in `constants.nix`, compute everything else in `lib.nix`
+2. **No hardcoding**: IPs, MACs, ports derived from role index
+3. **Declarative**: Use NixOS modules for config, not shell scripts
+4. **Pure**: No `--impure`, no `builtins.getFlake`, no `import <nixpkgs>`
+5. **Reproducible**: Pin inputs in `flake.lock`, use `vendorHash` for Go
+
+### Shell Script Rules (writeShellApplication)
+
+**NEVER use `# shellcheck disable=` directives.** Always fix the actual problem.
+
+Common fixes:
+- **SC2029** (variable expands client-side): Use `'single quotes'` or pass variables separately
+- **SC2086** (word splitting): Quote variables `"$VAR"` or use arrays
+- **SC2046** (word splitting in command substitution): Quote `"$(command)"`
+
+```bash
+# WRONG - disabling shellcheck
+# shellcheck disable=SC2029
+ssh host "command $VAR"
+
+# CORRECT - pass variable properly
+ssh host "command '$VAR'"
+# or
+ssh host 'command '"'$VAR'"
+# or for complex cases, use heredoc or pass as argument
+```
+
+**Nix string escaping for bash**: In `writeShellApplication` text blocks, bash parameter expansion like `${var%pattern}` or `${var#pattern}` conflicts with Nix's `${...}` interpolation. Escape with `''${...}`:
+
+```nix
+# WRONG - Nix interprets ${gateway%.1} as interpolation, causing syntax error
+host_ip="${gateway%.1}.254"
+
+# CORRECT - ''$ escapes the $ for bash
+host_ip="''${gateway%.1}.254"
+```
+
 ## Key Dependencies
 
 - `github.com/google/btree`: Packet storage, NAK tracking (generic btree with typed comparators)

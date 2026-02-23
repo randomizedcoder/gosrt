@@ -377,6 +377,9 @@ func TestRecvControlRing_ConcurrentMixed(t *testing.T) {
 // In production: ~100 ACKACK/sec (Full ACK every 10ms), single producer.
 // This test verifies 100% success with realistic traffic patterns.
 func TestRecvControlRing_ProducerConsumer_Realistic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping time-sensitive producer-consumer test in short mode")
+	}
 	ring, err := NewRecvControlRing(128, 1)
 	if err != nil {
 		t.Fatalf("NewRecvControlRing failed: %v", err)
@@ -446,6 +449,9 @@ func TestRecvControlRing_ProducerConsumer_Realistic(t *testing.T) {
 // extreme stress (much faster than production) with active consumer.
 // This demonstrates that even under heavy load, the fallback mechanism works.
 func TestRecvControlRing_ProducerConsumer_StressWithConsumer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping stress test in short mode")
+	}
 	// Large ring to give consumer more buffer
 	ring, err := NewRecvControlRing(4096, 1)
 	if err != nil {
@@ -534,6 +540,9 @@ func TestRecvControlRing_ProducerConsumer_StressWithConsumer(t *testing.T) {
 // TestRecvControlRing_ProducerConsumer_SingleProducerMaxSpeed shows throughput
 // with a single producer (most realistic) pushing at max speed.
 func TestRecvControlRing_ProducerConsumer_SingleProducerMaxSpeed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping performance-sensitive throughput test in short mode")
+	}
 	ring, err := NewRecvControlRing(128, 1)
 	if err != nil {
 		t.Fatalf("NewRecvControlRing failed: %v", err)

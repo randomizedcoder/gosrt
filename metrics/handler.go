@@ -1056,6 +1056,9 @@ func MetricsHandler() http.Handler {
 			writeCounterIfNonZero(b, "gosrt_send_eventloop_drain_ring_had_data_total",
 				metrics.SendEventLoopDrainRingHadData.Load(),
 				"socket_id", socketIdStr, "instance", instanceName)
+			writeCounterIfNonZero(b, "gosrt_send_eventloop_tight_cap_reached_total",
+				metrics.SendEventLoopTightCapReached.Load(),
+				"socket_id", socketIdStr, "instance", instanceName)
 			writeCounterIfNonZero(b, "gosrt_send_delivery_packets_total",
 				metrics.SendDeliveryPackets.Load(),
 				"socket_id", socketIdStr, "instance", instanceName)
