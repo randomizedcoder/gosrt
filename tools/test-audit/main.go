@@ -551,9 +551,13 @@ func findProjectRoot() string {
 	if _, err := os.Stat("congestion/live"); err == nil {
 		return "."
 	}
-	dir, _ := os.Getwd()
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get current directory: %v\n", err)
+		return ""
+	}
 	for i := 0; i < 5; i++ {
-		if _, err := os.Stat(filepath.Join(dir, "congestion/live")); err == nil {
+		if _, statErr := os.Stat(filepath.Join(dir, "congestion/live")); statErr == nil {
 			return dir
 		}
 		dir = filepath.Dir(dir)
@@ -563,7 +567,7 @@ func findProjectRoot() string {
 
 func findTestFiles(dir string) []string {
 	var files []string
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -571,7 +575,9 @@ func findTestFiles(dir string) []string {
 			files = append(files, path)
 		}
 		return nil
-	})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: error walking directory %s: %v\n", dir, err)
+	}
 	return files
 }
 
@@ -692,7 +698,7 @@ func getTopPatterns(patterns map[string]int, n int) string {
 		k string
 		v int
 	}
-	var sorted []kv
+	sorted := make([]kv, 0, len(patterns))
 	for k, v := range patterns {
 		sorted = append(sorted, kv{k, v})
 	}
@@ -769,9 +775,9 @@ func analyzeProductionFile(filename string) ([]CodeParameter, error) {
 	}
 
 	ast.Inspect(node, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.TypeSpec:
-			if st, ok := x.Type.(*ast.StructType); ok {
+		x, isTypeSpec := n.(*ast.TypeSpec)
+		if isTypeSpec {
+			if st, isStruct := x.Type.(*ast.StructType); isStruct {
 				structName := strings.ToLower(x.Name.Name)
 				if relevantStructs[structName] {
 					for _, field := range st.Fields.List {
@@ -893,7 +899,7 @@ func typeToString(expr ast.Expr) string {
 // =============================================================================
 
 func classifyFields(fields []FieldInfo, codeParams CodeParamMap) []FieldClassification {
-	var result []FieldClassification
+	result := make([]FieldClassification, 0, len(fields))
 
 	for _, f := range fields {
 		result = append(result, classifyField(f, codeParams))
@@ -1074,7 +1080,7 @@ func generateCorners(fieldName, fieldType string) []CornerValue {
 }
 
 func cornerValues(corners []CornerValue) []string {
-	var vals []string
+	vals := make([]string, 0, len(corners))
 	for _, c := range corners {
 		vals = append(vals, c.Value)
 	}
@@ -1100,21 +1106,21 @@ func extractTestValues(filename string) map[string]map[string][]string {
 	values := make(map[string]map[string][]string)
 
 	ast.Inspect(node, func(n ast.Node) bool {
-		compLit, ok := n.(*ast.CompositeLit)
-		if !ok {
+		compLit, isCompLit := n.(*ast.CompositeLit)
+		if !isCompLit {
 			return true
 		}
 
 		currentTestName := ""
 
 		for _, elt := range compLit.Elts {
-			kvExpr, ok := elt.(*ast.KeyValueExpr)
-			if !ok {
+			kvExpr, isKV := elt.(*ast.KeyValueExpr)
+			if !isKV {
 				continue
 			}
 
-			key, ok := kvExpr.Key.(*ast.Ident)
-			if !ok {
+			key, isIdent := kvExpr.Key.(*ast.Ident)
+			if !isIdent {
 				continue
 			}
 
@@ -1195,4 +1201,3 @@ func valuesMatch(cornerVal, actualVal string) bool {
 
 	return false
 }
-

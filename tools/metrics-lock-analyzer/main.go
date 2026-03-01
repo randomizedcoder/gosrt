@@ -228,8 +228,7 @@ func scanFile(path string, fset *token.FileSet) (*FileScanResult, error) {
 
 	// Walk the AST to find functions first
 	ast.Inspect(f, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.FuncDecl:
+		if node, ok := n.(*ast.FuncDecl); ok {
 			result.recordFunction(node, fset)
 		}
 		return true
@@ -367,8 +366,9 @@ func (r *FileScanResult) analyzeClosureForMetrics(fn *ast.FuncLit, lockExpr stri
 
 	// Walk the closure body for metric operations and function calls
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		call, isCall := n.(*ast.CallExpr)
+		if isCall {
+			if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel {
 				method := sel.Sel.Name
 				if method == "Add" || method == "Store" || method == "Swap" {
 					metricOp := r.extractMetricOp(call, sel, method, fset, parentFunc)
@@ -381,7 +381,7 @@ func (r *FileScanResult) analyzeClosureForMetrics(fn *ast.FuncLit, lockExpr stri
 			}
 
 			// Check for calls to *Locked functions (method calls like r.pushLocked())
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel {
 				calledFunc := sel.Sel.Name
 				// Record ANY function called from within the closure as potentially under lock
 				// Functions with "Locked" in name are definitely under lock
@@ -390,7 +390,7 @@ func (r *FileScanResult) analyzeClosureForMetrics(fn *ast.FuncLit, lockExpr stri
 				}
 			}
 			// Check for plain function calls (ident calls like pushLocked())
-			if ident, ok := call.Fun.(*ast.Ident); ok {
+			if ident, isIdent := call.Fun.(*ast.Ident); isIdent {
 				if strings.Contains(ident.Name, "Locked") || strings.Contains(ident.Name, "locked") {
 					r.recordLockedFunctionCall(ident.Name, lockExpr, lockType, parentFunc, fset, call)
 				}
@@ -618,20 +618,20 @@ func propagateLockedFunctions(result *ScanResult) {
 
 			// Find all function calls in this function
 			ast.Inspect(body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
+				call, isCall := n.(*ast.CallExpr)
+				if !isCall {
 					return true
 				}
 
 				var calledFunc string
 
 				// Check for method calls (r.methodName())
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel {
 					calledFunc = sel.Sel.Name
 				}
 
 				// Check for plain function calls
-				if ident, ok := call.Fun.(*ast.Ident); ok {
+				if ident, isIdent := call.Fun.(*ast.Ident); isIdent {
 					calledFunc = ident.Name
 				}
 
@@ -683,7 +683,6 @@ func generateReport(result *ScanResult) {
 		file     string
 		function string
 		lockExpr string
-		lockType string
 		metrics  []*MetricOperation
 	}
 
@@ -709,7 +708,7 @@ func generateReport(result *ScanResult) {
 	}
 
 	// Sort keys for consistent output
-	var keys []string
+	keys := make([]string, 0, len(funcMetrics))
 	for k := range funcMetrics {
 		keys = append(keys, k)
 	}
@@ -759,7 +758,8 @@ func generateReport(result *ScanResult) {
 	fileStatsMap := make(map[string]*fileStats)
 	for _, f := range result.Files {
 		stats := &fileStats{file: f.File}
-		for _, m := range f.MetricOps {
+		for j := range f.MetricOps {
+			m := &f.MetricOps[j]
 			if m.InLockScope {
 				stats.metricsUnderLock++
 				// For now, assume all are extractable (Phase 3 will refine)
@@ -771,7 +771,7 @@ func generateReport(result *ScanResult) {
 		}
 	}
 
-	var fileStatsList []*fileStats
+	fileStatsList := make([]*fileStats, 0, len(fileStatsMap))
 	for _, s := range fileStatsMap {
 		fileStatsList = append(fileStatsList, s)
 	}
@@ -817,9 +817,13 @@ func findProjectRoot() string {
 	}
 
 	// Try parent directories
-	dir, _ := os.Getwd()
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get current directory: %v\n", err)
+		return ""
+	}
 	for i := 0; i < 5; i++ {
-		if _, err := os.Stat(filepath.Join(dir, "metrics/metrics.go")); err == nil {
+		if _, statErr := os.Stat(filepath.Join(dir, "metrics/metrics.go")); statErr == nil {
 			return dir
 		}
 		dir = filepath.Dir(dir)
@@ -832,7 +836,7 @@ func findProjectRoot() string {
 func findGoFiles(root string) []string {
 	var files []string
 
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -851,7 +855,9 @@ func findGoFiles(root string) []string {
 
 		files = append(files, path)
 		return nil
-	})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: error walking directory %s: %v\n", root, err)
+	}
 
 	return files
 }

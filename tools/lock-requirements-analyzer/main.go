@@ -368,16 +368,16 @@ func (r *FileScanResult) recordWithLockTiming(call *ast.CallExpr, lockType strin
 
 func (r *FileScanResult) scanClosureForLockedCalls(fn *ast.FuncLit, lockExpr, lockType string, fset *token.FileSet, parentFunc string) {
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
+		call, isCall := n.(*ast.CallExpr)
+		if !isCall {
 			return true
 		}
 
 		var calledFunc string
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel {
 			calledFunc = sel.Sel.Name
 		}
-		if ident, ok := call.Fun.(*ast.Ident); ok {
+		if ident, isIdent := call.Fun.(*ast.Ident); isIdent {
 			calledFunc = ident.Name
 		}
 
@@ -603,16 +603,16 @@ func propagateLockedFunctions(result *ScanResult) {
 			}
 
 			ast.Inspect(body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
+				call, isCall := n.(*ast.CallExpr)
+				if !isCall {
 					return true
 				}
 
 				var calledFunc string
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel {
 					calledFunc = sel.Sel.Name
 				}
-				if ident, ok := call.Fun.(*ast.Ident); ok {
+				if ident, isIdent := call.Fun.(*ast.Ident); isIdent {
 					calledFunc = ident.Name
 				}
 
@@ -661,19 +661,19 @@ func generateReport(result *ScanResult) {
 		fmt.Printf("  Why: %s\n\n", res.Description)
 	}
 
-	// Group operations by protection status
+	// Group operations by protection status for reporting
 	var unprotected []ProtectedOperation
 	var needsReview []ProtectedOperation
-	var protected []ProtectedOperation
 
-	for _, f := range result.Files {
-		for _, op := range f.ProtectedOps {
-			if !op.IsProtected {
-				unprotected = append(unprotected, op)
-			} else if op.NeedsReview {
-				needsReview = append(needsReview, op)
-			} else {
-				protected = append(protected, op)
+	for i := range result.Files {
+		for j := range result.Files[i].ProtectedOps {
+			op := &result.Files[i].ProtectedOps[j]
+			switch {
+			case !op.IsProtected:
+				unprotected = append(unprotected, *op)
+			case op.NeedsReview:
+				needsReview = append(needsReview, *op)
+				// Note: protected operations don't need to be collected for reporting
 			}
 		}
 	}
@@ -685,12 +685,13 @@ func generateReport(result *ScanResult) {
 
 		// Group by file and function
 		byFunc := make(map[string][]ProtectedOperation)
-		for _, op := range unprotected {
+		for i := range unprotected {
+			op := &unprotected[i]
 			key := fmt.Sprintf("%s:%s", op.File, op.Function)
-			byFunc[key] = append(byFunc[key], op)
+			byFunc[key] = append(byFunc[key], *op)
 		}
 
-		var keys []string
+		keys := make([]string, 0, len(byFunc))
 		for k := range byFunc {
 			keys = append(keys, k)
 		}
@@ -711,7 +712,8 @@ func generateReport(result *ScanResult) {
 			fmt.Printf("  Function: %s\n", ops[0].Function)
 			fmt.Printf("  Unprotected operations:\n")
 
-			for _, op := range ops {
+			for i := range ops {
+				op := &ops[i]
 				fmt.Printf("    ⚠️  %s.%s [line %d] - %s\n",
 					op.Resource, op.Operation, op.Line, op.Expression)
 			}
@@ -724,7 +726,8 @@ func generateReport(result *ScanResult) {
 		fmt.Println("=== ⚠️  NEEDS REVIEW (May Be Safe) ===")
 		fmt.Println()
 
-		for _, op := range needsReview {
+		for i := range needsReview {
+			op := &needsReview[i]
 			relPath := op.File
 			if idx := strings.Index(relPath, "gosrt/"); idx >= 0 {
 				relPath = relPath[idx+6:]
@@ -752,16 +755,18 @@ func generateReport(result *ScanResult) {
 	}
 
 	for _, f := range result.Files {
-		for _, op := range f.ProtectedOps {
+		for j := range f.ProtectedOps {
+			op := &f.ProtectedOps[j]
 			s := stats[op.Resource]
 			if s == nil {
 				continue
 			}
-			if !op.IsProtected {
+			switch {
+			case !op.IsProtected:
 				s.unprotected++
-			} else if op.NeedsReview {
+			case op.NeedsReview:
 				s.needsReview++
-			} else {
+			default:
 				s.protected++
 			}
 		}
@@ -804,9 +809,13 @@ func findProjectRoot() string {
 		return "."
 	}
 
-	dir, _ := os.Getwd()
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get current directory: %v\n", err)
+		return ""
+	}
 	for i := 0; i < 5; i++ {
-		if _, err := os.Stat(filepath.Join(dir, "metrics/metrics.go")); err == nil {
+		if _, statErr := os.Stat(filepath.Join(dir, "metrics/metrics.go")); statErr == nil {
 			return dir
 		}
 		dir = filepath.Dir(dir)
@@ -818,7 +827,7 @@ func findProjectRoot() string {
 func findGoFiles(root string) []string {
 	var files []string
 
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	if walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -835,7 +844,9 @@ func findGoFiles(root string) []string {
 
 		files = append(files, path)
 		return nil
-	})
+	}); walkErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: error walking directory %s: %v\n", root, walkErr)
+	}
 
 	return files
 }
