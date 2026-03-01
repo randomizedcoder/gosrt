@@ -1601,30 +1601,30 @@ func (c SRTConfig) WithLargeIoUringRecvRing() SRTConfig {
 // At 500 Mb/s with 1456 byte payloads: ~43,000 packets/sec
 func (c SRTConfig) WithUltraHighThroughput() SRTConfig {
 	// io_uring settings
-	c.IoUringRecvRingSize = 16384  // 2x larger than large
-	c.IoUringRecvBatchSize = 1024  // 2x larger batch
+	c.IoUringRecvRingSize = 16384 // 2x larger than large
+	c.IoUringRecvBatchSize = 1024 // 2x larger batch
 
 	// SRT buffer settings
-	c.FC = 102400                  // 4x default flow control (25600 * 4)
-	c.RecvBuf = 64 * 1024 * 1024   // 64 MB receive buffer
-	c.SendBuf = 64 * 1024 * 1024   // 64 MB send buffer
-	c.Latency = 5000 * time.Millisecond      // 5 second latency buffer
-	c.RecvLatency = 5000 * time.Millisecond  // 5 second recv latency
-	c.PeerLatency = 5000 * time.Millisecond  // 5 second peer latency
+	c.FC = 102400                           // 4x default flow control (25600 * 4)
+	c.RecvBuf = 64 * 1024 * 1024            // 64 MB receive buffer
+	c.SendBuf = 64 * 1024 * 1024            // 64 MB send buffer
+	c.Latency = 5000 * time.Millisecond     // 5 second latency buffer
+	c.RecvLatency = 5000 * time.Millisecond // 5 second recv latency
+	c.PeerLatency = 5000 * time.Millisecond // 5 second peer latency
 
 	// Packet ring - CRITICAL for high throughput!
 	// Default: 1024 * 4 = 4096 slots fills in ~95ms at 500 Mb/s
 	// Need: at least 1 second of buffer = 43000 packets
 	c.UsePacketRing = true
-	c.PacketRingSize = 16384       // 16x larger (16384 * 8 = 131k slots)
-	c.PacketRingShards = 8         // More shards for parallelism
-	c.PacketRingMaxRetries = 100   // More retries before giving up
+	c.PacketRingSize = 16384                            // 16x larger (16384 * 8 = 131k slots)
+	c.PacketRingShards = 8                              // More shards for parallelism
+	c.PacketRingMaxRetries = 100                        // More retries before giving up
 	c.PacketRingBackoffDuration = 50 * time.Microsecond // Faster retry
 
 	// Send ring - also needs to be larger
 	c.UseSendRing = true
-	c.SendRingSize = 8192          // 8x larger
-	c.SendRingShards = 4           // More shards
+	c.SendRingSize = 8192 // 8x larger
+	c.SendRingShards = 4  // More shards
 
 	return c
 }
@@ -1692,14 +1692,14 @@ func (c SRTConfig) WithAggressiveBuffers() SRTConfig {
 	c.SendBuf = 128 * 1024 * 1024 // 128 MB
 
 	// Latency buffer - increased
-	c.Latency = 8000 * time.Millisecond    // 8 seconds
+	c.Latency = 8000 * time.Millisecond // 8 seconds
 	c.RecvLatency = 8000 * time.Millisecond
 	c.PeerLatency = 8000 * time.Millisecond
 
 	// Packet ring - 2x
 	c.UsePacketRing = true
-	c.PacketRingSize = 32768  // 2x (32k * 16 shards = 524k slots)
-	c.PacketRingShards = 16   // 2x
+	c.PacketRingSize = 32768 // 2x (32k * 16 shards = 524k slots)
+	c.PacketRingShards = 16  // 2x
 	c.PacketRingMaxRetries = 200
 	c.PacketRingBackoffDuration = 25 * time.Microsecond
 
@@ -1709,8 +1709,8 @@ func (c SRTConfig) WithAggressiveBuffers() SRTConfig {
 	c.SendRingShards = 8   // 2x
 
 	// io_uring recv - 2x
-	c.IoUringRecvRingSize = 32768  // 2x
-	c.IoUringRecvBatchSize = 2048  // 2x
+	c.IoUringRecvRingSize = 32768 // 2x
+	c.IoUringRecvBatchSize = 2048 // 2x
 
 	return c
 }
@@ -1719,9 +1719,9 @@ func (c SRTConfig) WithAggressiveBuffers() SRTConfig {
 // Lower intervals = more responsive but higher CPU usage.
 func (c SRTConfig) WithAggressiveTimers() SRTConfig {
 	// Timer intervals - halved
-	c.TickIntervalMs = 5          // 5ms tick (was 10)
-	c.PeriodicNakIntervalMs = 10  // 10ms NAK (was 20)
-	c.PeriodicAckIntervalMs = 5   // 5ms ACK (was 10)
+	c.TickIntervalMs = 5         // 5ms tick (was 10)
+	c.PeriodicNakIntervalMs = 10 // 10ms NAK (was 20)
+	c.PeriodicAckIntervalMs = 5  // 5ms ACK (was 10)
 
 	// Receiver EventLoop backoff - reduced
 	c.BackoffMinSleep = 1 * time.Microsecond   // 1µs (was 10µs)
@@ -1746,14 +1746,14 @@ func (c SRTConfig) WithExtremeBuffers() SRTConfig {
 	c.SendBuf = 256 * 1024 * 1024 // 256 MB
 
 	// Latency buffer - maximum
-	c.Latency = 10000 * time.Millisecond    // 10 seconds
+	c.Latency = 10000 * time.Millisecond // 10 seconds
 	c.RecvLatency = 10000 * time.Millisecond
 	c.PeerLatency = 10000 * time.Millisecond
 
 	// Packet ring - 4x
 	c.UsePacketRing = true
-	c.PacketRingSize = 65536  // 4x (65k * 32 shards = 2M slots!)
-	c.PacketRingShards = 32   // 4x
+	c.PacketRingSize = 65536 // 4x (65k * 32 shards = 2M slots!)
+	c.PacketRingShards = 32  // 4x
 	c.PacketRingMaxRetries = 500
 	c.PacketRingBackoffDuration = 10 * time.Microsecond
 
@@ -1773,18 +1773,18 @@ func (c SRTConfig) WithExtremeBuffers() SRTConfig {
 // WARNING: This will use significant CPU. Only use for benchmarking.
 func (c SRTConfig) WithExtremeTimers() SRTConfig {
 	// Timer intervals - minimum practical
-	c.TickIntervalMs = 2         // 2ms tick
-	c.PeriodicNakIntervalMs = 5  // 5ms NAK
-	c.PeriodicAckIntervalMs = 2  // 2ms ACK
+	c.TickIntervalMs = 2        // 2ms tick
+	c.PeriodicNakIntervalMs = 5 // 5ms NAK
+	c.PeriodicAckIntervalMs = 2 // 2ms ACK
 
 	// Receiver EventLoop backoff - near zero
-	c.BackoffMinSleep = 100 * time.Nanosecond  // 100ns
-	c.BackoffMaxSleep = 10 * time.Microsecond  // 10µs
+	c.BackoffMinSleep = 100 * time.Nanosecond // 100ns
+	c.BackoffMaxSleep = 10 * time.Microsecond // 10µs
 
 	// Sender EventLoop backoff - near zero
-	c.SendEventLoopBackoffMinSleep = 1 * time.Microsecond // 1µs
+	c.SendEventLoopBackoffMinSleep = 1 * time.Microsecond  // 1µs
 	c.SendEventLoopBackoffMaxSleep = 10 * time.Microsecond // 10µs
-	c.SendTsbpdSleepFactor = 0.99 // Wake up very close to deadline
+	c.SendTsbpdSleepFactor = 0.99                          // Wake up very close to deadline
 
 	return c
 }
@@ -1854,12 +1854,10 @@ func (c *IsolationTestConfig) GetTestCGFlags(testID string) []string {
 // GetControlServerFlags returns CLI flags for the control server
 func (c *IsolationTestConfig) GetControlServerFlags(testID string) []string {
 	udsPath := fmt.Sprintf("/tmp/srt_server_control_%s.sock", testID)
-	flags := []string{
-		"-addr", "10.2.1.2:6000",
-		"-promuds", udsPath,
-		"-name", "control-server",
-	}
-	flags = append(flags, c.ControlServer.ToCliFlags()...)
+	controlFlags := c.ControlServer.ToCliFlags()
+	flags := make([]string, 0, 6+len(controlFlags))
+	flags = append(flags, "-addr", "10.2.1.2:6000", "-promuds", udsPath, "-name", "control-server")
+	flags = append(flags, controlFlags...)
 	return flags
 }
 

@@ -5,36 +5,117 @@
 # Reference: documentation/nix_microvm_design.md
 # Implementation: documentation/nix_microvm_implementation_plan.md
 #
-# Quick Start:
-#   nix flake check --no-build   # Validate flake
-#   nix eval .#lib               # Inspect library exports
-#   nix build .#gosrt-debug      # Build debug binary
+# ═══════════════════════════════════════════════════════════════════════════════
+# FLAKE OUTPUTS OVERVIEW
+# ═══════════════════════════════════════════════════════════════════════════════
 #
-# VM Management Commands:
+# This flake provides:
+#   - packages.*    : GoSRT binaries, MicroVMs, network scripts
+#   - checks.*      : CI checks (linting, testing, security scanning)
+#   - apps.*        : Runnable applications (VMs, tests, utilities)
+#   - devShells.*   : Development environment with all tools
+#   - lib           : Computed values (IPs, MACs, ports) for external use
 #
-#   # Network setup (requires sudo, one-time)
+# ═══════════════════════════════════════════════════════════════════════════════
+# CI CHECKS (nix flake check)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Run all checks:
+#   nix flake check                    # Run ALL checks (~20 min)
+#
+# Run individual checks:
+#   nix build .#checks.x86_64-linux.<check-name>
+#
+# Available checks:
+#
+#   ── Go Analysis ──────────────────────────────────────────────────────────────
+#   go-vet                   Go's built-in static analysis
+#   go-sec                   Security scanner (gosec) - SQL injection, XSS, etc.
+#   seq-audit                Sequence arithmetic safety (31-bit wraparound)
+#   metrics-audit            Prometheus metrics definition/usage validation
+#
+#   ── Linting Tiers ────────────────────────────────────────────────────────────
+#   golangci-lint-quick      Tier 0 (~30s): gofmt, govet, errcheck, ineffassign
+#   golangci-lint            Tier 1 (~2min): Tier 0 + gosec, gocritic, revive
+#   golangci-lint-comprehensive  Tier 2 (~10min): Tier 1 + gocyclo, prealloc, funlen
+#
+#   ── Testing ──────────────────────────────────────────────────────────────────
+#   go-test-quick            Quick unit tests (-short flag)
+#   go-test-circular         Sequence wraparound tests (critical)
+#   go-test-packet           Packet marshaling tests
+#   go-test-stream-tier1     Core receiver stream tests (~50 tests)
+#
+#   ── Nix Validation ───────────────────────────────────────────────────────────
+#   nix-fmt                  Nix file formatting check
+#   flake-valid              Flake schema validation
+#   lib-eval                 Library expression evaluation
+#
+# Makefile convenience targets:
+#   make nix-lint-quick      # Run Tier 0 via nix
+#   make nix-lint            # Run Tier 1 via nix (CI gating)
+#   make nix-lint-all        # Run Tier 2 via nix (comprehensive)
+#   make nix-test            # Run all go tests via nix
+#   make nix-check           # Run ALL checks via nix
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# PACKAGES
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# GoSRT binaries:
+#   nix build .#gosrt-prod             # Production build (optimized)
+#   nix build .#gosrt-debug            # Debug build (assertions enabled)
+#   nix build .#gosrt-perf             # Performance build (pprof enabled)
+#
+# MicroVMs:
+#   nix build .#srt-server-vm          # GoSRT server VM
+#   nix build .#srt-publisher-vm       # GoSRT publisher VM
+#   nix build .#srt-subscriber-vm      # GoSRT subscriber VM
+#   nix build .#srt-metrics-vm         # Prometheus/Grafana VM
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# VM MANAGEMENT COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Network setup (requires sudo, one-time):
 #   sudo nix run .#srt-network-setup -- "$USER"
 #
-#   # Start VMs
-#   nix run .#srt-vm-start-background      # Start all VMs in background (logs: /tmp/gosrt-vms/)
-#   nix run .#srt-tmux-all                 # Start all VMs in tmux session (interactive)
+# Start VMs:
+#   nix run .#srt-vm-start-background  # Start all VMs in background (logs: /tmp/gosrt-vms/)
+#   nix run .#srt-tmux-all             # Start all VMs in tmux session (interactive)
 #
-#   # Check VM status
-#   nix run .#srt-vm-is-running -- server  # Check single VM (exit 0=running, 1=not, 2=invalid)
-#   nix run .#srt-vm-all-running           # Check all 4 core VMs (exit 0=all running, 1=some missing)
-#   nix run .#srt-vm-check                 # Show status table for all VMs
-#   nix run .#srt-vm-wait                  # Wait until VMs are SSH-accessible
+# Check VM status:
+#   nix run .#srt-vm-is-running -- server  # Check single VM (exit 0=running, 1=not)
+#   nix run .#srt-vm-all-running       # Check all 4 core VMs (exit 0=all running)
+#   nix run .#srt-vm-check             # Show status table for all VMs
+#   nix run .#srt-vm-wait              # Wait until VMs are SSH-accessible
 #
-#   # Stop VMs
-#   nix run .#srt-vm-stop                  # Stop all VMs
-#   nix run .#srt-vm-stop-and-clear-tmux   # Stop VMs and kill tmux session
+# Stop VMs:
+#   nix run .#srt-vm-stop              # Stop all VMs
+#   nix run .#srt-vm-stop-and-clear-tmux  # Stop VMs and kill tmux session
 #
-#   # Access VMs
-#   nix run .#srt-ssh-server               # SSH into server (password: srt)
-#   nix run .#srt-ssh-metrics              # SSH into metrics VM
+# Access VMs:
+#   nix run .#srt-ssh-server           # SSH into server (password: srt)
+#   nix run .#srt-ssh-metrics          # SSH into metrics VM
 #
-#   # Cleanup
-#   sudo nix run .#srt-network-teardown    # Remove network resources
+# Cleanup:
+#   sudo nix run .#srt-network-teardown  # Remove network resources
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTEGRATION TESTS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   nix run .#srt-integration-smoke    # Quick health check
+#   nix run .#srt-integration-basic    # VM and service verification
+#   nix run .#srt-integration-full     # Complete test suite
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEVELOPMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   nix develop                        # Enter dev shell with all tools
+#   nix flake check --no-build         # Validate flake structure
+#   nix eval .#lib                     # Inspect library exports
+#   nix eval .#lib.serverIp            # Get server IP address
 #
 {
   description = "GoSRT - Pure Go SRT implementation with MicroVM test infrastructure";

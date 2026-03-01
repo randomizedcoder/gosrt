@@ -109,6 +109,37 @@ in {
     fi
   '';
 
+  # ─── Go Security Scan (gosec) ─────────────────────────────────────────────
+  # Scan for common security issues in Go code
+  # Excludes:
+  #   G103 - unsafe: intentional for io_uring/syscalls (systems code)
+  #   G115 - integer overflow: false positives for validated conversions
+  #   G204 - subprocess with variable: expected in integration tests
+  #   G304 - file path from variable: intentional in config loading
+  #   G306 - WriteFile permissions: log files intentionally world-readable
+  #   G401 - AES key wrap: RFC 3394 compliant (vendor code)
+  #   G501 - SHA1 in PBKDF2: SRT protocol mandates PBKDF2-SHA1
+  # NOT excluded (will fail build if found):
+  #   G104 - unhandled errors: should be fixed
+  #   G112 - HTTP timeouts: should be fixed
+  #   G301 - directory permissions: case-by-case review
+  #   G407 - insecure TLS: should fail if found
+  #   G505 - MD5 usage: should fail if found
+  go-sec = pkgs.runCommand "gosrt-go-sec" {
+    nativeBuildInputs = [ goPackage pkgs.gosec ];
+    inherit src;
+  } ''
+    cd $src
+    ${goEnv}
+    # Run gosec excluding noisy/expected findings
+    gosec -exclude=G103,G115,G204,G304,G306,G401,G501 -fmt=text ./... > $out 2>&1 || {
+      exitcode=$?
+      cat $out
+      # gosec returns 1 for findings, 2+ for errors
+      exit $exitcode
+    }
+  '';
+
   # ─── Nix Format Check ──────────────────────────────────────────────────────
   nix-fmt = pkgs.runCommand "gosrt-nix-fmt" {
     nativeBuildInputs = [ pkgs.nixfmt pkgs.findutils ];

@@ -72,12 +72,9 @@ func (pm *ProcessManager) StartServer(ctx context.Context) error {
 // Uses common.BuildFlagArgs() to pass through all SRT configuration flags
 // that were explicitly set by the user.
 func (pm *ProcessManager) buildServerArgs() []string {
-	// Start with server-specific args
-	args := []string{
-		"-addr", pm.config.ServerAddr,
-		"-promuds", pm.serverPromUDS,
-		"-name", "perf-server",
-	}
+	// Start with server-specific args (estimate capacity for typical flag count)
+	args := make([]string, 0, 30)
+	args = append(args, "-addr", pm.config.ServerAddr, "-promuds", pm.serverPromUDS, "-name", "perf-server")
 
 	// Always add essential baseline flags (connection timeouts, etc.)
 	// These are required for reliable operation
@@ -131,14 +128,14 @@ func (pm *ProcessManager) StartSeeker(ctx context.Context, initialBitrate int64)
 // Uses common.BuildFlagArgs() to pass through all SRT configuration flags
 // that were explicitly set by the user.
 func (pm *ProcessManager) buildSeekerArgs(initialBitrate int64) []string {
-	// Start with seeker-specific args
-	args := []string{
+	// Start with seeker-specific args (estimate capacity for typical flag count)
+	args := make([]string, 0, 30)
+	args = append(args,
 		"-target", fmt.Sprintf("srt://%s/perf-test", pm.config.ServerAddr),
 		"-initial", fmt.Sprintf("%d", initialBitrate),
 		"-control-socket", pm.seekerControlUDS,
 		"-metrics-socket", pm.seekerPromUDS,
-		"-watchdog-timeout", pm.config.Timing.WatchdogTimeout.String(),
-	}
+		"-watchdog-timeout", pm.config.Timing.WatchdogTimeout.String())
 
 	// Always add essential baseline flags (connection timeouts, etc.)
 	args = append(args, baselineArgs()...)
@@ -382,8 +379,9 @@ func (pm *ProcessManager) probeSocket(ctx context.Context, socketPath string) bo
 	// Try to connect and get metrics
 	client := &http.Client{
 		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return net.Dial("unix", socketPath)
+			DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(dialCtx, "unix", socketPath)
 			},
 		},
 		Timeout: 1 * time.Second,
@@ -398,7 +396,11 @@ func (pm *ProcessManager) probeSocket(ctx context.Context, socketPath string) bo
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: error closing response body: %v\n", cerr)
+		}
+	}()
 
 	return resp.StatusCode == http.StatusOK
 }
@@ -410,15 +412,24 @@ func (pm *ProcessManager) probeControlSocket(ctx context.Context, socketPath str
 		return false
 	}
 
-	// Try to connect
-	conn, err := net.DialTimeout("unix", socketPath, 1*time.Second)
+	// Try to connect using context-aware dialer
+	dialCtx, dialCancel := context.WithTimeout(ctx, 1*time.Second)
+	defer dialCancel()
+	var d net.Dialer
+	conn, err := d.DialContext(dialCtx, "unix", socketPath)
 	if err != nil {
 		return false
 	}
-	defer conn.Close()
+	defer func() {
+		if cerr := conn.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: error closing control socket: %v\n", cerr)
+		}
+	}()
 
 	// Send get_status command
-	conn.SetDeadline(time.Now().Add(1 * time.Second))
+	if deadlineErr := conn.SetDeadline(time.Now().Add(1 * time.Second)); deadlineErr != nil {
+		return false
+	}
 	_, err = conn.Write([]byte(`{"command":"get_status"}` + "\n"))
 	if err != nil {
 		return false
@@ -437,14 +448,23 @@ func (pm *ProcessManager) probeControlSocket(ctx context.Context, socketPath str
 
 // probeConnection checks if the SRT connection is established.
 func (pm *ProcessManager) probeConnection(ctx context.Context) bool {
-	// Connect to control socket and check connection_alive
-	conn, err := net.DialTimeout("unix", pm.seekerControlUDS, 1*time.Second)
+	// Connect to control socket and check connection_alive using context-aware dialer
+	dialCtx, dialCancel := context.WithTimeout(ctx, 1*time.Second)
+	defer dialCancel()
+	var d net.Dialer
+	conn, err := d.DialContext(dialCtx, "unix", pm.seekerControlUDS)
 	if err != nil {
 		return false
 	}
-	defer conn.Close()
+	defer func() {
+		if cerr := conn.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: error closing seeker socket: %v\n", cerr)
+		}
+	}()
 
-	conn.SetDeadline(time.Now().Add(1 * time.Second))
+	if deadlineErr := conn.SetDeadline(time.Now().Add(1 * time.Second)); deadlineErr != nil {
+		return false
+	}
 	_, err = conn.Write([]byte(`{"command":"get_status"}` + "\n"))
 	if err != nil {
 		return false
@@ -470,7 +490,9 @@ func (pm *ProcessManager) Stop() {
 
 		// Stop seeker first (it's the client)
 		if pm.seekerCmd != nil && pm.seekerCmd.Process != nil {
-			pm.seekerCmd.Process.Signal(os.Interrupt)
+			if err := pm.seekerCmd.Process.Signal(os.Interrupt); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to send interrupt to seeker: %v\n", err)
+			}
 			done := make(chan error, 1)
 			go func() {
 				done <- pm.seekerCmd.Wait()
@@ -478,13 +500,17 @@ func (pm *ProcessManager) Stop() {
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
-				pm.seekerCmd.Process.Kill()
+				if err := pm.seekerCmd.Process.Kill(); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to kill seeker: %v\n", err)
+				}
 			}
 		}
 
 		// Stop server
 		if pm.serverCmd != nil && pm.serverCmd.Process != nil {
-			pm.serverCmd.Process.Signal(os.Interrupt)
+			if err := pm.serverCmd.Process.Signal(os.Interrupt); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to send interrupt to server: %v\n", err)
+			}
 			done := make(chan error, 1)
 			go func() {
 				done <- pm.serverCmd.Wait()
@@ -492,14 +518,22 @@ func (pm *ProcessManager) Stop() {
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
-				pm.serverCmd.Process.Kill()
+				if err := pm.serverCmd.Process.Kill(); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to kill server: %v\n", err)
+				}
 			}
 		}
 
-		// Clean up socket files
-		os.Remove(pm.serverPromUDS)
-		os.Remove(pm.seekerPromUDS)
-		os.Remove(pm.seekerControlUDS)
+		// Clean up socket files (ignore errors - files may not exist)
+		if err := os.Remove(pm.serverPromUDS); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove server socket: %v\n", err)
+		}
+		if err := os.Remove(pm.seekerPromUDS); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove seeker socket: %v\n", err)
+		}
+		if err := os.Remove(pm.seekerControlUDS); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove control socket: %v\n", err)
+		}
 	})
 }
 
@@ -540,7 +574,10 @@ func ResolveBinaryPath(path string) string {
 
 	// Try relative to current directory
 	if _, err := os.Stat(path); err == nil {
-		abs, _ := filepath.Abs(path)
+		abs, absErr := filepath.Abs(path)
+		if absErr != nil {
+			return path // Return original path if Abs fails
+		}
 		return abs
 	}
 
@@ -549,7 +586,10 @@ func ResolveBinaryPath(path string) string {
 	workspaceRoot := filepath.Join("..", "..")
 	fullPath := filepath.Join(workspaceRoot, path)
 	if _, err := os.Stat(fullPath); err == nil {
-		abs, _ := filepath.Abs(fullPath)
+		abs, absErr := filepath.Abs(fullPath)
+		if absErr != nil {
+			return fullPath // Return non-absolute path if Abs fails
+		}
 		return abs
 	}
 

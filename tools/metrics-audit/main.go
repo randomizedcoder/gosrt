@@ -46,10 +46,10 @@ type IncrementLocation struct {
 
 // MutualExclusionConfig represents the YAML configuration
 type MutualExclusionConfig struct {
-	Groups           map[string]GroupDef   `yaml:"groups"`
-	MutualExclusion  [][]string            `yaml:"mutual_exclusion"`
-	SeparatePrograms []string              `yaml:"separate_programs"`
-	KnownPatterns    []KnownPattern        `yaml:"known_patterns"`
+	Groups           map[string]GroupDef `yaml:"groups"`
+	MutualExclusion  [][]string          `yaml:"mutual_exclusion"`
+	SeparatePrograms []string            `yaml:"separate_programs"`
+	KnownPatterns    []KnownPattern      `yaml:"known_patterns"`
 }
 
 // GroupDef defines a mutual exclusion group
@@ -67,15 +67,15 @@ type KnownPattern struct {
 
 // MultiIncrementAnalysis holds the analysis result for a metric with multiple increments
 type MultiIncrementAnalysis struct {
-	Metric           string
-	Locations        []IncrementLocation
-	InSeparateProgs  []IncrementLocation // In contrib/test programs
-	InLibrary        []IncrementLocation // In main library
-	GroupedLocations map[string][]IncrementLocation // By group name
-	UngroupedLocs    []IncrementLocation
+	Metric              string
+	Locations           []IncrementLocation
+	InSeparateProgs     []IncrementLocation            // In contrib/test programs
+	InLibrary           []IncrementLocation            // In main library
+	GroupedLocations    map[string][]IncrementLocation // By group name
+	UngroupedLocs       []IncrementLocation
 	IsMutuallyExclusive bool
-	KnownPattern     *KnownPattern
-	Violations       []string
+	KnownPattern        *KnownPattern
+	Violations          []string
 }
 
 func main() {
@@ -207,26 +207,29 @@ func main() {
 	var knownPatterns []MultiIncrementAnalysis
 	var potentialIssues []MultiIncrementAnalysis
 
-	for _, a := range analyses {
-		if a.KnownPattern != nil {
-			knownPatterns = append(knownPatterns, a)
-		} else if len(a.InLibrary) == 0 && len(a.InSeparateProgs) > 0 {
+	for i := range analyses {
+		a := &analyses[i]
+		switch {
+		case a.KnownPattern != nil:
+			knownPatterns = append(knownPatterns, *a)
+		case len(a.InLibrary) == 0 && len(a.InSeparateProgs) > 0:
 			// Only in contrib programs
-			separatePrograms = append(separatePrograms, a)
-		} else if len(a.InSeparateProgs) > 0 && len(a.InLibrary) > 0 {
+			separatePrograms = append(separatePrograms, *a)
+		case len(a.InSeparateProgs) > 0 && len(a.InLibrary) > 0:
 			// Split between programs - OK
-			separatePrograms = append(separatePrograms, a)
-		} else if a.IsMutuallyExclusive {
-			mutuallyExclusive = append(mutuallyExclusive, a)
-		} else {
-			potentialIssues = append(potentialIssues, a)
+			separatePrograms = append(separatePrograms, *a)
+		case a.IsMutuallyExclusive:
+			mutuallyExclusive = append(mutuallyExclusive, *a)
+		default:
+			potentialIssues = append(potentialIssues, *a)
 		}
 	}
 
 	// Report mutually exclusive (OK)
 	fmt.Printf("✅ Mutually Exclusive Code Paths (OK): %d fields\n", len(mutuallyExclusive))
 	if len(mutuallyExclusive) > 0 {
-		for _, a := range mutuallyExclusive {
+		for i := range mutuallyExclusive {
+			a := &mutuallyExclusive[i]
 			groups := getGroupNames(a.GroupedLocations)
 			fmt.Printf("   - %s (%d locations in %s)\n", a.Metric, len(a.Locations), strings.Join(groups, "/"))
 		}
@@ -236,7 +239,8 @@ func main() {
 	// Report separate programs (OK)
 	fmt.Printf("✅ Separate Programs (OK): %d fields\n", len(separatePrograms))
 	if len(separatePrograms) > 0 {
-		for _, a := range separatePrograms {
+		for i := range separatePrograms {
+			a := &separatePrograms[i]
 			fmt.Printf("   - %s (library: %d, contrib: %d)\n",
 				a.Metric, len(a.InLibrary), len(a.InSeparateProgs))
 		}
@@ -246,7 +250,8 @@ func main() {
 	// Report known patterns (OK)
 	fmt.Printf("✅ Known Patterns (documented): %d fields\n", len(knownPatterns))
 	if len(knownPatterns) > 0 {
-		for _, a := range knownPatterns {
+		for i := range knownPatterns {
+			a := &knownPatterns[i]
 			fmt.Printf("   - %s: %s\n", a.Metric, a.KnownPattern.Reason)
 		}
 	}
@@ -255,7 +260,8 @@ func main() {
 	// Report potential issues (needs review)
 	fmt.Printf("⚠️  Potential Double-Counting (review): %d fields\n", len(potentialIssues))
 	if len(potentialIssues) > 0 {
-		for _, a := range potentialIssues {
+		for i := range potentialIssues {
+			a := &potentialIssues[i]
 			fmt.Printf("   - %s (%d locations):\n", a.Metric, len(a.Locations))
 			for _, v := range a.Violations {
 				fmt.Printf("       ⚠️  %s\n", v)
@@ -277,18 +283,20 @@ func main() {
 
 	// Summary
 	fmt.Println("=== Summary ===")
-	if len(missingExports) == 0 && len(neverUsed) == 0 {
+	switch {
+	case len(missingExports) == 0 && len(neverUsed) == 0:
 		fmt.Println("✅ AUDIT PASSED: All used metrics are exported to Prometheus")
-		if len(potentialIssues) > 0 {
+		switch {
+		case len(potentialIssues) > 0:
 			fmt.Printf("⚠️  WARNING: %d metrics may have potential double-counting - review above\n", len(potentialIssues))
-		} else if len(analyses) > 0 {
+		case len(analyses) > 0:
 			fmt.Printf("✅ All %d multi-location metrics verified as mutually exclusive or documented\n", len(analyses))
 		}
 		os.Exit(0)
-	} else if len(missingExports) > 0 {
+	case len(missingExports) > 0:
 		fmt.Printf("❌ AUDIT FAILED: %d metrics need to be added to Prometheus handler\n", len(missingExports))
 		os.Exit(1)
-	} else {
+	default:
 		fmt.Printf("⚠️  AUDIT WARNING: %d metrics defined but never used\n", len(neverUsed))
 		os.Exit(0)
 	}
@@ -305,8 +313,8 @@ func loadMutualExclusionConfig(root string) *MutualExclusionConfig {
 	}
 
 	var config MutualExclusionConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		fmt.Printf("  WARNING: Could not parse mutual_exclusion.yaml: %v\n\n", err)
+	if unmarshalErr := yaml.Unmarshal(data, &config); unmarshalErr != nil {
+		fmt.Printf("  WARNING: Could not parse mutual_exclusion.yaml: %v\n\n", unmarshalErr)
 		return &MutualExclusionConfig{}
 	}
 
@@ -325,9 +333,13 @@ func findProjectRoot() string {
 	}
 
 	// Try parent directories
-	dir, _ := os.Getwd()
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get current directory: %v\n", err)
+		return ""
+	}
 	for i := 0; i < 5; i++ {
-		if _, err := os.Stat(filepath.Join(dir, "metrics/metrics.go")); err == nil {
+		if _, statErr := os.Stat(filepath.Join(dir, "metrics/metrics.go")); statErr == nil {
 			return dir
 		}
 		dir = filepath.Dir(dir)
@@ -406,7 +418,7 @@ func findIncrementCalls(rootDir string, config *MutualExclusionConfig) (map[stri
 	increments := make(map[string][]IncrementLocation)
 	fileCount := 0
 
-	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+	if walkErr := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -466,8 +478,8 @@ func findIncrementCalls(rootDir string, config *MutualExclusionConfig) (map[stri
 			}
 
 			pos := fset.Position(n.Pos())
-			relPath, _ := filepath.Rel(rootDir, path)
-			if relPath == "" {
+			relPath, relErr := filepath.Rel(rootDir, path)
+			if relErr != nil || relPath == "" {
 				relPath = path
 			}
 
@@ -488,7 +500,9 @@ func findIncrementCalls(rootDir string, config *MutualExclusionConfig) (map[stri
 			return true
 		})
 		return nil
-	})
+	}); walkErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: error walking directory %s: %v\n", rootDir, walkErr)
+	}
 
 	return increments, fileCount
 }
@@ -498,8 +512,7 @@ func buildFunctionMap(f *ast.File, fset *token.FileSet) map[int]string {
 	funcMap := make(map[int]string)
 
 	ast.Inspect(f, func(n ast.Node) bool {
-		switch fn := n.(type) {
-		case *ast.FuncDecl:
+		if fn, ok := n.(*ast.FuncDecl); ok {
 			if fn.Body != nil {
 				startLine := fset.Position(fn.Body.Pos()).Line
 				endLine := fset.Position(fn.Body.End()).Line
@@ -508,6 +521,7 @@ func buildFunctionMap(f *ast.File, fset *token.FileSet) map[int]string {
 				if fn.Recv != nil && len(fn.Recv.List) > 0 {
 					if t := fn.Recv.List[0].Type; t != nil {
 						// funcName is already the method name
+						_ = t // silence unused warning
 					}
 				}
 				for line := startLine; line <= endLine; line++ {
@@ -609,16 +623,16 @@ func findKnownPattern(metric string, config *MutualExclusionConfig) *KnownPatter
 
 // analyzeMultipleIncrements analyzes all metrics with multiple increment locations
 func analyzeMultipleIncrements(metricsInUse map[string][]IncrementLocation, config *MutualExclusionConfig) []MultiIncrementAnalysis {
-	var analyses []MultiIncrementAnalysis
-
 	// Get sorted metric names for consistent output
-	var metricNames []string
+	metricNames := make([]string, 0, len(metricsInUse))
 	for name, locs := range metricsInUse {
 		if len(locs) > 1 {
 			metricNames = append(metricNames, name)
 		}
 	}
 	sort.Strings(metricNames)
+
+	analyses := make([]MultiIncrementAnalysis, 0, len(metricNames))
 
 	for _, name := range metricNames {
 		locs := metricsInUse[name]
@@ -729,7 +743,7 @@ func generateViolations(analysis MultiIncrementAnalysis, config *MutualExclusion
 
 // getGroupNames extracts sorted group names from grouped locations
 func getGroupNames(grouped map[string][]IncrementLocation) []string {
-	var names []string
+	names := make([]string, 0, len(grouped))
 	for name := range grouped {
 		names = append(names, name)
 	}

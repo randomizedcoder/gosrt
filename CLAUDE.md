@@ -824,14 +824,21 @@ nix develop
 sudo nix run .#srt-network-setup -- "$USER"    # Create namespaces, bridges, TAPs
 sudo nix run .#srt-network-teardown            # Remove all network resources
 
-# VM lifecycle
-nix run .#srt-tmux-all                 # Start all VMs in tmux session
+# VM lifecycle - starting
+nix run .#srt-tmux-all                 # Start all VMs in tmux session (interactive)
+nix run .#srt-vm-start-background      # Start all VMs in background (logs to /tmp/gosrt-vms/)
 nix run .#srt-tmux-attach              # Attach to tmux session
-nix run .#srt-tmux-clear               # Kill tmux session (without stopping VMs)
-nix run .#srt-vm-stop                  # Stop all VMs (tmux session persists)
-nix run .#srt-vm-stop-and-clear-tmux   # Stop all VMs AND kill tmux session (clean restart)
-nix run .#srt-vm-check                 # Show VM status (running/stopped)
+
+# VM lifecycle - status checking
+nix run .#srt-vm-is-running -- server  # Check if specific VM is running (exit 0=running, 1=not)
+nix run .#srt-vm-all-running           # Check if all 4 core VMs are running (exit 0=all, 1=some missing)
+nix run .#srt-vm-check                 # Show all VM status table (running/stopped)
 nix run .#srt-vm-wait                  # Wait for VMs to be ready (SSH accessible)
+
+# VM lifecycle - stopping
+nix run .#srt-vm-stop                  # Stop all VMs
+nix run .#srt-vm-stop-and-clear-tmux   # Stop all VMs AND kill tmux session (clean restart)
+nix run .#srt-tmux-clear               # Kill tmux session (without stopping VMs)
 
 # Per-VM access
 nix run .#srt-ssh-server               # SSH into server VM (password: srt)

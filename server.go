@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/randomizedcoder/gosrt/metrics"
 )
@@ -228,8 +229,11 @@ func (s *Server) startMetricsServer() {
 		mux.Handle("/metrics", metrics.MetricsHandler())
 
 		s.metricsServer = &http.Server{
-			Addr:    s.Config.MetricsListenAddr,
-			Handler: mux,
+			Addr:         s.Config.MetricsListenAddr,
+			Handler:      mux,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 15 * time.Second,
+			IdleTimeout:  60 * time.Second,
 		}
 
 		go func() {

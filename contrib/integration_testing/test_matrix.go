@@ -146,7 +146,10 @@ func GenerateTestName(p TestMatrixParams) string {
 
 // GenerateParallelTests generates all parallel tests based on the matrix config.
 func GenerateParallelTests(cfg ParallelMatrixConfig) []GeneratedParallelTest {
-	var tests []GeneratedParallelTest
+	// Estimate capacity: 6 + RTTs + Buffers + 4 + stress + 4 + buffer*bitrate + 9 + 9 + buffer*RTT + loss*bitrate + 3*bitrate*3
+	// Conservative estimate for typical configs
+	estimatedCap := 100
+	tests := make([]GeneratedParallelTest, 0, estimatedCap)
 
 	defaults := TestMatrixParams{
 		Mode:     TestModeParallel,
@@ -388,10 +391,11 @@ func deduplicateTests(tests []GeneratedParallelTest) []GeneratedParallelTest {
 	seen := make(map[string]bool)
 	var result []GeneratedParallelTest
 
-	for _, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		if !seen[t.Name] {
 			seen[t.Name] = true
-			result = append(result, t)
+			result = append(result, *t)
 		}
 	}
 
@@ -405,8 +409,8 @@ func deduplicateTests(tests []GeneratedParallelTest) []GeneratedParallelTest {
 // CountByTier counts tests by tier.
 func CountByTier(tests []GeneratedParallelTest) map[TestTier]int {
 	counts := make(map[TestTier]int)
-	for _, t := range tests {
-		counts[t.Tier]++
+	for i := range tests {
+		counts[tests[i].Tier]++
 	}
 	return counts
 }
@@ -414,9 +418,10 @@ func CountByTier(tests []GeneratedParallelTest) map[TestTier]int {
 // FilterTestsByTier returns tests up to and including the specified tier.
 func FilterTestsByTier(tests []GeneratedParallelTest, maxTier TestTier) []GeneratedParallelTest {
 	var result []GeneratedParallelTest
-	for _, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		if t.Tier <= maxTier {
-			result = append(result, t)
+			result = append(result, *t)
 		}
 	}
 	return result
@@ -425,9 +430,10 @@ func FilterTestsByTier(tests []GeneratedParallelTest, maxTier TestTier) []Genera
 // FilterTestsByConfig returns tests that use the specified high-perf config.
 func FilterTestsByConfig(tests []GeneratedParallelTest, config ConfigVariant) []GeneratedParallelTest {
 	var result []GeneratedParallelTest
-	for _, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		if t.Params.HighPerf == config {
-			result = append(result, t)
+			result = append(result, *t)
 		}
 	}
 	return result
@@ -436,9 +442,10 @@ func FilterTestsByConfig(tests []GeneratedParallelTest, config ConfigVariant) []
 // FilterTestsByRTT returns tests that use the specified RTT profile.
 func FilterTestsByRTT(tests []GeneratedParallelTest, rtt RTTProfile) []GeneratedParallelTest {
 	var result []GeneratedParallelTest
-	for _, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		if t.Params.RTT == rtt {
-			result = append(result, t)
+			result = append(result, *t)
 		}
 	}
 	return result
@@ -447,9 +454,10 @@ func FilterTestsByRTT(tests []GeneratedParallelTest, rtt RTTProfile) []Generated
 // FilterTestsByBitrate returns tests that use the specified bitrate.
 func FilterTestsByBitrate(tests []GeneratedParallelTest, bitrate int64) []GeneratedParallelTest {
 	var result []GeneratedParallelTest
-	for _, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		if t.Params.Bitrate == bitrate {
-			result = append(result, t)
+			result = append(result, *t)
 		}
 	}
 	return result
@@ -465,7 +473,8 @@ func PrintTestMatrix(tests []GeneratedParallelTest) {
 		TierNightly: "Nightly",
 	}
 
-	for i, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		fmt.Printf("%3d. [%s] %s\n", i+1, tierNames[t.Tier], t.Name)
 		fmt.Printf("     %s\n", t.Description)
 		fmt.Printf("     Duration: %s\n\n", t.Duration)
@@ -552,11 +561,12 @@ func calculateCleanTestDuration(buffer time.Duration, bitrate int64, defaultDura
 	// For smaller buffers, buffer + 10s is sufficient
 	// For very small buffers, use the default duration
 	var minDuration time.Duration
-	if buffer >= 20*time.Second {
+	switch {
+	case buffer >= 20*time.Second:
 		minDuration = buffer + 30*time.Second // Large buffers need more time
-	} else if buffer >= 10*time.Second {
+	case buffer >= 10*time.Second:
 		minDuration = buffer + 20*time.Second
-	} else {
+	default:
 		minDuration = buffer + 10*time.Second
 	}
 
@@ -578,7 +588,9 @@ func calculateCleanTestDuration(buffer time.Duration, bitrate int64, defaultDura
 // GenerateCleanNetworkTests generates clean network tests following the matrix approach.
 // These tests run without network impairment on loopback interface.
 func GenerateCleanNetworkTests() []GeneratedCleanTest {
-	var tests []GeneratedCleanTest
+	// Estimate capacity: 7 config variants + 3 bitrate + 4 buffer + extended tests
+	estimatedCap := 50
+	tests := make([]GeneratedCleanTest, 0, estimatedCap)
 
 	// Default parameters
 	defaultBitrate := int64(20_000_000)
@@ -733,10 +745,11 @@ func deduplicateCleanTests(tests []GeneratedCleanTest) []GeneratedCleanTest {
 	seen := make(map[string]bool)
 	var result []GeneratedCleanTest
 
-	for _, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		if !seen[t.Name] {
 			seen[t.Name] = true
-			result = append(result, t)
+			result = append(result, *t)
 		}
 	}
 
@@ -746,9 +759,10 @@ func deduplicateCleanTests(tests []GeneratedCleanTest) []GeneratedCleanTest {
 // FilterCleanTestsByTier returns tests up to and including the specified tier.
 func FilterCleanTestsByTier(tests []GeneratedCleanTest, maxTier TestTier) []GeneratedCleanTest {
 	var result []GeneratedCleanTest
-	for _, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		if t.Tier <= maxTier {
-			result = append(result, t)
+			result = append(result, *t)
 		}
 	}
 	return result
@@ -757,8 +771,8 @@ func FilterCleanTestsByTier(tests []GeneratedCleanTest, maxTier TestTier) []Gene
 // CountCleanByTier counts clean tests by tier.
 func CountCleanByTier(tests []GeneratedCleanTest) map[TestTier]int {
 	counts := make(map[TestTier]int)
-	for _, t := range tests {
-		counts[t.Tier]++
+	for i := range tests {
+		counts[tests[i].Tier]++
 	}
 	return counts
 }
@@ -772,8 +786,8 @@ func PrintCleanTestMatrix(tests []GeneratedCleanTest) {
 	}
 
 	fmt.Printf("Matrix-Generated Clean Network Tests (%d total):\n\n", len(tests))
-	for i, t := range tests {
-		fmt.Printf("  %3d. [%-8s] %-45s %s\n", i+1, tierNames[t.Tier], t.Name, t.Duration)
+	for i := range tests {
+		fmt.Printf("  %3d. [%-8s] %-45s %s\n", i+1, tierNames[tests[i].Tier], tests[i].Name, tests[i].Duration)
 	}
 }
 
@@ -791,8 +805,8 @@ func PrintCleanTestSummary(tests []GeneratedCleanTest) {
 
 	// Calculate total duration
 	var totalDuration time.Duration
-	for _, t := range tests {
-		totalDuration += t.Duration
+	for i := range tests {
+		totalDuration += tests[i].Duration
 	}
 	fmt.Printf("\nEstimated total runtime: %s\n", totalDuration.Round(time.Minute))
 }

@@ -77,8 +77,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 
 	// Setup network namespaces
 	fmt.Println("Setting up network namespaces...")
-	if err := nc.Setup(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error setting up network: %v\n", err)
+	if setupErr := nc.Setup(ctx); setupErr != nil {
+		fmt.Fprintf(os.Stderr, "Error setting up network: %v\n", setupErr)
 		result.EndTime = time.Now()
 		return result
 	}
@@ -86,15 +86,15 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 	// Ensure cleanup happens even on failure
 	defer func() {
 		fmt.Println("\nCleaning up network namespaces...")
-		if err := nc.Cleanup(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", err)
+		if cleanupErr := nc.Cleanup(ctx); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", cleanupErr)
 		}
 	}()
 
 	// Setup parallel IPs (.3 addresses for HighPerf pipeline)
 	fmt.Println("Setting up parallel IPs for dual-pipeline test...")
-	if err := nc.SetupParallelIPs(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error setting up parallel IPs: %v\n", err)
+	if ipErr := nc.SetupParallelIPs(ctx); ipErr != nil {
+		fmt.Fprintf(os.Stderr, "Error setting up parallel IPs: %v\n", ipErr)
 		result.EndTime = time.Now()
 		return result
 	}
@@ -103,8 +103,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 	tcpdumpConfig := GetTcpdumpConfigFromEnv()
 	if tcpdumpConfig.HasAnyCapture() {
 		fmt.Println("Starting packet captures (TCPDUMP_* enabled)...")
-		if err := nc.StartTcpdumpFromConfig(ctx, tcpdumpConfig); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: tcpdump start failed: %v\n", err)
+		if tcpdumpErr := nc.StartTcpdumpFromConfig(ctx, tcpdumpConfig); tcpdumpErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: tcpdump start failed: %v\n", tcpdumpErr)
 		} else {
 			if tcpdumpConfig.PublisherFile != "" {
 				fmt.Printf("  Publisher (CG): %s\n", tcpdumpConfig.PublisherFile)
@@ -136,8 +136,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 		profile := getLatencyProfileIndex(config.Impairment.LatencyProfile)
 		if profile >= 0 {
 			fmt.Printf("Setting latency profile: %s (profile %d)\n", config.Impairment.LatencyProfile, profile)
-			if err := nc.SetLatencyProfile(ctx, profile); err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting latency: %v\n", err)
+			if latencyErr := nc.SetLatencyProfile(ctx, profile); latencyErr != nil {
+				fmt.Fprintf(os.Stderr, "Error setting latency: %v\n", latencyErr)
 				result.EndTime = time.Now()
 				return result
 			}
@@ -159,8 +159,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 	}
 
 	// Check if binaries exist
-	if err := ensureBinaries(baseDir, serverBin, clientGenBin, clientBin); err != nil {
-		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", err)
+	if binErr := ensureBinaries(ctx, baseDir, serverBin, clientGenBin, clientBin); binErr != nil {
+		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", binErr)
 		result.EndTime = time.Now()
 		return result
 	}
@@ -180,24 +180,24 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 		fmt.Printf("Enabling %s profiling for all 6 components\n\n", profileType)
 
 		// Baseline pipeline profiling
-		if args, err := profileConfig.GetProfileArgs("baseline_server", profileType); err == nil && args != nil {
+		if args, profileErr := profileConfig.GetProfileArgs("baseline_server", profileType); profileErr == nil && args != nil {
 			baselineServerFlags = append(baselineServerFlags, args...)
 		}
-		if args, err := profileConfig.GetProfileArgs("baseline_cg", profileType); err == nil && args != nil {
+		if args, profileErr := profileConfig.GetProfileArgs("baseline_cg", profileType); profileErr == nil && args != nil {
 			baselineClientGenFlags = append(baselineClientGenFlags, args...)
 		}
-		if args, err := profileConfig.GetProfileArgs("baseline_client", profileType); err == nil && args != nil {
+		if args, profileErr := profileConfig.GetProfileArgs("baseline_client", profileType); profileErr == nil && args != nil {
 			baselineClientFlags = append(baselineClientFlags, args...)
 		}
 
 		// HighPerf pipeline profiling
-		if args, err := profileConfig.GetProfileArgs("highperf_server", profileType); err == nil && args != nil {
+		if args, profileErr := profileConfig.GetProfileArgs("highperf_server", profileType); profileErr == nil && args != nil {
 			highperfServerFlags = append(highperfServerFlags, args...)
 		}
-		if args, err := profileConfig.GetProfileArgs("highperf_cg", profileType); err == nil && args != nil {
+		if args, profileErr := profileConfig.GetProfileArgs("highperf_cg", profileType); profileErr == nil && args != nil {
 			highperfClientGenFlags = append(highperfClientGenFlags, args...)
 		}
-		if args, err := profileConfig.GetProfileArgs("highperf_client", profileType); err == nil && args != nil {
+		if args, profileErr := profileConfig.GetProfileArgs("highperf_client", profileType); profileErr == nil && args != nil {
 			highperfClientFlags = append(highperfClientFlags, args...)
 		}
 	}
@@ -290,8 +290,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 		lossPercent := int(config.Impairment.LossRate * 100)
 		fmt.Printf("Applying %d%% packet loss (both pipelines)...\n", lossPercent)
 		// Use parallel loss function to affect all 6 IPs
-		if err := nc.SetLossParallel(ctx, lossPercent); err != nil {
-			fmt.Fprintf(os.Stderr, "Error setting loss: %v\n", err)
+		if lossErr := nc.SetLossParallel(ctx, lossPercent); lossErr != nil {
+			fmt.Fprintf(os.Stderr, "Error setting loss: %v\n", lossErr)
 			result.EndTime = time.Now()
 			return result
 		}
@@ -303,13 +303,15 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 		if pattern != nil {
 			fmt.Printf("Starting impairment pattern: %s (both pipelines)\n", config.Impairment.Pattern)
 			// Use parallel pattern to affect all 6 IPs
-			if err := nc.StartPatternParallel(ctx, *pattern); err != nil {
-				fmt.Fprintf(os.Stderr, "Error starting pattern: %v\n", err)
+			if patternErr := nc.StartPatternParallel(ctx, *pattern); patternErr != nil {
+				fmt.Fprintf(os.Stderr, "Error starting pattern: %v\n", patternErr)
 				result.EndTime = time.Now()
 				return result
 			}
 			defer func() {
-				_ = nc.StopPatternParallel(ctx)
+				if stopErr := nc.StopPatternParallel(ctx); stopErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to stop parallel pattern: %v\n", stopErr)
+				}
 			}()
 		}
 	}
@@ -329,8 +331,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 
 	// Collect initial metrics
 	fmt.Println("\nCollecting initial metrics (both pipelines)...")
-	result.BaselineMetrics.CollectAllMetrics("startup")
-	result.HighPerfMetrics.CollectAllMetrics("startup")
+	result.BaselineMetrics.CollectAllMetrics(context.Background(), "startup")
+	result.HighPerfMetrics.CollectAllMetrics(context.Background(), "startup")
 
 	// Run for test duration
 	fmt.Printf("All 6 processes started. Running for %v...\n", config.TestDuration)
@@ -346,8 +348,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 			select {
 			case <-collectTicker.C:
 				fmt.Println("\nCollecting mid-test metrics (both pipelines)...")
-				result.BaselineMetrics.CollectAllMetrics("mid-test")
-				result.HighPerfMetrics.CollectAllMetrics("mid-test")
+				result.BaselineMetrics.CollectAllMetrics(context.Background(), "mid-test")
+				result.HighPerfMetrics.CollectAllMetrics(context.Background(), "mid-test")
 				snapshotCount++
 
 				// Print verbose delta if enabled
@@ -373,8 +375,12 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 
 	// Send SIGUSR1 to both client-generators to pause data generation
 	fmt.Println("Sending SIGUSR1 to both client-generators (pause data)...")
-	_ = signalProcess(baseline.ClientGen, syscall.SIGUSR1)
-	_ = signalProcess(highperf.ClientGen, syscall.SIGUSR1)
+	if signalErr := signalProcess(baseline.ClientGen, syscall.SIGUSR1); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to send SIGUSR1 to baseline client-gen: %v\n", signalErr)
+	}
+	if signalErr := signalProcess(highperf.ClientGen, syscall.SIGUSR1); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to send SIGUSR1 to highperf client-gen: %v\n", signalErr)
+	}
 
 	// Wait for both pipelines to stabilize
 	fmt.Println("Waiting for metrics to stabilize...")
@@ -398,8 +404,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 
 	// Collect pre-shutdown metrics
 	fmt.Println("Collecting pre-shutdown metrics...")
-	result.BaselineMetrics.CollectAllMetrics("pre-shutdown")
-	result.HighPerfMetrics.CollectAllMetrics("pre-shutdown")
+	result.BaselineMetrics.CollectAllMetrics(context.Background(), "pre-shutdown")
+	result.HighPerfMetrics.CollectAllMetrics(context.Background(), "pre-shutdown")
 
 	// =================================================================
 	// SHUTDOWN PHASE: Gracefully stop all 6 processes
@@ -409,13 +415,17 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 	// Stop impairment pattern
 	if config.Impairment.Pattern != "" && config.Impairment.Pattern != "clean" {
 		fmt.Println("Stopping impairment pattern...")
-		_ = nc.StopPatternParallel(ctx)
+		if stopErr := nc.StopPatternParallel(ctx); stopErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop impairment pattern: %v\n", stopErr)
+		}
 	}
 
 	// Clear loss
 	if config.Impairment.LossRate > 0 {
 		fmt.Println("Clearing packet loss...")
-		_ = nc.SetLossParallel(ctx, 0)
+		if lossErr := nc.SetLossParallel(ctx, 0); lossErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to clear packet loss: %v\n", lossErr)
+		}
 	}
 
 	// Shutdown all processes
@@ -424,8 +434,8 @@ func runParallelModeTest(config ParallelTestConfig) ParallelTestResult {
 
 	// Collect final metrics
 	fmt.Println("\nCollecting final metrics...")
-	result.BaselineMetrics.CollectAllMetrics("final")
-	result.HighPerfMetrics.CollectAllMetrics("final")
+	result.BaselineMetrics.CollectAllMetrics(context.Background(), "final")
+	result.HighPerfMetrics.CollectAllMetrics(context.Background(), "final")
 
 	// Generate profile comparison report if profiling was enabled
 	if profileConfig != nil {
@@ -442,7 +452,7 @@ func generateParallelProfileReport(testName string, profileConfig *ProfileConfig
 	fmt.Println("\n=== Analyzing Parallel Test Profiles ===")
 
 	// Analyze all collected profiles
-	analyses, err := AnalyzeAllProfiles(profileConfig.OutputDir)
+	analyses, err := AnalyzeAllProfiles(context.Background(), profileConfig.OutputDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to analyze profiles: %v\n", err)
 		return
@@ -522,8 +532,8 @@ func generateParallelProfileReport(testName string, profileConfig *ProfileConfig
 	}
 	report.CalculateOverallSummary()
 
-	if err := GenerateHTMLReport(report); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to generate report: %v\n", err)
+	if reportErr := GenerateHTMLReport(report); reportErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to generate report: %v\n", reportErr)
 	}
 
 	// Print summary of where profile files are located
@@ -539,7 +549,8 @@ func printParallelProfileSummary(comparisons []*ComparisonResult) {
 	// Aggregate improvements across all comparisons
 	totalImprovements := 0
 	totalRegressions := 0
-	var allRecommendations []string
+	// Estimate: each comparison typically has 0-5 recommendations
+	allRecommendations := make([]string, 0, len(comparisons)*5)
 
 	for _, comp := range comparisons {
 		for _, fc := range comp.FuncComparisons {
@@ -584,8 +595,12 @@ func shutdownParallelPipelines(baseline, highperf *ParallelProcessSet) bool {
 
 	// Shutdown clients first (subscribers)
 	fmt.Println("Sending SIGINT to clients...")
-	_ = signalProcess(baseline.Client, syscall.SIGINT)
-	_ = signalProcess(highperf.Client, syscall.SIGINT)
+	if err := signalProcess(baseline.Client, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal baseline client: %v\n", err)
+	}
+	if err := signalProcess(highperf.Client, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal highperf client: %v\n", err)
+	}
 
 	baselineClientExited := waitForProcessExit(baseline.Client, 5*time.Second)
 	highperfClientExited := waitForProcessExit(highperf.Client, 5*time.Second)
@@ -607,8 +622,12 @@ func shutdownParallelPipelines(baseline, highperf *ParallelProcessSet) bool {
 
 	// Shutdown client-generators (publishers)
 	fmt.Println("Sending SIGINT to client-generators...")
-	_ = signalProcess(baseline.ClientGen, syscall.SIGINT)
-	_ = signalProcess(highperf.ClientGen, syscall.SIGINT)
+	if err := signalProcess(baseline.ClientGen, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal baseline client-gen: %v\n", err)
+	}
+	if err := signalProcess(highperf.ClientGen, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal highperf client-gen: %v\n", err)
+	}
 
 	baselineClientGenExited := waitForProcessExit(baseline.ClientGen, 8*time.Second)
 	highperfClientGenExited := waitForProcessExit(highperf.ClientGen, 8*time.Second)
@@ -630,8 +649,12 @@ func shutdownParallelPipelines(baseline, highperf *ParallelProcessSet) bool {
 
 	// Shutdown servers
 	fmt.Println("Sending SIGINT to servers...")
-	_ = signalProcess(baseline.Server, syscall.SIGINT)
-	_ = signalProcess(highperf.Server, syscall.SIGINT)
+	if err := signalProcess(baseline.Server, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal baseline server: %v\n", err)
+	}
+	if err := signalProcess(highperf.Server, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal highperf server: %v\n", err)
+	}
 
 	baselineServerExited := waitForProcessExit(baseline.Server, 10*time.Second)
 	highperfServerExited := waitForProcessExit(highperf.Server, 10*time.Second)
