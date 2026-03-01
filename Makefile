@@ -860,9 +860,106 @@ tidy:
 vendor:
 	go mod vendor
 
-## lint: Static analysis with staticcheck
-lint:
+## ═══════════════════════════════════════════════════════════════════════════
+## TIERED LINTING
+## ═══════════════════════════════════════════════════════════════════════════
+## Tier 0: Quick (~30s) - Development feedback
+## Tier 1: Standard (~2min) - PR validation (CI gating)
+## Tier 2: Comprehensive (~10min) - Nightly CI
+##
+## See .golangci*.yml for linter configurations
+
+## lint-quick: Tier 0 quick lint (~30s) - development feedback
+## Runs: gofmt, goimports, govet, errcheck, ineffassign, unused
+## Also runs: seq-audit (SRT-specific sequence arithmetic safety)
+lint-quick: code-audit-seq
+	@echo "=== Tier 0: Quick Lint ==="
+	golangci-lint run --config .golangci-quick.yml --timeout 1m ./...
+	@echo "✅ Tier 0 lint passed"
+
+## lint: Tier 1 standard lint (~2min) - PR validation
+## Includes Tier 0 plus: gosec, gosimple, gocritic, revive, contextcheck
+## Also runs: metrics-audit (Prometheus metrics alignment)
+lint: lint-quick audit-metrics
+	@echo "=== Tier 1: Standard Lint ==="
+	golangci-lint run --config .golangci.yml --timeout 5m ./...
+	@echo "✅ Tier 1 lint passed"
+
+## lint-comprehensive: Tier 2 comprehensive lint (~10min) - nightly CI
+## Includes Tier 1 plus: exhaustive, prealloc, gocyclo, funlen, goconst, dupl, etc.
+## Also runs: all custom audit tools
+lint-comprehensive: lint
+	@echo "=== Tier 2: Comprehensive Lint ==="
+	golangci-lint run --config .golangci-comprehensive.yml --timeout 15m ./...
+	make lint-audit-all
+	@echo "✅ Tier 2 lint passed"
+
+## lint-fix: Auto-fix linting issues where possible
+lint-fix:
+	golangci-lint run --fix --config .golangci.yml ./...
+
+## lint-new: Only lint changes since last commit (fast for incremental dev)
+lint-new:
+	golangci-lint run --new-from-rev=HEAD~1 --config .golangci.yml ./...
+
+## lint-audit-all: Run all custom audit tools
+lint-audit-all: code-audit-seq audit-metrics code-audit-test
+	@echo "✅ All custom audits passed"
+
+## lint-staticcheck: Legacy staticcheck (deprecated, use 'make lint' instead)
+lint-staticcheck:
 	staticcheck ./...
+
+## ============================================================================
+## NIX FLAKE CHECKS (Sandboxed, Reproducible)
+## ============================================================================
+## These targets run linting/testing via nix flake check.
+## Benefits: reproducible environment, no local tool version drift.
+## Requires: nix with flakes enabled.
+
+## nix-lint-quick: Run Tier 0 lint via nix (~30s)
+## gofmt, govet, errcheck, ineffassign, unused
+nix-lint-quick:
+	nix build .#checks.x86_64-linux.golangci-lint-quick --print-build-logs
+	@echo "✅ Nix Tier 0 lint passed"
+
+## nix-lint: Run Tier 1 lint via nix (~2min) - CI gating
+## Tier 0 + gosec, gosimple, gocritic, revive, contextcheck
+nix-lint:
+	nix build .#checks.x86_64-linux.golangci-lint --print-build-logs
+	@echo "✅ Nix Tier 1 lint passed"
+
+## nix-lint-all: Run Tier 2 comprehensive lint via nix (~10min)
+## Tier 1 + gocyclo, prealloc, funlen, goconst, dupl
+nix-lint-all:
+	nix build .#checks.x86_64-linux.golangci-lint-comprehensive --print-build-logs
+	@echo "✅ Nix Tier 2 lint passed"
+
+## nix-sec: Run security scan via nix (gosec)
+nix-sec:
+	nix build .#checks.x86_64-linux.go-sec --print-build-logs
+	@echo "✅ Nix security scan passed"
+
+## nix-test: Run all Go tests via nix
+nix-test:
+	nix build .#checks.x86_64-linux.go-test-quick --print-build-logs
+	nix build .#checks.x86_64-linux.go-test-circular --print-build-logs
+	nix build .#checks.x86_64-linux.go-test-packet --print-build-logs
+	@echo "✅ Nix tests passed"
+
+## nix-audit: Run all audit tools via nix
+nix-audit:
+	nix build .#checks.x86_64-linux.seq-audit --print-build-logs
+	nix build .#checks.x86_64-linux.metrics-audit --print-build-logs
+	@echo "✅ Nix audits passed"
+
+## nix-check: Run ALL nix flake checks (~20min)
+## Includes: linting (all tiers), testing, security, audits
+nix-check:
+	nix flake check --print-build-logs
+	@echo "✅ All nix flake checks passed"
+
+.PHONY: nix-lint-quick nix-lint nix-lint-all nix-sec nix-test nix-audit nix-check
 
 ## client: Build import binary
 client:
@@ -1035,7 +1132,7 @@ nixshell:
 # Debug build targets (lock-free context verification)
 .PHONY: test-debug test-debug-quick test-debug-connection build-debug verify-lockfree-context
 # Code quality targets
-.PHONY: vet fmt lint
+.PHONY: vet fmt lint lint-quick lint-comprehensive lint-fix lint-new lint-audit-all lint-staticcheck
 # Dependency management targets
 .PHONY: update tidy vendor
 # Build targets
