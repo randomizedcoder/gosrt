@@ -677,6 +677,30 @@ func shutdownParallelPipelines(baseline, highperf *ParallelProcessSet) bool {
 	return allPassed
 }
 
+// printParallelConfigOnly prints the CLI flags for a parallel test without running it.
+// No root required, no binary builds needed.
+func printParallelConfigOnly(config ParallelTestConfig) {
+	const placeholderTestID = "config_preview"
+	printParallelTestHeader(config)
+
+	baselineServerFlags := config.GetBaselineServerFlags(placeholderTestID)
+	baselineClientGenFlags := config.GetBaselineClientGeneratorFlags(placeholderTestID)
+	baselineClientFlags := config.GetBaselineClientFlags(placeholderTestID)
+	highperfServerFlags := config.GetHighPerfServerFlags(placeholderTestID)
+	highperfClientGenFlags := config.GetHighPerfClientGeneratorFlags(placeholderTestID)
+	highperfClientFlags := config.GetHighPerfClientFlags(placeholderTestID)
+
+	fmt.Println("CLI Flags (Baseline):")
+	fmt.Printf("  Server:           %s\n", strings.Join(baselineServerFlags, " "))
+	fmt.Printf("  Client-Generator: %s\n", strings.Join(baselineClientGenFlags, " "))
+	fmt.Printf("  Client:           %s\n", strings.Join(baselineClientFlags, " "))
+	fmt.Println()
+	fmt.Println("CLI Flags (HighPerf):")
+	fmt.Printf("  Server:           %s\n", strings.Join(highperfServerFlags, " "))
+	fmt.Printf("  Client-Generator: %s\n", strings.Join(highperfClientGenFlags, " "))
+	fmt.Printf("  Client:           %s\n", strings.Join(highperfClientFlags, " "))
+}
+
 // printParallelTestHeader prints the header for a parallel test
 func printParallelTestHeader(config ParallelTestConfig) {
 	fmt.Printf("=== Parallel Comparison Test: %s ===\n", config.Name)
