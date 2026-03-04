@@ -208,6 +208,9 @@ integration-testing:
 ## test-parallel: Run parallel comparison test (root, CONFIG=Parallel-Starlink-5Mbps)
 ## sudo make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo make test-parallel CONFIG=Parallel-Starlink-5Mbps VERBOSE=1
+## sudo make test-parallel CONFIG=Parallel-Loss-L5-20M-Base-vs-FullSendEL-GEO CONFIGONLY=true
+## Add CONFIGONLY=true to print CLI flags without running (no root required):
+## make test-parallel CONFIG=Parallel-Starlink-5Mbps CONFIGONLY=true
 ## Add PROFILES=<type> to enable profiling with Baseline vs HighPerf comparison (uses debug builds):
 ## sudo PROFILES=cpu make test-parallel CONFIG=Parallel-Starlink-5Mbps
 ## sudo PROFILES=cpu,mutex make test-parallel CONFIG=Parallel-Starlink-5Mbps
@@ -215,9 +218,19 @@ integration-testing:
 ## Add TCPDUMP_* to capture packets for analysis with tshark/wireshark:
 ## sudo TCPDUMP_CG=/tmp/cg.pcap TCPDUMP_SERVER=/tmp/server.pcap TCPDUMP_CLIENT=/tmp/client.pcap make test-parallel ...
 # When PROFILES is set, use debug builds (with symbols) for better profile output
-test-parallel: integration-testing $(if $(PROFILES),client-debug server-debug client-generator-debug,client server client-generator)
-	@echo "NOTE: Parallel tests require root privileges for network namespace creation"
-	@cd contrib/integration_testing && PROFILES=$(PROFILES) ./integration_testing parallel-test $(CONFIG) $(if $(VERBOSE),--verbose,)
+# When CONFIGONLY is set, skip building binaries and just print config
+test-parallel: integration-testing $(if $(CONFIGONLY),,$(if $(PROFILES),client-debug server-debug client-generator-debug,client server client-generator))
+	@if [ -n "$(CONFIGONLY)" ]; then \
+		cd contrib/integration_testing && ./integration_testing parallel-test-config $(CONFIG); \
+	else \
+		echo "NOTE: Parallel tests require root privileges for network namespace creation"; \
+		cd contrib/integration_testing && PROFILES=$(PROFILES) ./integration_testing parallel-test $(CONFIG) $(if $(VERBOSE),--verbose,); \
+	fi
+
+## test-parallel-config: Print CLI flags for a parallel test without running (no root required)
+## make test-parallel-config CONFIG=Parallel-Starlink-5Mbps
+test-parallel-config: integration-testing
+	@cd contrib/integration_testing && ./integration_testing parallel-test-config $(CONFIG)
 
 ## test-parallel-all: Run all parallel comparison tests (requires root)
 test-parallel-all: integration-testing client server client-generator

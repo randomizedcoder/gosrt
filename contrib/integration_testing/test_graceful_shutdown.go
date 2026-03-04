@@ -148,6 +148,29 @@ func main() {
 		}
 		testParallelModeWithConfig(*config)
 
+	case "parallel-test-config":
+		// Print CLI flags for a parallel test without running (no root required)
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Error: config name required\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s parallel-test-config <config-name>\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for i := range ParallelTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", ParallelTestConfigs[i].Name, ParallelTestConfigs[i].Description)
+			}
+			os.Exit(1)
+		}
+		configName := os.Args[2]
+		config := GetParallelTestConfigByName(configName)
+		if config == nil {
+			fmt.Fprintf(os.Stderr, "Error: unknown parallel configuration: %s\n", configName)
+			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
+			for i := range ParallelTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", ParallelTestConfigs[i].Name, ParallelTestConfigs[i].Description)
+			}
+			os.Exit(1)
+		}
+		printParallelConfigOnly(*config)
+
 	case "parallel-test-all":
 		// Run all parallel comparison tests
 		testParallelModeAllConfigs()
@@ -272,6 +295,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "\nParallel Comparison Tests (require root):\n")
 	fmt.Fprintf(os.Stderr, "  parallel-test NAME                    Run parallel comparison test (Baseline vs HighPerf)\n")
 	fmt.Fprintf(os.Stderr, "  parallel-test-all                     Run all parallel comparison tests\n")
+	fmt.Fprintf(os.Stderr, "  parallel-test-config NAME             Print CLI flags without running (no root required)\n")
 	fmt.Fprintf(os.Stderr, "  list-parallel-configs                 List all parallel comparison configurations\n")
 	fmt.Fprintf(os.Stderr, "\nIsolation Tests (require root):\n")
 	fmt.Fprintf(os.Stderr, "  isolation-test NAME                   Run CG→Server isolation test (single variable change)\n")
