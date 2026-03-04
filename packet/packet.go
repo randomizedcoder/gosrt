@@ -36,6 +36,13 @@ const (
 	CRTLTYPE_DROPREQ   CtrlType = 0x0007 // unimplemented, sender->receiver
 	CRTLTYPE_PEERERROR CtrlType = 0x0008 // unimplemented, receiver->sender (only for file transfers)
 	CTRLTYPE_USER      CtrlType = 0x7FFF
+
+	// Keepalive TypeSpecific values.
+	// Original keepalives are echoed back as responses for RTT measurement.
+	// Responses are never echoed, preventing infinite ping-pong between peers.
+	// The SRT spec (Section 3.2.3) reserves TypeSpecific for future definition.
+	KeepaliveTypeOriginal uint32 = 0 // Proactive keepalive (should be echoed)
+	KeepaliveTypeResponse uint32 = 1 // Echo response (must not be echoed)
 )
 
 // CtrlType represents SRT Control Packet Types (Table 1 in SRT spec).

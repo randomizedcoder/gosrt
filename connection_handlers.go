@@ -240,8 +240,20 @@ func (c *srtConn) dispatchACKACK(p packet.Packet) {
 // dispatchKeepAlive routes KEEPALIVE to control ring or locked handler.
 // Simplified: just check recvControlRing != nil (no separate bool).
 //
+// If this is an original keepalive (TypeSpecific == 0), we echo it back as
+// a response (TypeSpecific == 1) for RTT measurement. Responses are never
+// echoed, preventing an infinite ping-pong loop between peers.
+//
 // Reference: completely_lockfree_receiver.md Section 4.1
 func (c *srtConn) dispatchKeepAlive(p packet.Packet) {
+	// Echo original keepalives (TypeSpecific == 0) back as responses
+	// (TypeSpecific == 1) for RTT probing. Never echo responses to
+	// prevent infinite ping-pong between peers.
+	if p.Header().TypeSpecific == packet.KeepaliveTypeOriginal {
+		p.Header().TypeSpecific = packet.KeepaliveTypeResponse
+		c.pop(p)
+	}
+
 	if c.recvControlRing != nil {
 		if c.recvControlRing.PushKEEPALIVE() {
 			if c.metrics != nil {
@@ -284,7 +296,7 @@ func (c *srtConn) handleKeepAliveEventLoop() {
 
 // handleKeepAlive is the locking wrapper for Tick/legacy mode.
 // Called from io_uring handlers when control ring is NOT enabled.
-// Resets the idle timeout and sends a keepalive response to the peer.
+// Resets the idle timeout. The echo response is handled by dispatchKeepAlive().
 func (c *srtConn) handleKeepAlive(p packet.Packet) {
 	// TDD: This assert will fail until we properly set Tick context
 	// Reference: multi_iouring_design.md Phase 0.5
@@ -296,10 +308,6 @@ func (c *srtConn) handleKeepAlive(p packet.Packet) {
 	// No need to increment here - metrics already tracked
 
 	c.resetPeerIdleTimeout()
-
-	c.log("control:send:keepalive:dump", func() string { return p.Dump() })
-
-	c.pop(p)
 }
 
 // sendProactiveKeepalive sends a keepalive packet to keep the connection alive.
