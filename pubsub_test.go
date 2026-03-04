@@ -27,32 +27,39 @@ func TestPubSub(t *testing.T) {
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
 
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -67,12 +74,12 @@ func TestPubSub(t *testing.T) {
 	dataReader2 := bytes.Buffer{}
 
 	go func() {
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		reader1Config := DefaultConfig()
+		reader1Config.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", reader1Config)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
 		buffer := make([]byte, 2048)
@@ -80,28 +87,30 @@ func TestPubSub(t *testing.T) {
 		readerReadyWg.Done()
 
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader1.Write(buffer[:n])
 			}
 
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
 
-		err = conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("Reader1: conn.Close error (expected during shutdown): %v", closeErr)
+		}
 
 		readerDoneWg.Done()
 	}()
 
 	go func() {
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		reader2Config := DefaultConfig()
+		reader2Config.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", reader2Config)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
 		buffer := make([]byte, 2048)
@@ -109,17 +118,19 @@ func TestPubSub(t *testing.T) {
 		readerReadyWg.Done()
 
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader2.Write(buffer[:n])
 			}
 
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
 
-		err = conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("Reader2: conn.Close error (expected during shutdown): %v", closeErr)
+		}
 
 		readerDoneWg.Done()
 	}()
@@ -130,20 +141,25 @@ func TestPubSub(t *testing.T) {
 	writerWg.Add(1)
 
 	go func() {
-		config := DefaultConfig()
-		config.StreamId = "publish"
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", writerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
-		n, err := conn.Write([]byte(message))
+		n, writeErr := conn.Write([]byte(message))
+		if writeErr != nil {
+			t.Logf("Writer: Write error: %v", writeErr)
+		}
 		require.Equal(t, 12, n)
 
 		time.Sleep(3 * time.Second)
 
-		err = conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("Writer: conn.Close error (expected during shutdown): %v", closeErr)
+		}
 
 		writerWg.Done()
 	}()

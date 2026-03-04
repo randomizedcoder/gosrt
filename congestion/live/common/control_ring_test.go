@@ -162,8 +162,8 @@ func TestControlRing_Empty(t *testing.T) {
 
 	// Multiple pops on empty should all return false
 	for i := 0; i < 10; i++ {
-		_, ok := ring.TryPop()
-		if ok {
+		_, popOk := ring.TryPop()
+		if popOk {
 			t.Errorf("TryPop %d should return false on empty ring", i)
 		}
 	}

@@ -35,7 +35,7 @@ func readProcStatFromPath(path string) (ProcStat, error) {
 	if err != nil {
 		return stat, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // Error ignored: read-only file
 
 	n, err := f.Read(scratchBuffer)
 	if err != nil {

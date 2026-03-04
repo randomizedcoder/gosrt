@@ -228,7 +228,7 @@ func (a *TypeAwareAnalyzer) checkTypeConversion(call *ast.CallExpr) {
 			Severity: "HIGH",
 			Category: "int32-uint32-subtraction",
 			Pattern:  fmt.Sprintf("int32(%s - %s)", exprString(binExpr.X), exprString(binExpr.Y)),
-			TypeInfo: fmt.Sprintf("int32(uint32 - uint32)"),
+			TypeInfo: "int32(uint32 - uint32)",
 			Context:  fmt.Sprintf("function %s", a.currentFunc),
 			Suggestion: "This pattern fails at 31-bit wraparound. " +
 				"When a < b (in uint32 terms but a is 'after' b circularly), " +
@@ -242,14 +242,14 @@ func (a *TypeAwareAnalyzer) checkTypeConversion(call *ast.CallExpr) {
 		if isSequenceRelatedFunc(a.currentFunc) {
 			pos := a.fset.Position(call.Pos())
 			*a.findings = append(*a.findings, Finding{
-				File:     a.filename,
-				Line:     pos.Line,
-				Column:   pos.Column,
-				Severity: "MEDIUM",
-				Category: "int64-uint64-subtraction",
-				Pattern:  fmt.Sprintf("int64(%s - %s)", exprString(binExpr.X), exprString(binExpr.Y)),
-				TypeInfo: fmt.Sprintf("int64(uint64 - uint64)"),
-				Context:  fmt.Sprintf("function %s", a.currentFunc),
+				File:       a.filename,
+				Line:       pos.Line,
+				Column:     pos.Column,
+				Severity:   "MEDIUM",
+				Category:   "int64-uint64-subtraction",
+				Pattern:    fmt.Sprintf("int64(%s - %s)", exprString(binExpr.X), exprString(binExpr.Y)),
+				TypeInfo:   "int64(uint64 - uint64)",
+				Context:    fmt.Sprintf("function %s", a.currentFunc),
 				Suggestion: "Similar wraparound issue may exist for 64-bit sequences.",
 			})
 		}
@@ -306,8 +306,8 @@ func printFindings(findings []Finding, verbose bool) bool {
 
 	// Count by severity
 	counts := map[string]int{}
-	for _, f := range findings {
-		counts[f.Severity]++
+	for i := range findings {
+		counts[findings[i].Severity]++
 	}
 
 	fmt.Printf("Summary: %d HIGH, %d MEDIUM, %d LOW, %d INFO\n\n",
@@ -324,11 +324,12 @@ func printFindings(findings []Finding, verbose bool) bool {
 
 	// Group by file
 	byFile := make(map[string][]Finding)
-	for _, f := range findings {
+	for i := range findings {
+		f := &findings[i]
 		if !verbose && (f.Severity == "LOW" || f.Severity == "INFO") {
 			continue
 		}
-		byFile[f.File] = append(byFile[f.File], f)
+		byFile[f.File] = append(byFile[f.File], *f)
 	}
 
 	// Sort files
@@ -348,7 +349,9 @@ func printFindings(findings []Finding, verbose bool) bool {
 		fmt.Printf("📁 %s\n", displayFile)
 		fmt.Println("───────────────────────────────────────────────────────────────────")
 
-		for _, f := range byFile[file] {
+		fileFindings := byFile[file]
+		for i := range fileFindings {
+			f := &fileFindings[i]
 			severityIcon := map[string]string{
 				"HIGH":   "🔴",
 				"MEDIUM": "🟠",

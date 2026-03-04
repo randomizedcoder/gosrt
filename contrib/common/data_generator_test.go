@@ -339,12 +339,16 @@ func TestDataGeneratorMinimalAllocations(t *testing.T) {
 
 	// Warm up
 	for i := 0; i < 100; i++ {
-		gen.Read(buf)
+		if _, err := gen.Read(buf); err != nil {
+			t.Fatalf("warm up read failed: %v", err)
+		}
 	}
 
 	// Measure allocations
 	allocs := testing.AllocsPerRun(1000, func() {
-		gen.Read(buf)
+		if _, err := gen.Read(buf); err != nil {
+			t.Logf("read error: %v", err)
+		}
 	})
 
 	t.Logf("Allocations per Read: %.2f", allocs)
@@ -380,7 +384,9 @@ func BenchmarkDataGenerator(b *testing.B) {
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				gen.Read(buf)
+				if _, err := gen.Read(buf); err != nil {
+					b.Fatalf("read failed: %v", err)
+				}
 			}
 		})
 	}
@@ -408,7 +414,9 @@ func BenchmarkRateLimiterOverhead(b *testing.B) {
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				limiter.Wait(ctx)
+				if err := limiter.Wait(ctx); err != nil {
+					b.Fatalf("wait failed: %v", err)
+				}
 			}
 		})
 	}
@@ -455,4 +463,3 @@ func BenchmarkDataGeneratorThroughput(b *testing.B) {
 		})
 	}
 }
-

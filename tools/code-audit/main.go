@@ -234,7 +234,8 @@ func runSeqAnalysis(patterns []string, result *AuditResult, verbose, includeTest
 	result.SeqFindings = findings
 
 	// Count severities
-	for _, f := range findings {
+	for i := range findings {
+		f := &findings[i]
 		switch f.Severity {
 		case "HIGH":
 			result.Summary.SeqHigh++
@@ -251,7 +252,8 @@ func runSeqAnalysis(patterns []string, result *AuditResult, verbose, includeTest
 		fmt.Printf("  Found %d issues (%d HIGH, %d MEDIUM)\n",
 			len(findings), result.Summary.SeqHigh, result.Summary.SeqMedium)
 
-		for _, f := range findings {
+		for i := range findings {
+			f := &findings[i]
 			if f.Severity == "HIGH" || f.Severity == "MEDIUM" || verbose {
 				icon := map[string]string{"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡"}[f.Severity]
 				fmt.Printf("  %s [%s:%d] %s\n", icon, shortPath(f.File), f.Line, f.Pattern)
@@ -481,7 +483,7 @@ func parseMetricsStruct(path, structName string) map[string]bool {
 func findIncrementCalls(rootDir string) map[string]bool {
 	increments := make(map[string]bool)
 
-	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -527,7 +529,9 @@ func findIncrementCalls(rootDir string) map[string]bool {
 			return true
 		})
 		return nil
-	})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: error walking directory %s: %v\n", rootDir, err)
+	}
 
 	return increments
 }
@@ -676,7 +680,7 @@ func runTestAnalysis(root, file, dir, subMode string, result *AuditResult, verbo
 
 func findTestFiles(dir string) []string {
 	var files []string
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -684,7 +688,9 @@ func findTestFiles(dir string) []string {
 			files = append(files, path)
 		}
 		return nil
-	})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: error walking directory %s: %v\n", dir, err)
+	}
 	return files
 }
 
@@ -836,7 +842,11 @@ func runCoverageAnalysis(root string, result *AuditResult, verbose bool) {
 
 	for _, pkg := range packages {
 		pkgPath := filepath.Join(root, pkg)
-		files, _ := filepath.Glob(filepath.Join(pkgPath, "*.go"))
+		files, globErr := filepath.Glob(filepath.Join(pkgPath, "*.go"))
+		if globErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: glob error for %s: %v\n", pkgPath, globErr)
+			continue
+		}
 		for _, f := range files {
 			if strings.HasSuffix(f, "_test.go") {
 				testFiles = append(testFiles, f)
@@ -859,11 +869,12 @@ func runCoverageAnalysis(root string, result *AuditResult, verbose bool) {
 	ratio := float64(testFunctions) / float64(prodFunctions)
 	fmt.Printf("  Test/Prod ratio: %.2f\n", ratio)
 
-	if ratio >= 1.0 {
+	switch {
+	case ratio >= 1.0:
 		fmt.Println("  ✅ Good test coverage ratio")
-	} else if ratio >= 0.5 {
+	case ratio >= 0.5:
 		fmt.Println("  ⚠️  Moderate test coverage ratio")
-	} else {
+	default:
 		fmt.Println("  ❌ Low test coverage ratio")
 	}
 }
@@ -1044,19 +1055,19 @@ func extractTestValues(filename string) map[string]map[string]bool {
 	values := make(map[string]map[string]bool)
 
 	ast.Inspect(node, func(n ast.Node) bool {
-		compLit, ok := n.(*ast.CompositeLit)
-		if !ok {
+		compLit, isCompLit := n.(*ast.CompositeLit)
+		if !isCompLit {
 			return true
 		}
 
 		for _, elt := range compLit.Elts {
-			kvExpr, ok := elt.(*ast.KeyValueExpr)
-			if !ok {
+			kvExpr, isKV := elt.(*ast.KeyValueExpr)
+			if !isKV {
 				continue
 			}
 
-			key, ok := kvExpr.Key.(*ast.Ident)
-			if !ok {
+			key, isIdent := kvExpr.Key.(*ast.Ident)
+			if !isIdent {
 				continue
 			}
 
@@ -1150,7 +1161,11 @@ func findProjectRoot() string {
 		return "."
 	}
 
-	dir, _ := os.Getwd()
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get current directory: %v\n", err)
+		return "."
+	}
 	for i := 0; i < 5; i++ {
 		if allExist(dir, markers) {
 			return dir
@@ -1208,4 +1223,3 @@ func typeExprString(expr ast.Expr) string {
 		return "unknown"
 	}
 }
-

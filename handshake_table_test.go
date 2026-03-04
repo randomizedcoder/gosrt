@@ -31,9 +31,9 @@ type HandshakeTestCase struct {
 	Name string
 
 	// CODE_PARAMs - production parameters affecting handshake
-	Passphrase    string        // Encryption passphrase (empty = no encryption)
-	StreamId      string        // Stream identifier
-	Latency       time.Duration // Latency setting
+	Passphrase       string        // Encryption passphrase (empty = no encryption)
+	StreamId         string        // Stream identifier
+	Latency          time.Duration // Latency setting
 	HandshakeTimeout time.Duration // Handshake timeout (0 = use default)
 
 	// TEST_INFRA - test mechanics
@@ -254,7 +254,7 @@ func runHandshakeTest(t *testing.T, tc HandshakeTestCase, port int) {
 	if tc.ExpectSuccess {
 		require.NoError(t, err, "Expected connection to succeed")
 		require.NotNil(t, conn, "Connection should not be nil")
-		conn.Close()
+		require.NoError(t, conn.Close())
 		t.Logf("✅ %s: handshake succeeded", tc.Name)
 	} else if tc.ExpectError {
 		require.Error(t, err, "Expected connection to fail")
@@ -375,4 +375,3 @@ func TestRejectionReasons_Values(t *testing.T) {
 
 // Note: SYN Cookie tests are in net/syncookie_test.go
 // They cover DoS prevention per RFC Section 4.3.1.1
-

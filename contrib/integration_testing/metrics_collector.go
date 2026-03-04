@@ -76,7 +76,7 @@ func extractAddr(url string) string {
 }
 
 // CollectMetricsFromEndpoint fetches metrics from an endpoint (HTTP or UDS)
-func CollectMetricsFromEndpoint(client *common.MetricsClient, endpoint MetricsEndpoint, point string) *MetricsSnapshot {
+func CollectMetricsFromEndpoint(ctx context.Context, client *common.MetricsClient, endpoint MetricsEndpoint, point string) *MetricsSnapshot {
 	snapshot := &MetricsSnapshot{
 		Timestamp: time.Now(),
 		Point:     point,
@@ -93,9 +93,9 @@ func CollectMetricsFromEndpoint(client *common.MetricsClient, endpoint MetricsEn
 
 	// Prefer UDS if configured (works across network namespaces)
 	if endpoint.UDSPath != "" {
-		body, err = client.FetchUDS(endpoint.UDSPath)
+		body, err = client.FetchUDS(ctx, endpoint.UDSPath)
 	} else {
-		body, err = client.FetchHTTP(endpoint.HTTPAddr)
+		body, err = client.FetchHTTP(ctx, endpoint.HTTPAddr)
 	}
 
 	if err != nil {
@@ -150,7 +150,7 @@ func parsePrometheusMetrics(raw string) map[string]float64 {
 }
 
 // CollectAllMetrics collects metrics from all components in parallel
-func (tm *TestMetrics) CollectAllMetrics(point string) {
+func (tm *TestMetrics) CollectAllMetrics(ctx context.Context, point string) {
 	var wg sync.WaitGroup
 
 	// Collect from server
@@ -158,7 +158,7 @@ func (tm *TestMetrics) CollectAllMetrics(point string) {
 	go func() {
 		defer wg.Done()
 		if tm.Server.Endpoint.IsConfigured() {
-			snapshot := CollectMetricsFromEndpoint(tm.client, tm.Server.Endpoint, point)
+			snapshot := CollectMetricsFromEndpoint(ctx, tm.client, tm.Server.Endpoint, point)
 			tm.Server.Snapshots = append(tm.Server.Snapshots, snapshot)
 		}
 	}()
@@ -168,7 +168,7 @@ func (tm *TestMetrics) CollectAllMetrics(point string) {
 	go func() {
 		defer wg.Done()
 		if tm.ClientGenerator.Endpoint.IsConfigured() {
-			snapshot := CollectMetricsFromEndpoint(tm.client, tm.ClientGenerator.Endpoint, point)
+			snapshot := CollectMetricsFromEndpoint(ctx, tm.client, tm.ClientGenerator.Endpoint, point)
 			tm.ClientGenerator.Snapshots = append(tm.ClientGenerator.Snapshots, snapshot)
 		}
 	}()
@@ -178,7 +178,7 @@ func (tm *TestMetrics) CollectAllMetrics(point string) {
 	go func() {
 		defer wg.Done()
 		if tm.Client.Endpoint.IsConfigured() {
-			snapshot := CollectMetricsFromEndpoint(tm.client, tm.Client.Endpoint, point)
+			snapshot := CollectMetricsFromEndpoint(ctx, tm.client, tm.Client.Endpoint, point)
 			tm.Client.Snapshots = append(tm.Client.Snapshots, snapshot)
 		}
 	}()

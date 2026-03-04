@@ -22,32 +22,37 @@ func TestControlServer_SetBitrate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go cs.Start(ctx)
+	go func() { _ = cs.Start(ctx) }()
 	time.Sleep(50 * time.Millisecond) // Wait for server to start
 
-	// Connect and send command
-	conn, err := net.Dial("unix", socketPath)
+	// Connect and send command using context-aware dialer
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error: %v", closeErr)
+		}
+	}()
 
 	// Send set_bitrate command
 	req := ControlRequest{Command: CmdSetBitrate, Bitrate: 200_000_000}
 	data, _ := json.Marshal(req)
-	conn.Write(append(data, '\n'))
+	_, _ = conn.Write(append(data, '\n'))
 
 	// Read response
 	buf := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read response: %v", err)
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, readErr := conn.Read(buf)
+	if readErr != nil {
+		t.Fatalf("failed to read response: %v", readErr)
 	}
 
 	var resp ControlResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
+	if unmarshalErr := json.Unmarshal(buf[:n], &resp); unmarshalErr != nil {
+		t.Fatalf("failed to parse response: %v", unmarshalErr)
 	}
 
 	// Verify
@@ -70,31 +75,36 @@ func TestControlServer_GetStatus(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go cs.Start(ctx)
+	go func() { _ = cs.Start(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
-	conn, err := net.Dial("unix", socketPath)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error: %v", closeErr)
+		}
+	}()
 
 	// Send get_status command
 	req := ControlRequest{Command: CmdGetStatus}
 	data, _ := json.Marshal(req)
-	conn.Write(append(data, '\n'))
+	_, _ = conn.Write(append(data, '\n'))
 
 	// Read response
 	buf := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read response: %v", err)
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, readErr := conn.Read(buf)
+	if readErr != nil {
+		t.Fatalf("failed to read response: %v", readErr)
 	}
 
 	var resp ControlResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
+	if unmarshalErr := json.Unmarshal(buf[:n], &resp); unmarshalErr != nil {
+		t.Fatalf("failed to parse response: %v", unmarshalErr)
 	}
 
 	// Verify
@@ -117,7 +127,7 @@ func TestControlServer_Heartbeat(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go cs.Start(ctx)
+	go func() { _ = cs.Start(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
 	// Record time before heartbeat
@@ -126,28 +136,33 @@ func TestControlServer_Heartbeat(t *testing.T) {
 	// Wait a bit
 	time.Sleep(100 * time.Millisecond)
 
-	conn, err := net.Dial("unix", socketPath)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error: %v", closeErr)
+		}
+	}()
 
 	// Send heartbeat command
 	req := ControlRequest{Command: CmdHeartbeat}
 	data, _ := json.Marshal(req)
-	conn.Write(append(data, '\n'))
+	_, _ = conn.Write(append(data, '\n'))
 
 	// Read response
 	buf := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read response: %v", err)
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, readErr := conn.Read(buf)
+	if readErr != nil {
+		t.Fatalf("failed to read response: %v", readErr)
 	}
 
 	var resp ControlResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
+	if unmarshalErr := json.Unmarshal(buf[:n], &resp); unmarshalErr != nil {
+		t.Fatalf("failed to parse response: %v", unmarshalErr)
 	}
 
 	// Verify
@@ -170,29 +185,36 @@ func TestControlServer_InvalidCommand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go cs.Start(ctx)
+	go func() { _ = cs.Start(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
-	conn, err := net.Dial("unix", socketPath)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error: %v", closeErr)
+		}
+	}()
 
 	// Send invalid command
-	conn.Write([]byte(`{"command":"invalid_command"}` + "\n"))
+	if _, writeErr := conn.Write([]byte(`{"command":"invalid_command"}` + "\n")); writeErr != nil {
+		t.Fatalf("failed to write command: %v", writeErr)
+	}
 
 	// Read response
 	buf := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read response: %v", err)
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, readErr := conn.Read(buf)
+	if readErr != nil {
+		t.Fatalf("failed to read response: %v", readErr)
 	}
 
 	var resp ControlResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
+	if unmarshalErr := json.Unmarshal(buf[:n], &resp); unmarshalErr != nil {
+		t.Fatalf("failed to parse response: %v", unmarshalErr)
 	}
 
 	// Verify error response
@@ -212,29 +234,36 @@ func TestControlServer_InvalidJSON(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go cs.Start(ctx)
+	go func() { _ = cs.Start(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
-	conn, err := net.Dial("unix", socketPath)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error: %v", closeErr)
+		}
+	}()
 
 	// Send invalid JSON
-	conn.Write([]byte("not valid json\n"))
+	if _, writeErr := conn.Write([]byte("not valid json\n")); writeErr != nil {
+		t.Fatalf("failed to write command: %v", writeErr)
+	}
 
 	// Read response
 	buf := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read response: %v", err)
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, readErr := conn.Read(buf)
+	if readErr != nil {
+		t.Fatalf("failed to read response: %v", readErr)
 	}
 
 	var resp ControlResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
+	if unmarshalErr := json.Unmarshal(buf[:n], &resp); unmarshalErr != nil {
+		t.Fatalf("failed to parse response: %v", unmarshalErr)
 	}
 
 	if resp.Status != StatusError {
@@ -250,14 +279,19 @@ func TestControlServer_MultipleCommands(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go cs.Start(ctx)
+	go func() { _ = cs.Start(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
-	conn, err := net.Dial("unix", socketPath)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error: %v", closeErr)
+		}
+	}()
 
 	// Send multiple commands on same connection
 	commands := []ControlRequest{
@@ -269,18 +303,18 @@ func TestControlServer_MultipleCommands(t *testing.T) {
 
 	for i, req := range commands {
 		data, _ := json.Marshal(req)
-		conn.Write(append(data, '\n'))
+		_, _ = conn.Write(append(data, '\n'))
 
 		buf := make([]byte, 4096)
-		conn.SetReadDeadline(time.Now().Add(time.Second))
-		n, err := conn.Read(buf)
-		if err != nil {
-			t.Fatalf("command %d: failed to read response: %v", i, err)
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		n, readErr := conn.Read(buf)
+		if readErr != nil {
+			t.Fatalf("command %d: failed to read response: %v", i, readErr)
 		}
 
 		var resp ControlResponse
-		if err := json.Unmarshal(buf[:n], &resp); err != nil {
-			t.Fatalf("command %d: failed to parse response: %v", i, err)
+		if unmarshalErr := json.Unmarshal(buf[:n], &resp); unmarshalErr != nil {
+			t.Fatalf("command %d: failed to parse response: %v", i, unmarshalErr)
 		}
 
 		if resp.Status != StatusOK {
@@ -301,7 +335,7 @@ func TestControlServer_SocketCleanup(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go cs.Start(ctx)
+	go func() { _ = cs.Start(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
 	// Verify socket exists

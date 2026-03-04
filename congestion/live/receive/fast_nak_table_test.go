@@ -31,8 +31,8 @@ type FastNakConditionTestCase struct {
 	// Configuration
 	FastNakEnabled  bool
 	UseNakBtree     bool
-	HasPrevPacket   bool           // Whether lastPacketArrivalTime is set
-	SilenceDuration time.Duration  // Time since last packet
+	HasPrevPacket   bool          // Whether lastPacketArrivalTime is set
+	SilenceDuration time.Duration // Time since last packet
 
 	// Expected
 	ExpectTrigger bool
@@ -41,46 +41,46 @@ type FastNakConditionTestCase struct {
 var FastNakConditionTests = []FastNakConditionTestCase{
 	// === Disabled/Missing Prerequisites ===
 	{
-		Name:           "Disabled",
-		FastNakEnabled: false,
-		UseNakBtree:    true,
-		HasPrevPacket:  true,
+		Name:            "Disabled",
+		FastNakEnabled:  false,
+		UseNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 100 * time.Millisecond,
-		ExpectTrigger:  false,
+		ExpectTrigger:   false,
 	},
 	{
-		Name:           "NoNakBtree",
-		FastNakEnabled: true,
-		UseNakBtree:    false,
-		HasPrevPacket:  true,
+		Name:            "NoNakBtree",
+		FastNakEnabled:  true,
+		UseNakBtree:     false,
+		HasPrevPacket:   true,
 		SilenceDuration: 100 * time.Millisecond,
-		ExpectTrigger:  false,
+		ExpectTrigger:   false,
 	},
 	{
-		Name:           "NoPreviousPacket",
-		FastNakEnabled: true,
-		UseNakBtree:    true,
-		HasPrevPacket:  false,
+		Name:            "NoPreviousPacket",
+		FastNakEnabled:  true,
+		UseNakBtree:     true,
+		HasPrevPacket:   false,
 		SilenceDuration: 0,
-		ExpectTrigger:  false,
+		ExpectTrigger:   false,
 	},
 
 	// === Silence Duration Tests ===
 	{
-		Name:           "ShortSilence_10ms",
-		FastNakEnabled: true,
-		UseNakBtree:    true,
-		HasPrevPacket:  true,
+		Name:            "ShortSilence_10ms",
+		FastNakEnabled:  true,
+		UseNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 10 * time.Millisecond,
-		ExpectTrigger:  false, // Below 50ms threshold
+		ExpectTrigger:   false, // Below 50ms threshold
 	},
 	{
-		Name:           "ShortSilence_40ms",
-		FastNakEnabled: true,
-		UseNakBtree:    true,
-		HasPrevPacket:  true,
+		Name:            "ShortSilence_40ms",
+		FastNakEnabled:  true,
+		UseNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 40 * time.Millisecond,
-		ExpectTrigger:  false, // Below 50ms threshold
+		ExpectTrigger:   false, // Below 50ms threshold
 	},
 }
 
@@ -124,13 +124,13 @@ type FastNakRecentTestCase struct {
 	Name string
 
 	// Configuration
-	Enabled          bool
-	HasNakBtree      bool
-	HasPrevPacket    bool
-	SilenceDuration  time.Duration
-	LastSeq          uint32
-	NewSeq           uint32
-	PacketsPerSec    float64 // Simulated receive rate
+	Enabled         bool
+	HasNakBtree     bool
+	HasPrevPacket   bool
+	SilenceDuration time.Duration
+	LastSeq         uint32
+	NewSeq          uint32
+	PacketsPerSec   float64 // Simulated receive rate
 
 	// Expected
 	ExpectInserts bool
@@ -141,112 +141,112 @@ type FastNakRecentTestCase struct {
 var FastNakRecentTests = []FastNakRecentTestCase{
 	// === Disabled/Missing Prerequisites ===
 	{
-		Name:          "Disabled",
-		Enabled:       false,
-		HasNakBtree:   true,
-		HasPrevPacket: true,
+		Name:            "Disabled",
+		Enabled:         false,
+		HasNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 100 * time.Millisecond,
-		LastSeq:       100,
-		NewSeq:        200,
-		ExpectInserts: false,
+		LastSeq:         100,
+		NewSeq:          200,
+		ExpectInserts:   false,
 	},
 	{
-		Name:          "NoNakBtree",
-		Enabled:       true,
-		HasNakBtree:   false,
-		HasPrevPacket: true,
+		Name:            "NoNakBtree",
+		Enabled:         true,
+		HasNakBtree:     false,
+		HasPrevPacket:   true,
 		SilenceDuration: 100 * time.Millisecond,
-		LastSeq:       100,
-		NewSeq:        200,
-		ExpectInserts: false,
+		LastSeq:         100,
+		NewSeq:          200,
+		ExpectInserts:   false,
 	},
 	{
-		Name:          "NoPreviousPacket",
-		Enabled:       true,
-		HasNakBtree:   true,
-		HasPrevPacket: false,
+		Name:            "NoPreviousPacket",
+		Enabled:         true,
+		HasNakBtree:     true,
+		HasPrevPacket:   false,
 		SilenceDuration: 0,
-		LastSeq:       0,
-		NewSeq:        100,
-		ExpectInserts: false,
+		LastSeq:         0,
+		NewSeq:          100,
+		ExpectInserts:   false,
 	},
 
 	// === Silence/Jump Conditions ===
 	{
-		Name:          "ShortSilence",
-		Enabled:       true,
-		HasNakBtree:   true,
-		HasPrevPacket: true,
+		Name:            "ShortSilence",
+		Enabled:         true,
+		HasNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 10 * time.Millisecond,
-		LastSeq:       100,
-		NewSeq:        105,
-		PacketsPerSec: 500,
-		ExpectInserts: false, // Silence too short
+		LastSeq:         100,
+		NewSeq:          105,
+		PacketsPerSec:   500,
+		ExpectInserts:   false, // Silence too short
 	},
 	{
-		Name:          "NoSequenceJump",
-		Enabled:       true,
-		HasNakBtree:   true,
-		HasPrevPacket: true,
+		Name:            "NoSequenceJump",
+		Enabled:         true,
+		HasNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 100 * time.Millisecond,
-		LastSeq:       100,
-		NewSeq:        101, // Sequential, no gap
-		PacketsPerSec: 500,
-		ExpectInserts: false,
+		LastSeq:         100,
+		NewSeq:          101, // Sequential, no gap
+		PacketsPerSec:   500,
+		ExpectInserts:   false,
 	},
 	{
-		Name:          "SignificantJump",
-		Enabled:       true,
-		HasNakBtree:   true,
-		HasPrevPacket: true,
+		Name:            "SignificantJump",
+		Enabled:         true,
+		HasNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 100 * time.Millisecond,
-		LastSeq:       100,
-		NewSeq:        150, // 49-packet gap (matches original test)
-		PacketsPerSec: 500, // 100ms * 500pps = 50 expected packets
-		ExpectInserts: true,
-		MinInserts:    40,
-		MaxInserts:    60,
+		LastSeq:         100,
+		NewSeq:          150, // 49-packet gap (matches original test)
+		PacketsPerSec:   500, // 100ms * 500pps = 50 expected packets
+		ExpectInserts:   true,
+		MinInserts:      40,
+		MaxInserts:      60,
 	},
 
 	// === Large Burst Loss Tests (Starlink scenarios) ===
 	{
-		Name:          "LargeBurstLoss_5Mbps",
-		Enabled:       true,
-		HasNakBtree:   true,
-		HasPrevPacket: true,
+		Name:            "LargeBurstLoss_5Mbps",
+		Enabled:         true,
+		HasNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 60 * time.Millisecond, // Starlink-style outage
-		LastSeq:       10000,
-		NewSeq:        10300, // ~300 packet gap
-		PacketsPerSec: 5000,  // 5Mbps @ 1000 byte packets
-		ExpectInserts: true,
-		MinInserts:    200,
-		MaxInserts:    400,
+		LastSeq:         10000,
+		NewSeq:          10300, // ~300 packet gap
+		PacketsPerSec:   5000,  // 5Mbps @ 1000 byte packets
+		ExpectInserts:   true,
+		MinInserts:      200,
+		MaxInserts:      400,
 	},
 	{
-		Name:          "LargeBurstLoss_20Mbps",
-		Enabled:       true,
-		HasNakBtree:   true,
-		HasPrevPacket: true,
+		Name:            "LargeBurstLoss_20Mbps",
+		Enabled:         true,
+		HasNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 60 * time.Millisecond,
-		LastSeq:       50000,
-		NewSeq:        51200, // ~1200 packet gap
-		PacketsPerSec: 20000,
-		ExpectInserts: true,
-		MinInserts:    1000,
-		MaxInserts:    1400,
+		LastSeq:         50000,
+		NewSeq:          51200, // ~1200 packet gap
+		PacketsPerSec:   20000,
+		ExpectInserts:   true,
+		MinInserts:      1000,
+		MaxInserts:      1400,
 	},
 	{
-		Name:          "LargeBurstLoss_100Mbps",
-		Enabled:       true,
-		HasNakBtree:   true,
-		HasPrevPacket: true,
+		Name:            "LargeBurstLoss_100Mbps",
+		Enabled:         true,
+		HasNakBtree:     true,
+		HasPrevPacket:   true,
 		SilenceDuration: 60 * time.Millisecond,
-		LastSeq:       100000,
-		NewSeq:        106000, // ~6000 packet gap
-		PacketsPerSec: 100000,
-		ExpectInserts: true,
-		MinInserts:    1000, // May be capped by maxFastNakRecentGap
-		MaxInserts:    10000,
+		LastSeq:         100000,
+		NewSeq:          106000, // ~6000 packet gap
+		PacketsPerSec:   100000,
+		ExpectInserts:   true,
+		MinInserts:      1000, // May be capped by maxFastNakRecentGap
+		MaxInserts:      10000,
 	},
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -456,8 +456,8 @@ func TestBuildNakListLocked_Table(t *testing.T) {
 
 // MultipleBurstTestCase tests multiple sequential outages.
 type MultipleBurstTestCase struct {
-	Name          string
-	Bursts        []struct {
+	Name   string
+	Bursts []struct {
 		SilenceMs int
 		LastSeq   uint32
 		NewSeq    uint32
@@ -475,9 +475,9 @@ var MultipleBurstTests = []MultipleBurstTestCase{
 			LastSeq   uint32
 			NewSeq    uint32
 		}{
-			{60, 10000, 10300},  // First outage: ~300 packets
-			{60, 11000, 11300},  // Second outage: ~300 packets
-			{60, 12000, 12300},  // Third outage: ~300 packets
+			{60, 10000, 10300}, // First outage: ~300 packets
+			{60, 11000, 11300}, // Second outage: ~300 packets
+			{60, 12000, 12300}, // Third outage: ~300 packets
 		},
 		PacketsPerSec: 5000,
 		MinTotalNaks:  600, // At least 600 NAKs total
@@ -534,4 +534,3 @@ func TestCheckFastNakRecent_MultipleBursts_Table(t *testing.T) {
 		})
 	}
 }
-

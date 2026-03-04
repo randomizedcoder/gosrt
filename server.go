@@ -3,7 +3,9 @@ package srt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -112,8 +114,8 @@ func NewServer(ctx context.Context, wg *sync.WaitGroup, config ServerConfig) *Se
 		s.HandleSubscribe = s.defaultHandler
 	}
 	if s.Config == nil {
-		defaultConfig := DefaultConfig()
-		s.Config = &defaultConfig
+		cfg := DefaultConfig()
+		s.Config = &cfg
 	}
 
 	return s
@@ -207,8 +209,8 @@ func (s *Server) Serve() error {
 				return
 			}
 
-			conn, err := req.Accept()
-			if err != nil {
+			conn, acceptErr := req.Accept()
+			if acceptErr != nil {
 				// rejected connection, ignore
 				return
 			}
@@ -237,9 +239,10 @@ func (s *Server) startMetricsServer() {
 		}
 
 		go func() {
+			// Metrics server errors are non-fatal
+			// ErrServerClosed is expected during graceful shutdown
 			if err := s.metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				// Log error (if logger available)
-				// For now, silently ignore - metrics are optional
+				fmt.Fprintf(os.Stderr, "gosrt: metrics server error: %v\n", err)
 			}
 		}()
 	})
@@ -263,7 +266,9 @@ func (s *Server) Shutdown() {
 
 func (s *Server) defaultHandler(conn Conn) {
 	// Close the incoming connection
-	conn.Close()
+	if closeErr := conn.Close(); closeErr != nil {
+		fmt.Fprintf(os.Stderr, "gosrt: defaultHandler close error: %v\n", closeErr)
+	}
 }
 
 // GetConnections returns all active connections from the listener.

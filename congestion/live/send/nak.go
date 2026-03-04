@@ -125,8 +125,8 @@ func (s *sender) nakBtree(sequenceNumbers []circular.Number) uint64 {
 			pktLen := p.Len()
 			m.CongestionSendPktRetrans.Add(1)
 			m.CongestionSendPkt.Add(1)
-			m.CongestionSendByteRetrans.Add(uint64(pktLen))
-			m.CongestionSendByte.Add(uint64(pktLen))
+			m.CongestionSendByteRetrans.Add(pktLen)
+			m.CongestionSendByte.Add(pktLen)
 
 			s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
 			m.SendRateBytesSent.Add(pktLen)
@@ -158,7 +158,7 @@ func (s *sender) isNakBeforeACK(seqNum circular.Number) bool {
 // Increments NakBeforeACKCount metric once if any invalid entry is found.
 // sequenceNumbers is pairs of [start, end] ranges per SRT NAK format.
 func (s *sender) checkNakBeforeACK(sequenceNumbers []circular.Number) {
-	for i := 0; i < len(sequenceNumbers); i += 2 {
+	for i := 0; i+1 < len(sequenceNumbers); i += 2 {
 		if s.isNakBeforeACK(sequenceNumbers[i]) {
 			s.metrics.NakBeforeACKCount.Add(1)
 			return // Count once per NAK packet, not per entry
@@ -202,7 +202,10 @@ func (s *sender) nakLockedOriginal(sequenceNumbers []circular.Number) uint64 {
 	// Now, retransmit packets that we can find in our buffer
 	retransCount := uint64(0)
 	for e := s.lossList.Back(); e != nil; e = e.Prev() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 
 		for i := 0; i < len(sequenceNumbers); i += 2 {
 			if p.Header().PacketSequenceNumber.Gte(sequenceNumbers[i]) && p.Header().PacketSequenceNumber.Lte(sequenceNumbers[i+1]) {
@@ -236,8 +239,8 @@ func (s *sender) nakLockedOriginal(sequenceNumbers []circular.Number) uint64 {
 				pktLen := p.Len()
 				m.CongestionSendPktRetrans.Add(1)
 				m.CongestionSendPkt.Add(1)
-				m.CongestionSendByteRetrans.Add(uint64(pktLen))
-				m.CongestionSendByte.Add(uint64(pktLen))
+				m.CongestionSendByteRetrans.Add(pktLen)
+				m.CongestionSendByte.Add(pktLen)
 
 				//  5.1.2. SRT's Default LiveCC Algorithm
 				s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
@@ -303,7 +306,10 @@ func (s *sender) nakLockedHonorOrder(sequenceNumbers []circular.Number) uint64 {
 
 		// Find and retransmit packets in this range, in sequence order
 		for e := s.lossList.Front(); e != nil; e = e.Next() {
-			p := e.Value.(packet.Packet)
+			p, ok := e.Value.(packet.Packet)
+			if !ok {
+				continue // Skip invalid element
+			}
 			h := p.Header()
 			pktSeq := h.PacketSequenceNumber
 
@@ -337,8 +343,8 @@ func (s *sender) nakLockedHonorOrder(sequenceNumbers []circular.Number) uint64 {
 				pktLen := p.Len()
 				m.CongestionSendPktRetrans.Add(1)
 				m.CongestionSendPkt.Add(1)
-				m.CongestionSendByteRetrans.Add(uint64(pktLen))
-				m.CongestionSendByte.Add(uint64(pktLen))
+				m.CongestionSendByteRetrans.Add(pktLen)
+				m.CongestionSendByte.Add(pktLen)
 
 				// Update running average payload size
 				s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)

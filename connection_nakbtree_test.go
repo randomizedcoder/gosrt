@@ -37,7 +37,11 @@ func TestConnectionPassesNakBtreeConfigToReceiver(t *testing.T) {
 
 	// Create a minimal connection for testing
 	conn := createMinimalTestConnection(t, config)
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Logf("conn.Close error: %v", err)
+		}
+	}()
 
 	// Get receiver internals using the test helper
 	internals, ok := live.GetReceiverTestInternals(conn.recv)
@@ -94,7 +98,11 @@ func TestConnectionPassesDisabledNakBtreeConfigToReceiver(t *testing.T) {
 
 	// Create a minimal connection for testing
 	conn := createMinimalTestConnection(t, config)
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Logf("conn.Close error: %v", err)
+		}
+	}()
 
 	// Get receiver internals
 	internals, ok := live.GetReceiverTestInternals(conn.recv)
@@ -133,7 +141,11 @@ func TestConnectionWithIoUringAutoEnablesNakBtree(t *testing.T) {
 
 	// Create a minimal connection for testing
 	conn := createMinimalTestConnection(t, config)
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Logf("conn.Close error: %v", err)
+		}
+	}()
 
 	// Get receiver internals
 	internals, ok := live.GetReceiverTestInternals(conn.recv)
@@ -217,8 +229,12 @@ func createMinimalTestConnection(t *testing.T, config Config) *srtConn {
 	// Register cleanup
 	t.Cleanup(func() {
 		cancel()
-		conn.Close()
-		udpConn.Close()
+		if err := conn.Close(); err != nil {
+			t.Logf("conn.Close error: %v", err)
+		}
+		if err := udpConn.Close(); err != nil {
+			t.Logf("udpConn.Close error: %v", err)
+		}
 	})
 
 	return conn

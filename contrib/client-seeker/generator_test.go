@@ -167,7 +167,10 @@ func TestDataGenerator_Reset(t *testing.T) {
 
 	// Generate some packets
 	for i := 0; i < 5; i++ {
-		gen.Generate(ctx)
+		if _, err := gen.Generate(ctx); err != nil {
+			// Context may cancel during generation, which is expected
+			break
+		}
 	}
 
 	// Reset

@@ -24,19 +24,19 @@ type MetricsTestCase struct {
 	Name string
 
 	// Setup
-	ISN            uint32
-	PacketCount    int
-	PacketTsbpd    uint64
-	NowUs          uint64
-	Operation      string // "push", "deliver", "ack", "drop"
+	ISN         uint32
+	PacketCount int
+	PacketTsbpd uint64
+	NowUs       uint64
+	Operation   string // "push", "deliver", "ack", "drop"
 
 	// Expected metrics increments
-	ExpectedBtreeInserted   uint64
-	ExpectedBtreeDeleted    uint64
-	ExpectedDelivered       uint64
-	ExpectedDropped         uint64
-	ExpectedRingPushed      uint64
-	ExpectedRingDrained     uint64
+	ExpectedBtreeInserted uint64
+	ExpectedBtreeDeleted  uint64
+	ExpectedDelivered     uint64
+	ExpectedDropped       uint64
+	ExpectedRingPushed    uint64
+	ExpectedRingDrained   uint64
 }
 
 var metricsTestCases = []MetricsTestCase{
@@ -44,31 +44,31 @@ var metricsTestCases = []MetricsTestCase{
 	// Push Metrics
 	// ═══════════════════════════════════════════════════════════════════════
 	{
-		Name:                  "Push_Single",
-		ISN:                   0,
-		PacketCount:           1,
-		PacketTsbpd:           100,
-		NowUs:                 1_000_000,
-		Operation:             "push_ring",
-		ExpectedRingPushed:    1,
+		Name:               "Push_Single",
+		ISN:                0,
+		PacketCount:        1,
+		PacketTsbpd:        100,
+		NowUs:              1_000_000,
+		Operation:          "push_ring",
+		ExpectedRingPushed: 1,
 	},
 	{
-		Name:                  "Push_Batch_10",
-		ISN:                   0,
-		PacketCount:           10,
-		PacketTsbpd:           100,
-		NowUs:                 1_000_000,
-		Operation:             "push_ring",
-		ExpectedRingPushed:    10,
+		Name:               "Push_Batch_10",
+		ISN:                0,
+		PacketCount:        10,
+		PacketTsbpd:        100,
+		NowUs:              1_000_000,
+		Operation:          "push_ring",
+		ExpectedRingPushed: 10,
 	},
 	{
-		Name:                  "Push_Batch_100",
-		ISN:                   0,
-		PacketCount:           100,
-		PacketTsbpd:           100,
-		NowUs:                 1_000_000,
-		Operation:             "push_ring",
-		ExpectedRingPushed:    100,
+		Name:               "Push_Batch_100",
+		ISN:                0,
+		PacketCount:        100,
+		PacketTsbpd:        100,
+		NowUs:              1_000_000,
+		Operation:          "push_ring",
+		ExpectedRingPushed: 100,
 	},
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -130,12 +130,12 @@ var metricsTestCases = []MetricsTestCase{
 	// ACK Metrics
 	// ═══════════════════════════════════════════════════════════════════════
 	{
-		Name:                "ACK_All",
-		ISN:                 0,
-		PacketCount:         10,
-		PacketTsbpd:         100,
-		NowUs:               1_000_000,
-		Operation:           "ack",
+		Name:                 "ACK_All",
+		ISN:                  0,
+		PacketCount:          10,
+		PacketTsbpd:          100,
+		NowUs:                1_000_000,
+		Operation:            "ack",
 		ExpectedBtreeDeleted: 10,
 	},
 
@@ -160,18 +160,18 @@ func TestMetrics_Table(t *testing.T) {
 			m := &metrics.ConnectionMetrics{}
 
 			s := NewSender(SendConfig{
-				InitialSequenceNumber:        circular.New(tc.ISN, packet.MAX_SEQUENCENUMBER),
-				ConnectionMetrics:            m,
-				OnDeliver:                    func(p packet.Packet) {},
-				StartTime:                    time.Now(),
-				UseBtree:                     true,
-				UseSendRing:                  true,
-				SendRingSize:                 1024,
-				UseSendControlRing:           true,
-				SendControlRingSize:          256,
-				UseSendEventLoop:             true,
-				SendDropThresholdUs:          1_000_000,
-				DropThreshold:                1_000_000,
+				InitialSequenceNumber: circular.New(tc.ISN, packet.MAX_SEQUENCENUMBER),
+				ConnectionMetrics:     m,
+				OnDeliver:             func(p packet.Packet) {},
+				StartTime:             time.Now(),
+				UseBtree:              true,
+				UseSendRing:           true,
+				SendRingSize:          1024,
+				UseSendControlRing:    true,
+				SendControlRingSize:   256,
+				UseSendEventLoop:      true,
+				SendDropThresholdUs:   1_000_000,
+				DropThreshold:         1_000_000,
 			}).(*sender)
 
 			s.nowFn = func() uint64 { return tc.NowUs }
@@ -185,34 +185,34 @@ func TestMetrics_Table(t *testing.T) {
 				require.Equal(t, tc.ExpectedRingPushed, m.SendRingPushed.Load(),
 					"ring pushed mismatch")
 
-		case "drain":
-			// First push to ring
-			for i := 0; i < tc.PacketCount; i++ {
-				pkt := createTestPacketWithTsbpd(0, tc.PacketTsbpd)
-				s.pushRing(pkt)
-			}
-			// Then drain (with EventLoop context)
-			runInEventLoopContext(s, func() {
-				s.drainRingToBtreeEventLoop()
-			})
-			require.Equal(t, tc.ExpectedRingDrained, m.SendRingDrained.Load(),
-				"ring drained mismatch")
-			require.Equal(t, tc.ExpectedBtreeInserted, m.SendBtreeInserted.Load(),
-				"btree inserted mismatch")
+			case "drain":
+				// First push to ring
+				for i := 0; i < tc.PacketCount; i++ {
+					pkt := createTestPacketWithTsbpd(0, tc.PacketTsbpd)
+					s.pushRing(pkt)
+				}
+				// Then drain (with EventLoop context)
+				runInEventLoopContext(s, func() {
+					s.drainRingToBtreeEventLoop()
+				})
+				require.Equal(t, tc.ExpectedRingDrained, m.SendRingDrained.Load(),
+					"ring drained mismatch")
+				require.Equal(t, tc.ExpectedBtreeInserted, m.SendBtreeInserted.Load(),
+					"btree inserted mismatch")
 
-		case "deliver":
-			// Insert directly into btree
-			for i := 0; i < tc.PacketCount; i++ {
-				seq := circular.SeqAdd(tc.ISN, uint32(i))
-				pkt := createTestPacketWithTsbpd(seq, tc.PacketTsbpd)
-				s.packetBtree.Insert(pkt)
-			}
-			var delivered int
-			runInEventLoopContext(s, func() {
-				delivered, _ = s.deliverReadyPacketsEventLoop(tc.NowUs)
-			})
-			require.Equal(t, int(tc.ExpectedDelivered), delivered,
-				"delivered mismatch")
+			case "deliver":
+				// Insert directly into btree
+				for i := 0; i < tc.PacketCount; i++ {
+					seq := circular.SeqAdd(tc.ISN, uint32(i))
+					pkt := createTestPacketWithTsbpd(seq, tc.PacketTsbpd)
+					s.packetBtree.Insert(pkt)
+				}
+				var delivered int
+				runInEventLoopContext(s, func() {
+					delivered, _ = s.deliverReadyPacketsEventLoop(tc.NowUs)
+				})
+				require.Equal(t, int(tc.ExpectedDelivered), delivered,
+					"delivered mismatch")
 
 			case "ack":
 				// Insert directly into btree
@@ -226,18 +226,18 @@ func TestMetrics_Table(t *testing.T) {
 				require.Equal(t, 0, s.packetBtree.Len(),
 					"btree should be empty after ACK")
 
-		case "drop":
-			// Insert directly into btree
-			for i := 0; i < tc.PacketCount; i++ {
-				seq := circular.SeqAdd(tc.ISN, uint32(i))
-				pkt := createTestPacketWithTsbpd(seq, tc.PacketTsbpd)
-				s.packetBtree.Insert(pkt)
-			}
-			runInEventLoopContext(s, func() {
-				s.dropOldPacketsEventLoop(tc.NowUs)
-			})
-			require.Equal(t, tc.ExpectedDropped, m.CongestionSendPktDrop.Load(),
-				"dropped mismatch")
+			case "drop":
+				// Insert directly into btree
+				for i := 0; i < tc.PacketCount; i++ {
+					seq := circular.SeqAdd(tc.ISN, uint32(i))
+					pkt := createTestPacketWithTsbpd(seq, tc.PacketTsbpd)
+					s.packetBtree.Insert(pkt)
+				}
+				runInEventLoopContext(s, func() {
+					s.dropOldPacketsEventLoop(tc.NowUs)
+				})
+				require.Equal(t, tc.ExpectedDropped, m.CongestionSendPktDrop.Load(),
+					"dropped mismatch")
 			}
 		})
 	}
@@ -248,16 +248,16 @@ func TestMetrics_DeliveryAttempts(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Run delivery 10 times (with EventLoop context)
@@ -275,16 +275,16 @@ func TestMetrics_IterStarted(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Add some packets
@@ -307,16 +307,16 @@ func TestMetrics_BtreeEmpty(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Run delivery on empty btree (with EventLoop context)
@@ -335,17 +335,17 @@ func TestMetrics_RingFull(t *testing.T) {
 	smallRingSize := 8
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           smallRingSize,
-		SendRingShards:         1,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          smallRingSize,
+		SendRingShards:        1,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Fill ring and try to overflow
@@ -364,16 +364,16 @@ func TestMetrics_EventLoopCounters(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Simulate EventLoop operations (with EventLoop context)
@@ -391,16 +391,16 @@ func TestMetrics_ControlRing(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	require.NotNil(t, s.controlRing, "control ring should be created")
@@ -421,16 +421,16 @@ func TestMetrics_SendRateBytes(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Push packets
@@ -464,16 +464,16 @@ func TestMetrics_DiagnosticMetrics(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(549144712, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(549144712, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Add packets and run delivery
@@ -497,16 +497,16 @@ func TestMetrics_NoDoubleCounting(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	packetCount := 10
@@ -534,16 +534,16 @@ func TestMetrics_ConsistencyCheck(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           1024,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          1024,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	packetCount := 50
@@ -570,4 +570,3 @@ func TestMetrics_ConsistencyCheck(t *testing.T) {
 	require.Equal(t, m.SendRingPushed.Load(), m.SendRingDrained.Load(),
 		"pushed should equal drained when no drops")
 }
-

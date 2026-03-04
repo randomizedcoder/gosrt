@@ -30,10 +30,10 @@ type RingFlowTestCase struct {
 	Name string
 
 	// Setup
-	ISN          uint32
-	RingSize     int
-	RingShards   int
-	PacketCount  int
+	ISN         uint32
+	RingSize    int
+	RingShards  int
+	PacketCount int
 
 	// Expected
 	ExpectedDrained int
@@ -666,4 +666,3 @@ func TestUseRing_Disabled(t *testing.T) {
 	ok := s.PushDirect(pkt)
 	require.False(t, ok, "PushDirect should fail when ring disabled")
 }
-

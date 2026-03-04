@@ -152,7 +152,12 @@ func (c *srtConn) handleHSRequest(p packet.Packet) {
 	cif.RecvTSBPDDelay = 0
 	cif.SendTSBPDDelay = recvTsbpdDelay
 
-	p.MarshalCIF(cif)
+	if err := p.MarshalCIF(cif); err != nil {
+		c.log("control:send:HSRes:error", func() string {
+			return fmt.Sprintf("failed to marshal HSRes CIF: %v", err)
+		})
+		return
+	}
 
 	// Send HS Response
 	p.Header().SubType = packet.EXTTYPE_HSRSP
@@ -285,7 +290,7 @@ func (c *srtConn) sendHSRequest() {
 			CRYPT:         true,  // must be always set
 			TLPKTDROP:     true,  // must be set in live mode
 			PERIODICNAK:   false, // not relevant for us as sender
-			REXMITFLG:     true,  // must alwasy be set
+			REXMITFLG:     true,  // must always be set
 			STREAM:        false, // has been introducet in HSv5
 			PACKET_FILTER: false, // has been introducet in HSv5
 		},
@@ -301,7 +306,12 @@ func (c *srtConn) sendHSRequest() {
 	p.Header().SubType = packet.EXTTYPE_HSREQ
 	p.Header().Timestamp = c.getTimestampForPacket()
 
-	p.MarshalCIF(cif)
+	if err := p.MarshalCIF(cif); err != nil {
+		c.log("control:send:HSReq:error", func() string {
+			return fmt.Sprintf("failed to marshal HSReq CIF: %v", err)
+		})
+		return
+	}
 
 	c.log("control:send:HSReq:dump", func() string { return p.Dump() })
 	c.log("control:send:HSReq:cif", func() string { return cif.String() })

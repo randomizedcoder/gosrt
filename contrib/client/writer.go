@@ -7,9 +7,8 @@ import (
 	"time"
 )
 
-// NonblockingWriter is a io.Writer and io.Closer that won't block
-// any writes. If the underlying writer is blocking the data will be
-// buffered until it's available again.
+// Writer is a non-blocking io.Writer and io.Closer. If the underlying
+// writer is blocking, data will be buffered until it's available again.
 type Writer interface {
 	io.WriteCloser
 }
@@ -63,7 +62,7 @@ func (u *nonblockingWriter) Write(p []byte) (int, error) {
 func (u *nonblockingWriter) Close() error {
 	u.done = true
 
-	u.dst.Close()
+	_ = u.dst.Close()
 
 	return nil
 }
@@ -75,10 +74,10 @@ func (u *nonblockingWriter) writer() {
 
 	for {
 		u.lock.RLock()
-		n, err := u.buf.Read(p)
+		n, readErr := u.buf.Read(p)
 		u.lock.RUnlock()
 
-		if n == 0 || err == io.EOF {
+		if n == 0 || readErr == io.EOF {
 			if u.done {
 				break
 			}
@@ -87,7 +86,7 @@ func (u *nonblockingWriter) writer() {
 			continue
 		}
 
-		if _, err := u.dst.Write(p[:n]); err != nil {
+		if _, writeErr := u.dst.Write(p[:n]); writeErr != nil {
 			break
 		}
 	}

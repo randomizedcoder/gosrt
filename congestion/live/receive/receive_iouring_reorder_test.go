@@ -20,24 +20,6 @@ import (
 // Test Helper Functions
 // ============================================================================
 
-// generatePackets creates n packets with sequential sequence numbers
-// starting from startSeq. TSBPD times are spread across tsbpdDelay,
-// with older packets having earlier TSBPD times.
-func generatePackets(addr net.Addr, startSeq uint32, n int, baseTime uint64, tsbpdDelay time.Duration) []packet.Packet {
-	packets := make([]packet.Packet, n)
-	delayPerPacket := uint64(tsbpdDelay.Microseconds()) / uint64(n)
-
-	for i := 0; i < n; i++ {
-		p := packet.NewPacket(addr)
-		seq := startSeq + uint32(i)
-		p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		// Packets with lower sequence have earlier TSBPD times
-		p.Header().PktTsbpdTime = baseTime + uint64(i)*delayPerPacket
-		packets[i] = p
-	}
-	return packets
-}
-
 // shufflePacketsDeterministic shuffles packets using a seeded RNG for reproducibility
 func shufflePacketsDeterministic(packets []packet.Packet, seed int64) []packet.Packet {
 	shuffled := make([]packet.Packet, len(packets))
@@ -175,21 +157,21 @@ func mockLiveRecvNakBtree(
 
 	recv := New(Config{
 		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		PeriodicACKInterval:    10,                      // 10 microseconds for fast testing
-		PeriodicNAKInterval:    20,                      // 20 microseconds for fast testing
+		PeriodicACKInterval:    10, // 10 microseconds for fast testing
+		PeriodicNAKInterval:    20, // 20 microseconds for fast testing
 		OnSendACK:              onSendACK,
 		OnSendNAK:              onSendNAK,
 		OnDeliver:              onDeliver,
 		ConnectionMetrics:      testMetrics,
-		PacketReorderAlgorithm: "btree",                 // Required for NAK btree
-		UseNakBtree:            true,                    // Enable NAK btree
-		SuppressImmediateNak:   true,                    // Suppress immediate NAK
-		TsbpdDelay:             tsbpdDelayUs,            // e.g., 200000 for 200ms
-		NakRecentPercent:       0.10,                    // 10% "too recent" window
-		NakMergeGap:            3,                       // Merge gaps within 3 packets
-		NakConsolidationBudget: 2000,                    // 2ms budget
-		FastNakEnabled:         false,                   // Disable for deterministic tests
-		FastNakRecentEnabled:   false,                   // Disable for deterministic tests
+		PacketReorderAlgorithm: "btree",      // Required for NAK btree
+		UseNakBtree:            true,         // Enable NAK btree
+		SuppressImmediateNak:   true,         // Suppress immediate NAK
+		TsbpdDelay:             tsbpdDelayUs, // e.g., 200000 for 200ms
+		NakRecentPercent:       0.10,         // 10% "too recent" window
+		NakMergeGap:            3,            // Merge gaps within 3 packets
+		NakConsolidationBudget: 2000,         // 2ms budget
+		FastNakEnabled:         false,        // Disable for deterministic tests
+		FastNakRecentEnabled:   false,        // Disable for deterministic tests
 	})
 
 	return recv.(*receiver)
@@ -276,11 +258,11 @@ func TestOutOfOrderArrival_ModulusDrops(t *testing.T) {
 	// Setup
 	// Use 110 packets so packet 100 isn't at the "too recent" boundary
 	const (
-		numPackets       = 110
-		startSeq         = uint32(1)
-		dropModulus      = 10 // Drop every 10th packet: 10, 20, 30, ... 100
-		tsbpdDelayUs     = uint64(200_000) // 200ms in microseconds
-		nakIntervalUs    = uint64(20)      // 20µs NAK interval
+		numPackets    = 110
+		startSeq      = uint32(1)
+		dropModulus   = 10              // Drop every 10th packet: 10, 20, 30, ... 100
+		tsbpdDelayUs  = uint64(200_000) // 200ms in microseconds
+		nakIntervalUs = uint64(20)      // 20µs NAK interval
 	)
 
 	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
@@ -291,7 +273,7 @@ func TestOutOfOrderArrival_ModulusDrops(t *testing.T) {
 	// Create receiver with NAK btree enabled
 	recv := mockLiveRecvNakBtree(
 		func(seq circular.Number, light bool) {}, // ACK callback
-		nakCapture.capture,                        // NAK callback
+		nakCapture.capture,                       // NAK callback
 		func(p packet.Packet) {
 			deliverMu.Lock()
 			deliveredSeqs = append(deliveredSeqs, p.Header().PacketSequenceNumber.Val())
@@ -781,8 +763,8 @@ func TestOutOfOrder_ArrivalPermutations(t *testing.T) {
 	// Test various out-of-order arrival patterns
 
 	tests := []struct {
-		name       string
-		shuffleFn  func([]packet.Packet) []packet.Packet
+		name      string
+		shuffleFn func([]packet.Packet) []packet.Packet
 	}{
 		{
 			name: "Random shuffle (seed 42)",
@@ -938,4 +920,3 @@ func BenchmarkOutOfOrderPush_NakBtree(b *testing.B) {
 		}
 	}
 }
-

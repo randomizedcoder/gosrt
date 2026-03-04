@@ -343,7 +343,7 @@ func TestEstimateTsbpdForSeq_AdversarialMonotonicity(t *testing.T) {
 			lowerSeq:   100,
 			lowerTsbpd: 1_000_000,
 			upperSeq:   110,
-			upperTsbpd: 0, // Bug: zero
+			upperTsbpd: 0,         // Bug: zero
 			wantTsbpd:  1_000_000, // Should clamp to lowerTsbpd (upper < lower)
 			wantClamp:  true,
 		},
@@ -525,4 +525,3 @@ func TestDeleteBeforeTsbpdLocking(t *testing.T) {
 	require.Equal(t, 2, expired)
 	require.Equal(t, 1, nb.LenLocking())
 }
-

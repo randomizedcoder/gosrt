@@ -228,13 +228,14 @@ func TestBackoffHypothesis(t *testing.T) {
 	}
 
 	// Verify hypothesis: NoWait should be MUCH faster than Sleep
-	if results["NoWait"] > results["Sleep_100us"]*10 {
+	switch {
+	case results["NoWait"] > results["Sleep_100us"]*10:
 		t.Log("\n✅ HYPOTHESIS CONFIRMED: Removing sleep increases throughput 10x+")
 		t.Log("   Recommendation: Implement spin/yield mode for high throughput")
-	} else if results["NoWait"] > results["Sleep_100us"]*2 {
+	case results["NoWait"] > results["Sleep_100us"]*2:
 		t.Log("\n🟡 HYPOTHESIS PARTIALLY CONFIRMED: Sleep adds significant overhead")
 		t.Log("   Recommendation: Consider yield mode for high throughput")
-	} else {
+	default:
 		t.Log("\n❌ HYPOTHESIS NOT CONFIRMED: Sleep is not the primary bottleneck")
 		t.Log("   Need to investigate other causes")
 	}

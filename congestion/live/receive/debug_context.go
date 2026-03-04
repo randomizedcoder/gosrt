@@ -2,7 +2,7 @@
 
 // Package receive implements the receiver-side congestion control for SRT live mode.
 //
-// Debug Build Context Assertions
+// # Debug Build Context Assertions
 //
 // This file provides runtime verification that functions are called from the
 // correct context (EventLoop vs Tick). The lockless design requires strict
@@ -41,10 +41,10 @@ import (
 // debugContext tracks execution context for a receiver instance.
 // Embedded in receiver struct when debug build is enabled.
 type debugContext struct {
-	inEventLoop atomic.Bool   // True when inside EventLoop
-	inTick      atomic.Bool   // True when inside Tick
-	eventLoopGo atomic.Int64  // Goroutine ID running EventLoop (0 = none)
-	tickGo      atomic.Int64  // Goroutine ID running Tick (0 = none)
+	inEventLoop atomic.Bool  // True when inside EventLoop
+	inTick      atomic.Bool  // True when inside Tick
+	eventLoopGo atomic.Int64 // Goroutine ID running EventLoop (0 = none)
+	tickGo      atomic.Int64 // Goroutine ID running Tick (0 = none)
 }
 
 // initDebugContext initializes debug tracking for a receiver.
@@ -190,9 +190,9 @@ func getGoroutineID() int64 {
 	n := runtime.Stack(buf[:], false)
 	// Format: "goroutine 123 [running]:\n..."
 	var id int64
-	fmt.Sscanf(string(buf[:n]), "goroutine %d ", &id)
+	// Parse goroutine ID from stack trace; returns 0 if parsing fails
+	if _, err := fmt.Sscanf(string(buf[:n]), "goroutine %d ", &id); err != nil {
+		return 0
+	}
 	return id
 }
-
-
-

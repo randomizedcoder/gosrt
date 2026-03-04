@@ -527,8 +527,8 @@ func generateTestName(cfg ReceiverConfig, stream StreamProfile, loss LossPattern
 // RunTestMatrix runs all generated test cases in parallel.
 func RunTestMatrix(t *testing.T, cases []StreamTestCase) {
 	t.Logf("Running %d test cases", len(cases))
-	for _, tc := range cases {
-		tc := tc // Capture for parallel
+	for i := range cases {
+		tc := cases[i] // Copy for parallel closure capture
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			RunSingleTest(t, tc)

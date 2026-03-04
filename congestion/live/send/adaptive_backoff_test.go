@@ -341,9 +341,9 @@ func TestAdaptiveBackoff_ActivityScenarios(t *testing.T) {
 			name: "Activity after long idle",
 			events: []iterationEvent{
 				{idleThreshold + warmupThreshold + 1, false}, // Go to Sleep
-				{5, false},  // Stay asleep (more idle iterations)
-				{1, true},   // Wake
-				{5, true},   // Stay awake
+				{5, false}, // Stay asleep (more idle iterations)
+				{1, true},  // Wake
+				{5, true},  // Stay awake
 			},
 			expectedMode: EventLoopModeYield,
 			minSwitches:  2, // Yield→Sleep→Yield

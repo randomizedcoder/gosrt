@@ -509,18 +509,18 @@ func TestRTOModeString(t *testing.T) {
 // is correctly stored and retrieved.
 func TestRTTLastSample(t *testing.T) {
 	r := &rtt{}
-	r.rttBits.Store(math.Float64bits(100_000))    // Initial RTT: 100ms
-	r.rttVarBits.Store(math.Float64bits(10_000))  // Initial RTTVar: 10ms
+	r.rttBits.Store(math.Float64bits(100_000))   // Initial RTT: 100ms
+	r.rttVarBits.Store(math.Float64bits(10_000)) // Initial RTTVar: 10ms
 	r.SetRTOMode(RTORttRttVar, 0)
 
 	// Apply samples and verify the raw sample is stored (not smoothed)
 	tests := []struct {
-		sample   time.Duration
-		wantRaw  uint64 // Expected raw value (last sample)
+		sample  time.Duration
+		wantRaw uint64 // Expected raw value (last sample)
 	}{
-		{50_000 * time.Microsecond, 50_000},  // 50ms
+		{50_000 * time.Microsecond, 50_000},   // 50ms
 		{200_000 * time.Microsecond, 200_000}, // 200ms
-		{75_000 * time.Microsecond, 75_000},  // 75ms
+		{75_000 * time.Microsecond, 75_000},   // 75ms
 		{100 * time.Microsecond, 100},         // 0.1ms (100µs)
 	}
 

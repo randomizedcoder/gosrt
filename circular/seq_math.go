@@ -40,8 +40,8 @@ const seqThreshold31 = MaxSeqNumber31 / 2 // ~1.07 billion
 //   - SeqLess(MaxSeqNumber31-10, 5) = true (wraparound: MAX-10 is "before" 5)
 func SeqLess(a, b uint32) bool {
 	// Mask to 31 bits to ensure we're in SRT sequence space
-	a = a & MaxSeqNumber31
-	b = b & MaxSeqNumber31
+	a &= MaxSeqNumber31
+	b &= MaxSeqNumber31
 
 	if a == b {
 		return false
@@ -67,8 +67,8 @@ func SeqLess(a, b uint32) bool {
 
 // SeqGreater returns true if a > b, handling 31-bit sequence wraparound.
 func SeqGreater(a, b uint32) bool {
-	a = a & MaxSeqNumber31
-	b = b & MaxSeqNumber31
+	a &= MaxSeqNumber31
+	b &= MaxSeqNumber31
 
 	if a == b {
 		return false
@@ -116,8 +116,8 @@ func SeqGreaterOrEqual(a, b uint32) bool {
 //   - SeqDiff(MAX, 0) = -1        (wraparound: MAX is 1 before 0)
 //   - SeqDiff(50, MAX-100) = 151  (wraparound: 50 is 151 after MAX-100)
 func SeqDiff(a, b uint32) int32 {
-	a = a & MaxSeqNumber31
-	b = b & MaxSeqNumber31
+	a &= MaxSeqNumber31
+	b &= MaxSeqNumber31
 
 	if a == b {
 		return 0

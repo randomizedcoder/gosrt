@@ -33,10 +33,10 @@ type Publisher struct {
 
 	// Instrumentation for bottleneck detection
 	// See: client_seeker_instrumentation_design.md
-	writeTimeNs      atomic.Int64  // Total time spent in Write() calls
-	writeCount       atomic.Uint64 // Number of Write() calls
+	writeTimeNs       atomic.Int64  // Total time spent in Write() calls
+	writeCount        atomic.Uint64 // Number of Write() calls
 	writeBlockedCount atomic.Uint64 // Times Write() blocked (took > threshold)
-	writeErrorCount  atomic.Uint64 // Write errors
+	writeErrorCount   atomic.Uint64 // Write errors
 }
 
 // PublisherDetailedStats holds detailed statistics for bottleneck detection.
@@ -126,7 +126,7 @@ func (p *Publisher) Run(ctx context.Context, gen *DataGenerator) error {
 		// Generate packet (rate-limited by TokenBucket)
 		packet, err := gen.Generate(ctx)
 		if err != nil {
-			// Context cancelled - normal shutdown
+			// Context canceled - normal shutdown
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -192,7 +192,9 @@ func (p *Publisher) IsAlive() bool {
 // LastError returns the last error that occurred.
 func (p *Publisher) LastError() error {
 	if v := p.lastError.Load(); v != nil {
-		return v.(error)
+		if err, ok := v.(error); ok {
+			return err
+		}
 	}
 	return nil
 }

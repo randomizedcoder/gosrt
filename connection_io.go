@@ -75,8 +75,9 @@ func (c *srtConn) WritePacket(p packet.Packet) error {
 }
 
 // Write writes data to the connection.
+// Write is safe for concurrent use by multiple goroutines.
 func (c *srtConn) Write(b []byte) (int, error) {
-	// Check context cancellation FIRST, before any operations.
+	// Check context cancellation FIRST, before acquiring lock.
 	// This follows the context_and_cancellation_new_design.md pattern where
 	// context cancellation signals shutdown. Go's select is non-deterministic
 	// when multiple channels are ready, so we must check ctx.Done() separately
@@ -86,6 +87,10 @@ func (c *srtConn) Write(b []byte) (int, error) {
 		return 0, io.EOF
 	default:
 	}
+
+	// Lock for concurrent Write() safety (net.Conn requires concurrent calls)
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	c.writeBuffer.Write(b)
 
@@ -112,6 +117,7 @@ func (c *srtConn) Write(b []byte) (int, error) {
 		// ═══════════════════════════════════════════════════════════════════════
 		select {
 		case <-c.ctx.Done():
+			c.writeBuffer.Reset() // Reset before early return
 			return 0, io.EOF
 		default:
 		}
@@ -122,6 +128,7 @@ func (c *srtConn) Write(b []byte) (int, error) {
 				// Ring full - drop packet
 				p.Decommission()
 				c.metrics.SendRingDropped.Add(1)
+				c.writeBuffer.Reset() // Reset before early return
 				return 0, io.EOF
 			}
 		} else {
@@ -129,6 +136,7 @@ func (c *srtConn) Write(b []byte) (int, error) {
 			select {
 			case c.writeQueue <- p:
 			default:
+				c.writeBuffer.Reset() // Reset before early return
 				return 0, io.EOF
 			}
 		}

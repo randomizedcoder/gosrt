@@ -233,11 +233,11 @@ func TestStabilityGate_EvaluateSamples_MajorityUnstable(t *testing.T) {
 
 	// 4 out of 5 samples are unstable (80% > 30% threshold)
 	samples := []StabilityMetrics{
-		{GapRate: 0.05, NAKRate: 0.05, RTTMs: 150, ThroughputTE: 0.80}, // unstable
-		{GapRate: 0.05, NAKRate: 0.05, RTTMs: 150, ThroughputTE: 0.80}, // unstable
+		{GapRate: 0.05, NAKRate: 0.05, RTTMs: 150, ThroughputTE: 0.80},  // unstable
+		{GapRate: 0.05, NAKRate: 0.05, RTTMs: 150, ThroughputTE: 0.80},  // unstable
 		{GapRate: 0.001, NAKRate: 0.001, RTTMs: 10, ThroughputTE: 0.98}, // stable
-		{GapRate: 0.05, NAKRate: 0.05, RTTMs: 150, ThroughputTE: 0.80}, // unstable
-		{GapRate: 0.05, NAKRate: 0.05, RTTMs: 150, ThroughputTE: 0.80}, // unstable
+		{GapRate: 0.05, NAKRate: 0.05, RTTMs: 150, ThroughputTE: 0.80},  // unstable
+		{GapRate: 0.05, NAKRate: 0.05, RTTMs: 150, ThroughputTE: 0.80},  // unstable
 	}
 
 	verdict, reason := gate.evaluateSamples(samples)
@@ -304,5 +304,8 @@ func TestProbeResult_Fields(t *testing.T) {
 	}
 	if result.Duration != 5*time.Second {
 		t.Errorf("Duration = %v, want 5s", result.Duration)
+	}
+	if result.Reason != "test reason" {
+		t.Errorf("Reason = %q, want %q", result.Reason, "test reason")
 	}
 }

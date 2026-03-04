@@ -103,17 +103,17 @@ func (r *SendPacketRing) TryPop() (packet.Packet, bool) {
 	return p, true
 }
 
-// DrainBatch drains up to max packets from the ring.
+// DrainBatch drains up to maxCount packets from the ring.
 // Returns slice of drained packets (may be empty if ring is empty).
 //
 // NOT thread-safe for multiple consumers - designed for single EventLoop consumer.
-func (r *SendPacketRing) DrainBatch(max int) []packet.Packet {
-	if max <= 0 {
+func (r *SendPacketRing) DrainBatch(maxCount int) []packet.Packet {
+	if maxCount <= 0 {
 		return nil
 	}
 
-	result := make([]packet.Packet, 0, max)
-	for i := 0; i < max; i++ {
+	result := make([]packet.Packet, 0, maxCount)
+	for i := 0; i < maxCount; i++ {
 		p, ok := r.TryPop()
 		if !ok {
 			break
@@ -150,4 +150,3 @@ func (r *SendPacketRing) Len() int {
 func (r *SendPacketRing) Shards() int {
 	return r.shards
 }
-

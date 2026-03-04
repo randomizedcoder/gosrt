@@ -182,7 +182,8 @@ func TestMarshalUnmarshal(t *testing.T) {
 	url := wantConfig.MarshalURL("localhost:6000")
 
 	config := Config{}
-	config.UnmarshalURL(url)
+	_, err := config.UnmarshalURL(url)
+	require.NoError(t, err)
 
 	require.Equal(t, wantConfig, config)
 }

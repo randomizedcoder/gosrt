@@ -318,7 +318,8 @@ func TestEncode(t *testing.T) {
 
 		data, _ := hex.DecodeString(originalData)
 
-		c.EncryptOrDecryptPayload(data, packet.EvenKeyEncrypted, packetSequenceNumber)
+		err = c.EncryptOrDecryptPayload(data, packet.EvenKeyEncrypted, packetSequenceNumber)
+		require.NoError(t, err)
 
 		encrypted := mustDecodeString(test.evenEncrypted)
 
@@ -327,7 +328,8 @@ func TestEncode(t *testing.T) {
 
 		data = mustDecodeString(originalData)
 
-		c.EncryptOrDecryptPayload(data, packet.OddKeyEncrypted, packetSequenceNumber)
+		err = c.EncryptOrDecryptPayload(data, packet.OddKeyEncrypted, packetSequenceNumber)
+		require.NoError(t, err)
 
 		encrypted = mustDecodeString(test.oddEncrypted)
 

@@ -63,38 +63,38 @@ func TestAckEntryBtree_DeleteMin(t *testing.T) {
 	tree.Insert(&ackEntry{ackNum: 200, timestamp: now})
 
 	// DeleteMin should return entries in order
-	min := tree.DeleteMin()
-	require.NotNil(t, min)
-	require.Equal(t, uint32(100), min.ackNum)
+	minEntry := tree.DeleteMin()
+	require.NotNil(t, minEntry)
+	require.Equal(t, uint32(100), minEntry.ackNum)
 
-	min = tree.DeleteMin()
-	require.NotNil(t, min)
-	require.Equal(t, uint32(200), min.ackNum)
+	minEntry = tree.DeleteMin()
+	require.NotNil(t, minEntry)
+	require.Equal(t, uint32(200), minEntry.ackNum)
 
-	min = tree.DeleteMin()
-	require.NotNil(t, min)
-	require.Equal(t, uint32(300), min.ackNum)
+	minEntry = tree.DeleteMin()
+	require.NotNil(t, minEntry)
+	require.Equal(t, uint32(300), minEntry.ackNum)
 
 	// Empty tree
-	min = tree.DeleteMin()
-	require.Nil(t, min)
+	minEntry = tree.DeleteMin()
+	require.Nil(t, minEntry)
 }
 
 func TestAckEntryBtree_Min(t *testing.T) {
 	tree := newAckEntryBtree(4)
 
 	// Empty tree
-	min := tree.Min()
-	require.Nil(t, min)
+	minEntry := tree.Min()
+	require.Nil(t, minEntry)
 
 	now := time.Now()
 	tree.Insert(&ackEntry{ackNum: 300, timestamp: now})
 	tree.Insert(&ackEntry{ackNum: 100, timestamp: now})
 
 	// Min should return smallest without removing
-	min = tree.Min()
-	require.NotNil(t, min)
-	require.Equal(t, uint32(100), min.ackNum)
+	minEntry = tree.Min()
+	require.NotNil(t, minEntry)
+	require.Equal(t, uint32(100), minEntry.ackNum)
 	require.Equal(t, 2, tree.Len()) // Length unchanged
 }
 

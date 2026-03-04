@@ -42,8 +42,8 @@ import (
 //   - SeqLessBroken(0, MaxSeqNumber31) = true (WRONG! should be false)
 func SeqLessBroken(a, b uint32) bool {
 	// Mask to 31 bits to ensure we're in SRT sequence space
-	a = a & MaxSeqNumber31
-	b = b & MaxSeqNumber31
+	a &= MaxSeqNumber31
+	b &= MaxSeqNumber31
 
 	// Signed comparison - BROKEN for 31-bit because no overflow occurs
 	diff := int32(a - b)
@@ -326,8 +326,8 @@ func TestBug_WhySignedArithmeticFails(t *testing.T) {
 // SeqLessThreshold implements correct 31-bit comparison using threshold logic.
 // This matches the semantics of circular.Number.Lt() but for raw uint32 values.
 func SeqLessThreshold(a, b uint32) bool {
-	a = a & MaxSeqNumber31
-	b = b & MaxSeqNumber31
+	a &= MaxSeqNumber31
+	b &= MaxSeqNumber31
 
 	if a == b {
 		return false
@@ -353,8 +353,8 @@ func SeqLessThreshold(a, b uint32) bool {
 
 // SeqGreaterThreshold is the complement of SeqLessThreshold
 func SeqGreaterThreshold(a, b uint32) bool {
-	a = a & MaxSeqNumber31
-	b = b & MaxSeqNumber31
+	a &= MaxSeqNumber31
+	b &= MaxSeqNumber31
 
 	if a == b {
 		return false

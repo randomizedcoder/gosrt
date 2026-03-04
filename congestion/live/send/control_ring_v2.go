@@ -27,8 +27,8 @@ import (
 // NAKPacketV2 stores NAK sequence numbers for ring transport.
 // Uses inline array to avoid slice allocation.
 type NAKPacketV2 struct {
-	Count     uint8        // Number of valid sequences (max 32)
-	Sequences [32]uint32   // Inline array of sequence numbers
+	Count     uint8      // Number of valid sequences (max 32)
+	Sequences [32]uint32 // Inline array of sequence numbers
 }
 
 // MaxNAKSequencesV2 is the maximum NAK sequences per NAKPacketV2
@@ -97,7 +97,11 @@ func (r *SendControlRingV2) TryPopACK() (uint32, bool) {
 	if !ok {
 		return 0, false
 	}
-	return item.(uint32), true
+	ackSeq, typeOK := item.(uint32)
+	if !typeOK {
+		return 0, false
+	}
+	return ackSeq, true
 }
 
 // PushNAK pushes NAK sequence numbers to the NAK ring.
@@ -139,7 +143,11 @@ func (r *SendControlRingV2) TryPopNAK() (NAKPacketV2, bool) {
 	if !ok {
 		return NAKPacketV2{}, false
 	}
-	return item.(NAKPacketV2), true
+	nakPacket, typeOK := item.(NAKPacketV2)
+	if !typeOK {
+		return NAKPacketV2{}, false
+	}
+	return nakPacket, true
 }
 
 // ACKLen returns approximate count of items in the ACK ring.
@@ -156,4 +164,3 @@ func (r *SendControlRingV2) NAKLen() int {
 func (r *SendControlRingV2) TotalLen() int {
 	return r.ACKLen() + r.NAKLen()
 }
-

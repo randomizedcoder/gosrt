@@ -109,6 +109,7 @@ func newAdaptiveBackoff() *adaptiveBackoff {
 }
 
 // newAdaptiveBackoffWithThreshold creates a new adaptive backoff with custom idle threshold.
+//
 // Deprecated: Use newAdaptiveBackoffWithIterations for better wake-up latency.
 func newAdaptiveBackoffWithThreshold(idleThreshold time.Duration) *adaptiveBackoff {
 	// Convert time to approximate iterations (assuming ~46M iter/sec in Yield mode)

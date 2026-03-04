@@ -143,7 +143,10 @@ func AnalyzeTrend(timestamps []time.Time, values []float64) (TrendAnalysis, erro
 
 	// Calculate R-squared (coefficient of determination)
 	yData := stats.Float64Data(values)
-	mean, _ := stats.Mean(yData)
+	mean, meanErr := stats.Mean(yData)
+	if meanErr != nil {
+		return TrendAnalysis{}, fmt.Errorf("failed to calculate mean: %w", meanErr)
+	}
 
 	ssTotal := 0.0
 	ssResidual := 0.0
@@ -192,24 +195,24 @@ func ComputeVarianceStats(values []float64) (mean, cv float64, err error) {
 }
 
 // GetMinMaxStats returns min and max values
-func GetMinMaxStats(values []float64) (min, max float64, err error) {
+func GetMinMaxStats(values []float64) (minVal, maxVal float64, err error) {
 	if len(values) == 0 {
 		return 0, 0, fmt.Errorf("no values provided")
 	}
 
 	data := stats.Float64Data(values)
 
-	min, err = stats.Min(data)
+	minVal, err = stats.Min(data)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	max, err = stats.Max(data)
+	maxVal, err = stats.Max(data)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	return min, max, nil
+	return minVal, maxVal, nil
 }
 
 // filterAfterWarmup returns snapshots after the warmup period
@@ -423,15 +426,19 @@ func populateRuntimeSummary(summary *RuntimeSummary, snapshots []*MetricsSnapsho
 	if len(heapValues) > 0 {
 		summary.InitialHeapMB = heapValues[0] / (1024 * 1024)
 		summary.FinalHeapMB = heapValues[len(heapValues)-1] / (1024 * 1024)
-		_, peakHeap, _ := GetMinMaxStats(heapValues)
-		summary.PeakHeapMB = peakHeap / (1024 * 1024)
+		_, peakHeap, err := GetMinMaxStats(heapValues)
+		if err == nil {
+			summary.PeakHeapMB = peakHeap / (1024 * 1024)
+		}
 	}
 
 	if len(goroutineValues) > 0 {
 		summary.InitialGoroutines = int(goroutineValues[0])
 		summary.FinalGoroutines = int(goroutineValues[len(goroutineValues)-1])
-		_, peakGoroutines, _ := GetMinMaxStats(goroutineValues)
-		summary.PeakGoroutines = int(peakGoroutines)
+		_, peakGoroutines, err := GetMinMaxStats(goroutineValues)
+		if err == nil {
+			summary.PeakGoroutines = int(peakGoroutines)
+		}
 	}
 }
 

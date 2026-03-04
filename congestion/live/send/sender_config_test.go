@@ -27,10 +27,10 @@ type ConfigTestCase struct {
 	Config SendConfig
 
 	// Expected behavior
-	ShouldPanic    bool
-	ExpectBtree    bool
-	ExpectRing     bool
-	ExpectControl  bool
+	ShouldPanic     bool
+	ExpectBtree     bool
+	ExpectRing      bool
+	ExpectControl   bool
 	ExpectEventLoop bool
 }
 
@@ -128,16 +128,16 @@ var configTestCases = []ConfigTestCase{
 	{
 		Name: "ISN_Zero",
 		Config: SendConfig{
-			InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-			ConnectionMetrics:      &metrics.ConnectionMetrics{},
-			OnDeliver:              func(p packet.Packet) {},
-			StartTime:              time.Now(),
-			UseBtree:               true,
-			UseSendRing:            true,
-			SendRingSize:           256,
-			UseSendControlRing:     true, // Required for EventLoop
-			SendControlRingSize:    64,
-			UseSendEventLoop:       true,
+			InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+			ConnectionMetrics:     &metrics.ConnectionMetrics{},
+			OnDeliver:             func(p packet.Packet) {},
+			StartTime:             time.Now(),
+			UseBtree:              true,
+			UseSendRing:           true,
+			SendRingSize:          256,
+			UseSendControlRing:    true, // Required for EventLoop
+			SendControlRingSize:   64,
+			UseSendEventLoop:      true,
 		},
 		ShouldPanic:     false,
 		ExpectBtree:     true,
@@ -148,16 +148,16 @@ var configTestCases = []ConfigTestCase{
 	{
 		Name: "ISN_Max",
 		Config: SendConfig{
-			InitialSequenceNumber:  circular.New(2147483647, packet.MAX_SEQUENCENUMBER),
-			ConnectionMetrics:      &metrics.ConnectionMetrics{},
-			OnDeliver:              func(p packet.Packet) {},
-			StartTime:              time.Now(),
-			UseBtree:               true,
-			UseSendRing:            true,
-			SendRingSize:           256,
-			UseSendControlRing:     true,
-			SendControlRingSize:    64,
-			UseSendEventLoop:       true,
+			InitialSequenceNumber: circular.New(2147483647, packet.MAX_SEQUENCENUMBER),
+			ConnectionMetrics:     &metrics.ConnectionMetrics{},
+			OnDeliver:             func(p packet.Packet) {},
+			StartTime:             time.Now(),
+			UseBtree:              true,
+			UseSendRing:           true,
+			SendRingSize:          256,
+			UseSendControlRing:    true,
+			SendControlRingSize:   64,
+			UseSendEventLoop:      true,
 		},
 		ShouldPanic:     false,
 		ExpectBtree:     true,
@@ -168,16 +168,16 @@ var configTestCases = []ConfigTestCase{
 	{
 		Name: "ISN_Random_549M",
 		Config: SendConfig{
-			InitialSequenceNumber:  circular.New(549144712, packet.MAX_SEQUENCENUMBER),
-			ConnectionMetrics:      &metrics.ConnectionMetrics{},
-			OnDeliver:              func(p packet.Packet) {},
-			StartTime:              time.Now(),
-			UseBtree:               true,
-			UseSendRing:            true,
-			SendRingSize:           256,
-			UseSendControlRing:     true,
-			SendControlRingSize:    64,
-			UseSendEventLoop:       true,
+			InitialSequenceNumber: circular.New(549144712, packet.MAX_SEQUENCENUMBER),
+			ConnectionMetrics:     &metrics.ConnectionMetrics{},
+			OnDeliver:             func(p packet.Packet) {},
+			StartTime:             time.Now(),
+			UseBtree:              true,
+			UseSendRing:           true,
+			SendRingSize:          256,
+			UseSendControlRing:    true,
+			SendControlRingSize:   64,
+			UseSendEventLoop:      true,
 		},
 		ShouldPanic:     false,
 		ExpectBtree:     true,
@@ -192,16 +192,16 @@ var configTestCases = []ConfigTestCase{
 	{
 		Name: "SmallRing_32",
 		Config: SendConfig{
-			InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-			ConnectionMetrics:      &metrics.ConnectionMetrics{},
-			OnDeliver:              func(p packet.Packet) {},
-			StartTime:              time.Now(),
-			UseBtree:               true,
-			UseSendRing:            true,
-			SendRingSize:           32,
-			UseSendControlRing:     true,
-			SendControlRingSize:    64,
-			UseSendEventLoop:       true,
+			InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+			ConnectionMetrics:     &metrics.ConnectionMetrics{},
+			OnDeliver:             func(p packet.Packet) {},
+			StartTime:             time.Now(),
+			UseBtree:              true,
+			UseSendRing:           true,
+			SendRingSize:          32,
+			UseSendControlRing:    true,
+			SendControlRingSize:   64,
+			UseSendEventLoop:      true,
 		},
 		ShouldPanic:     false,
 		ExpectBtree:     true,
@@ -212,16 +212,16 @@ var configTestCases = []ConfigTestCase{
 	{
 		Name: "LargeRing_8192",
 		Config: SendConfig{
-			InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-			ConnectionMetrics:      &metrics.ConnectionMetrics{},
-			OnDeliver:              func(p packet.Packet) {},
-			StartTime:              time.Now(),
-			UseBtree:               true,
-			UseSendRing:            true,
-			SendRingSize:           8192,
-			UseSendControlRing:     true,
-			SendControlRingSize:    64,
-			UseSendEventLoop:       true,
+			InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+			ConnectionMetrics:     &metrics.ConnectionMetrics{},
+			OnDeliver:             func(p packet.Packet) {},
+			StartTime:             time.Now(),
+			UseBtree:              true,
+			UseSendRing:           true,
+			SendRingSize:          8192,
+			UseSendControlRing:    true,
+			SendControlRingSize:   64,
+			UseSendEventLoop:      true,
 		},
 		ShouldPanic:     false,
 		ExpectBtree:     true,
@@ -236,18 +236,18 @@ var configTestCases = []ConfigTestCase{
 	{
 		Name: "DropThreshold_1Second",
 		Config: SendConfig{
-			InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-			ConnectionMetrics:      &metrics.ConnectionMetrics{},
-			OnDeliver:              func(p packet.Packet) {},
-			StartTime:              time.Now(),
-			UseBtree:               true,
-			UseSendRing:            true,
-			SendRingSize:           256,
-			UseSendControlRing:     true,
-			SendControlRingSize:    64,
-			UseSendEventLoop:       true,
-			SendDropThresholdUs:    1_000_000,
-			DropThreshold:          1_000_000,
+			InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+			ConnectionMetrics:     &metrics.ConnectionMetrics{},
+			OnDeliver:             func(p packet.Packet) {},
+			StartTime:             time.Now(),
+			UseBtree:              true,
+			UseSendRing:           true,
+			SendRingSize:          256,
+			UseSendControlRing:    true,
+			SendControlRingSize:   64,
+			UseSendEventLoop:      true,
+			SendDropThresholdUs:   1_000_000,
+			DropThreshold:         1_000_000,
 		},
 		ShouldPanic:     false,
 		ExpectBtree:     true,
@@ -258,18 +258,18 @@ var configTestCases = []ConfigTestCase{
 	{
 		Name: "DropThreshold_10Seconds",
 		Config: SendConfig{
-			InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-			ConnectionMetrics:      &metrics.ConnectionMetrics{},
-			OnDeliver:              func(p packet.Packet) {},
-			StartTime:              time.Now(),
-			UseBtree:               true,
-			UseSendRing:            true,
-			SendRingSize:           256,
-			UseSendControlRing:     true,
-			SendControlRingSize:    64,
-			UseSendEventLoop:       true,
-			SendDropThresholdUs:    10_000_000,
-			DropThreshold:          10_000_000,
+			InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+			ConnectionMetrics:     &metrics.ConnectionMetrics{},
+			OnDeliver:             func(p packet.Packet) {},
+			StartTime:             time.Now(),
+			UseBtree:              true,
+			UseSendRing:           true,
+			SendRingSize:          256,
+			UseSendControlRing:    true,
+			SendControlRingSize:   64,
+			UseSendEventLoop:      true,
+			SendDropThresholdUs:   10_000_000,
+			DropThreshold:         10_000_000,
 		},
 		ShouldPanic:     false,
 		ExpectBtree:     true,
@@ -331,7 +331,7 @@ func TestConfig_DeliveryStartPoint_InitializedToISN(t *testing.T) {
 	isnValues := []uint32{
 		0,
 		1000,
-		549144712,  // THE FAILING CASE
+		549144712, // THE FAILING CASE
 		879502527,
 		2147483640,
 		2147483647,
@@ -340,16 +340,16 @@ func TestConfig_DeliveryStartPoint_InitializedToISN(t *testing.T) {
 	for _, isn := range isnValues {
 		t.Run(formatISN(isn), func(t *testing.T) {
 			s := NewSender(SendConfig{
-				InitialSequenceNumber:  circular.New(isn, packet.MAX_SEQUENCENUMBER),
-				ConnectionMetrics:      &metrics.ConnectionMetrics{},
-				OnDeliver:              func(p packet.Packet) {},
-				StartTime:              time.Now(),
-				UseBtree:               true,
-				UseSendRing:            true,
-				SendRingSize:           256,
-				UseSendControlRing:     true, // Required for EventLoop
-				SendControlRingSize:    64,
-				UseSendEventLoop:       true,
+				InitialSequenceNumber: circular.New(isn, packet.MAX_SEQUENCENUMBER),
+				ConnectionMetrics:     &metrics.ConnectionMetrics{},
+				OnDeliver:             func(p packet.Packet) {},
+				StartTime:             time.Now(),
+				UseBtree:              true,
+				UseSendRing:           true,
+				SendRingSize:          256,
+				UseSendControlRing:    true, // Required for EventLoop
+				SendControlRingSize:   64,
+				UseSendEventLoop:      true,
 			}).(*sender)
 
 			// CRITICAL: deliveryStartPoint must be initialized to ISN
@@ -367,16 +367,16 @@ func TestConfig_NowFn_RelativeTime(t *testing.T) {
 	startTime := time.Now()
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      &metrics.ConnectionMetrics{},
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              startTime,
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     &metrics.ConnectionMetrics{},
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             startTime,
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Wait a bit
@@ -420,18 +420,18 @@ func TestConfig_MultiShard(t *testing.T) {
 	for _, shards := range shardCounts {
 		t.Run("Shards_"+string(rune('0'+shards)), func(t *testing.T) {
 			s := NewSender(SendConfig{
-				InitialSequenceNumber:    circular.New(0, packet.MAX_SEQUENCENUMBER),
-				ConnectionMetrics:        &metrics.ConnectionMetrics{},
-				OnDeliver:                func(p packet.Packet) {},
-				StartTime:                time.Now(),
-				UseBtree:                 true,
-				UseSendRing:              true,
-				SendRingSize:             1024,
-				SendRingShards:           shards,
-				UseSendControlRing:       true,
-				SendControlRingSize:      256,
-				SendControlRingShards:    shards,
-				UseSendEventLoop:         true,
+				InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+				ConnectionMetrics:     &metrics.ConnectionMetrics{},
+				OnDeliver:             func(p packet.Packet) {},
+				StartTime:             time.Now(),
+				UseBtree:              true,
+				UseSendRing:           true,
+				SendRingSize:          1024,
+				SendRingShards:        shards,
+				UseSendControlRing:    true,
+				SendControlRingSize:   256,
+				SendControlRingShards: shards,
+				UseSendEventLoop:      true,
 			}).(*sender)
 
 			require.NotNil(t, s.packetRing)
@@ -445,16 +445,16 @@ func TestConfig_MetricsAttached(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	require.Equal(t, m, s.metrics)
@@ -465,16 +465,16 @@ func TestConfig_OnDeliver_Called(t *testing.T) {
 	var deliverCalled bool
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      &metrics.ConnectionMetrics{},
-		OnDeliver:              func(p packet.Packet) { deliverCalled = true },
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     &metrics.ConnectionMetrics{},
+		OnDeliver:             func(p packet.Packet) { deliverCalled = true },
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	s.nowFn = func() uint64 { return 1_000_000 }
@@ -493,4 +493,3 @@ func TestConfig_OnDeliver_Called(t *testing.T) {
 	require.Equal(t, 1, delivered)
 	require.True(t, deliverCalled, "OnDeliver should have been called")
 }
-

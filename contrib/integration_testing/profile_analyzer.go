@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -66,12 +67,12 @@ type FuncComparison struct {
 
 // AnalyzeProfile runs go tool pprof to analyze a profile
 // If binaryPath is provided, it will be used to resolve symbols (important for debug builds)
-func AnalyzeProfile(profilePath string, outputDir string) (*ProfileAnalysis, error) {
-	return AnalyzeProfileWithBinary(profilePath, outputDir, "")
+func AnalyzeProfile(ctx context.Context, profilePath string, outputDir string) (*ProfileAnalysis, error) {
+	return AnalyzeProfileWithBinary(ctx, profilePath, outputDir, "")
 }
 
 // AnalyzeProfileWithBinary runs go tool pprof with a specified binary for symbol resolution
-func AnalyzeProfileWithBinary(profilePath string, outputDir string, binaryPath string) (*ProfileAnalysis, error) {
+func AnalyzeProfileWithBinary(ctx context.Context, profilePath string, outputDir string, binaryPath string) (*ProfileAnalysis, error) {
 	if _, err := os.Stat(profilePath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("profile file not found: %s", profilePath)
 	}
@@ -96,19 +97,20 @@ func AnalyzeProfileWithBinary(profilePath string, outputDir string, binaryPath s
 
 	// Parse component from parent directory
 	// Formats: "control_server", "test_cg", "baseline_client", "highperf_server"
-	if strings.HasPrefix(parentDir, "control_") {
+	switch {
+	case strings.HasPrefix(parentDir, "control_"):
 		analysis.Pipeline = "control"
 		analysis.Component = strings.TrimPrefix(parentDir, "control_")
-	} else if strings.HasPrefix(parentDir, "test_") {
+	case strings.HasPrefix(parentDir, "test_"):
 		analysis.Pipeline = "test"
 		analysis.Component = strings.TrimPrefix(parentDir, "test_")
-	} else if strings.HasPrefix(parentDir, "baseline_") {
+	case strings.HasPrefix(parentDir, "baseline_"):
 		analysis.Pipeline = "baseline"
 		analysis.Component = strings.TrimPrefix(parentDir, "baseline_")
-	} else if strings.HasPrefix(parentDir, "highperf_") {
+	case strings.HasPrefix(parentDir, "highperf_"):
 		analysis.Pipeline = "highperf"
 		analysis.Component = strings.TrimPrefix(parentDir, "highperf_")
-	} else {
+	default:
 		// Fallback: use entire parent dir as component
 		analysis.Component = parentDir
 	}
@@ -132,7 +134,7 @@ func AnalyzeProfileWithBinary(profilePath string, outputDir string, binaryPath s
 	}
 	cmdArgs = append(cmdArgs, profilePath)
 
-	topCmd := exec.Command("go", cmdArgs...)
+	topCmd := exec.CommandContext(ctx, "go", cmdArgs...)
 	topOutput, err := topCmd.Output()
 	if err != nil {
 		// Try to get stderr for debugging
@@ -142,9 +144,9 @@ func AnalyzeProfileWithBinary(profilePath string, outputDir string, binaryPath s
 		return nil, fmt.Errorf("pprof -top failed: %w", err)
 	}
 	analysis.TopOutput = string(topOutput)
-	if err := os.WriteFile(topPath, topOutput, 0644); err != nil {
+	if writeErr := os.WriteFile(topPath, topOutput, 0644); writeErr != nil {
 		// Non-fatal, just log
-		fmt.Fprintf(os.Stderr, "Warning: failed to write top output to %s: %v\n", topPath, err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to write top output to %s: %v\n", topPath, writeErr)
 	}
 
 	// Generate flame graph SVG (optional - may fail if graphviz not installed)
@@ -155,10 +157,10 @@ func AnalyzeProfileWithBinary(profilePath string, outputDir string, binaryPath s
 		svgArgs = append(svgArgs, binaryPath)
 	}
 	svgArgs = append(svgArgs, profilePath)
-	svgCmd := exec.Command("go", svgArgs...)
-	svgOutput, err := svgCmd.Output()
-	if err == nil {
-		if err := os.WriteFile(svgPath, svgOutput, 0644); err == nil {
+	svgCmd := exec.CommandContext(ctx, "go", svgArgs...)
+	svgOutput, svgErr := svgCmd.Output()
+	if svgErr == nil {
+		if svgWriteErr := os.WriteFile(svgPath, svgOutput, 0644); svgWriteErr == nil {
 			analysis.FlameGraph = svgPath
 		}
 	}
@@ -272,7 +274,10 @@ func parseTopOutput(output string, pt ProfileType) []FuncStat {
 
 func parsePercentage(s string) float64 {
 	s = strings.TrimSuffix(s, "%")
-	v, _ := strconv.ParseFloat(s, 64)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
 	return v
 }
 
@@ -326,19 +331,20 @@ func CompareProfiles(baseline, highperf *ProfileAnalysis) *ComparisonResult {
 			FuncName: name,
 		}
 
-		if inBase && inHP {
+		switch {
+		case inBase && inHP:
 			comp.BaselineValue = baseStat.Flat
 			comp.HighPerfValue = hpStat.Flat
 			comp.Delta = hpStat.Flat - baseStat.Flat
 			if baseStat.Flat > 0 {
 				comp.DeltaPercent = (comp.Delta / baseStat.Flat) * 100
 			}
-		} else if inBase {
+		case inBase:
 			comp.BaselineValue = baseStat.Flat
 			comp.IsRemoved = true
 			comp.Delta = -baseStat.Flat
 			comp.DeltaPercent = -100
-		} else {
+		default:
 			comp.HighPerfValue = hpStat.Flat
 			comp.IsNew = true
 			comp.Delta = hpStat.Flat
@@ -503,7 +509,7 @@ func (r *ComparisonResult) FormatComparison() string {
 }
 
 // AnalyzeAllProfiles analyzes all profiles in a directory
-func AnalyzeAllProfiles(profileDir string) ([]*ProfileAnalysis, error) {
+func AnalyzeAllProfiles(ctx context.Context, profileDir string) ([]*ProfileAnalysis, error) {
 	var analyses []*ProfileAnalysis
 
 	err := filepath.Walk(profileDir, func(path string, info os.FileInfo, err error) error {
@@ -514,7 +520,7 @@ func AnalyzeAllProfiles(profileDir string) ([]*ProfileAnalysis, error) {
 			return nil
 		}
 
-		analysis, err := AnalyzeProfile(path, profileDir)
+		analysis, err := AnalyzeProfile(ctx, path, profileDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to analyze %s: %v\n", path, err)
 			return nil // Continue with other files

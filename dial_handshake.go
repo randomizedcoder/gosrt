@@ -67,11 +67,11 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 				}
 			}
 
-			cr, err := crypto.New(keylen)
-			if err != nil {
+			cr, cryptoErr := crypto.New(keylen)
+			if cryptoErr != nil {
 				dl.connChan <- connResponse{
 					conn: nil,
-					err:  fmt.Errorf("failed creating crypto context: %w", err),
+					err:  fmt.Errorf("failed creating crypto context: %w", cryptoErr),
 				}
 			}
 
@@ -116,10 +116,10 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 				cif.HasKM = true
 				cif.SRTKM = &packet.CIFKeyMaterialExtension{}
 
-				if err := dl.crypto.MarshalKM(cif.SRTKM, dl.config.Passphrase, packet.EvenKeyEncrypted); err != nil {
+				if kmErr := dl.crypto.MarshalKM(cif.SRTKM, dl.config.Passphrase, packet.EvenKeyEncrypted); kmErr != nil {
 					dl.connChan <- connResponse{
 						conn: nil,
-						err:  err,
+						err:  kmErr,
 					}
 
 					return
@@ -136,7 +136,16 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			cif.HasSID = false
 		}
 
-		p.MarshalCIF(cif)
+		if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+			dl.log("handshake:send:error", func() string {
+				return fmt.Sprintf("failed to marshal handshake CIF: %v", marshalErr)
+			})
+			dl.connChan <- connResponse{
+				conn: nil,
+				err:  fmt.Errorf("failed to marshal handshake CIF: %w", marshalErr),
+			}
+			return
+		}
 
 		dl.log("handshake:send:dump", func() string { return p.Dump() })
 		dl.log("handshake:send:cif", func() string { return cif.String() })
@@ -233,11 +242,11 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 		// Extract socket FD for io_uring (if enabled)
 		var socketFd int
 		if dl.config.IoUringEnabled {
-			var err error
-			socketFd, err = getUDPConnFD(dl.pc)
-			if err != nil {
+			var fdErr error
+			socketFd, fdErr = getUDPConnFD(dl.pc)
+			if fdErr != nil {
 				dl.log("connection:io_uring:error", func() string {
-					return fmt.Sprintf("failed to extract socket FD: %v", err)
+					return fmt.Sprintf("failed to extract socket FD: %v", fdErr)
 				})
 				// Continue without io_uring - will fall back to regular sends
 			}
@@ -267,13 +276,17 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			keyBaseEncryption:           packet.EvenKeyEncrypted,
 			onSend:                      dl.send,              // Fallback if io_uring disabled
 			sendFilter:                  dl.config.SendFilter, // Optional test filter
-			onShutdown:                  func(socketId uint32) { dl.Close() },
-			logger:                      dl.config.Logger,
-			socketFd:                    socketFd,
-			parentCtx:                   dl.ctx,
-			parentWg:                    &dl.connWg,
-			metrics:                     connMetrics,         // Pre-created - no race!
-			recvBufferPool:              GetRecvBufferPool(), // Phase 2: shared global pool
+			onShutdown: func(socketId uint32) {
+				if closeErr := dl.Close(); closeErr != nil {
+					dl.log("dial:shutdown", func() string { return fmt.Sprintf("close error: %v", closeErr) })
+				}
+			},
+			logger:         dl.config.Logger,
+			socketFd:       socketFd,
+			parentCtx:      dl.ctx,
+			parentWg:       &dl.connWg,
+			metrics:        connMetrics,         // Pre-created - no race!
+			recvBufferPool: GetRecvBufferPool(), // Phase 2: shared global pool
 		})
 
 		dl.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })
@@ -283,21 +296,21 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			err:  nil,
 		}
 	default:
-		var err error
+		var hsErr error
 		var reason string
 
 		if cif.HandshakeType.IsRejection() {
 			reason = fmt.Sprintf("connection rejected: %s", cif.HandshakeType.String())
-			err = fmt.Errorf("connection rejected: %s", cif.HandshakeType.String())
+			hsErr = fmt.Errorf("connection rejected: %s", cif.HandshakeType.String())
 		} else {
 			reason = fmt.Sprintf("unsupported handshake: %s", cif.HandshakeType.String())
-			err = fmt.Errorf("unsupported handshake: %s", cif.HandshakeType.String())
+			hsErr = fmt.Errorf("unsupported handshake: %s", cif.HandshakeType.String())
 		}
 
 		dl.log("connection:close:reason", func() string { return reason })
 		dl.connChan <- connResponse{
 			conn: nil,
-			err:  err,
+			err:  hsErr,
 		}
 	}
 }
@@ -329,7 +342,14 @@ func (dl *dialer) sendInduction() {
 
 	cif.PeerIP.FromNetAddr(dl.localAddr)
 
-	p.MarshalCIF(cif)
+	if err := p.MarshalCIF(cif); err != nil {
+		dl.log("handshake:send:error", func() string {
+			return fmt.Sprintf("failed to marshal induction CIF: %v", err)
+		})
+		// For induction, we can't send to connChan here as this is called during dial setup
+		// The connection will eventually timeout. Log and return.
+		return
+	}
 
 	dl.log("handshake:send:dump", func() string { return p.Dump() })
 	dl.log("handshake:send:cif", func() string { return cif.String() })

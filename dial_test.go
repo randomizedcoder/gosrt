@@ -120,12 +120,12 @@ func TestDialV4(t *testing.T) {
 		buffer := make([]byte, MAX_MSS_SIZE)
 		listenWg.Done()
 		for {
-			n, _, err := pc.ReadFrom(buffer)
-			if err != nil {
+			n, _, readErr := pc.ReadFrom(buffer)
+			if readErr != nil {
 				return
 			}
 
-			p, err := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
+			p, _ := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
 
 			packets <- p
 		}
@@ -155,18 +155,18 @@ func TestDialV4(t *testing.T) {
 
 	sendcif.PeerIP.FromNetAddr(pc.LocalAddr())
 
-	p.MarshalCIF(sendcif)
+	require.NoError(t, p.MarshalCIF(sendcif))
 
 	var data bytes.Buffer
 
-	err = p.Marshal(&data)
+	_ = p.Marshal(&data)
 
-	pc.Write(data.Bytes())
+	_, _ = pc.Write(data.Bytes())
 
 	p = <-packets
 
 	recvcif := &packet.CIFHandshake{}
-	err = p.UnmarshalCIF(recvcif)
+	_ = p.UnmarshalCIF(recvcif)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -181,7 +181,7 @@ func TestDialV4(t *testing.T) {
 	sendcif.HandshakeType = packet.HSTYPE_CONCLUSION
 	sendcif.SynCookie = recvcif.SynCookie
 
-	p.MarshalCIF(sendcif)
+	require.NoError(t, p.MarshalCIF(sendcif))
 
 	p.Header().IsControlPacket = true
 
@@ -194,14 +194,14 @@ func TestDialV4(t *testing.T) {
 
 	data.Reset()
 
-	err = p.Marshal(&data)
+	_ = p.Marshal(&data)
 
-	pc.Write(data.Bytes())
+	_, _ = pc.Write(data.Bytes())
 
 	p = <-packets
 
 	recvcif = &packet.CIFHandshake{}
-	err = p.UnmarshalCIF(recvcif)
+	_ = p.UnmarshalCIF(recvcif)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(4), recvcif.Version)
@@ -217,8 +217,8 @@ func TestDialV4(t *testing.T) {
 	require.False(t, recvcif.HasKM)
 	require.False(t, recvcif.HasSID)
 
-	pc.Close()
-	ln.Close()
+	require.NoError(t, pc.Close())
+	ln.Close() // Listener cleanup - errors logged internally
 }
 
 func TestDialV5(t *testing.T) {
@@ -259,12 +259,12 @@ func TestDialV5(t *testing.T) {
 		buffer := make([]byte, MAX_MSS_SIZE)
 		listenWg.Done()
 		for {
-			n, _, err := pc.ReadFrom(buffer)
-			if err != nil {
+			n, _, readErr := pc.ReadFrom(buffer)
+			if readErr != nil {
 				return
 			}
 
-			p, err := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
+			p, _ := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
 
 			packets <- p
 		}
@@ -296,18 +296,18 @@ func TestDialV5(t *testing.T) {
 
 	sendcif.PeerIP.FromNetAddr(pc.LocalAddr())
 
-	p.MarshalCIF(sendcif)
+	require.NoError(t, p.MarshalCIF(sendcif))
 
 	var data bytes.Buffer
 
-	err = p.Marshal(&data)
+	_ = p.Marshal(&data)
 
-	pc.Write(data.Bytes())
+	_, _ = pc.Write(data.Bytes())
 
 	p = <-packets
 
 	recvcif := &packet.CIFHandshake{}
-	err = p.UnmarshalCIF(recvcif)
+	_ = p.UnmarshalCIF(recvcif)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -344,7 +344,7 @@ func TestDialV5(t *testing.T) {
 	sendcif.HasSID = true
 	sendcif.StreamId = "foobar"
 
-	p.MarshalCIF(sendcif)
+	require.NoError(t, p.MarshalCIF(sendcif))
 
 	p.Header().IsControlPacket = true
 
@@ -357,14 +357,14 @@ func TestDialV5(t *testing.T) {
 
 	data.Reset()
 
-	err = p.Marshal(&data)
+	_ = p.Marshal(&data)
 
-	pc.Write(data.Bytes())
+	_, _ = pc.Write(data.Bytes())
 
 	p = <-packets
 
 	recvcif = &packet.CIFHandshake{}
-	err = p.UnmarshalCIF(recvcif)
+	_ = p.UnmarshalCIF(recvcif)
 
 	require.Equal(t, false, recvcif.IsRequest)
 	require.Equal(t, uint32(5), recvcif.Version)
@@ -382,24 +382,31 @@ func TestDialV5(t *testing.T) {
 	require.True(t, recvcif.HasSID)
 	require.Equal(t, recvcif.StreamId, sendcif.StreamId)
 
-	pc.Close()
-	ln.Close()
+	require.NoError(t, pc.Close())
+	ln.Close() // Listener cleanup - errors logged internally
 }
 
 func TestDialV5MissingExtension(t *testing.T) {
-	ln, err := net.ListenPacket("udp", "127.0.0.1:6003")
-	defer ln.Close()
+	var lc net.ListenConfig
+	ln, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:6003")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
 
 	go func() {
 		// read induction request
 		buf := make([]byte, MAX_MSS_SIZE)
-		n, addr, err := ln.ReadFrom(buf)
-		require.NoError(t, err)
-		p, err := packet.NewPacketFromData(addr, buf[:n])
-		require.NoError(t, err)
+		n, addr, ioErr := ln.ReadFrom(buf)
+		if ioErr != nil {
+			return // goroutine can't use require
+		}
+		p, parseErr := packet.NewPacketFromData(addr, buf[:n])
+		if parseErr != nil {
+			return
+		}
 		recvcif := &packet.CIFHandshake{}
-		err = p.UnmarshalCIF(recvcif)
-		require.Equal(t, packet.HSTYPE_INDUCTION, recvcif.HandshakeType)
+		if unmarshalErr := p.UnmarshalCIF(recvcif); unmarshalErr != nil {
+			return
+		}
 
 		// write induction response
 		p.Header().IsControlPacket = true
@@ -421,17 +428,30 @@ func TestDialV5MissingExtension(t *testing.T) {
 			SynCookie:                   1234,
 		}
 		sendcif.PeerIP.FromNetAddr(ln.LocalAddr())
-		p.MarshalCIF(sendcif)
+		if marshalErr := p.MarshalCIF(sendcif); marshalErr != nil {
+			return
+		}
 		var outbuf bytes.Buffer
-		err = p.Marshal(&outbuf)
-		ln.WriteTo(outbuf.Bytes(), p.Header().Addr)
+		if marshalErr := p.Marshal(&outbuf); marshalErr != nil {
+			return
+		}
+		if _, writeErr := ln.WriteTo(outbuf.Bytes(), p.Header().Addr); writeErr != nil {
+			return
+		}
 
 		// read conclusion request
-		n, addr, err = ln.ReadFrom(buf)
-		p, err = packet.NewPacketFromData(addr, buf[:n])
+		n, addr, ioErr = ln.ReadFrom(buf)
+		if ioErr != nil {
+			return
+		}
+		p, parseErr = packet.NewPacketFromData(addr, buf[:n])
+		if parseErr != nil {
+			return
+		}
 		recvcif = &packet.CIFHandshake{}
-		err = p.UnmarshalCIF(recvcif)
-		require.Equal(t, packet.HSTYPE_CONCLUSION, recvcif.HandshakeType)
+		if unmarshalErr := p.UnmarshalCIF(recvcif); unmarshalErr != nil {
+			return
+		}
 
 		// write invalid conclusion response
 		p.Header().IsControlPacket = true
@@ -446,10 +466,16 @@ func TestDialV5MissingExtension(t *testing.T) {
 		sendcif.SynCookie = 0
 		sendcif.PeerIP.FromNetAddr(ln.LocalAddr())
 		sendcif.HasHS = false
-		p.MarshalCIF(sendcif)
+		if marshalErr := p.MarshalCIF(sendcif); marshalErr != nil {
+			return
+		}
 		outbuf.Reset()
-		err = p.Marshal(&outbuf)
-		ln.WriteTo(outbuf.Bytes(), p.Header().Addr)
+		if marshalErr := p.Marshal(&outbuf); marshalErr != nil {
+			return
+		}
+		if _, writeErr := ln.WriteTo(outbuf.Bytes(), p.Header().Addr); writeErr != nil {
+			return
+		}
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())

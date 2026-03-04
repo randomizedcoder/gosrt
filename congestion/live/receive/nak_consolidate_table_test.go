@@ -176,7 +176,8 @@ func runConsolidateTableTest(t *testing.T, tc ConsolidateTestCase) {
 	t.Logf("  MergeGap: %d, Ranges: %d", tc.NakMergeGap, len(actualRanges))
 
 	// Verify based on expectation type
-	if len(tc.ExpectedRanges) > 0 {
+	switch {
+	case len(tc.ExpectedRanges) > 0:
 		// Explicit range verification
 		if len(actualRanges) != len(tc.ExpectedRanges) {
 			t.Errorf("Expected %d ranges, got %d", len(tc.ExpectedRanges), len(actualRanges))
@@ -189,12 +190,12 @@ func runConsolidateTableTest(t *testing.T, tc ConsolidateTestCase) {
 					i, exp.Start, exp.End, actualRanges[i].Start, actualRanges[i].End)
 			}
 		}
-	} else if tc.ExpectedCount > 0 {
+	case tc.ExpectedCount > 0:
 		// Count verification (for large-scale tests)
 		if len(actualRanges) != tc.ExpectedCount {
 			t.Errorf("Expected %d ranges, got %d", tc.ExpectedCount, len(actualRanges))
 		}
-	} else if tc.AllSingles {
+	case tc.AllSingles:
 		// All singles verification
 		for i, r := range actualRanges {
 			if r.IsRange() {
@@ -204,7 +205,7 @@ func runConsolidateTableTest(t *testing.T, tc ConsolidateTestCase) {
 		if len(actualRanges) != len(seqs) {
 			t.Errorf("Expected %d singles, got %d ranges", len(seqs), len(actualRanges))
 		}
-	} else if tc.SingleMerge {
+	case tc.SingleMerge:
 		// Single merged range verification
 		if len(actualRanges) != 1 {
 			t.Errorf("Expected 1 merged range, got %d", len(actualRanges))
@@ -664,7 +665,7 @@ func TestEntriesToNakList_Table(t *testing.T) {
 			list := r.entriesToNakList(tc.Entries)
 
 			if tc.ExpectedPairs == 0 {
-				if list != nil && len(list) > 0 {
+				if len(list) > 0 {
 					t.Errorf("Expected nil/empty, got %d entries", len(list))
 				}
 				t.Logf("  ✓ %s completed (empty)", tc.Name)

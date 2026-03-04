@@ -12,15 +12,15 @@ import (
 type ProfileType string
 
 const (
-	ProfileCPU          ProfileType = "cpu"
-	ProfileMem          ProfileType = "mem"
-	ProfileMutex        ProfileType = "mutex"
-	ProfileBlock        ProfileType = "block"
-	ProfileHeap         ProfileType = "heap"
-	ProfileAllocs       ProfileType = "allocs"
-	ProfileTrace        ProfileType = "trace"
-	ProfileThread       ProfileType = "thread"       // OS thread creation (threadcreate)
-	ProfileGoroutine    ProfileType = "goroutine"    // All current goroutines
+	ProfileCPU       ProfileType = "cpu"
+	ProfileMem       ProfileType = "mem"
+	ProfileMutex     ProfileType = "mutex"
+	ProfileBlock     ProfileType = "block"
+	ProfileHeap      ProfileType = "heap"
+	ProfileAllocs    ProfileType = "allocs"
+	ProfileTrace     ProfileType = "trace"
+	ProfileThread    ProfileType = "thread"    // OS thread creation (threadcreate)
+	ProfileGoroutine ProfileType = "goroutine" // All current goroutines
 )
 
 // AllProfiles returns all profile types (excluding trace due to size)
@@ -274,8 +274,8 @@ func (c *ProfileConfig) PrintProfileFileLocations() {
 		fmt.Printf("║  Files (%d total):                                                                             ║\n", len(files))
 		for _, f := range files {
 			// Show relative path from output dir for cleaner display
-			relPath, err := filepath.Rel(c.OutputDir, f)
-			if err != nil {
+			relPath, relErr := filepath.Rel(c.OutputDir, f)
+			if relErr != nil {
 				relPath = f
 			}
 			fmt.Printf("║    %s\n", relPath)
@@ -333,8 +333,8 @@ func (c *ProfileConfig) GetProfileComponents() ([]ProfileComponent, error) {
 		}
 
 		// Find profile files
-		files, err := os.ReadDir(compDir)
-		if err != nil {
+		files, readErr := os.ReadDir(compDir)
+		if readErr != nil {
 			continue
 		}
 

@@ -167,7 +167,11 @@ func (at *AtomicTime) Load() time.Time {
 	if val == nil {
 		return time.Time{}
 	}
-	return val.(time.Time)
+	t, ok := val.(time.Time)
+	if !ok {
+		return time.Time{}
+	}
+	return t
 }
 
 // Store atomically stores the time.Time value.

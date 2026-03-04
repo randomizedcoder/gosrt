@@ -444,23 +444,25 @@ func PrintDetailedComparison(comparisons []PipelineComparison) {
 			for _, m := range cat.Metrics {
 				// Format the difference
 				var diffStr string
-				if m.Diff == 0 {
+				switch {
+				case m.Diff == 0:
 					diffStr = "="
-				} else if m.BaselineVal == 0 {
+				case m.BaselineVal == 0:
 					diffStr = "NEW"
-				} else if m.Diff > 0 {
+				case m.Diff > 0:
 					diffStr = fmt.Sprintf("+%.1f%%", m.DiffPercent)
-				} else {
+				default:
 					diffStr = fmt.Sprintf("%.1f%%", m.DiffPercent)
 				}
 
 				// Highlight significant differences
 				var prefix string
-				if m.Significant && m.Diff > 0 {
+				switch {
+				case m.Significant && m.Diff > 0:
 					prefix = "⚠️"
-				} else if m.Significant && m.Diff < 0 {
+				case m.Significant && m.Diff < 0:
 					prefix = "✓"
-				} else {
+				default:
 					prefix = "  "
 				}
 

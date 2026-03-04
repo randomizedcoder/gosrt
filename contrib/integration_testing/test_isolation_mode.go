@@ -61,22 +61,24 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 
 	// Set up network namespaces
 	fmt.Println("Setting up network namespaces...")
-	if err := nc.Setup(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error setting up network: %v\n", err)
+	if setupErr := nc.Setup(ctx); setupErr != nil {
+		fmt.Fprintf(os.Stderr, "Error setting up network: %v\n", setupErr)
 		return false
 	}
 
 	// Set up parallel IPs (.3 addresses for test pipeline)
-	if err := nc.SetupParallelIPs(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error setting up parallel IPs: %v\n", err)
+	if ipErr := nc.SetupParallelIPs(ctx); ipErr != nil {
+		fmt.Fprintf(os.Stderr, "Error setting up parallel IPs: %v\n", ipErr)
 		return false
 	}
 
 	defer func() {
 		fmt.Println("\nCleaning up network namespaces...")
-		_ = nc.CleanupParallelIPs(ctx)
-		if err := nc.Cleanup(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", err)
+		if parallelErr := nc.CleanupParallelIPs(ctx); parallelErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: parallel IP cleanup failed: %v\n", parallelErr)
+		}
+		if cleanupErr := nc.Cleanup(ctx); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", cleanupErr)
 		}
 	}()
 
@@ -84,8 +86,8 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 	tcpdumpConfig := GetTcpdumpConfigFromEnv()
 	if tcpdumpConfig.HasAnyCapture() {
 		fmt.Println("Starting packet captures (TCPDUMP_* enabled)...")
-		if err := nc.StartTcpdumpFromConfig(ctx, tcpdumpConfig); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: tcpdump start failed: %v\n", err)
+		if tcpdumpErr := nc.StartTcpdumpFromConfig(ctx, tcpdumpConfig); tcpdumpErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: tcpdump start failed: %v\n", tcpdumpErr)
 		} else {
 			if tcpdumpConfig.PublisherFile != "" {
 				fmt.Printf("  Publisher (CG): %s\n", tcpdumpConfig.PublisherFile)
@@ -123,22 +125,22 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 		fmt.Printf("Enabling %s profiling for all components\n\n", profileType)
 
 		// Add profiling to control server
-		if controlServerProfileArgs, err := profileConfig.GetProfileArgs("control_server", profileType); err == nil && controlServerProfileArgs != nil {
+		if controlServerProfileArgs, profileErr := profileConfig.GetProfileArgs("control_server", profileType); profileErr == nil && controlServerProfileArgs != nil {
 			controlServerFlags = append(controlServerFlags, controlServerProfileArgs...)
 		}
 
 		// Add profiling to test server
-		if testServerProfileArgs, err := profileConfig.GetProfileArgs("test_server", profileType); err == nil && testServerProfileArgs != nil {
+		if testServerProfileArgs, profileErr := profileConfig.GetProfileArgs("test_server", profileType); profileErr == nil && testServerProfileArgs != nil {
 			testServerFlags = append(testServerFlags, testServerProfileArgs...)
 		}
 
 		// Add profiling to control CG
-		if controlCGProfileArgs, err := profileConfig.GetProfileArgs("control_cg", profileType); err == nil && controlCGProfileArgs != nil {
+		if controlCGProfileArgs, profileErr := profileConfig.GetProfileArgs("control_cg", profileType); profileErr == nil && controlCGProfileArgs != nil {
 			controlCGFlags = append(controlCGFlags, controlCGProfileArgs...)
 		}
 
 		// Add profiling to test CG
-		if testCGProfileArgs, err := profileConfig.GetProfileArgs("test_cg", profileType); err == nil && testCGProfileArgs != nil {
+		if testCGProfileArgs, profileErr := profileConfig.GetProfileArgs("test_cg", profileType); profileErr == nil && testCGProfileArgs != nil {
 			testCGFlags = append(testCGFlags, testCGProfileArgs...)
 		}
 	}
@@ -164,8 +166,8 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 	}
 
 	// Build binaries if needed
-	if err := ensureBinaries(baseDir, serverBin, clientGenBin, ""); err != nil {
-		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", err)
+	if binErr := ensureBinaries(ctx, baseDir, serverBin, clientGenBin, ""); binErr != nil {
+		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", binErr)
 		return false
 	}
 
@@ -215,8 +217,8 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 
 	// Collect initial metrics
 	fmt.Println("Collecting initial metrics...")
-	controlMetrics.CollectAllMetrics("startup")
-	testMetrics.CollectAllMetrics("startup")
+	controlMetrics.CollectAllMetrics(ctx, "startup")
+	testMetrics.CollectAllMetrics(ctx, "startup")
 
 	// Run for test duration, optionally with periodic metrics collection
 	fmt.Printf("Running for %v...\n", config.TestDuration)
@@ -233,8 +235,8 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 			select {
 			case <-statsTicker.C:
 				label := fmt.Sprintf("periodic-%d", snapshotCount)
-				controlMetrics.CollectAllMetrics(label)
-				testMetrics.CollectAllMetrics(label)
+				controlMetrics.CollectAllMetrics(ctx, label)
+				testMetrics.CollectAllMetrics(ctx, label)
 				snapshotCount++
 
 				// Print verbose NAK debug metrics for test pipeline
@@ -260,8 +262,8 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 
 	// Collect final metrics
 	fmt.Println("\nCollecting final metrics...")
-	controlMetrics.CollectAllMetrics("final")
-	testMetrics.CollectAllMetrics("final")
+	controlMetrics.CollectAllMetrics(ctx, "final")
+	testMetrics.CollectAllMetrics(ctx, "final")
 
 	// Print raw Prometheus metrics if PRINT_PROM=true (BEFORE shutdown!)
 	// This must be done before processes exit and remove their UDS sockets
@@ -269,11 +271,19 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 
 	// Shutdown
 	fmt.Println("\nShutting down...")
-	_ = signalProcess(controlCG, syscall.SIGINT)
-	_ = signalProcess(testCG, syscall.SIGINT)
+	if signalErr := signalProcess(controlCG, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal control client-generator: %v\n", signalErr)
+	}
+	if signalErr := signalProcess(testCG, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal test client-generator: %v\n", signalErr)
+	}
 	time.Sleep(500 * time.Millisecond)
-	_ = signalProcess(controlServer, syscall.SIGINT)
-	_ = signalProcess(testServer, syscall.SIGINT)
+	if signalErr := signalProcess(controlServer, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal control server: %v\n", signalErr)
+	}
+	if signalErr := signalProcess(testServer, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal test server: %v\n", signalErr)
+	}
 
 	// Wait for processes to exit
 	waitForProcessExit(controlCG, 3*time.Second)
@@ -294,10 +304,11 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 		fmt.Println("\n=== Analyzing Profiles ===")
 
 		// Analyze all collected profiles
-		analyses, err := AnalyzeAllProfiles(profileConfig.OutputDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to analyze profiles: %v\n", err)
-		} else if len(analyses) > 0 {
+		analyses, analyzeErr := AnalyzeAllProfiles(ctx, profileConfig.OutputDir)
+		switch {
+		case analyzeErr != nil:
+			fmt.Fprintf(os.Stderr, "Warning: failed to analyze profiles: %v\n", analyzeErr)
+		case len(analyses) > 0:
 			// Print summary
 			PrintAnalysisSummary(analyses)
 
@@ -338,13 +349,13 @@ func runIsolationModeTest(config IsolationTestConfig) (passed bool) {
 			}
 			report.CalculateOverallSummary()
 
-			if err := GenerateHTMLReport(report); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to generate report: %v\n", err)
+			if reportErr := GenerateHTMLReport(report); reportErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to generate report: %v\n", reportErr)
 			}
 
 			// Print summary of where profile files are located
 			profileConfig.PrintProfileFileLocations()
-		} else {
+		default:
 			fmt.Println("No profile files found to analyze")
 		}
 	}
@@ -470,14 +481,15 @@ func printIsolationComparison(testName string, controlServer, testServer, contro
 	controlGaps := getMetricSum(controlServer, "gosrt_connection_congestion_packets_lost_total", "direction=\"recv\"")
 	testGaps := getMetricSum(testServer, "gosrt_connection_congestion_packets_lost_total", "direction=\"recv\"")
 
-	if controlGaps == 0 && testGaps == 0 {
+	switch {
+	case controlGaps == 0 && testGaps == 0:
 		fmt.Println("\n✓ GOOD: Both pipelines show 0 gaps (clean network)")
-	} else if testGaps > controlGaps*1.1 { // Test has >10% more gaps
+	case testGaps > controlGaps*1.1: // Test has >10% more gaps
 		fmt.Printf("\n⚠ FINDING: Test pipeline has more gaps (%.0f vs %.0f) - this variable may be the cause!\n",
 			testGaps, controlGaps)
-	} else if controlGaps > testGaps*1.1 { // Control has >10% more gaps
+	case controlGaps > testGaps*1.1: // Control has >10% more gaps
 		fmt.Printf("\n✓ Test pipeline has FEWER gaps (%.0f vs %.0f)\n", testGaps, controlGaps)
-	} else {
+	default:
 		fmt.Println("\n= Both pipelines show similar gap counts")
 	}
 }
@@ -535,11 +547,12 @@ func testIsolationModeAllConfigs() {
 	failed := 0
 	var failedConfigs []string
 
-	for i, config := range IsolationTestConfigs {
+	for i := range IsolationTestConfigs {
+		config := &IsolationTestConfigs[i]
 		fmt.Printf("\n[%d/%d] Running: %s\n", i+1, len(IsolationTestConfigs), config.Name)
 		fmt.Println(strings.Repeat("=", 60))
 
-		result := runIsolationModeTest(config)
+		result := runIsolationModeTest(*config)
 		if result {
 			fmt.Printf("✓ Test %d (%s) COMPLETED\n", i, config.Name)
 			passed++
@@ -581,21 +594,32 @@ func printPrometheusMetrics(label string, udsPath string) {
 	// Create HTTP client using Unix socket
 	client := &http.Client{
 		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", udsPath)
+			DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(dialCtx, "unix", udsPath)
 			},
 		},
 		Timeout: 5 * time.Second,
 	}
 
-	// Fetch metrics
-	resp, err := client.Get("http://localhost/metrics")
+	// Fetch metrics using context-aware request
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost/metrics", nil)
+	if err != nil {
+		fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
+		fmt.Printf("(error creating request: %v)\n", err)
+		return
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
 		fmt.Printf("(error fetching metrics: %v)\n", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			fmt.Printf("Warning: error closing response body: %v\n", cerr)
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

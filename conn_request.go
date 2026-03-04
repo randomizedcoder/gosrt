@@ -107,15 +107,16 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 	// Create a copy of the configuration for the connection
 	config := ln.config
 
-	if cif.HandshakeType == packet.HSTYPE_INDUCTION {
+	switch cif.HandshakeType {
+	case packet.HSTYPE_INDUCTION:
 		// cif
 		cif.Version = 5
 		cif.EncryptionField = 0 // Don't advertise any specific encryption method
 		cif.ExtensionField = 0x4A17
-		//cif.initialPacketSequenceNumber = newCircular(0, MAX_SEQUENCENUMBER)
-		//cif.maxTransmissionUnitSize = 0
-		//cif.maxFlowWindowSize = 0
-		//cif.SRTSocketId = 0
+		// cif.initialPacketSequenceNumber = newCircular(0, MAX_SEQUENCENUMBER)
+		// cif.maxTransmissionUnitSize = 0
+		// cif.maxFlowWindowSize = 0
+		// cif.SRTSocketId = 0
 		if ln.syncookie == nil {
 			ln.log("handshake:recv:error", func() string { return "syncookie is nil" })
 			return nil
@@ -126,13 +127,18 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		}
 		cif.SynCookie = ln.syncookie.Get(header.Addr.String())
 
-		p.MarshalCIF(cif)
+		if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+			ln.log("handshake:send:error", func() string {
+				return fmt.Sprintf("failed to marshal induction CIF: %v", marshalErr)
+			})
+			return nil
+		}
 
 		ln.log("handshake:send:dump", func() string { return p.Dump() })
 		ln.log("handshake:send:cif", func() string { return cif.String() })
 
 		ln.send(p)
-	} else if cif.HandshakeType == packet.HSTYPE_CONCLUSION {
+	case packet.HSTYPE_CONCLUSION:
 		// Verify the SYN cookie
 		if ln.syncookie == nil {
 			ln.log("handshake:recv:error", func() string { return "syncookie is nil" })
@@ -145,7 +151,12 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		if !ln.syncookie.Verify(cif.SynCookie, header.Addr.String()) {
 			cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 			ln.log("handshake:recv:error", func() string { return "invalid SYN cookie" })
-			p.MarshalCIF(cif)
+			if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+				ln.log("handshake:send:error", func() string {
+					return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+				})
+				return nil
+			}
 			ln.log("handshake:send:dump", func() string { return p.Dump() })
 			ln.log("handshake:send:cif", func() string { return cif.String() })
 			ln.send(p)
@@ -157,7 +168,12 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		if cif.MaxTransmissionUnitSize > MAX_MSS_SIZE {
 			cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 			ln.log("handshake:recv:error", func() string { return fmt.Sprintf("MTU is too big (%d bytes)", cif.MaxTransmissionUnitSize) })
-			p.MarshalCIF(cif)
+			if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+				ln.log("handshake:send:error", func() string {
+					return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+				})
+				return nil
+			}
 			ln.log("handshake:send:dump", func() string { return p.Dump() })
 			ln.log("handshake:send:cif", func() string { return cif.String() })
 			ln.send(p)
@@ -173,7 +189,12 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 			if config.PayloadSize < MIN_PAYLOAD_SIZE {
 				cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 				ln.log("handshake:recv:error", func() string { return fmt.Sprintf("payload size is too small (%d bytes)", config.PayloadSize) })
-				p.MarshalCIF(cif)
+				if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+					ln.log("handshake:send:error", func() string {
+						return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+					})
+					return nil
+				}
 				ln.log("handshake:send:dump", func() string { return p.Dump() })
 				ln.log("handshake:send:cif", func() string { return cif.String() })
 				ln.send(p)
@@ -181,23 +202,34 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		}
 
 		// We only support HSv4 and HSv5
-		if cif.Version == 4 {
+		switch cif.Version {
+		case 4:
 			// Check if the type (encryption field + extension field) has the value 2
 			if cif.EncryptionField != 0 || cif.ExtensionField != 2 {
 				cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 				ln.log("handshake:recv:error", func() string { return "invalid type, expecting a value of 2 (UDT_DGRAM)" })
-				p.MarshalCIF(cif)
+				if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+					ln.log("handshake:send:error", func() string {
+						return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+					})
+					return nil
+				}
 				ln.log("handshake:send:dump", func() string { return p.Dump() })
 				ln.log("handshake:send:cif", func() string { return cif.String() })
 				ln.send(p)
 
 				return nil
 			}
-		} else if cif.Version == 5 {
+		case 5:
 			if cif.SRTHS == nil {
 				cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 				ln.log("handshake:recv:error", func() string { return "missing handshake extension" })
-				p.MarshalCIF(cif)
+				if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+					ln.log("handshake:send:error", func() string {
+						return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+					})
+					return nil
+				}
 				ln.log("handshake:send:dump", func() string { return p.Dump() })
 				ln.log("handshake:send:cif", func() string { return cif.String() })
 				ln.send(p)
@@ -211,7 +243,12 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 				ln.log("handshake:recv:error", func() string {
 					return fmt.Sprintf("peer version insufficient (%#06x), expecting at least %#06x", cif.SRTHS.SRTVersion, config.MinVersion)
 				})
-				p.MarshalCIF(cif)
+				if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+					ln.log("handshake:send:error", func() string {
+						return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+					})
+					return nil
+				}
 				ln.log("handshake:send:dump", func() string { return p.Dump() })
 				ln.log("handshake:send:cif", func() string { return cif.String() })
 				ln.send(p)
@@ -223,7 +260,12 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 			if !cif.SRTHS.SRTFlags.TSBPDSND || !cif.SRTHS.SRTFlags.TSBPDRCV || !cif.SRTHS.SRTFlags.TLPKTDROP || !cif.SRTHS.SRTFlags.PERIODICNAK || !cif.SRTHS.SRTFlags.REXMITFLG {
 				cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 				ln.log("handshake:recv:error", func() string { return "not all required flags are set" })
-				p.MarshalCIF(cif)
+				if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+					ln.log("handshake:send:error", func() string {
+						return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+					})
+					return nil
+				}
 				ln.log("handshake:send:dump", func() string { return p.Dump() })
 				ln.log("handshake:send:cif", func() string { return cif.String() })
 				ln.send(p)
@@ -235,7 +277,12 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 			if cif.SRTHS.SRTFlags.STREAM {
 				cif.HandshakeType = packet.HandshakeType(REJ_MESSAGEAPI)
 				ln.log("handshake:recv:error", func() string { return "only live streaming is supported" })
-				p.MarshalCIF(cif)
+				if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+					ln.log("handshake:send:error", func() string {
+						return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+					})
+					return nil
+				}
 				ln.log("handshake:send:dump", func() string { return p.Dump() })
 				ln.log("handshake:send:cif", func() string { return cif.String() })
 				ln.send(p)
@@ -247,17 +294,27 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 			if cif.HasCongestionCtl && cif.CongestionCtl != "live" {
 				cif.HandshakeType = packet.HandshakeType(REJ_CONGESTION)
 				ln.log("handshake:recv:error", func() string { return "only live congestion control is supported" })
-				p.MarshalCIF(cif)
+				if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+					ln.log("handshake:send:error", func() string {
+						return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+					})
+					return nil
+				}
 				ln.log("handshake:send:dump", func() string { return p.Dump() })
 				ln.log("handshake:send:cif", func() string { return cif.String() })
 				ln.send(p)
 
 				return nil
 			}
-		} else {
+		default:
 			cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
 			ln.log("handshake:recv:error", func() string { return fmt.Sprintf("only HSv4 and HSv5 are supported (got HSv%d)", cif.Version) })
-			p.MarshalCIF(cif)
+			if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+				ln.log("handshake:send:error", func() string {
+					return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+				})
+				return nil
+			}
 			ln.log("handshake:send:dump", func() string { return p.Dump() })
 			ln.log("handshake:send:cif", func() string { return cif.String() })
 			ln.send(p)
@@ -276,11 +333,16 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		}
 
 		if cif.SRTKM != nil {
-			cr, err := crypto.New(int(cif.SRTKM.KLen))
-			if err != nil {
+			cr, cryptoErr := crypto.New(int(cif.SRTKM.KLen))
+			if cryptoErr != nil {
 				cif.HandshakeType = packet.HandshakeType(REJ_ROGUE)
-				ln.log("handshake:recv:error", func() string { return fmt.Sprintf("crypto: %s", err) })
-				p.MarshalCIF(cif)
+				ln.log("handshake:recv:error", func() string { return fmt.Sprintf("crypto: %s", cryptoErr) })
+				if marshalErr := p.MarshalCIF(cif); marshalErr != nil {
+					ln.log("handshake:send:error", func() string {
+						return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+					})
+					return nil
+				}
 				ln.log("handshake:send:dump", func() string { return p.Dump() })
 				ln.log("handshake:send:cif", func() string { return cif.String() })
 				ln.send(p)
@@ -309,8 +371,8 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		// Note: generateSocketId() uses sync.Map which handles locking internally
 		// We still need lock for connReqs map operations
 		ln.lock.Lock()
-		socketId, err := req.generateSocketId()
-		if err == nil {
+		socketId, genErr := req.generateSocketId()
+		if genErr == nil {
 			// sync.Map handles locking internally
 			ln.conns.Store(socketId, nil)
 			req.socketId = socketId
@@ -318,12 +380,12 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 		ln.lock.Unlock()
 
 		// We couldn't create a socketId: reject silently
-		if err != nil {
+		if genErr != nil {
 			return nil
 		}
 
 		return req
-	} else {
+	default:
 		if cif.HandshakeType.IsRejection() {
 			ln.log("handshake:recv:error", func() string { return fmt.Sprintf("connection rejected: %s", cif.HandshakeType.String()) })
 		} else {
@@ -335,7 +397,10 @@ func newConnRequest(ln *listener, p packet.Packet) *connRequest {
 }
 
 func (req *connRequest) RemoteAddr() net.Addr {
-	addr, _ := net.ResolveUDPAddr("udp", req.addr.String())
+	addr, err := net.ResolveUDPAddr("udp", req.addr.String())
+	if err != nil {
+		return req.addr // Fall back to original address if parsing fails
+	}
 	return addr
 }
 
@@ -397,10 +462,16 @@ func (req *connRequest) Reject(reason RejectionReason) {
 	p.Header().Timestamp = uint32(time.Since(req.ln.start).Microseconds())
 	p.Header().DestinationSocketId = req.peerSocketId
 	req.handshake.HandshakeType = packet.HandshakeType(reason)
-	p.MarshalCIF(req.handshake)
-	req.ln.log("handshake:send:dump", func() string { return p.Dump() })
-	req.ln.log("handshake:send:cif", func() string { return req.handshake.String() })
-	req.ln.send(p)
+	if marshalErr := p.MarshalCIF(req.handshake); marshalErr != nil {
+		req.ln.log("handshake:send:error", func() string {
+			return fmt.Sprintf("failed to marshal rejection CIF: %v", marshalErr)
+		})
+		// Still clean up even if marshal failed
+	} else {
+		req.ln.log("handshake:send:dump", func() string { return p.Dump() })
+		req.ln.log("handshake:send:cif", func() string { return req.handshake.String() })
+		req.ln.send(p)
+	}
 
 	delete(req.ln.connReqs, req.peerSocketId)
 	// sync.Map handles locking internally
@@ -539,7 +610,16 @@ func (req *connRequest) Accept() (Conn, error) {
 	p.Header().TypeSpecific = 0
 	p.Header().Timestamp = uint32(time.Since(req.start).Microseconds())
 	p.Header().DestinationSocketId = req.peerSocketId
-	p.MarshalCIF(req.handshake)
+	if marshalErr := p.MarshalCIF(req.handshake); marshalErr != nil {
+		req.ln.log("handshake:send:error", func() string {
+			return fmt.Sprintf("failed to marshal accept CIF: %v", marshalErr)
+		})
+		// Clean up and return error - connection cannot complete handshake
+		req.ln.conns.Delete(req.socketId)
+		delete(req.ln.connReqs, req.peerSocketId)
+		req.ln.connWg.Done() // Decrement waitgroup since connection won't start
+		return nil, fmt.Errorf("failed to marshal handshake CIF: %w", marshalErr)
+	}
 	req.ln.log("handshake:send:dump", func() string { return p.Dump() })
 	req.ln.log("handshake:send:cif", func() string { return req.handshake.String() })
 	req.ln.send(p)

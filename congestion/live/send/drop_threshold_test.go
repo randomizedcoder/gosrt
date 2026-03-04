@@ -19,7 +19,7 @@ import (
 func TestCalculateDropThreshold_NormalCase(t *testing.T) {
 	// Normal case: nowUs > dropThreshold
 	// At 5 seconds into connection, with 1 second drop threshold
-	nowUs := uint64(5_000_000)       // 5 seconds in µs
+	nowUs := uint64(5_000_000)         // 5 seconds in µs
 	dropThreshold := uint64(1_000_000) // 1 second in µs
 
 	threshold, shouldDrop := calculateDropThreshold(nowUs, dropThreshold)
@@ -57,7 +57,7 @@ func TestCalculateDropThreshold_Underflow_StartupScenario(t *testing.T) {
 	// This was the root cause of 20% intermittent failure in 20M tests.
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	nowUs := uint64(100_000)          // 100ms into connection
+	nowUs := uint64(100_000)           // 100ms into connection
 	dropThreshold := uint64(1_000_000) // 1 second
 
 	threshold, shouldDrop := calculateDropThreshold(nowUs, dropThreshold)
@@ -100,7 +100,7 @@ func TestCalculateDropThreshold_ExactBoundary(t *testing.T) {
 
 func TestCalculateDropThreshold_JustAfterBoundary(t *testing.T) {
 	// Edge case: nowUs is just 1µs after dropThreshold
-	nowUs := uint64(1_000_001)        // 1 second + 1µs
+	nowUs := uint64(1_000_001)         // 1 second + 1µs
 	dropThreshold := uint64(1_000_000) // 1 second
 
 	threshold, shouldDrop := calculateDropThreshold(nowUs, dropThreshold)
@@ -117,7 +117,7 @@ func TestCalculateDropThreshold_JustAfterBoundary(t *testing.T) {
 func TestCalculateDropThreshold_JustBeforeBoundary(t *testing.T) {
 	// Edge case: nowUs is just 1µs before dropThreshold
 	// This should NOT cause underflow
-	nowUs := uint64(999_999)          // 1 second - 1µs
+	nowUs := uint64(999_999)           // 1 second - 1µs
 	dropThreshold := uint64(1_000_000) // 1 second
 
 	threshold, shouldDrop := calculateDropThreshold(nowUs, dropThreshold)
@@ -154,7 +154,7 @@ func TestCalculateDropThreshold_LargeValues(t *testing.T) {
 	// Test with large values (simulating long-running connection)
 	// At 24 hours into connection
 	nowUs := uint64(24 * 60 * 60 * 1_000_000) // 24 hours in µs
-	dropThreshold := uint64(1_000_000)         // 1 second
+	dropThreshold := uint64(1_000_000)        // 1 second
 
 	threshold, shouldDrop := calculateDropThreshold(nowUs, dropThreshold)
 
@@ -267,6 +267,3 @@ func BenchmarkCalculateDropThreshold(b *testing.B) {
 		_, _ = calculateDropThreshold(nowUs, dropThreshold)
 	}
 }
-
-
-

@@ -199,7 +199,10 @@ func (r *receiver) drainPacketRing(now uint64) {
 			break
 		}
 
-		p := item.(packet.Packet)
+		p, ok := item.(packet.Packet)
+		if !ok {
+			continue // Skip invalid item
+		}
 		h := p.Header()
 		seq := h.PacketSequenceNumber
 
@@ -209,8 +212,8 @@ func (r *receiver) drainPacketRing(now uint64) {
 		// Too old: already past contiguousPoint - Phase 4 change
 		if circular.SeqLessOrEqual(seq.Val(), r.contiguousPoint.Load()) {
 			m.CongestionRecvPktBelated.Add(1)
-			m.CongestionRecvByteBelated.Add(uint64(p.Len()))
-			metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, uint64(p.Len()))
+			m.CongestionRecvByteBelated.Add(p.Len())
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, p.Len())
 			r.releasePacketFully(p)
 			continue
 		}
@@ -311,7 +314,10 @@ func (r *receiver) drainRingByDelta() uint64 {
 		processedCount++
 
 		// Process the packet (same logic as drainPacketRing)
-		p := item.(packet.Packet)
+		p, pktOk := item.(packet.Packet)
+		if !pktOk {
+			continue // Skip invalid item
+		}
 		h := p.Header()
 		seq := h.PacketSequenceNumber
 		pktLen := p.Len()
@@ -326,13 +332,13 @@ func (r *receiver) drainRingByDelta() uint64 {
 		}
 
 		if seq.Lt(r.lastACKSequenceNumber) {
-			metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, uint64(pktLen))
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, pktLen)
 			r.releasePacketFully(p)
 			continue
 		}
 
 		if r.packetStore.Has(seq) {
-			metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, uint64(pktLen))
+			metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, pktLen)
 			r.releasePacketFully(p)
 			continue
 		}

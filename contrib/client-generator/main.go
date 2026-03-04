@@ -40,6 +40,10 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	// Parse all flags (shared + client-generator-specific)
 	common.ParseFlags()
 
@@ -48,6 +52,27 @@ func main() {
 		for _, w := range warnings {
 			fmt.Fprintf(os.Stderr, "⚠ %s\n", w)
 		}
+	}
+
+	// Test mode: print config and exit (before profiler starts)
+	if *testflags {
+		config := srt.DefaultConfig()
+		common.ApplyFlagsToConfig(&config)
+		// Print config as JSON
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			return 1
+		}
+		fmt.Println(string(data))
+		return 0
+	}
+
+	// Validate required flags before starting profiler
+	if len(*to) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: -to is required\n")
+		flag.PrintDefaults()
+		return 1
 	}
 
 	// Setup profiling if requested
@@ -81,26 +106,6 @@ func main() {
 	}
 	// Silence unused variable warning when profiling is not enabled
 	_ = prof
-
-	// Test mode: print config and exit
-	if *testflags {
-		config := srt.DefaultConfig()
-		common.ApplyFlagsToConfig(&config)
-		// Print config as JSON
-		data, err := json.MarshalIndent(config, "", "  ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(string(data))
-		os.Exit(0)
-	}
-
-	if len(*to) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: -to is required\n")
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
 
 	var logger srt.Logger
 
@@ -137,7 +142,7 @@ func main() {
 	// ============================================================
 	if err := common.StartMetricsServers(ctx, &wg, *common.PromHTTPAddr, *common.PromUDSPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start metrics server: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// ============================================================
@@ -161,7 +166,7 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
 		flag.PrintDefaults()
-		os.Exit(1)
+		return 1
 	}
 
 	// Store connection socket ID for metrics lookup (if SRT connection)
@@ -261,7 +266,7 @@ func main() {
 			// Check context cancellation first
 			select {
 			case <-ctx.Done():
-				// Context cancelled - exit gracefully
+				// Context canceled - exit gracefully
 				doneChan <- nil
 				return
 			default:
@@ -279,21 +284,21 @@ func main() {
 				}
 			}
 
-			n, err := generator.Read(buffer)
-			if err != nil {
-				if err == io.EOF {
+			n, readErr := generator.Read(buffer)
+			if readErr != nil {
+				if readErr == io.EOF {
 					// Generator closed, exit gracefully
 					doneChan <- nil
 					return
 				}
-				// Check if context was cancelled during read
+				// Check if context was canceled during read
 				select {
 				case <-ctx.Done():
-					// Context cancelled - exit gracefully (don't report error)
+					// Context canceled - exit gracefully (don't report error)
 					doneChan <- nil
 					return
 				default:
-					doneChan <- fmt.Errorf("generator read: %w", err)
+					doneChan <- fmt.Errorf("generator read: %w", readErr)
 					return
 				}
 			}
@@ -301,23 +306,23 @@ func main() {
 			// Check context cancellation before write
 			select {
 			case <-ctx.Done():
-				// Context cancelled - exit gracefully
+				// Context canceled - exit gracefully
 				doneChan <- nil
 				return
 			default:
 			}
 
-			written, err := w.Write(buffer[:n])
-			if err != nil {
-				// Check if context was cancelled or connection closed during shutdown
+			written, writeErr := w.Write(buffer[:n])
+			if writeErr != nil {
+				// Check if context was canceled or connection closed during shutdown
 				select {
 				case <-ctx.Done():
-					// Context cancelled - exit gracefully (don't report error)
+					// Context canceled - exit gracefully (don't report error)
 					doneChan <- nil
 					return
 				default:
 					// Check if error is due to connection being closed (expected during shutdown)
-					errStr := err.Error()
+					errStr := writeErr.Error()
 					if strings.Contains(errStr, "connection refused") ||
 						strings.Contains(errStr, "use of closed network connection") ||
 						strings.Contains(errStr, "broken pipe") {
@@ -326,18 +331,18 @@ func main() {
 						return
 					}
 					// Check for net.OpError which indicates connection issues
-					if opErr, ok := err.(*net.OpError); ok {
+					if opErr, ok := writeErr.(*net.OpError); ok {
 						if opErr.Err != nil {
-							errStr := opErr.Err.Error()
-							if strings.Contains(errStr, "connection refused") ||
-								strings.Contains(errStr, "broken pipe") {
+							opErrStr := opErr.Err.Error()
+							if strings.Contains(opErrStr, "connection refused") ||
+								strings.Contains(opErrStr, "broken pipe") {
 								// Connection closed during shutdown - exit gracefully (don't report error)
 								doneChan <- nil
 								return
 							}
 						}
 					}
-					doneChan <- fmt.Errorf("write: %w", err)
+					doneChan <- fmt.Errorf("write: %w", writeErr)
 					return
 				}
 			}
@@ -353,16 +358,16 @@ func main() {
 	// ============================================================
 	var shutdownStart time.Time
 	select {
-	case err := <-doneChan:
+	case doneErr := <-doneChan:
 		shutdownStart = time.Now()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if doneErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", doneErr)
 		} else {
 			fmt.Fprint(os.Stderr, "\n")
 		}
 	case <-ctx.Done():
 		shutdownStart = time.Now()
-		// Context cancelled - graceful shutdown
+		// Context canceled - graceful shutdown
 		fmt.Fprintf(os.Stderr, "\nShutdown signal received\n")
 	}
 
@@ -370,7 +375,7 @@ func main() {
 	// Cleanup
 	// ============================================================
 	// Close connection
-	w.Close()
+	_ = w.Close()
 
 	// Close logger so its goroutine can exit (channel will close)
 	if logger != nil {
@@ -394,6 +399,8 @@ func main() {
 		elapsedMs := time.Since(shutdownStart).Milliseconds()
 		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
 	}
+
+	return 0
 }
 
 // openWriter opens a writer based on the URL scheme
@@ -424,9 +431,9 @@ func openWriter(address string, logger srt.Logger, ctx context.Context, wg *sync
 		}
 		config.StreamId = streamID
 
-		conn, err := srt.Dial(ctx, "srt", u.Host, config, wg)
-		if err != nil {
-			return nil, fmt.Errorf("dial: %w", err)
+		conn, dialErr := srt.Dial(ctx, "srt", u.Host, config, wg)
+		if dialErr != nil {
+			return nil, fmt.Errorf("dial: %w", dialErr)
 		}
 
 		return conn, nil

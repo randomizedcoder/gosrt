@@ -1,6 +1,7 @@
 package srt
 
 import (
+	"fmt"
 	"net"
 	"time"
 
@@ -114,7 +115,9 @@ func (ln *listener) Close() {
 
 		ln.log("listen", func() string { return "closing socket" })
 
-		ln.pc.Close()
+		if closeErr := ln.pc.Close(); closeErr != nil {
+			ln.log("listen:close", func() string { return fmt.Sprintf("socket close error: %v", closeErr) })
+		}
 
 		// Notify server waitgroup
 		if ln.shutdownWg != nil {
@@ -124,12 +127,16 @@ func (ln *listener) Close() {
 }
 
 func (ln *listener) Addr() net.Addr {
-	addrString := "0.0.0.0:0"
+	// If we have a valid address from the listener, return it directly
 	if ln.addr != nil {
-		addrString = ln.addr.String()
+		return ln.addr
 	}
 
-	addr, _ := net.ResolveUDPAddr("udp", addrString)
+	// Fallback: resolve a default address
+	addr, err := net.ResolveUDPAddr("udp", "0.0.0.0:0")
+	if err != nil {
+		// Return nil if resolution fails (should not happen for this constant)
+		return nil
+	}
 	return addr
 }
-

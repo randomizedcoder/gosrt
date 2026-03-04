@@ -52,7 +52,8 @@ func createTestConnectionWithIoUring(tb testing.TB, enableIoUring bool) (*srtCon
 	tb.Helper()
 
 	// Create a test UDP connection
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
 		tb.Fatalf("failed to create test UDP connection: %v", err)
 	}
@@ -117,8 +118,12 @@ func createTestConnectionWithIoUring(tb testing.TB, enableIoUring bool) (*srtCon
 	conn := newSRTConn(connConfig)
 
 	cleanup := func() {
-		conn.Close()
-		udpConn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			tb.Logf("conn.Close error: %v", closeErr)
+		}
+		if udpCloseErr := udpConn.Close(); udpCloseErr != nil {
+			tb.Logf("udpConn.Close error: %v", udpCloseErr)
+		}
 	}
 
 	return conn, cleanup
@@ -175,11 +180,16 @@ func TestIoUringFallback(t *testing.T) {
 
 // TestSocketFDExtraction tests that socket FD extraction works
 func TestSocketFDExtraction(t *testing.T) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to create test UDP connection: %v", err)
 	}
-	defer pc.Close()
+	defer func() {
+		if closeErr := pc.Close(); closeErr != nil {
+			t.Logf("pc.Close error: %v", closeErr)
+		}
+	}()
 
 	udpConn := pc.(*net.UDPConn)
 

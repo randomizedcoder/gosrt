@@ -108,11 +108,11 @@ type Reporter interface {
 
 // ReadinessCriteria defines what "ready" means for the system.
 type ReadinessCriteria struct {
-	ServerRunning       bool
-	SeekerRunning       bool
-	ServerMetricsReady  bool
-	SeekerMetricsReady  bool
-	SeekerControlReady  bool
+	ServerRunning         bool
+	SeekerRunning         bool
+	ServerMetricsReady    bool
+	SeekerMetricsReady    bool
+	SeekerControlReady    bool
 	ConnectionEstablished bool
 }
 

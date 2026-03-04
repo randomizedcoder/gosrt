@@ -45,8 +45,8 @@ type StabilizationMetrics struct {
 	NakRecv  uint64 // NAKs received (retransmit requests)
 }
 
-// GetStabilizationMetrics extracts stabilization-relevant metrics from a ConnectionMetrics.
-// This aggregates across all connections in the registry.
+// GetStabilizationMetricsFromRegistry extracts stabilization-relevant metrics
+// aggregated across all connections in the registry.
 func GetStabilizationMetricsFromRegistry() StabilizationMetrics {
 	connections := GetConnections()
 
@@ -102,7 +102,11 @@ func StabilizationHandler() http.Handler {
 		m := GetStabilizationMetricsFromRegistry()
 
 		// Reuse the same pool as /metrics handler
-		b := metricsBuilderPool.Get().(*strings.Builder)
+		b, ok := metricsBuilderPool.Get().(*strings.Builder)
+		if !ok {
+			// Fallback if pool returns wrong type
+			b = &strings.Builder{}
+		}
 		defer func() {
 			b.Reset()
 			metricsBuilderPool.Put(b)
@@ -134,7 +138,10 @@ func StabilizationHandler() http.Handler {
 		b.WriteByte('\n')
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		io.WriteString(w, b.String())
+		if _, err := io.WriteString(w, b.String()); err != nil {
+			// Client disconnected; nothing more we can do
+			return
+		}
 	})
 }
 
@@ -198,7 +205,8 @@ func ParseStabilizationResponse(response string) (StabilizationMetrics, error) {
 
 // MetricsGetter is a function that returns current stabilization metrics.
 // Used to abstract over different ways of getting metrics (HTTP/UDS fetch).
-type MetricsGetter func() (StabilizationMetrics, error)
+// The context allows cancellation of in-flight requests during shutdown.
+type MetricsGetter func(ctx context.Context) (StabilizationMetrics, error)
 
 // StabilizationResult contains the result of waiting for stabilization.
 type StabilizationResult struct {
@@ -252,7 +260,7 @@ func WaitForStabilization(ctx context.Context, cfg StabilizationConfig, getters 
 	// Get initial snapshot from all getters
 	prevSnapshots := make([]StabilizationMetrics, len(getters))
 	for i, getter := range getters {
-		m, err := getter()
+		m, err := getter(ctx)
 		if err != nil {
 			return StabilizationResult{
 				Stable:  false,
@@ -293,7 +301,7 @@ func WaitForStabilization(ctx context.Context, cfg StabilizationConfig, getters 
 			// Get current snapshots and check if all are unchanged
 			allStable := true
 			for i, getter := range getters {
-				current, err := getter()
+				current, err := getter(ctx)
 				if err != nil {
 					return StabilizationResult{
 						Stable:       false,
@@ -336,12 +344,16 @@ func WaitForStabilization(ctx context.Context, cfg StabilizationConfig, getters 
 //	getter := metrics.NewHTTPGetter("http://localhost:5101/stabilize")
 func NewHTTPGetter(url string) MetricsGetter {
 	client := &http.Client{Timeout: 2 * time.Second}
-	return func() (StabilizationMetrics, error) {
-		resp, err := client.Get(url)
+	return func(ctx context.Context) (StabilizationMetrics, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return StabilizationMetrics{}, err
 		}
-		defer resp.Body.Close()
+		resp, err := client.Do(req)
+		if err != nil {
+			return StabilizationMetrics{}, err
+		}
+		defer func() { _ = resp.Body.Close() }() // Error ignored: body already read
 
 		if resp.StatusCode != http.StatusOK {
 			return StabilizationMetrics{}, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -374,13 +386,17 @@ func NewUDSGetter(socketPath string) MetricsGetter {
 		},
 		Timeout: 2 * time.Second,
 	}
-	return func() (StabilizationMetrics, error) {
+	return func(ctx context.Context) (StabilizationMetrics, error) {
 		// For UDS, the host in the URL doesn't matter, but we need a valid URL
-		resp, err := client.Get("http://localhost/stabilize")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/stabilize", nil)
 		if err != nil {
 			return StabilizationMetrics{}, err
 		}
-		defer resp.Body.Close()
+		resp, err := client.Do(req)
+		if err != nil {
+			return StabilizationMetrics{}, err
+		}
+		defer func() { _ = resp.Body.Close() }() // Error ignored: body already read
 
 		if resp.StatusCode != http.StatusOK {
 			return StabilizationMetrics{}, fmt.Errorf("HTTP %d", resp.StatusCode)

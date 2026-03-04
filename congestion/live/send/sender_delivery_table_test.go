@@ -37,9 +37,9 @@ type DeliveryTestCase struct {
 	DropThresholdUs       uint64           // Drop threshold
 
 	// Expected outcomes
-	ExpectedDelivered     int   // Number of packets delivered
-	ExpectedNextDeliveryUs int64 // Microseconds until next (-1 = max)
-	ExpectedStartPoint    uint32 // Updated deliveryStartPoint after delivery
+	ExpectedDelivered      int    // Number of packets delivered
+	ExpectedNextDeliveryUs int64  // Microseconds until next (-1 = max)
+	ExpectedStartPoint     uint32 // Updated deliveryStartPoint after delivery
 }
 
 // DeliveryPacket represents a packet for delivery testing
@@ -295,14 +295,14 @@ var deliveryTestCases = []DeliveryTestCase{
 	// Large Batch Cases
 	// ═══════════════════════════════════════════════════════════════════════
 	{
-		Name:                  "Large_Batch_100_Packets",
-		InitialSequenceNumber: 549144712,
-		PacketData:            generateDeliveryPackets(100, 1000), // 100 packets, 1ms apart
-		NowUs:                 1_000_000_000,                      // All ready (1 second)
-		DropThresholdUs:       2_000_000_000,
-		ExpectedDelivered:     100,
+		Name:                   "Large_Batch_100_Packets",
+		InitialSequenceNumber:  549144712,
+		PacketData:             generateDeliveryPackets(100, 1000), // 100 packets, 1ms apart
+		NowUs:                  1_000_000_000,                      // All ready (1 second)
+		DropThresholdUs:        2_000_000_000,
+		ExpectedDelivered:      100,
 		ExpectedNextDeliveryUs: -1,
-		ExpectedStartPoint:    549144812, // 549144712 + 100
+		ExpectedStartPoint:     549144812, // 549144712 + 100
 	},
 }
 
@@ -563,43 +563,43 @@ func createTestPacketWithTsbpd(seq uint32, tsbpdTimeUs uint64) packet.Packet {
 // ============================================================================// TestDeliveryTransmitCount_Table tests the TransmitCount-based delivery logic
 func TestDeliveryTransmitCount_Table(t *testing.T) {
 	testCases := []struct {
-		Name                   string
-		InitialTransmitCount   uint32
-		ExpectDelivered        bool
-		ExpectFirstTransmit    uint64
-		ExpectAlreadySent      uint64
+		Name                     string
+		InitialTransmitCount     uint32
+		ExpectDelivered          bool
+		ExpectFirstTransmit      uint64
+		ExpectAlreadySent        uint64
 		ExpectFinalTransmitCount uint32
 	}{
 		{
-			Name:                   "TransmitCount_0_delivers",
-			InitialTransmitCount:   0,
-			ExpectDelivered:        true,
-			ExpectFirstTransmit:    1,
-			ExpectAlreadySent:      0,
+			Name:                     "TransmitCount_0_delivers",
+			InitialTransmitCount:     0,
+			ExpectDelivered:          true,
+			ExpectFirstTransmit:      1,
+			ExpectAlreadySent:        0,
 			ExpectFinalTransmitCount: 1,
 		},
 		{
-			Name:                   "TransmitCount_1_skips",
-			InitialTransmitCount:   1,
-			ExpectDelivered:        false,
-			ExpectFirstTransmit:    0,
-			ExpectAlreadySent:      1,
+			Name:                     "TransmitCount_1_skips",
+			InitialTransmitCount:     1,
+			ExpectDelivered:          false,
+			ExpectFirstTransmit:      0,
+			ExpectAlreadySent:        1,
 			ExpectFinalTransmitCount: 1, // Unchanged
 		},
 		{
-			Name:                   "TransmitCount_2_skips",
-			InitialTransmitCount:   2,
-			ExpectDelivered:        false,
-			ExpectFirstTransmit:    0,
-			ExpectAlreadySent:      1,
+			Name:                     "TransmitCount_2_skips",
+			InitialTransmitCount:     2,
+			ExpectDelivered:          false,
+			ExpectFirstTransmit:      0,
+			ExpectAlreadySent:        1,
 			ExpectFinalTransmitCount: 2, // Unchanged
 		},
 		{
-			Name:                   "TransmitCount_high_skips",
-			InitialTransmitCount:   10,
-			ExpectDelivered:        false,
-			ExpectFirstTransmit:    0,
-			ExpectAlreadySent:      1,
+			Name:                     "TransmitCount_high_skips",
+			InitialTransmitCount:     10,
+			ExpectDelivered:          false,
+			ExpectFirstTransmit:      0,
+			ExpectAlreadySent:        1,
 			ExpectFinalTransmitCount: 10, // Unchanged
 		},
 	}
@@ -671,8 +671,8 @@ func TestDeliveryTransmitCount_MixedPackets(t *testing.T) {
 	var mu sync.Mutex
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(100, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:            m,
+		InitialSequenceNumber: circular.New(100, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
 		OnDeliver: func(p packet.Packet) {
 			mu.Lock()
 			deliveredSeqs = append(deliveredSeqs, p.Header().PacketSequenceNumber.Val())

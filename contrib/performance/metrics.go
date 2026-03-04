@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -75,8 +76,9 @@ func (mc *MetricsCollector) scrapeAndParse(ctx context.Context, socketPath strin
 	// Create HTTP client with Unix socket transport
 	client := &http.Client{
 		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return net.Dial("unix", socketPath)
+			DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(dialCtx, "unix", socketPath)
 			},
 		},
 		Timeout: 2 * time.Second,
@@ -91,7 +93,12 @@ func (mc *MetricsCollector) scrapeAndParse(ctx context.Context, socketPath strin
 	if err != nil {
 		return m, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			// Log but don't override main error
+			fmt.Fprintf(os.Stderr, "Warning: error closing response body: %v\n", cerr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return m, fmt.Errorf("HTTP %d", resp.StatusCode)

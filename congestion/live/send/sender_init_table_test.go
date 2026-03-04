@@ -293,13 +293,13 @@ func TestSender_Init_DeliveryStartPoint_MustMatchISN(t *testing.T) {
 	// This test specifically catches the bug where deliveryStartPoint was 0
 	// when ISN was ~549M, causing IterateFrom(0) to fail
 	isnValues := []uint32{
-		0,           // Trivial case
-		1000,        // Small value
-		549144712,   // THE FAILING CASE from integration tests
-		879502527,   // From actual test metrics
-		1073741823,  // Half max
-		2147483640,  // Near max
-		2147483647,  // Max
+		0,          // Trivial case
+		1000,       // Small value
+		549144712,  // THE FAILING CASE from integration tests
+		879502527,  // From actual test metrics
+		1073741823, // Half max
+		2147483640, // Near max
+		2147483647, // Max
 	}
 
 	for _, isn := range isnValues {
@@ -440,4 +440,3 @@ func formatISN(isn uint32) string {
 		return "Small"
 	}
 }
-

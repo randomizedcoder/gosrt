@@ -35,5 +35,3 @@ func (c *srtConn) InEventLoop() bool { return false }
 
 // InTick always returns false in release builds.
 func (c *srtConn) InTick() bool { return false }
-
-

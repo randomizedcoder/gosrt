@@ -67,7 +67,10 @@ func (s *listPacketStore) Insert(pkt packet.Packet) (bool, packet.Packet) {
 
 	// Check for duplicate (list requires linear scan anyway)
 	for e := s.list.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 		// Note: Still need to call Header() for each list element in comparison loop
 		ph := p.Header()
 		if ph.PacketSequenceNumber == seqNum {
@@ -86,7 +89,10 @@ func (s *listPacketStore) Insert(pkt packet.Packet) (bool, packet.Packet) {
 
 func (s *listPacketStore) Iterate(fn func(pkt packet.Packet) bool) bool {
 	for e := s.list.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 		if !fn(p) {
 			return false // Stop iteration
 		}
@@ -98,7 +104,10 @@ func (s *listPacketStore) IterateFrom(startSeq circular.Number, fn func(pkt pack
 	// For list-based store, we must scan from beginning (O(n))
 	// This is a fallback - btree implementation uses AscendGreaterOrEqual for O(log n)
 	for e := s.list.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 		h := p.Header()
 		// Skip packets before startSeq (handles wraparound via circular comparison)
 		if h.PacketSequenceNumber.Lt(startSeq) {
@@ -113,7 +122,10 @@ func (s *listPacketStore) IterateFrom(startSeq circular.Number, fn func(pkt pack
 
 func (s *listPacketStore) Remove(seqNum circular.Number) packet.Packet {
 	for e := s.list.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 		h := p.Header()
 		if h.PacketSequenceNumber == seqNum {
@@ -129,7 +141,10 @@ func (s *listPacketStore) RemoveAll(predicate func(pkt packet.Packet) bool, deli
 	var toRemove []*list.Element
 
 	for e := s.list.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 		if predicate(p) {
 			deliverFunc(p)
 			toRemove = append(toRemove, e)
@@ -148,7 +163,10 @@ func (s *listPacketStore) RemoveAll(predicate func(pkt packet.Packet) bool, deli
 
 func (s *listPacketStore) Has(seqNum circular.Number) bool {
 	for e := s.list.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 		h := p.Header()
 		if h.PacketSequenceNumber == seqNum {
@@ -170,5 +188,9 @@ func (s *listPacketStore) Min() packet.Packet {
 	if s.list.Len() == 0 {
 		return nil
 	}
-	return s.list.Front().Value.(packet.Packet)
+	p, ok := s.list.Front().Value.(packet.Packet)
+	if !ok {
+		return nil
+	}
+	return p
 }

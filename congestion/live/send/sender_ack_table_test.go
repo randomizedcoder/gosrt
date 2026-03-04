@@ -34,9 +34,9 @@ type ACKTestCase struct {
 	PrevLastACKed uint32   // Previous lastACKedSequence
 
 	// Expected
-	ExpectedRemaining  int    // Packets remaining after ACK
-	ExpectedLastACKed  uint32 // New lastACKedSequence
-	ExpectedMinSeq     uint32 // Minimum sequence in btree after ACK (0 if empty)
+	ExpectedRemaining int    // Packets remaining after ACK
+	ExpectedLastACKed uint32 // New lastACKedSequence
+	ExpectedMinSeq    uint32 // Minimum sequence in btree after ACK (0 if empty)
 }
 
 var ackTestCases = []ACKTestCase{
@@ -300,13 +300,13 @@ func TestSender_ACK_Progressive(t *testing.T) {
 
 	// Progressive ACKs
 	testSteps := []struct {
-		ACK              uint32
+		ACK               uint32
 		ExpectedRemaining int
 	}{
-		{5, 15},   // Remove 0-4
-		{10, 10},  // Remove 5-9
-		{15, 5},   // Remove 10-14
-		{20, 0},   // Remove 15-19
+		{5, 15},  // Remove 0-4
+		{10, 10}, // Remove 5-9
+		{15, 5},  // Remove 10-14
+		{20, 0},  // Remove 15-19
 	}
 
 	for _, step := range testSteps {
@@ -385,4 +385,3 @@ func TestSender_ACK_Wraparound_Progressive(t *testing.T) {
 	s.ackBtree(circular.New(4, packet.MAX_SEQUENCENUMBER))
 	require.Equal(t, 0, s.packetBtree.Len(), "after final ACK")
 }
-

@@ -142,7 +142,7 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 
 	c.debug.expectedRcvPacketSequenceNumber = header.PacketSequenceNumber.Inc()
 
-	//fmt.Printf("%s\n", p.String())
+	// fmt.Printf("%s\n", p.String())
 
 	// Ignore FEC filter control packets
 	// https://github.com/Haivision/srt/blob/master/docs/features/packet-filtering-and-fec.md
@@ -154,7 +154,7 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 		// Track drop for FEC filter packet
 		if c.metrics != nil {
 			c.metrics.PktRecvDataDropped.Add(1)
-			c.metrics.ByteRecvDataDropped.Add(uint64(p.Len()))
+			c.metrics.ByteRecvDataDropped.Add(p.Len())
 		}
 		return
 	}
@@ -190,13 +190,13 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 			if err := c.crypto.EncryptOrDecryptPayload(p.Data(), header.KeyBaseEncryptionFlag, header.PacketSequenceNumber.Val()); err != nil {
 				if c.metrics != nil {
 					c.metrics.PktRecvUndecrypt.Add(1)
-					c.metrics.ByteRecvUndecrypt.Add(uint64(p.Len()))
+					c.metrics.ByteRecvUndecrypt.Add(p.Len())
 				}
 			}
 		} else {
 			if c.metrics != nil {
 				c.metrics.PktRecvUndecrypt.Add(1)
-				c.metrics.ByteRecvUndecrypt.Add(uint64(p.Len()))
+				c.metrics.ByteRecvUndecrypt.Add(p.Len())
 			}
 		}
 	}
@@ -416,7 +416,7 @@ func (c *srtConn) handleNAK(p packet.Packet) {
 	retransCount := c.snd.NAK(cif.LostPacketSequenceNumber)
 	if retransCount > 0 {
 		if c.metrics != nil {
-			c.metrics.PktRetransFromNAK.Add(uint64(retransCount))
+			c.metrics.PktRetransFromNAK.Add(retransCount)
 		}
 	}
 }
@@ -516,8 +516,12 @@ func (c *srtConn) handleACKACK(ackNum uint32, arrivalTime time.Time) {
 
 	// Update metrics
 	if c.metrics != nil {
-		c.metrics.AckBtreeEntriesExpired.Add(uint64(expiredCount))
-		c.metrics.AckBtreeSize.Store(uint64(btreeLenAfter))
+		if expiredCount > 0 {
+			c.metrics.AckBtreeEntriesExpired.Add(uint64(expiredCount))
+		}
+		if btreeLenAfter >= 0 {
+			c.metrics.AckBtreeSize.Store(uint64(btreeLenAfter))
+		}
 		// Note: RecvControlRingProcessedACKACK is incremented by drainRecvControlRing()
 		// after this function returns, not here (to avoid double-counting)
 	}
@@ -574,8 +578,12 @@ func (c *srtConn) handleACKACKLocked(p packet.Packet) {
 
 	// Update metrics (outside lock)
 	if c.metrics != nil {
-		c.metrics.AckBtreeEntriesExpired.Add(uint64(expiredCount))
-		c.metrics.AckBtreeSize.Store(uint64(btreeLenAfter))
+		if expiredCount > 0 {
+			c.metrics.AckBtreeEntriesExpired.Add(uint64(expiredCount))
+		}
+		if btreeLenAfter >= 0 {
+			c.metrics.AckBtreeSize.Store(uint64(btreeLenAfter))
+		}
 	}
 
 	// Return expired entries to pool (outside lock)

@@ -413,7 +413,7 @@ func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern
 		select {
 		case <-ctx.Done():
 			if nc.Verbose {
-				fmt.Printf("[PATTERN] Context cancelled while waiting for event\n")
+				fmt.Printf("[PATTERN] Context canceled while waiting for event\n")
 			}
 			return
 		case <-time.After(waitDuration):
@@ -445,7 +445,7 @@ func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern
 		case <-ctx.Done():
 			// Clear loss before exiting
 			if nc.Verbose {
-				fmt.Printf("[PATTERN] Context cancelled during event, clearing loss\n")
+				fmt.Printf("[PATTERN] Context canceled during event, clearing loss\n")
 			}
 			nc.mu.Lock()
 			if nc.isSetup {
@@ -775,7 +775,7 @@ func (nc *NetworkController) runPatternParallel(ctx context.Context, pattern Los
 		select {
 		case <-ctx.Done():
 			if nc.Verbose {
-				fmt.Printf("[PATTERN] Context cancelled while waiting for event\n")
+				fmt.Printf("[PATTERN] Context canceled while waiting for event\n")
 			}
 			return
 		case <-time.After(waitDuration):
@@ -811,11 +811,13 @@ func (nc *NetworkController) runPatternParallel(ctx context.Context, pattern Los
 		case <-ctx.Done():
 			// Clear loss before exiting
 			nc.mu.Lock()
-			script := fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent_parallel 0",
+			clearScript := fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent_parallel 0",
 				nc.ScriptDir, nc.CurrentLatencyProfile)
-			cmd := exec.CommandContext(context.Background(), "bash", "-c", script)
-			cmd.Env = nc.buildScriptEnv()
-			_ = cmd.Run()
+			clearCmd := exec.CommandContext(context.Background(), "bash", "-c", clearScript)
+			clearCmd.Env = nc.buildScriptEnv()
+			if err := clearCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "[PATTERN] Error clearing loss on exit: %v\n", err)
+			}
 			nc.CurrentLossPercent = 0
 			nc.mu.Unlock()
 			return
@@ -921,8 +923,15 @@ func (nc *NetworkController) StartTcpdump(ctx context.Context, namespace, output
 
 	// Stop any existing capture for this namespace
 	if existing, ok := nc.tcpdumpProcesses[namespace]; ok {
-		_ = existing.Process.Kill()
-		_ = existing.Wait()
+		if killErr := existing.Process.Kill(); killErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to kill existing tcpdump in %s: %v\n", namespace, killErr)
+		}
+		if waitErr := existing.Wait(); waitErr != nil {
+			// Ignore "signal: killed" errors from Kill()
+			if !strings.Contains(waitErr.Error(), "killed") {
+				fmt.Fprintf(os.Stderr, "Warning: tcpdump wait error in %s: %v\n", namespace, waitErr)
+			}
+		}
 		delete(nc.tcpdumpProcesses, namespace)
 	}
 
@@ -1029,7 +1038,9 @@ func (nc *NetworkController) stopAllTcpdumpsLocked() {
 					namespace, cmd.Process.Pid)
 			}
 			// Send SIGINT for graceful shutdown (tcpdump writes final packets)
-			_ = cmd.Process.Signal(os.Interrupt)
+			if err := cmd.Process.Signal(os.Interrupt); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to send SIGINT to tcpdump in %s: %v\n", namespace, err)
+			}
 
 			// Wait with timeout
 			done := make(chan error, 1)
@@ -1042,7 +1053,9 @@ func (nc *NetworkController) stopAllTcpdumpsLocked() {
 				// Exited cleanly
 			case <-time.After(2 * time.Second):
 				// Force kill if didn't exit
-				_ = cmd.Process.Kill()
+				if killErr := cmd.Process.Kill(); killErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to kill tcpdump in %s: %v\n", namespace, killErr)
+				}
 				<-done
 			}
 		}

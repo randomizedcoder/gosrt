@@ -250,12 +250,12 @@ func DefaultConfig() *Config {
 	timing := DefaultTimingModel()
 	return &Config{
 		Search: SearchConfig{
-			InitialBitrate:  200_000_000,  // 200 Mb/s
-			MinBitrate:      50_000_000,   // 50 Mb/s
-			MaxBitrate:      600_000_000,  // 600 Mb/s
-			StepSize:        10_000_000,   // 10 Mb/s
-			DecreasePercent: 0.25,         // 25%
-			Precision:       5_000_000,    // 5 Mb/s
+			InitialBitrate:  200_000_000, // 200 Mb/s
+			MinBitrate:      50_000_000,  // 50 Mb/s
+			MaxBitrate:      600_000_000, // 600 Mb/s
+			StepSize:        10_000_000,  // 10 Mb/s
+			DecreasePercent: 0.25,        // 25%
+			Precision:       5_000_000,   // 5 Mb/s
 			Timeout:         10 * time.Minute,
 		},
 		Stability: StabilityConfig{

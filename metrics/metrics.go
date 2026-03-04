@@ -1,3 +1,5 @@
+// Package metrics provides high-performance atomic counters and Prometheus metrics
+// for SRT connection statistics and monitoring.
 package metrics
 
 import (
@@ -28,7 +30,7 @@ type IoUringRingMetrics struct {
 	CompletionEBADF        atomic.Uint64 // Ring closed (normal shutdown)
 	CompletionEINTR        atomic.Uint64 // Interrupted by signal
 	CompletionError        atomic.Uint64 // Other unexpected errors
-	CompletionCtxCancelled atomic.Uint64 // Context cancelled (shutdown)
+	CompletionCtxCancelled atomic.Uint64 // Context canceled (shutdown)
 
 	// Packet processing
 	PacketsProcessed atomic.Uint64 // Packets successfully processed
@@ -286,19 +288,19 @@ type ConnectionMetrics struct {
 	CongestionRecvPeriodicNAKRuns atomic.Uint64 // Times periodicNAK() actually ran
 
 	// NAK btree metrics - Core operations
-	NakBtreeInserts     atomic.Uint64 // Sequences added to NAK btree
-	NakBtreeDeletes     atomic.Uint64 // Sequences removed (packet arrived)
+	NakBtreeInserts        atomic.Uint64 // Sequences added to NAK btree
+	NakBtreeDeletes        atomic.Uint64 // Sequences removed (packet arrived)
 	NakBtreeExpired        atomic.Uint64 // Sequences removed (sequence-based expiry, fallback)
 	NakBtreeExpiredEarly   atomic.Uint64 // Sequences removed RTT before TSBPD (time-based)
 	NakBtreeSkippedExpired atomic.Uint64 // Sequences not inserted (already expired at gap detection)
 	NakBtreeSize           atomic.Uint64 // Current size (gauge, updated each periodic NAK)
 
 	// NAK TSBPD estimation metrics (nak_btree_expiry_optimization.md)
-	NakTsbpdEstBoundary    atomic.Uint64 // TSBPD estimated using boundary packets (linear interpolation)
-	NakTsbpdEstEWMA        atomic.Uint64 // TSBPD estimated using inter-packet EWMA (warm fallback)
+	NakTsbpdEstBoundary     atomic.Uint64 // TSBPD estimated using boundary packets (linear interpolation)
+	NakTsbpdEstEWMA         atomic.Uint64 // TSBPD estimated using inter-packet EWMA (warm fallback)
 	NakTsbpdEstColdFallback atomic.Uint64 // TSBPD estimated during EWMA warm-up (conservative)
-	NakBtreeScanPackets atomic.Uint64 // Packets scanned in periodicNakBtree()
-	NakBtreeScanGaps    atomic.Uint64 // Gaps found during scan
+	NakBtreeScanPackets     atomic.Uint64 // Packets scanned in periodicNakBtree()
+	NakBtreeScanGaps        atomic.Uint64 // Gaps found during scan
 
 	// NAK btree metrics - Periodic NAK execution
 	NakPeriodicOriginalRuns atomic.Uint64 // Times periodicNakOriginal() executed
@@ -371,16 +373,16 @@ type ConnectionMetrics struct {
 	// ========================================================================
 	// Tracks sender packet ring buffer operations.
 
-	SendRingPushed       atomic.Uint64 // Packets successfully pushed to sender ring
-	SendRingDropped      atomic.Uint64 // Packets dropped due to sender ring full
-	SendSeqAssigned      atomic.Uint64 // Sequence numbers assigned (atomic 31-bit)
-	SendSeqWraparound    atomic.Uint64 // Times sequence wrapped past MAX_SEQUENCENUMBER
-	SendFirstTransmit    atomic.Uint64 // Packets sent with TransmitCount 0→1 (first send)
-	SendAlreadySent      atomic.Uint64 // Packets skipped in delivery (TransmitCount>=1)
-	SendRingDrained      atomic.Uint64 // Packets drained from sender ring to btree
-	SendBtreeInserted    atomic.Uint64 // Packets inserted into sender btree
-	SendBtreeDuplicates  atomic.Uint64 // Duplicate packets detected in sender btree
-	SendRingDrainSeqGap  atomic.Uint64 // Sequence gaps detected during ring→btree drain (sender bug indicator)
+	SendRingPushed      atomic.Uint64 // Packets successfully pushed to sender ring
+	SendRingDropped     atomic.Uint64 // Packets dropped due to sender ring full
+	SendSeqAssigned     atomic.Uint64 // Sequence numbers assigned (atomic 31-bit)
+	SendSeqWraparound   atomic.Uint64 // Times sequence wrapped past MAX_SEQUENCENUMBER
+	SendFirstTransmit   atomic.Uint64 // Packets sent with TransmitCount 0→1 (first send)
+	SendAlreadySent     atomic.Uint64 // Packets skipped in delivery (TransmitCount>=1)
+	SendRingDrained     atomic.Uint64 // Packets drained from sender ring to btree
+	SendBtreeInserted   atomic.Uint64 // Packets inserted into sender btree
+	SendBtreeDuplicates atomic.Uint64 // Duplicate packets detected in sender btree
+	SendRingDrainSeqGap atomic.Uint64 // Sequence gaps detected during ring→btree drain (sender bug indicator)
 
 	// ========================================================================
 	// Sender Control Ring Metrics (Phase 3: Lockless Sender)
@@ -401,13 +403,13 @@ type ConnectionMetrics struct {
 	// ========================================================================
 	// Tracks receiver control packet (ACKACK/KEEPALIVE) ring buffer operations.
 
-	RecvControlRingPushedACKACK     atomic.Uint64 // ACKACKs successfully pushed to control ring
-	RecvControlRingPushedKEEPALIVE  atomic.Uint64 // KEEPALIVEs successfully pushed to control ring
-	RecvControlRingDroppedACKACK    atomic.Uint64 // ACKACKs dropped due to control ring full (fallback to locked path)
-	RecvControlRingDroppedKEEPALIVE atomic.Uint64 // KEEPALIVEs dropped due to control ring full (fallback to locked path)
-	RecvControlRingDrained          atomic.Uint64 // Control packets drained by EventLoop
-	RecvControlRingProcessed        atomic.Uint64 // Control packets processed by EventLoop (total)
-	RecvControlRingProcessedACKACK  atomic.Uint64 // ACKACKs processed by EventLoop
+	RecvControlRingPushedACKACK       atomic.Uint64 // ACKACKs successfully pushed to control ring
+	RecvControlRingPushedKEEPALIVE    atomic.Uint64 // KEEPALIVEs successfully pushed to control ring
+	RecvControlRingDroppedACKACK      atomic.Uint64 // ACKACKs dropped due to control ring full (fallback to locked path)
+	RecvControlRingDroppedKEEPALIVE   atomic.Uint64 // KEEPALIVEs dropped due to control ring full (fallback to locked path)
+	RecvControlRingDrained            atomic.Uint64 // Control packets drained by EventLoop
+	RecvControlRingProcessed          atomic.Uint64 // Control packets processed by EventLoop (total)
+	RecvControlRingProcessedACKACK    atomic.Uint64 // ACKACKs processed by EventLoop
 	RecvControlRingProcessedKEEPALIVE atomic.Uint64 // KEEPALIVEs processed by EventLoop
 
 	// ========================================================================
@@ -420,38 +422,38 @@ type ConnectionMetrics struct {
 	SendEventLoopSkippedDisabled atomic.Uint64 // Times EventLoop returned early (useEventLoop=false)
 	SendEventLoopStarted         atomic.Uint64 // Times EventLoop entered main loop
 
-	SendEventLoopIterations        atomic.Uint64 // Total EventLoop iterations
-	SendEventLoopDefaultRuns       atomic.Uint64 // Default case runs (no timer fired)
-	SendEventLoopDropFires         atomic.Uint64 // Drop ticker fires
-	SendEventLoopDataDrained       atomic.Uint64 // Data packets drained from ring
-	SendEventLoopControlDrained    atomic.Uint64 // Control packets drained from ring
-	SendEventLoopACKsProcessed     atomic.Uint64 // ACKs processed by EventLoop
-	SendEventLoopNAKsProcessed     atomic.Uint64 // NAKs processed by EventLoop
-	SendEventLoopIdleBackoffs      atomic.Uint64 // Times EventLoop entered idle backoff
-	SendEventLoopTightCapReached   atomic.Uint64 // Times MaxDataPerIteration cap was hit (tight loop mode)
+	SendEventLoopIterations      atomic.Uint64 // Total EventLoop iterations
+	SendEventLoopDefaultRuns     atomic.Uint64 // Default case runs (no timer fired)
+	SendEventLoopDropFires       atomic.Uint64 // Drop ticker fires
+	SendEventLoopDataDrained     atomic.Uint64 // Data packets drained from ring
+	SendEventLoopControlDrained  atomic.Uint64 // Control packets drained from ring
+	SendEventLoopACKsProcessed   atomic.Uint64 // ACKs processed by EventLoop
+	SendEventLoopNAKsProcessed   atomic.Uint64 // NAKs processed by EventLoop
+	SendEventLoopIdleBackoffs    atomic.Uint64 // Times EventLoop entered idle backoff
+	SendEventLoopTightCapReached atomic.Uint64 // Times MaxDataPerIteration cap was hit (tight loop mode)
 	// Diagnostic metrics for drain debugging
-	SendEventLoopDrainAttempts     atomic.Uint64 // Times drain was called
-	SendEventLoopDrainRingNil      atomic.Uint64 // Times packetRing was nil
-	SendEventLoopDrainRingEmpty    atomic.Uint64 // Times TryPop returned empty (first try)
-	SendEventLoopDrainRingHadData  atomic.Uint64 // Times ring.Len() > 0 before drain
-	SendEventLoopTsbpdSleeps       atomic.Uint64 // Times EventLoop used TSBPD-aware sleep
-	SendEventLoopEmptyBtreeSleeps  atomic.Uint64 // Times EventLoop slept due to empty btree
-	SendEventLoopSleepClampedMin   atomic.Uint64 // Times sleep was clamped to minimum
-	SendEventLoopSleepClampedMax   atomic.Uint64 // Times sleep was clamped to maximum
-	SendEventLoopSleepTotalUs      atomic.Uint64 // Total sleep time in microseconds
+	SendEventLoopDrainAttempts       atomic.Uint64 // Times drain was called
+	SendEventLoopDrainRingNil        atomic.Uint64 // Times packetRing was nil
+	SendEventLoopDrainRingEmpty      atomic.Uint64 // Times TryPop returned empty (first try)
+	SendEventLoopDrainRingHadData    atomic.Uint64 // Times ring.Len() > 0 before drain
+	SendEventLoopTsbpdSleeps         atomic.Uint64 // Times EventLoop used TSBPD-aware sleep
+	SendEventLoopEmptyBtreeSleeps    atomic.Uint64 // Times EventLoop slept due to empty btree
+	SendEventLoopSleepClampedMin     atomic.Uint64 // Times sleep was clamped to minimum
+	SendEventLoopSleepClampedMax     atomic.Uint64 // Times sleep was clamped to maximum
+	SendEventLoopSleepTotalUs        atomic.Uint64 // Total sleep time in microseconds
 	SendEventLoopNextDeliveryTotalUs atomic.Uint64 // Total next delivery time in microseconds
-	SendDeliveryPackets            atomic.Uint64 // Packets delivered by EventLoop
-	SendBtreeLen                   atomic.Uint64 // Current btree length (updated per iteration)
+	SendDeliveryPackets              atomic.Uint64 // Packets delivered by EventLoop
+	SendBtreeLen                     atomic.Uint64 // Current btree length (updated per iteration)
 	// Delivery debugging metrics
-	SendDeliveryAttempts       atomic.Uint64 // Times deliverReadyPacketsEventLoop was called
-	SendDeliveryBtreeEmpty     atomic.Uint64 // Times btree was empty when trying to deliver
-	SendDeliveryIterStarted    atomic.Uint64 // Times IterateFrom called callback (had packets)
-	SendDeliveryTsbpdNotReady  atomic.Uint64 // Times first packet had tsbpdTime > nowUs
-	SendDeliveryLastNowUs      atomic.Uint64 // Last nowUs value (for debugging)
-	SendDeliveryLastTsbpd      atomic.Uint64 // Last first packet's tsbpdTime (for debugging)
-	SendDeliveryStartSeq       atomic.Uint64 // Last deliveryStartPoint value (for debugging)
-	SendDeliveryBtreeMinSeq    atomic.Uint64 // Btree min sequence (for debugging IterateFrom)
-	SendDropAheadOfDelivery    atomic.Uint64 // Packets dropped that were ahead of deliveryStartPoint (head-of-line blocking)
+	SendDeliveryAttempts      atomic.Uint64 // Times deliverReadyPacketsEventLoop was called
+	SendDeliveryBtreeEmpty    atomic.Uint64 // Times btree was empty when trying to deliver
+	SendDeliveryIterStarted   atomic.Uint64 // Times IterateFrom called callback (had packets)
+	SendDeliveryTsbpdNotReady atomic.Uint64 // Times first packet had tsbpdTime > nowUs
+	SendDeliveryLastNowUs     atomic.Uint64 // Last nowUs value (for debugging)
+	SendDeliveryLastTsbpd     atomic.Uint64 // Last first packet's tsbpdTime (for debugging)
+	SendDeliveryStartSeq      atomic.Uint64 // Last deliveryStartPoint value (for debugging)
+	SendDeliveryBtreeMinSeq   atomic.Uint64 // Btree min sequence (for debugging IterateFrom)
+	SendDropAheadOfDelivery   atomic.Uint64 // Packets dropped that were ahead of deliveryStartPoint (head-of-line blocking)
 
 	// ========================================================================
 	// Zero-Copy Payload Pool Metrics (Phase 5: Lockless Sender)
@@ -502,12 +504,12 @@ type ConnectionMetrics struct {
 	// Tracks EventLoop behavior for diagnosing ticker starvation issues.
 	// Key diagnostic: DefaultRuns / FullACKFires ratio (expected ~1000)
 
-	EventLoopIterations      atomic.Uint64 // Total loop iterations
-	EventLoopFullACKFires    atomic.Uint64 // Times fullACKTicker.C case executed
-	EventLoopNAKFires        atomic.Uint64 // Times nakTicker.C case executed
-	EventLoopRateFires       atomic.Uint64 // Times rateTicker.C case executed
-	EventLoopDefaultRuns     atomic.Uint64 // Times default case executed
-	EventLoopIdleBackoffs    atomic.Uint64 // Times idle backoff sleep triggered
+	EventLoopIterations       atomic.Uint64 // Total loop iterations
+	EventLoopFullACKFires     atomic.Uint64 // Times fullACKTicker.C case executed
+	EventLoopNAKFires         atomic.Uint64 // Times nakTicker.C case executed
+	EventLoopRateFires        atomic.Uint64 // Times rateTicker.C case executed
+	EventLoopDefaultRuns      atomic.Uint64 // Times default case executed
+	EventLoopIdleBackoffs     atomic.Uint64 // Times idle backoff sleep triggered
 	EventLoopControlProcessed atomic.Uint64 // Connection control packets processed (ACKACK, KEEPALIVE)
 
 	// Startup diagnostics (debug intermittent failures)
@@ -529,8 +531,8 @@ type ConnectionMetrics struct {
 	// ========================================================================
 	// Current RTT values as gauges (stored as microseconds)
 
-	RTTMicroseconds          atomic.Uint64 // Current RTT value in microseconds (EWMA smoothed)
-	RTTVarMicroseconds       atomic.Uint64 // Current RTT variance in microseconds (EWMA smoothed)
+	RTTMicroseconds           atomic.Uint64 // Current RTT value in microseconds (EWMA smoothed)
+	RTTVarMicroseconds        atomic.Uint64 // Current RTT variance in microseconds (EWMA smoothed)
 	RTTLastSampleMicroseconds atomic.Uint64 // Last RTT sample in microseconds (NO smoothing, raw value)
 
 	// ========================================================================

@@ -20,7 +20,8 @@ func TestEmptyPacket(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	p.Marshal(&buf)
+	err := p.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -35,7 +36,8 @@ func TestArbitraryPacket(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	p.Marshal(&buf)
+	err := p.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -53,7 +55,8 @@ func TestArbitraryControlPacket(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	p.Marshal(&buf)
+	err := p.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -82,7 +85,9 @@ func FuzzPacket(f *testing.F) {
 
 		var buf bytes.Buffer
 		buf.Reset()
-		p.Marshal(&buf)
+		if marshalErr := p.Marshal(&buf); marshalErr != nil {
+			return
+		}
 
 		if !bytes.Equal(data, buf.Bytes()) {
 			t.Errorf("Before: %q, after: %q\n%s", orig, hex.EncodeToString(buf.Bytes()), p.Dump())
@@ -142,7 +147,8 @@ func TestHandshakeV4(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	cif.Marshal(&buf)
+	err := cif.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -150,7 +156,7 @@ func TestHandshakeV4(t *testing.T) {
 
 	cif2 := &CIFHandshake{}
 
-	err := cif2.Unmarshal(buf.Bytes())
+	err = cif2.Unmarshal(buf.Bytes())
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
@@ -215,7 +221,8 @@ func TestHandshakeV5(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	cif.Marshal(&buf)
+	err := cif.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -223,7 +230,7 @@ func TestHandshakeV5(t *testing.T) {
 
 	cif2 := &CIFHandshake{}
 
-	err := cif2.Unmarshal(buf.Bytes())
+	err = cif2.Unmarshal(buf.Bytes())
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
@@ -293,7 +300,8 @@ func TestKM(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	cif.Marshal(&buf)
+	err := cif.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -301,7 +309,7 @@ func TestKM(t *testing.T) {
 
 	cif2 := &CIFKeyMaterialExtension{}
 
-	err := cif2.Unmarshal(buf.Bytes())
+	err = cif2.Unmarshal(buf.Bytes())
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
@@ -345,7 +353,8 @@ func TestFullACK(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	cif.Marshal(&buf)
+	err := cif.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -353,7 +362,7 @@ func TestFullACK(t *testing.T) {
 
 	cif2 := &CIFACK{}
 
-	err := cif2.Unmarshal(buf.Bytes())
+	err = cif2.Unmarshal(buf.Bytes())
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
@@ -390,7 +399,8 @@ func TestSmallACK(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	cif.Marshal(&buf)
+	err := cif.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -398,7 +408,7 @@ func TestSmallACK(t *testing.T) {
 
 	cif2 := &CIFACK{}
 
-	err := cif2.Unmarshal(buf.Bytes())
+	err = cif2.Unmarshal(buf.Bytes())
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
@@ -435,7 +445,8 @@ func TestLiteACK(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	cif.Marshal(&buf)
+	err := cif.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -443,7 +454,7 @@ func TestLiteACK(t *testing.T) {
 
 	cif2 := &CIFACK{}
 
-	err := cif2.Unmarshal(buf.Bytes())
+	err = cif2.Unmarshal(buf.Bytes())
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
@@ -466,7 +477,7 @@ func TestLiteACKString(t *testing.T) {
 }
 
 // TestFullACKPacketRoundTrip tests the full packet round-trip for ACK packets
-// This verifies that a packet with header + CIF can be marshalled and unmarshalled correctly
+// This verifies that a packet with header + CIF can be marshaled and unmarshaled correctly
 func TestFullACKPacketRoundTrip(t *testing.T) {
 	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
 
@@ -517,7 +528,7 @@ func TestFullACKPacketRoundTrip(t *testing.T) {
 }
 
 // TestFullNAKPacketRoundTrip tests the full packet round-trip for NAK packets
-// This verifies that a packet with header + CIF can be marshalled and unmarshalled correctly
+// This verifies that a packet with header + CIF can be marshaled and unmarshaled correctly
 func TestFullNAKPacketRoundTrip(t *testing.T) {
 	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
 
@@ -574,7 +585,8 @@ func TestNAK(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	cif.Marshal(&buf)
+	err := cif.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -582,7 +594,7 @@ func TestNAK(t *testing.T) {
 
 	cif2 := &CIFNAK{}
 
-	err := cif2.Unmarshal(buf.Bytes())
+	err = cif2.Unmarshal(buf.Bytes())
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
@@ -606,7 +618,8 @@ func TestShutdown(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	cif.Marshal(&buf)
+	err := cif.Marshal(&buf)
+	require.NoError(t, err)
 
 	data := hex.EncodeToString(buf.Bytes())
 
@@ -614,7 +627,7 @@ func TestShutdown(t *testing.T) {
 
 	cif2 := &CIFShutdown{}
 
-	err := cif2.Unmarshal(buf.Bytes())
+	err = cif2.Unmarshal(buf.Bytes())
 
 	require.NoError(t, err)
 	require.Equal(t, cif, cif2)
@@ -627,29 +640,32 @@ func TestShutdownString(t *testing.T) {
 }
 
 func TestPacketPoolReuse(t *testing.T) {
-	// Verify packets are reused from pool
+	// Verify packets from pool are properly initialized
+	// Note: sync.Pool does NOT guarantee LIFO (same object returned), so we
+	// can only verify that packets from the pool have correctly reset fields.
 	addr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1234}
 
 	p1 := NewPacket(addr)
 	p1.Header().DestinationSocketId = 12345
 	p1.Header().Timestamp = 99999
 
-	// Store pointer to verify reuse
-	p1Ptr := p1.(*pkt)
-
 	p1.Decommission() // Resets fields and returns to pool
 
 	p2 := NewPacket(addr)
-	// Verify p2 is the same underlying struct (pointer comparison)
-	require.Equal(t, p1Ptr, p2.(*pkt), "packet should be reused from pool")
 	// Verify fields are properly reset (should be 0/defaults)
+	// This works regardless of whether we got the same packet or a new one
 	require.Equal(t, uint32(0), p2.Header().DestinationSocketId, "DestinationSocketId should be reset")
 	require.Equal(t, uint32(0), p2.Header().Timestamp, "Timestamp should be reset")
 	require.Equal(t, addr, p2.Header().Addr, "Addr should be set")
+
+	// Clean up
+	p2.Decommission()
 }
 
 func TestPacketPoolResetInDecommission(t *testing.T) {
 	// Verify all fields are reset in Decommission() before Put()
+	// Note: sync.Pool does NOT guarantee LIFO, so we verify that any packet
+	// from the pool has properly initialized fields (reset to defaults).
 	addr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1234}
 
 	p := NewPacket(addr)
@@ -663,7 +679,7 @@ func TestPacketPoolResetInDecommission(t *testing.T) {
 
 	p.Decommission() // Should reset all fields
 
-	// Get again from pool
+	// Get again from pool - may or may not be the same packet
 	p2 := NewPacket(addr)
 	require.False(t, p2.Header().IsControlPacket, "IsControlPacket should be reset")
 	require.Equal(t, CtrlType(0), p2.Header().ControlType, "ControlType should be reset")
@@ -672,6 +688,9 @@ func TestPacketPoolResetInDecommission(t *testing.T) {
 	require.Equal(t, uint32(0), p2.Header().Timestamp, "Timestamp should be reset")
 	require.Equal(t, uint32(0), p2.Header().TypeSpecific, "TypeSpecific should be reset")
 	require.Equal(t, addr, p2.Header().Addr, "Addr should be set")
+
+	// Clean up
+	p2.Decommission()
 }
 
 func TestPacketPoolWithUnmarshal(t *testing.T) {
@@ -709,7 +728,9 @@ func BenchmarkNewPacketWithData(b *testing.B) {
 
 	var buf bytes.Buffer
 
-	p.Marshal(&buf)
+	if err := p.Marshal(&buf); err != nil {
+		b.Fatalf("Marshal failed: %v", err)
+	}
 
 	data = buf.Bytes()
 
@@ -917,13 +938,14 @@ func TestDecommissionWithBuffer(t *testing.T) {
 	testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
 
 	t.Run("returns buffer to pool", func(t *testing.T) {
-		pool := &sync.Pool{New: func() interface{} { b := make([]byte, 1500); return &b }}
+		pool := &sync.Pool{New: func() any { b := make([]byte, 1500); return &b }}
 
 		bufPtr := pool.Get().(*[]byte)
 		copy(*bufPtr, createTestDataPacket(1, 100))
 
 		p := NewPacket(nil).(*pkt)
-		p.UnmarshalZeroCopy(bufPtr, HeaderSize+100, testAddr)
+		err := p.UnmarshalZeroCopy(bufPtr, HeaderSize+100, testAddr)
+		require.NoError(t, err)
 		require.True(t, p.HasRecvBuffer())
 
 		p.DecommissionWithBuffer(pool)
@@ -933,7 +955,7 @@ func TestDecommissionWithBuffer(t *testing.T) {
 	})
 
 	t.Run("handles nil buffer gracefully", func(t *testing.T) {
-		pool := &sync.Pool{New: func() interface{} { b := make([]byte, 1500); return &b }}
+		pool := &sync.Pool{New: func() any { b := make([]byte, 1500); return &b }}
 
 		p := NewPacket(nil).(*pkt) // No buffer set
 		require.False(t, p.HasRecvBuffer())
@@ -947,7 +969,8 @@ func TestDecommissionWithBuffer(t *testing.T) {
 		bufPtr := &buf
 
 		p := NewPacket(nil).(*pkt)
-		p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+		err := p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+		require.NoError(t, err)
 
 		// Should not panic with nil pool
 		p.DecommissionWithBuffer(nil)
@@ -964,7 +987,7 @@ func TestDecommissionWithBuffer(t *testing.T) {
 		// when io_uring tries to set iovec.Base = &buffer[0]
 
 		const bufferSize = 1500
-		pool := &sync.Pool{New: func() interface{} { b := make([]byte, bufferSize); return &b }}
+		pool := &sync.Pool{New: func() any { b := make([]byte, bufferSize); return &b }}
 
 		// Get buffer, simulate zero-copy receive, then return to pool
 		bufPtr := pool.Get().(*[]byte)
@@ -1006,7 +1029,8 @@ func TestDataZeroCopy(t *testing.T) {
 		bufPtr := &buf
 
 		p := NewPacket(nil).(*pkt)
-		p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+		err := p.UnmarshalZeroCopy(bufPtr, len(buf), testAddr)
+		require.NoError(t, err)
 
 		payload := p.Data()
 		require.Equal(t, payloadData, payload)
@@ -1019,7 +1043,8 @@ func TestDataZeroCopy(t *testing.T) {
 		bufPtr := &buf
 
 		p := NewPacket(nil).(*pkt)
-		p.UnmarshalZeroCopy(bufPtr, HeaderSize, testAddr)
+		err := p.UnmarshalZeroCopy(bufPtr, HeaderSize, testAddr)
+		require.NoError(t, err)
 
 		payload := p.Data()
 		require.Empty(t, payload)
@@ -1037,10 +1062,10 @@ func TestDataZeroCopy(t *testing.T) {
 	})
 
 	t.Run("legacy path still works", func(t *testing.T) {
-		testAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
+		legacyAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
 		payloadData := []byte("legacy payload")
 
-		p := NewPacket(testAddr)
+		p := NewPacket(legacyAddr)
 		p.SetData(payloadData)
 
 		payload := p.Data()
@@ -1059,7 +1084,8 @@ func TestLenZeroCopy(t *testing.T) {
 		n := len(buf) // HeaderSize + 184 = 200
 
 		p := NewPacket(nil).(*pkt)
-		p.UnmarshalZeroCopy(bufPtr, n, testAddr)
+		err := p.UnmarshalZeroCopy(bufPtr, n, testAddr)
+		require.NoError(t, err)
 
 		require.Equal(t, uint64(184), p.Len())
 
@@ -1071,7 +1097,8 @@ func TestLenZeroCopy(t *testing.T) {
 		bufPtr := &buf
 
 		p := NewPacket(nil).(*pkt)
-		p.UnmarshalZeroCopy(bufPtr, HeaderSize, testAddr)
+		err := p.UnmarshalZeroCopy(bufPtr, HeaderSize, testAddr)
+		require.NoError(t, err)
 
 		require.Equal(t, uint64(0), p.Len())
 
@@ -1125,7 +1152,8 @@ func TestUnmarshalZeroCopyRoundTrip(t *testing.T) {
 
 			// Marshal to bytes
 			var buf bytes.Buffer
-			original.Marshal(&buf)
+			err := original.Marshal(&buf)
+			require.NoError(t, err)
 			marshaled := buf.Bytes()
 
 			// Unmarshal with zero-copy
@@ -1134,7 +1162,7 @@ func TestUnmarshalZeroCopyRoundTrip(t *testing.T) {
 			bufPtr := &bufCopy
 
 			restored := NewPacket(nil).(*pkt)
-			err := restored.UnmarshalZeroCopy(bufPtr, len(bufCopy), testAddr)
+			err = restored.UnmarshalZeroCopy(bufPtr, len(bufCopy), testAddr)
 			require.NoError(t, err)
 
 			// Verify all header fields match

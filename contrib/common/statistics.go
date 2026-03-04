@@ -23,7 +23,7 @@ type ThroughputGetter func() (bytes uint64, pkts uint64, gapsPkts uint64, naksPk
 
 // RunThroughputDisplay runs a throughput display loop that periodically prints stats
 // The getter function is called to retrieve current byte/packet/success/loss/retrans totals
-// The loop exits when ctx is cancelled
+// The loop exits when ctx is canceled
 //
 // Output format (fixed-width columns):
 //
@@ -77,7 +77,7 @@ func RunThroughputDisplayWithLabelAndColor(ctx context.Context, period time.Dura
 			// - gaps = sequence gaps detected (triggers NAK/retrans)
 			// - skips = TSBPD skips (packets that NEVER arrived - true losses)
 			// Recovery = 100% means all gaps were successfully retransmitted
-			var recoveryPct float64 = 100.0
+			var recoveryPct = 100.0
 			if gapsPkts > 0 {
 				recoveryPct = (1.0 - float64(skipsPkts)/float64(gapsPkts)) * 100.0
 				if recoveryPct < 0 {
@@ -247,8 +247,8 @@ func PrintConnectionStatistics(connections []srt.Conn, interval string, labeler 
 		type connWithTimeout interface {
 			GetPeerIdleTimeoutRemaining() time.Duration
 		}
-		if connWithTimeout, ok := conn.(connWithTimeout); ok {
-			remaining := connWithTimeout.GetPeerIdleTimeoutRemaining()
+		if cwt, ok := conn.(connWithTimeout); ok {
+			remaining := cwt.GetPeerIdleTimeoutRemaining()
 			if remaining > 0 {
 				remainingSeconds := remaining.Seconds()
 				connStat.Instantaneous.PeerIdleTimeoutRemainingS = &remainingSeconds

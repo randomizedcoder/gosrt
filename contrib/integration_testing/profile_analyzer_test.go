@@ -81,9 +81,9 @@ func TestCompareProfiles(t *testing.T) {
 		Component:   "server",
 		ProfileType: ProfileCPU,
 		TopFuncs: []FuncStat{
-			{Name: "runtime.chanrecv", Flat: 5.0},   // Improved
-			{Name: "io_uring.Submit", Flat: 12.0},   // New
-			{Name: "runtime.mallocgc", Flat: 8.0},   // Slightly improved
+			{Name: "runtime.chanrecv", Flat: 5.0}, // Improved
+			{Name: "io_uring.Submit", Flat: 12.0}, // New
+			{Name: "runtime.mallocgc", Flat: 8.0}, // Slightly improved
 		},
 	}
 
@@ -316,4 +316,3 @@ func TestGenerateRecommendations(t *testing.T) {
 		t.Error("Expected GC recommendation")
 	}
 }
-

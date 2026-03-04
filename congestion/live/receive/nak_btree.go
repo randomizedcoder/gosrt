@@ -320,8 +320,8 @@ func (nb *nakBtree) Min() (uint32, bool) {
 	if nb.tree.Len() == 0 {
 		return 0, false
 	}
-	min, _ := nb.tree.Min()
-	return min.Seq, true
+	minEntry, _ := nb.tree.Min()
+	return minEntry.Seq, true
 }
 
 // MinLocking returns the minimum sequence number with lock protection.
@@ -339,8 +339,8 @@ func (nb *nakBtree) Max() (uint32, bool) {
 	if nb.tree.Len() == 0 {
 		return 0, false
 	}
-	max, _ := nb.tree.Max()
-	return max.Seq, true
+	maxEntry, _ := nb.tree.Max()
+	return maxEntry.Seq, true
 }
 
 // MaxLocking returns the maximum sequence number with lock protection.

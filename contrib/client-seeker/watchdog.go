@@ -26,7 +26,7 @@ func DefaultWatchdogConfig() WatchdogConfig {
 	}
 }
 
-// WatchdogState represents the current watchdog state.
+// WatchdogStateEnum represents the current watchdog state.
 type WatchdogStateEnum int
 
 const (
@@ -124,7 +124,9 @@ func (w *Watchdog) check() {
 				FormatBitrate(w.savedBitrate),
 				FormatBitrate(w.config.SafeBitrate))
 
-			w.bm.Set(w.config.SafeBitrate)
+			if err := w.bm.Set(w.config.SafeBitrate); err != nil {
+				fmt.Fprintf(os.Stderr, "watchdog: failed to set safe bitrate: %v\n", err)
+			}
 			w.state.Store(int32(WatchdogStateWarning))
 		}
 

@@ -11,11 +11,11 @@ import (
 
 // NAK wire format constants for MSS limit testing
 const (
-	nakSingleEntrySize = 4             // 4 bytes for single sequence
-	nakRangeEntrySize  = 8             // 8 bytes for range (start + end)
-	nakCIFMaxBytes     = 1456          // Max NAK CIF size (MTU - headers)
-	nakMaxSingles      = 364           // nakCIFMaxBytes / 4
-	nakMaxRanges       = 182           // nakCIFMaxBytes / 8
+	nakSingleEntrySize = 4    // 4 bytes for single sequence
+	nakRangeEntrySize  = 8    // 8 bytes for range (start + end)
+	nakCIFMaxBytes     = 1456 // Max NAK CIF size (MTU - headers)
+	nakMaxSingles      = 364  // nakCIFMaxBytes / 4
+	nakMaxRanges       = 182  // nakCIFMaxBytes / 8
 )
 
 // ═══════════════════════════════════════════════════════════════════════════

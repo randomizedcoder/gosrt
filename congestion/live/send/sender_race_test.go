@@ -168,7 +168,7 @@ func TestRace_PushWhileDelivering(t *testing.T) {
 
 	var nowUs atomic.Uint64
 	nowUs.Store(1_000_000)
-	s.nowFn = func() uint64 { return nowUs.Load() }
+	s.nowFn = nowUs.Load
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -299,7 +299,7 @@ func TestRace_DropWhileDelivering(t *testing.T) {
 
 	var nowUs atomic.Uint64
 	nowUs.Store(0)
-	s.nowFn = func() uint64 { return nowUs.Load() }
+	s.nowFn = nowUs.Load
 
 	// Pre-populate with old packets
 	for i := 0; i < 100; i++ {
@@ -367,7 +367,7 @@ func TestRace_MultipleOperations(t *testing.T) {
 
 	var nowUs atomic.Uint64
 	nowUs.Store(0)
-	s.nowFn = func() uint64 { return nowUs.Load() }
+	s.nowFn = nowUs.Load
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})

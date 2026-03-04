@@ -78,14 +78,17 @@ func (g *StabilityGate) Probe(ctx context.Context, probeStart time.Time, bitrate
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return ProbeResult{Verdict: VerdictTimeout, Reason: "context cancelled"}
+			return ProbeResult{Verdict: VerdictTimeout, Reason: "context canceled"}
 
 		case <-fastTicker.C:
 			// FAST PATH: Check connection alive (50ms)
 			status, err := g.seeker.Status(ctx)
 			if err != nil || !status.ConnectionAlive {
 				// === SNAPSHOT-ON-EOF: Capture immediately! ===
-				m, _ := g.collector.Collect(ctx)
+				m, collectErr := g.collector.Collect(ctx)
+				if collectErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to collect metrics at EOF: %v\n", collectErr)
+				}
 				diag := g.captureAtFailureImmediate(bitrate, m, probeStart)
 
 				return ProbeResult{
@@ -169,12 +172,15 @@ func (g *StabilityGate) warmUpWithFastPoll(ctx context.Context, bitrate int64, p
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return &ProbeResult{Verdict: VerdictTimeout, Reason: "context cancelled during warm-up"}
+			return &ProbeResult{Verdict: VerdictTimeout, Reason: "context canceled during warm-up"}
 
 		case <-fastTicker.C:
 			status, err := g.seeker.Status(ctx)
 			if err != nil || !status.ConnectionAlive {
-				m, _ := g.collector.Collect(ctx)
+				m, collectErr := g.collector.Collect(ctx)
+				if collectErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to collect metrics at warm-up EOF: %v\n", collectErr)
+				}
 				diag := g.captureAtFailureImmediate(bitrate, m, probeStart)
 				return &ProbeResult{
 					Verdict:   VerdictEOF,
@@ -252,23 +258,24 @@ func (g *StabilityGate) logHypothesisAnalysis(capture *DiagnosticCapture, m Stab
 	// Automated hypothesis flagging (original logic)
 	hypothesis := DefaultHypothesisModel()
 
-	if te < hypothesis.H2TEThreshold && m.GapRate < hypothesis.H3GapRateThreshold {
+	switch {
+	case te < hypothesis.H2TEThreshold && m.GapRate < hypothesis.H3GapRateThreshold:
 		fmt.Fprintf(os.Stderr, "║  🔴 HYPOTHESIS 2: EventLoop Starvation                       \n")
 		fmt.Fprintf(os.Stderr, "║     Low throughput without packet loss                       \n")
 		fmt.Fprintf(os.Stderr, "║     → Check cpu.pprof for deliverReadyPacketsEventLoop()    \n")
-	} else if m.NAKRate > hypothesis.H1NAKRateThreshold && timeToFailure < 5*time.Second {
+	case m.NAKRate > hypothesis.H1NAKRateThreshold && timeToFailure < 5*time.Second:
 		fmt.Fprintf(os.Stderr, "║  🔴 HYPOTHESIS 1: Flow Control Window Exhaustion             \n")
 		fmt.Fprintf(os.Stderr, "║     NAK spike immediately before EOF                         \n")
 		fmt.Fprintf(os.Stderr, "║     → Increase FC, check ACK processing latency             \n")
-	} else if m.RTTVarianceMs > hypothesis.H5RTTVarianceThreshold {
+	case m.RTTVarianceMs > hypothesis.H5RTTVarianceThreshold:
 		fmt.Fprintf(os.Stderr, "║  🔴 HYPOTHESIS 5: GC/Memory Pressure                         \n")
 		fmt.Fprintf(os.Stderr, "║     High RTT variance indicates scheduling jitter           \n")
 		fmt.Fprintf(os.Stderr, "║     → Check heap.pprof, run with GODEBUG=gctrace=1          \n")
-	} else if te < hypothesis.H2TEThreshold && m.GapRate > hypothesis.H3GapRateThreshold {
+	case te < hypothesis.H2TEThreshold && m.GapRate > hypothesis.H3GapRateThreshold:
 		fmt.Fprintf(os.Stderr, "║  🔴 HYPOTHESIS 4: io_uring Backpressure                      \n")
 		fmt.Fprintf(os.Stderr, "║     Low throughput WITH packet loss                          \n")
 		fmt.Fprintf(os.Stderr, "║     → Check IoUringRecvRingSize, completion queue depth     \n")
-	} else {
+	default:
 		fmt.Fprintf(os.Stderr, "║  🟡 UNKNOWN: Review profiles for additional clues           \n")
 	}
 
@@ -304,7 +311,8 @@ func (g *StabilityGate) evaluateSamples(samples []StabilityMetrics) (ProbeVerdic
 	var totalTE float64
 	unstableCount := 0
 
-	for _, s := range samples {
+	for i := range samples {
+		s := &samples[i]
 		totalGap += s.GapRate
 		totalNAK += s.NAKRate
 		totalRTT += s.RTTMs
@@ -359,7 +367,8 @@ func (g *StabilityGate) aggregate(samples []StabilityMetrics) StabilityMetrics {
 	var m StabilityMetrics
 	var totalGap, totalNAK, totalRTT, totalRTTVar, totalTE float64
 
-	for _, s := range samples {
+	for i := range samples {
+		s := &samples[i]
 		totalGap += s.GapRate
 		totalNAK += s.NAKRate
 		totalRTT += s.RTTMs

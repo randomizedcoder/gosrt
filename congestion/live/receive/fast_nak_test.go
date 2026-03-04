@@ -129,21 +129,21 @@ func TestCheckFastNakRecent_MultipleBurstLosses(t *testing.T) {
 	// Burst 1: sequences 1001-1300 (300 packets lost)
 	r.lastDataPacketSeq.Store(1000)
 	r.lastPacketArrivalTime.Store(baseTime.Add(-300 * time.Millisecond))
-	r.checkFastNakRecent(1300, baseTime.Add(-240 * time.Millisecond))
+	r.checkFastNakRecent(1300, baseTime.Add(-240*time.Millisecond))
 
 	// Some packets arrive successfully: 1300-1500 (gap in losses)
 	r.lastDataPacketSeq.Store(1500)
 	r.lastPacketArrivalTime.Store(baseTime.Add(-200 * time.Millisecond))
 
 	// Burst 2: sequences 1501-1800 (300 packets lost)
-	r.checkFastNakRecent(1800, baseTime.Add(-140 * time.Millisecond))
+	r.checkFastNakRecent(1800, baseTime.Add(-140*time.Millisecond))
 
 	// More packets arrive successfully: 1800-2000 (gap in losses)
 	r.lastDataPacketSeq.Store(2000)
 	r.lastPacketArrivalTime.Store(baseTime.Add(-100 * time.Millisecond))
 
 	// Burst 3: sequences 2001-2300 (300 packets lost)
-	r.checkFastNakRecent(2300, baseTime.Add(-40 * time.Millisecond))
+	r.checkFastNakRecent(2300, baseTime.Add(-40*time.Millisecond))
 
 	inserts := r.metrics.NakFastRecentInserts.Load()
 	t.Logf("Total FastNAKRecent inserts after 3 bursts: %d", inserts)

@@ -220,12 +220,12 @@ func TestServer_ConcurrentConnections(t *testing.T) {
 
 	for i := 0; i < numClients; i++ {
 		go func(idx int) {
-			config := DefaultConfig()
-			config.StreamId = "client"
+			clientConfig := DefaultConfig()
+			clientConfig.StreamId = "client"
 
-			conn, err := Dial(ctx, "srt", "127.0.0.1:6310", config, &wg)
-			if err != nil {
-				errChan <- err
+			conn, dialErr := Dial(ctx, "srt", "127.0.0.1:6310", clientConfig, &wg)
+			if dialErr != nil {
+				errChan <- dialErr
 				return
 			}
 			connChan <- conn
@@ -238,8 +238,8 @@ func TestServer_ConcurrentConnections(t *testing.T) {
 		select {
 		case conn := <-connChan:
 			connections = append(connections, conn)
-		case err := <-errChan:
-			t.Errorf("Connection %d failed: %v", i, err)
+		case connErr := <-errChan:
+			t.Errorf("Connection %d failed: %v", i, connErr)
 		case <-time.After(3 * time.Second):
 			t.Fatal("Timeout waiting for connections")
 		}
@@ -250,7 +250,7 @@ func TestServer_ConcurrentConnections(t *testing.T) {
 
 	// Close all connections
 	for _, conn := range connections {
-		conn.Close()
+		require.NoError(t, conn.Close())
 	}
 }
 
@@ -376,9 +376,13 @@ func TestServer_CustomConfig(t *testing.T) {
 	clientConfig.StreamId = "test"
 	clientConfig.Latency = 500 * time.Millisecond
 
-	conn, err := Dial(ctx, "srt", "127.0.0.1:6313", clientConfig, &wg)
-	require.NoError(t, err)
-	defer conn.Close()
+	conn, dialErr := Dial(ctx, "srt", "127.0.0.1:6313", clientConfig, &wg)
+	require.NoError(t, dialErr)
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error: %v", closeErr)
+		}
+	}()
 
 	t.Log("✅ Server with custom config works correctly")
 }

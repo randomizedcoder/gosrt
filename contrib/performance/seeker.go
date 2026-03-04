@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,15 +35,22 @@ func NewSeekerControl(socketPath string) *SeekerControl {
 }
 
 // Connect establishes connection to the control socket.
-func (sc *SeekerControl) Connect() error {
+// The context is used for cancellation of the dial operation.
+func (sc *SeekerControl) Connect(ctx context.Context) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
 	if sc.conn != nil {
-		sc.conn.Close()
+		if closeErr := sc.conn.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close old connection: %v\n", closeErr)
+		}
 	}
 
-	conn, err := net.DialTimeout("unix", sc.socketPath, 5*time.Second)
+	// Use context-aware dialing with timeout
+	dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer dialCancel()
+	var d net.Dialer
+	conn, err := d.DialContext(dialCtx, "unix", sc.socketPath)
 	if err != nil {
 		return fmt.Errorf("connect to %s: %w", sc.socketPath, err)
 	}
@@ -158,9 +166,13 @@ func (sc *SeekerControl) sendCommand(ctx context.Context, req map[string]interfa
 
 	// Set deadline from context
 	if deadline, ok := ctx.Deadline(); ok {
-		sc.conn.SetDeadline(deadline)
+		if err := sc.conn.SetDeadline(deadline); err != nil {
+			return nil, fmt.Errorf("set deadline from context: %w", err)
+		}
 	} else {
-		sc.conn.SetDeadline(time.Now().Add(2 * time.Second))
+		if err := sc.conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			return nil, fmt.Errorf("set default deadline: %w", err)
+		}
 	}
 
 	// Send request
@@ -183,8 +195,8 @@ func (sc *SeekerControl) sendCommand(ctx context.Context, req map[string]interfa
 	}
 
 	var resp ControlResponse
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w", err)
+	if unmarshalErr := json.Unmarshal([]byte(line), &resp); unmarshalErr != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", unmarshalErr)
 	}
 
 	return &resp, nil
@@ -206,9 +218,12 @@ type ControlResponse struct {
 
 // GetStatusFast returns cached status if recent, otherwise fetches new.
 func (sc *SeekerControl) GetStatusFast(ctx context.Context, maxAge time.Duration) (SeekerStatus, error) {
-	lastTime := sc.lastStatusTime.Load().(time.Time)
+	lastTime, ok := sc.lastStatusTime.Load().(time.Time)
+	if !ok {
+		return sc.Status(ctx)
+	}
 	if time.Since(lastTime) < maxAge {
-		if status, ok := sc.lastStatus.Load().(SeekerStatus); ok {
+		if status, statusOK := sc.lastStatus.Load().(SeekerStatus); statusOK {
 			return status, nil
 		}
 	}
@@ -216,7 +231,10 @@ func (sc *SeekerControl) GetStatusFast(ctx context.Context, maxAge time.Duration
 }
 
 // Reconnect attempts to reconnect to the control socket.
-func (sc *SeekerControl) Reconnect() error {
-	sc.Close()
-	return sc.Connect()
+// The context is used for cancellation of the dial operation.
+func (sc *SeekerControl) Reconnect(ctx context.Context) error {
+	if err := sc.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: close error during reconnect: %v\n", err)
+	}
+	return sc.Connect(ctx)
 }

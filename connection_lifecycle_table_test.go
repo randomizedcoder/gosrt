@@ -88,21 +88,21 @@ var lifecycleTests = []LifecycleTestCase{
 		ExpectCleanup:      true,
 	},
 	{
-		Name:               "CloseReason_PeerIdle",
-		CloseReason:        metrics.CloseReasonPeerIdle,
-		PeerIdleTimeout:    2 * time.Second, // Must be > HandshakeTimeout (default 1.5s)
-		ExpectTimeout:      false,           // We close manually before timeout
-		ExpectCleanup:      true,
+		Name:            "CloseReason_PeerIdle",
+		CloseReason:     metrics.CloseReasonPeerIdle,
+		PeerIdleTimeout: 2 * time.Second, // Must be > HandshakeTimeout (default 1.5s)
+		ExpectTimeout:   false,           // We close manually before timeout
+		ExpectCleanup:   true,
 	},
 
 	// ═══════════════════════════════════════════════════════════════════════
 	// Activity and Timeout Scenarios
 	// ═══════════════════════════════════════════════════════════════════════
 	{
-		Name:             "ActivityResetsTimeout",
-		PeerIdleTimeout:  2 * time.Second, // Must be > HandshakeTimeout (default 1.5s)
-		SendActivity:     true,            // Sending data should reset timeout
-		ExpectCleanup:    true,
+		Name:            "ActivityResetsTimeout",
+		PeerIdleTimeout: 2 * time.Second, // Must be > HandshakeTimeout (default 1.5s)
+		SendActivity:    true,            // Sending data should reset timeout
+		ExpectCleanup:   true,
 	},
 	{
 		Name:               "CloseWithActiveTransfer_LargeData",
@@ -249,8 +249,8 @@ func runLifecycleTest(t *testing.T, tc LifecycleTestCase, port int) {
 		go func() {
 			defer transferDone.Done()
 			for i := 0; i < 10; i++ {
-				_, err := conn.Write([]byte("data-transfer-test"))
-				if err != nil {
+				_, writeErr := conn.Write([]byte("data-transfer-test"))
+				if writeErr != nil {
 					break
 				}
 				time.Sleep(10 * time.Millisecond)
@@ -265,14 +265,17 @@ func runLifecycleTest(t *testing.T, tc LifecycleTestCase, port int) {
 			closewg.Add(1)
 			go func() {
 				defer closewg.Done()
-				_ = conn.Close()
+				if closeErr := conn.Close(); closeErr != nil {
+					t.Logf("conn.Close error (expected in concurrent close test): %v", closeErr)
+				}
 			}()
 		}
 		closewg.Wait()
 	} else {
-		// Normal close
-		err = conn.Close()
-		// Close should be idempotent, so no error expected
+		// Normal close - Close should be idempotent, so no error expected
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("Warning: conn.Close error (may be expected during test): %v", closeErr)
+		}
 	}
 
 	// Wait for active transfer to complete

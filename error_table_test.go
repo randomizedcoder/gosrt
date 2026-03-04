@@ -17,10 +17,10 @@ import (
 
 // ConfigErrorTestCase tests config validation errors
 type ConfigErrorTestCase struct {
-	Name           string
-	ModifyConfig   func(c *Config)
-	ExpectError    bool
-	ErrorContains  string
+	Name          string
+	ModifyConfig  func(c *Config)
+	ExpectError   bool
+	ErrorContains string
 }
 
 // configErrorTests validates configuration validation
@@ -29,9 +29,9 @@ var configErrorTests = []ConfigErrorTestCase{
 	// Timeout Validations
 	// ═══════════════════════════════════════════════════════════════════════
 	{
-		Name:          "Valid_Default",
-		ModifyConfig:  func(c *Config) {}, // No changes - default is valid
-		ExpectError:   false,
+		Name:         "Valid_Default",
+		ModifyConfig: func(c *Config) {}, // No changes - default is valid
+		ExpectError:  false,
 	},
 	{
 		Name:          "Invalid_ConnectionTimeout_Zero",
@@ -126,9 +126,9 @@ var configErrorTests = []ConfigErrorTestCase{
 		ErrorContains: "Passphrase must be between",
 	},
 	{
-		Name:          "Valid_Passphrase_MinLength",
-		ModifyConfig:  func(c *Config) { c.Passphrase = "1234567890" }, // Exactly MIN_PASSPHRASE_SIZE
-		ExpectError:   false,
+		Name:         "Valid_Passphrase_MinLength",
+		ModifyConfig: func(c *Config) { c.Passphrase = "1234567890" }, // Exactly MIN_PASSPHRASE_SIZE
+		ExpectError:  false,
 	},
 	{
 		Name:          "Invalid_PBKeylen_Invalid",
@@ -137,19 +137,19 @@ var configErrorTests = []ConfigErrorTestCase{
 		ErrorContains: "PBKeylen must be 16, 24, or 32",
 	},
 	{
-		Name:          "Valid_PBKeylen_16",
-		ModifyConfig:  func(c *Config) { c.PBKeylen = 16 },
-		ExpectError:   false,
+		Name:         "Valid_PBKeylen_16",
+		ModifyConfig: func(c *Config) { c.PBKeylen = 16 },
+		ExpectError:  false,
 	},
 	{
-		Name:          "Valid_PBKeylen_24",
-		ModifyConfig:  func(c *Config) { c.PBKeylen = 24 },
-		ExpectError:   false,
+		Name:         "Valid_PBKeylen_24",
+		ModifyConfig: func(c *Config) { c.PBKeylen = 24 },
+		ExpectError:  false,
 	},
 	{
-		Name:          "Valid_PBKeylen_32",
-		ModifyConfig:  func(c *Config) { c.PBKeylen = 32 },
-		ExpectError:   false,
+		Name:         "Valid_PBKeylen_32",
+		ModifyConfig: func(c *Config) { c.PBKeylen = 32 },
+		ExpectError:  false,
 	},
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -408,7 +408,7 @@ func runDialErrorTest(t *testing.T, tc DialErrorTestCase) {
 	} else {
 		require.NoError(t, err)
 		if conn != nil {
-			conn.Close()
+			require.NoError(t, conn.Close())
 		}
 	}
 }
@@ -428,7 +428,7 @@ type ListenErrorTestCase struct {
 var listenErrorTests = []ListenErrorTestCase{
 	// Note: Empty address binds to all interfaces on a random port, which is valid
 	{
-		Name: "Invalid_Config_ConnectionTimeout",
+		Name:    "Invalid_Config_ConnectionTimeout",
 		Address: "127.0.0.1:6500",
 		ModifyConfig: func(c *Config) {
 			c.ConnectionTimeout = 0 // Invalid
@@ -437,7 +437,7 @@ var listenErrorTests = []ListenErrorTestCase{
 		ErrorContains: "config",
 	},
 	{
-		Name: "Invalid_Config_MSS_TooSmall",
+		Name:    "Invalid_Config_MSS_TooSmall",
 		Address: "127.0.0.1:6501",
 		ModifyConfig: func(c *Config) {
 			c.MSS = 10 // Too small
@@ -580,4 +580,3 @@ func TestConnection_ReadAfterClose(t *testing.T) {
 	require.Error(t, err, "Read after close should fail")
 	t.Logf("✅ Read after close failed as expected: %v", err)
 }
-

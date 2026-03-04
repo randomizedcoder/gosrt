@@ -416,4 +416,3 @@ func TestNoDoubleCountingSend(t *testing.T) {
 			"Should be exactly 1, not double-counted")
 	})
 }
-

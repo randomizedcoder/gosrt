@@ -142,8 +142,6 @@ type listener struct {
 	shutdownLock sync.RWMutex
 	shutdownOnce sync.Once
 
-	stopReader context.CancelFunc
-
 	doneChan chan struct{}
 	doneErr  error
 	doneOnce sync.Once
@@ -171,9 +169,7 @@ type listener struct {
 	recvRingStates []*recvRingState // Slice of independent ring states
 
 	// Shared by both single-ring and multi-ring modes
-	recvCompCtx    context.Context    // Context for completion handler(s)
-	recvCompCancel context.CancelFunc // Cancel function for completion handler(s)
-	recvCompWg     sync.WaitGroup     // WaitGroup for completion handler goroutine(s)
+	recvCompWg sync.WaitGroup // WaitGroup for completion handler goroutine(s)
 }
 
 // Listen returns a new listener on the SRT protocol on the address with
@@ -215,12 +211,15 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 		Control: ListenControl(config),
 	}
 
-	lp, err := lc.ListenPacket(context.Background(), "udp", address)
+	lp, err := lc.ListenPacket(ctx, "udp", address)
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
 
-	pc := lp.(*net.UDPConn)
+	pc, ok := lp.(*net.UDPConn)
+	if !ok {
+		return nil, fmt.Errorf("listen: expected *net.UDPConn, got %T", lp)
+	}
 
 	ln.pc = pc
 	ln.addr = pc.LocalAddr()
@@ -256,11 +255,9 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 
 	// Initialize io_uring receive ring (if enabled)
 	// This is a no-op on non-Linux platforms
+	// Error is logged in initializeIoUringRecv() and we fall back to ReadFrom()
 	ioUringInitialized := false
-	if err := ln.initializeIoUringRecv(); err != nil {
-		// Log error but don't fail - fall back to ReadFrom()
-		// Error is already logged in initializeIoUringRecv()
-	} else {
+	if initErr := ln.initializeIoUringRecv(); initErr == nil {
 		// Check if io_uring was actually initialized (enabled and successful)
 		// Single-ring mode uses ln.recvRing, multi-ring mode uses ln.recvRingStates
 		ioUringInitialized = (ln.recvRing != nil) || (len(ln.recvRingStates) > 0)
@@ -293,15 +290,20 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 				}
 
 				// Phase 2: Zero-copy - get buffer from shared global pool
-				bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+				bufferPtr, bufferOk := GetRecvBufferPool().Get().(*[]byte)
+				if !bufferOk {
+					panic("GetRecvBufferPool contained non-*[]byte value")
+				}
 
-				ln.pc.SetReadDeadline(time.Now().Add(3 * time.Second))
-				n, addr, err := ln.pc.ReadFrom(*bufferPtr)
-				if err != nil {
+				if deadlineErr := ln.pc.SetReadDeadline(time.Now().Add(3 * time.Second)); deadlineErr != nil {
+					ln.config.Logger.Print("listen:error", 0, 0, func() string { return fmt.Sprintf("SetReadDeadline error: %v", deadlineErr) })
+				}
+				n, addr, readErr := ln.pc.ReadFrom(*bufferPtr)
+				if readErr != nil {
 					// Return buffer to pool on read error
 					GetRecvBufferPool().Put(bufferPtr)
 
-					if errors.Is(err, os.ErrDeadlineExceeded) {
+					if errors.Is(readErr, os.ErrDeadlineExceeded) {
 						continue
 					}
 
@@ -318,13 +320,13 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 						return
 					}
 
-					ln.markDone(err)
+					ln.markDone(readErr)
 					return
 				}
 
 				// Phase 2: Zero-copy - unmarshal directly referencing the pooled buffer
 				p := packet.NewPacket(addr)
-				if err := p.UnmarshalZeroCopy(bufferPtr, n, addr); err != nil {
+				if unmarshalErr := p.UnmarshalZeroCopy(bufferPtr, n, addr); unmarshalErr != nil {
 					// Parse error - return buffer to pool via DecommissionWithBuffer
 					p.DecommissionWithBuffer(GetRecvBufferPool())
 					continue

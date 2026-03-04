@@ -77,7 +77,7 @@ type ListenerMetrics struct {
 	// Sum of all reasons should equal ConnectionsClosedTotal.
 	ConnectionsClosedGraceful      atomic.Uint64 // Normal shutdown (Close() called)
 	ConnectionsClosedPeerIdle      atomic.Uint64 // Peer idle timeout expired
-	ConnectionsClosedContextCancel atomic.Uint64 // Parent context cancelled
+	ConnectionsClosedContextCancel atomic.Uint64 // Parent context canceled
 	ConnectionsClosedError         atomic.Uint64 // Error during operation
 
 	// ========================================================================

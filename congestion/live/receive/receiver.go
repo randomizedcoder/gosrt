@@ -173,16 +173,16 @@ type receiver struct {
 	// NAK btree function dispatch (configured once based on usePacketRing)
 	// Event loop mode (usePacketRing=true): lock-free versions for single-threaded access
 	// Tick mode (usePacketRing=false): locking versions for concurrent Push/Tick safety
-	nakInsert           func(seq uint32)
-	nakInsertBatch      func(seqs []uint32) int
-	nakDelete           func(seq uint32) bool
-	nakDeleteBefore     func(cutoff uint32) int
-	nakLen              func() int
+	nakInsert       func(seq uint32)
+	nakInsertBatch  func(seqs []uint32) int
+	nakDelete       func(seq uint32) bool
+	nakDeleteBefore func(cutoff uint32) int
+	nakLen          func() int
 
 	// TSBPD-aware NAK btree function dispatch (nak_btree_expiry_optimization.md)
 	nakInsertBatchWithTsbpd func(seqs []uint32, tsbpdTimes []uint64) int
 	nakDeleteBeforeTsbpd    func(expiryThresholdUs uint64) int
-	nakIterateAndUpdate func(fn func(entry NakEntryWithTime) (NakEntryWithTime, bool, bool))
+	nakIterateAndUpdate     func(fn func(entry NakEntryWithTime) (NakEntryWithTime, bool, bool))
 
 	// Event loop (Phase 4: Lockless Design)
 	// When enabled, replaces timer-driven Tick() with continuous event loop
@@ -211,7 +211,7 @@ type receiver struct {
 	processConnectionControlPackets func() int
 }
 
-// NewReceiver takes a Config and returns a new Receiver
+// New takes a Config and returns a new Receiver.
 func New(recvConfig Config) congestion.Receiver {
 	// Choose packet store implementation based on recvConfig
 	var store packetStore

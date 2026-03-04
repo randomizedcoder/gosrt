@@ -38,13 +38,14 @@ func (ln *listener) reader(ctx context.Context) {
 			}
 
 			// sync.Map handles locking internally
-			val, ok := ln.conns.Load(p.Header().DestinationSocketId)
+			val, loadOk := ln.conns.Load(p.Header().DestinationSocketId)
 			var conn *srtConn
-			if ok {
-				conn = val.(*srtConn)
+			var connOk bool
+			if loadOk {
+				conn, connOk = val.(*srtConn)
 			}
 
-			if !ok || conn == nil {
+			if !loadOk || !connOk || conn == nil {
 				// ignore the packet, we don't know the destination
 				// Track at listener level since we can't associate with a connection
 				metrics.GetListenerMetrics().RecvConnLookupNotFound.Add(1)
@@ -92,7 +93,7 @@ func (ln *listener) sendWithMetrics(p packet.Packet, m *metrics.ConnectionMetric
 
 	if err := p.Marshal(&ln.sndData); err != nil {
 		p.Decommission()
-		ln.log("packet:send:error", func() string { return "marshalling packet failed" })
+		ln.log("packet:send:error", func() string { return "marshaling packet failed" })
 		if m != nil {
 			metrics.IncrementSendMetrics(m, p, false, false, metrics.DropReasonMarshal)
 		}
@@ -110,11 +111,9 @@ func (ln *listener) sendWithMetrics(p packet.Packet, m *metrics.ConnectionMetric
 		if m != nil {
 			metrics.IncrementSendMetrics(m, p, false, false, metrics.DropReasonWrite)
 		}
-	} else {
+	} else if m != nil {
 		// Success - track metrics
-		if m != nil {
-			metrics.IncrementSendMetrics(m, p, false, true, 0)
-		}
+		metrics.IncrementSendMetrics(m, p, false, true, 0)
 	}
 
 	if p.Header().IsControlPacket {
@@ -134,7 +133,7 @@ func (ln *listener) sendBrokenLookup(p packet.Packet) {
 
 	if err := p.Marshal(&ln.sndData); err != nil {
 		p.Decommission()
-		ln.log("packet:send:error", func() string { return "marshalling packet failed" })
+		ln.log("packet:send:error", func() string { return "marshaling packet failed" })
 		// Try to find connection for metrics tracking - THIS IS THE BUG!
 		// DestinationSocketId is the PEER's socket ID, but ln.conns is keyed by LOCAL socket ID
 		h := p.Header()
@@ -143,7 +142,7 @@ func (ln *listener) sendBrokenLookup(p packet.Packet) {
 			if !ok {
 				// Counter to detect this bug
 				metrics.GetListenerMetrics().SendConnLookupNotFound.Add(1)
-			} else if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
+			} else if conn, isConn := val.(*srtConn); isConn && conn != nil && conn.metrics != nil {
 				metrics.IncrementSendMetrics(conn.metrics, p, false, false, metrics.DropReasonMarshal)
 			}
 		}
@@ -164,7 +163,7 @@ func (ln *listener) sendBrokenLookup(p packet.Packet) {
 			val, ok := ln.conns.Load(h.DestinationSocketId) // WRONG KEY!
 			if !ok {
 				metrics.GetListenerMetrics().SendConnLookupNotFound.Add(1)
-			} else if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
+			} else if conn, isConn := val.(*srtConn); isConn && conn != nil && conn.metrics != nil {
 				metrics.IncrementSendMetrics(conn.metrics, p, false, false, metrics.DropReasonWrite)
 			}
 		}
@@ -175,7 +174,7 @@ func (ln *listener) sendBrokenLookup(p packet.Packet) {
 			val, ok := ln.conns.Load(h.DestinationSocketId) // WRONG KEY!
 			if !ok {
 				metrics.GetListenerMetrics().SendConnLookupNotFound.Add(1)
-			} else if conn, ok := val.(*srtConn); ok && conn != nil && conn.metrics != nil {
+			} else if conn, isConn := val.(*srtConn); isConn && conn != nil && conn.metrics != nil {
 				metrics.IncrementSendMetrics(conn.metrics, p, false, true, 0)
 			}
 		}
@@ -193,4 +192,3 @@ func (ln *listener) log(topic string, message func() string) {
 
 	ln.config.Logger.Print(topic, 0, 2, message)
 }
-

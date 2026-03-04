@@ -68,7 +68,7 @@ func TestReporter_Hypothesis2_EventLoopStarvation(t *testing.T) {
 		Verdict:  VerdictUnstable,
 		Duration: 5 * time.Second,
 		Metrics: StabilityMetrics{
-			ThroughputTE: 0.85, // 85% < 95% threshold
+			ThroughputTE: 0.85,   // 85% < 95% threshold
 			GapRate:      0.0001, // Very low gap rate
 		},
 	})
@@ -174,11 +174,15 @@ func TestReporter_JSONOutput(t *testing.T) {
 
 	r.FinalReport(result)
 
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatalf("Failed to close pipe writer: %v", err)
+	}
 	os.Stdout = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r2)
+	if _, err := buf.ReadFrom(r2); err != nil {
+		t.Fatalf("Failed to read from pipe: %v", err)
+	}
 	output := buf.String()
 
 	// Parse JSON
@@ -209,11 +213,18 @@ func TestReporter_SaveLoadProbes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
+	tmpFileName := tmpFile.Name()
+	t.Cleanup(func() {
+		if removeErr := os.Remove(tmpFileName); removeErr != nil && !os.IsNotExist(removeErr) {
+			t.Logf("Warning: failed to remove temp file: %v", removeErr)
+		}
+	})
+	if closeErr := tmpFile.Close(); closeErr != nil {
+		t.Fatalf("Failed to close temp file: %v", closeErr)
+	}
 
-	if err := r.SaveProbes(tmpFile.Name()); err != nil {
-		t.Fatalf("SaveProbes failed: %v", err)
+	if saveErr := r.SaveProbes(tmpFile.Name()); saveErr != nil {
+		t.Fatalf("SaveProbes failed: %v", saveErr)
 	}
 
 	// Load and verify
@@ -300,10 +311,10 @@ func TestReporter_MultipleHypothesesSameProbe(t *testing.T) {
 		Verdict:  VerdictUnstable,
 		Duration: 2 * time.Second,
 		Metrics: StabilityMetrics{
-			NAKRate:       0.05,  // H1
-			ThroughputTE:  0.85,  // H2
-			GapRate:       0.02,  // H3
-			RTTVarianceMs: 25.0,  // H5
+			NAKRate:       0.05, // H1
+			ThroughputTE:  0.85, // H2
+			GapRate:       0.02, // H3
+			RTTVarianceMs: 25.0, // H5
 		},
 	})
 

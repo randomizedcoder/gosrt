@@ -69,7 +69,12 @@ func GetRecvBufferPool() *sync.Pool {
 //
 // Reference: lockless_sender_design.md Section 6.2
 func GetBuffer() *[]byte {
-	return PayloadBufferPool.Get().(*[]byte)
+	buf, ok := PayloadBufferPool.Get().(*[]byte)
+	if !ok {
+		// Pool should only contain *[]byte, this is a programming error
+		panic("PayloadBufferPool contained non-*[]byte value")
+	}
+	return buf
 }
 
 // PutBuffer returns a buffer to the global pool.

@@ -16,7 +16,11 @@ func MetricsHandler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 
 		// Get strings.Builder from pool
-		b := metricsBuilderPool.Get().(*strings.Builder)
+		b, ok := metricsBuilderPool.Get().(*strings.Builder)
+		if !ok {
+			http.Error(w, "internal error: invalid pool type", http.StatusInternalServerError)
+			return
+		}
 		defer func() {
 			// Reset and return to pool
 			b.Reset()
@@ -1129,7 +1133,10 @@ func MetricsHandler() http.Handler {
 			writeConnectionPerRingMetrics(b, metrics, socketIdStr, instanceName)
 		}
 
-		w.Write([]byte(b.String()))
+		if _, err := w.Write([]byte(b.String())); err != nil {
+			// Client disconnected; nothing more we can do
+			return
+		}
 	})
 }
 
@@ -1196,7 +1203,7 @@ func writeListenerMetrics(b *strings.Builder) {
 		"reason", "peer_idle_timeout")
 	writeCounterIfNonZero(b, "gosrt_connections_closed_by_reason_total",
 		lm.ConnectionsClosedContextCancel.Load(),
-		"reason", "context_cancelled")
+		"reason", "context_canceled")
 	writeCounterIfNonZero(b, "gosrt_connections_closed_by_reason_total",
 		lm.ConnectionsClosedError.Load(),
 		"reason", "error")
@@ -1245,7 +1252,7 @@ func writeListenerPerRingMetrics(b *strings.Builder, lm *ListenerMetrics) {
 			rm.CompletionEINTR.Load(), "ring", ringStr)
 		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_error_total",
 			rm.CompletionError.Load(), "ring", ringStr)
-		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_ctx_cancelled_total",
+		writeCounterIfNonZero(b, "gosrt_iouring_listener_recv_completion_ctx_canceled_total",
 			rm.CompletionCtxCancelled.Load(), "ring", ringStr)
 
 		// Packet processing metrics
@@ -1304,7 +1311,7 @@ func writeConnectionPerRingMetrics(b *strings.Builder, m *ConnectionMetrics, soc
 			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_error_total",
 				rm.CompletionError.Load(),
 				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
-			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_ctx_cancelled_total",
+			writeCounterIfNonZero(b, "gosrt_iouring_send_completion_ctx_canceled_total",
 				rm.CompletionCtxCancelled.Load(),
 				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
 
@@ -1361,7 +1368,7 @@ func writeConnectionPerRingMetrics(b *strings.Builder, m *ConnectionMetrics, soc
 			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_error_total",
 				rm.CompletionError.Load(),
 				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
-			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_ctx_cancelled_total",
+			writeCounterIfNonZero(b, "gosrt_iouring_dialer_recv_completion_ctx_canceled_total",
 				rm.CompletionCtxCancelled.Load(),
 				"socket_id", socketIdStr, "instance", instanceName, "ring", ringStr)
 

@@ -302,26 +302,28 @@ func createEnhancedComparison(name string, baseVal, highVal float64) EnhancedCom
 
 	// Handle "effectively zero" cases to avoid misleading percentages like "0 vs 0 = +8000%"
 	// This happens with timing metrics that have sub-nanosecond values
-	if absBase < EffectivelyZeroThreshold && absHigh < EffectivelyZeroThreshold {
+	switch {
+	case absBase < EffectivelyZeroThreshold && absHigh < EffectivelyZeroThreshold:
 		status = "OK"
 		diffPct = 0
-	} else if absBase < EffectivelyZeroThreshold {
+	case absBase < EffectivelyZeroThreshold:
 		// Baseline is effectively zero, highperf has a real value
 		status = "NEW"
 		diffPct = 100
-	} else if absHigh < EffectivelyZeroThreshold {
+	case absHigh < EffectivelyZeroThreshold:
 		// HighPerf is effectively zero, baseline has a real value
 		status = "GONE"
 		diffPct = -100
-	} else {
+	default:
 		diffPct = (diff / baseVal) * 100
 		absPct := math.Abs(diffPct) / 100
 
-		if absPct <= ThresholdOK {
+		switch {
+		case absPct <= ThresholdOK:
 			status = "OK"
-		} else if absPct <= ThresholdWarning {
+		case absPct <= ThresholdWarning:
 			status = "WARNING"
-		} else {
+		default:
 			status = "ERROR"
 		}
 	}
@@ -411,11 +413,12 @@ func CheckStability(baseline, highperf *TestMetrics, testDuration time.Duration)
 				result.Difference = -result.Difference
 			}
 
-			if result.Difference <= ProcessUptimeTolerance {
+			switch {
+			case result.Difference <= ProcessUptimeTolerance:
 				result.Status = "OK"
-			} else if result.Difference <= ProcessUptimeTolerance*2 {
+			case result.Difference <= ProcessUptimeTolerance*2:
 				result.Status = "WARNING"
-			} else {
+			default:
 				result.Status = "ERROR"
 			}
 		} else {
@@ -519,11 +522,12 @@ func printStabilityChecks(baseline, highperf *TestMetrics, testDuration time.Dur
 	for _, r := range results {
 		statusColor := colorGreen
 		statusIcon := "✓"
-		if r.Status == "WARNING" {
+		switch r.Status {
+		case "WARNING":
 			statusColor = colorYellow
 			statusIcon = "⚠"
 			allOK = false
-		} else if r.Status == "ERROR" || r.Status == "UNKNOWN" {
+		case "ERROR", "UNKNOWN":
 			statusColor = colorRed
 			statusIcon = "✗"
 			allOK = false
@@ -965,12 +969,12 @@ func printConnectionValidation(title string, senderSnap, receiverSnap *MetricsSn
 		receiverMetrics = receiverSnap.Metrics
 	}
 
-	if senderMetrics == nil || len(senderMetrics) == 0 {
+	if len(senderMetrics) == 0 {
 		fmt.Printf("│ %-75s │\n", "(No matching sender connection found)")
 		fmt.Printf("└─────────────────────────────────────────────────────────────────────────────┘\n")
 		return
 	}
-	if receiverMetrics == nil || len(receiverMetrics) == 0 {
+	if len(receiverMetrics) == 0 {
 		fmt.Printf("│ %-75s │\n", "(No matching receiver connection found)")
 		fmt.Printf("└─────────────────────────────────────────────────────────────────────────────┘\n")
 		return
@@ -1017,13 +1021,9 @@ func printConnectionValidation(title string, senderSnap, receiverSnap *MetricsSn
 		// Calculate difference
 		// For S→R: sender should be >= receiver (due to loss)
 		// For R→S: receiver (which sends) should be >= sender (which receives)
+		// Note: In both directions, senderVal represents the sending side's value
 		var diffPct float64
-		var expectedHigher float64
-		if vp.direction == "S→R" {
-			expectedHigher = senderVal
-		} else {
-			expectedHigher = senderVal // In R→S context, senderVal is what receiver sent
-		}
+		expectedHigher := senderVal
 
 		if expectedHigher > 0 {
 			diffPct = math.Abs((receiverVal-senderVal)/expectedHigher) * 100
@@ -1034,14 +1034,15 @@ func printConnectionValidation(title string, senderSnap, receiverSnap *MetricsSn
 
 		var status string
 		var statusColor string
-		if diffPct <= tolerance {
+		switch {
+		case diffPct <= tolerance:
 			status = "✓ OK"
 			statusColor = colorGreen
-		} else if diffPct <= tolerance*1.5 {
+		case diffPct <= tolerance*1.5:
 			status = "⚠ WARN"
 			statusColor = colorYellow
 			allOK = false
-		} else {
+		default:
 			status = "✗ ERR"
 			statusColor = colorRed
 			allOK = false

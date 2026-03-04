@@ -144,7 +144,11 @@ func (w *IoUringWriter) Write(p []byte) (int, error) {
 	}
 
 	// Get buffer from pool
-	bufPtr := w.pool.Get().(*[]byte)
+	bufPtr, ok := w.pool.Get().(*[]byte)
+	if !ok {
+		// Pool should only contain *[]byte, this is a programming error
+		panic("IoUringWriter pool contained non-*[]byte value")
+	}
 
 	// Ensure buffer is large enough
 	if cap(*bufPtr) < len(p) {
