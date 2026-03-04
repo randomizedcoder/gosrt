@@ -13,9 +13,9 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/randomizedcoder/giouring"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
-	"github.com/randomizedcoder/giouring"
 )
 
 // Note: ioUringPollInterval is defined in connection_linux.go
@@ -74,7 +74,9 @@ func getUDPConnFd(pc *net.UDPConn) (int, error) {
 	if err != nil {
 		return -1, fmt.Errorf("failed to get file from UDPConn: %w", err)
 	}
-	defer file.Close()
+	// Close error ignored: the file handle is a duplicate and closing it is expected
+	// to succeed (it's releasing our Go-level reference, not the underlying socket FD)
+	defer func() { _ = file.Close() }()
 
 	fd := int(file.Fd())
 	// Duplicate the fd so closing the file doesn't close the socket
@@ -327,7 +329,9 @@ func (ln *listener) cleanupIoUringRecv() {
 
 	// Close the duplicated file descriptor
 	if ln.recvRingFd > 0 {
-		syscall.Close(ln.recvRingFd)
+		if closeErr := syscall.Close(ln.recvRingFd); closeErr != nil {
+			ln.log("iouring:cleanup", func() string { return fmt.Sprintf("recvRingFd close error: %v", closeErr) })
+		}
 		ln.recvRingFd = -1
 	}
 }
@@ -341,7 +345,10 @@ func (ln *listener) submitRecvRequest() {
 	}
 
 	// Get buffer from pool (fixed size MSS, no setup needed)
-	bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+	bufferPtr, ok := GetRecvBufferPool().Get().(*[]byte)
+	if !ok {
+		panic("GetRecvBufferPool contained non-*[]byte value")
+	}
 	buffer := *bufferPtr
 	// No Reset() needed - kernel will overwrite the buffer
 
@@ -636,9 +643,9 @@ func (ln *listener) processRecvCompletion(ring *giouring.Ring, cqe *giouring.Com
 		return // Always resubmit to maintain constant pending count
 	}
 
-	conn := val.(*srtConn)
-	if conn == nil {
-		// Connection is nil - drop packet
+	conn, connOk := val.(*srtConn)
+	if !connOk || conn == nil {
+		// Connection is nil or wrong type - drop packet
 		// Track at listener level since connection is nil
 		metrics.GetListenerMetrics().RecvConnLookupNotFoundIoUring.Add(1)
 		ring.CQESeen(cqe)
@@ -714,7 +721,7 @@ func (ln *listener) getRecvCompletion(ctx context.Context, ring *giouring.Ring) 
 		// Without this, the handler never gets a chance to resubmit pending requests on timeout.
 		if err == syscall.ETIME {
 			ln.incrementListenerRecvCompletionTimeout(0) // ringIdx=0 for single-ring mode
-			return nil, nil // Return on timeout so handler can flush pending
+			return nil, nil                              // Return on timeout so handler can flush pending
 		}
 
 		// EINTR is normal (interrupted by signal) - retry immediately
@@ -844,7 +851,10 @@ func (ln *listener) submitRecvRequestBatch(count int) {
 
 	for i := 0; i < count; i++ {
 		// Get buffer from pool
-		bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+		bufferPtr, bufferOk := GetRecvBufferPool().Get().(*[]byte)
+		if !bufferOk {
+			panic("GetRecvBufferPool contained non-*[]byte value")
+		}
 		buffer := *bufferPtr
 
 		// Setup iovec using buffer directly
@@ -1215,7 +1225,10 @@ func (ln *listener) submitRecvRequestToRing(state *recvRingState) {
 	}
 
 	// Get buffer from global pool (see buffers.go - global sync.Pool)
-	bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+	bufferPtr, ok := GetRecvBufferPool().Get().(*[]byte)
+	if !ok {
+		panic("GetRecvBufferPool contained non-*[]byte value")
+	}
 	buffer := *bufferPtr
 
 	// Setup iovec
@@ -1318,7 +1331,10 @@ func (ln *listener) submitRecvRequestBatchToRing(state *recvRingState, count int
 
 	// Prepare all SQEs
 	for i := 0; i < count; i++ {
-		bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+		bufferPtr, ok := GetRecvBufferPool().Get().(*[]byte)
+		if !ok {
+			panic("GetRecvBufferPool contained non-*[]byte value")
+		}
 		buffer := *bufferPtr
 
 		var iovec syscall.Iovec
@@ -1444,7 +1460,9 @@ func (ln *listener) cleanupIoUringRecvMultiRing() {
 
 	// Close the duplicated file descriptor
 	if ln.recvRingFd > 0 {
-		syscall.Close(ln.recvRingFd)
+		if closeErr := syscall.Close(ln.recvRingFd); closeErr != nil {
+			ln.log("iouring:cleanup", func() string { return fmt.Sprintf("recvRingFd close error: %v", closeErr) })
+		}
 		ln.recvRingFd = -1
 	}
 }

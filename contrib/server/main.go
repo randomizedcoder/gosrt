@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pkg/profile"
 	srt "github.com/randomizedcoder/gosrt"
 	"github.com/randomizedcoder/gosrt/contrib/common"
-	"github.com/pkg/profile"
 )
 
 const (
@@ -68,6 +68,10 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	s := server{
 		channels: make(map[string]srt.PubSub),
 	}
@@ -94,10 +98,10 @@ func main() {
 		data, err := json.MarshalIndent(config, "", "  ")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Println(string(data))
-		os.Exit(0)
+		return 0
 	}
 
 	// Set server fields from flags
@@ -110,9 +114,38 @@ func main() {
 
 	if len(s.addr) == 0 {
 		fmt.Fprintf(os.Stderr, "Provide a listen address with -addr\n")
-		os.Exit(1)
+		return 1
 	}
 
+	config := srt.DefaultConfig()
+
+	// Apply CLI flags (shared flags)
+	common.ApplyFlagsToConfig(&config)
+
+	// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
+	if common.FlagSet["passphrase"] {
+		config.Passphrase = *passphrase
+	}
+
+	if len(*logtopics) != 0 {
+		config.Logger = srt.NewLogger(strings.Split(*logtopics, ","))
+	}
+
+	config.KMPreAnnounce = KM_PRE_ANNOUNCE
+	config.KMRefreshRate = KM_REFRESH_RATE
+
+	// Print config and exit early (before profiler starts)
+	if *printConfig {
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
+			return 1
+		}
+		fmt.Println(string(data))
+		return 0
+	}
+
+	// Setup profiling if requested (after early exits)
 	var p func(*profile.Profile)
 	switch *profileFlag {
 	case "cpu":
@@ -140,32 +173,6 @@ func main() {
 		defer profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p).Stop()
 	}
 
-	config := srt.DefaultConfig()
-
-	// Apply CLI flags (shared flags)
-	common.ApplyFlagsToConfig(&config)
-
-	// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
-	if common.FlagSet["passphrase"] {
-		config.Passphrase = *passphrase
-	}
-
-	if len(*logtopics) != 0 {
-		config.Logger = srt.NewLogger(strings.Split(*logtopics, ","))
-	}
-
-	config.KMPreAnnounce = KM_PRE_ANNOUNCE
-	config.KMRefreshRate = KM_REFRESH_RATE
-
-	if *printConfig {
-		data, err := json.MarshalIndent(config, "", "  ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println(string(data))
-	}
-
 	// ============================================================
 	// Create context that cancels on signal (replaces setupSignalHandler)
 	// ============================================================
@@ -180,7 +187,7 @@ func main() {
 	// ============================================================
 	if err := common.StartMetricsServers(ctx, &wg, *common.PromHTTPAddr, *common.PromUDSPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start metrics server: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// ============================================================
@@ -233,20 +240,29 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "Listening on %s\n", s.addr)
 
-	// Run SRT server
+	// Run SRT server - use error channel to communicate failures
+	serverErrCh := make(chan error, 1)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		if err := s.ListenAndServe(); err != nil && err != srt.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "SRT Server: %s\n", err)
-			os.Exit(2)
+			serverErrCh <- err
 		}
 	}()
 
 	// ============================================================
-	// Wait for Shutdown Signal
+	// Wait for Shutdown Signal or Server Error
 	// ============================================================
-	<-ctx.Done()
+	var exitCode int
+	select {
+	case <-ctx.Done():
+		// Normal shutdown via signal
+	case err := <-serverErrCh:
+		// Server failed to start or crashed
+		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+		exitCode = 2
+	}
 	shutdownStart := time.Now()
 	fmt.Fprintf(os.Stderr, "\nShutdown signal received\n")
 
@@ -275,6 +291,8 @@ func main() {
 		elapsedMs := time.Since(shutdownStart).Milliseconds()
 		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
 	}
+
+	return exitCode
 }
 
 func (s *server) log(who, action, path, message string, client net.Addr) {
@@ -282,17 +300,22 @@ func (s *server) log(who, action, path, message string, client net.Addr) {
 }
 
 func (s *server) handleConnect(req srt.ConnRequest) srt.ConnType {
-	var mode srt.ConnType = srt.SUBSCRIBE
+	var mode = srt.SUBSCRIBE
 	client := req.RemoteAddr()
 
 	channel := ""
 
-	if req.Version() == 4 {
+	switch req.Version() {
+	case 4:
 		mode = srt.PUBLISH
 		channel = "/" + client.String()
 
-		req.SetPassphrase(s.passphrase)
-	} else if req.Version() == 5 {
+		if err := req.SetPassphrase(s.passphrase); err != nil {
+			s.log("CONNECT", "ERROR", channel, err.Error(), client)
+			return srt.REJECT
+		}
+
+	case 5:
 		streamId := req.StreamId()
 		path := streamId
 
@@ -309,8 +332,8 @@ func (s *server) handleConnect(req srt.ConnRequest) srt.ConnType {
 		}
 
 		if req.IsEncrypted() {
-			if err := req.SetPassphrase(s.passphrase); err != nil {
-				s.log("CONNECT", "FORBIDDEN", u.Path, err.Error(), client)
+			if passphraseErr := req.SetPassphrase(s.passphrase); passphraseErr != nil {
+				s.log("CONNECT", "FORBIDDEN", u.Path, passphraseErr.Error(), client)
 				return srt.REJECT
 			}
 		}
@@ -334,7 +357,8 @@ func (s *server) handleConnect(req srt.ConnRequest) srt.ConnType {
 		}
 
 		channel = u.Path
-	} else {
+
+	default:
 		return srt.REJECT
 	}
 
@@ -359,20 +383,24 @@ func (s *server) handlePublish(conn srt.Conn) {
 	channel := ""
 	client := conn.RemoteAddr()
 	if client == nil {
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "conn close error (nil client): %v\n", closeErr)
+		}
 		return
 	}
 
-	if conn.Version() == 4 {
+	switch conn.Version() {
+	case 4:
 		channel = "/" + client.String()
-	} else if conn.Version() == 5 {
+	case 5:
 		streamId := conn.StreamId()
 		path := strings.TrimPrefix(streamId, "publish:")
-
 		channel = path
-	} else {
+	default:
 		s.log("PUBLISH", "INVALID", channel, "unknown connection version", client)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "conn close error (invalid version): %v\n", closeErr)
+		}
 		return
 	}
 
@@ -391,13 +419,17 @@ func (s *server) handlePublish(conn srt.Conn) {
 
 	if pubsub == nil {
 		s.log("PUBLISH", "CONFLICT", channel, "already publishing", client)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "conn close error (publish conflict): %v\n", closeErr)
+		}
 		return
 	}
 
 	s.log("PUBLISH", "START", channel, "publishing", client)
 
-	pubsub.Publish(conn)
+	if err := pubsub.Publish(conn); err != nil {
+		s.log("PUBLISH", "ERROR", channel, err.Error(), client)
+	}
 
 	s.lock.Lock()
 	delete(s.channels, channel)
@@ -410,27 +442,33 @@ func (s *server) handlePublish(conn srt.Conn) {
 
 	fmt.Fprintf(os.Stderr, "%+v\n", stats)
 
-	conn.Close()
+	if closeErr := conn.Close(); closeErr != nil {
+		fmt.Fprintf(os.Stderr, "conn close error (publish stop): %v\n", closeErr)
+	}
 }
 
 func (s *server) handleSubscribe(conn srt.Conn) {
 	channel := ""
 	client := conn.RemoteAddr()
 	if client == nil {
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "conn close error (nil client): %v\n", closeErr)
+		}
 		return
 	}
 
-	if conn.Version() == 4 {
+	switch conn.Version() {
+	case 4:
 		channel = client.String()
-	} else if conn.Version() == 5 {
+	case 5:
 		streamId := conn.StreamId()
 		path := strings.TrimPrefix(streamId, "subscribe:")
-
 		channel = path
-	} else {
+	default:
 		s.log("SUBSCRIBE", "INVALID", channel, "unknown connection version", client)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "conn close error (invalid version): %v\n", closeErr)
+		}
 		return
 	}
 
@@ -443,11 +481,15 @@ func (s *server) handleSubscribe(conn srt.Conn) {
 
 	if pubsub == nil {
 		s.log("SUBSCRIBE", "NOTFOUND", channel, "not publishing", client)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "conn close error (not found): %v\n", closeErr)
+		}
 		return
 	}
 
-	pubsub.Subscribe(conn)
+	if err := pubsub.Subscribe(conn); err != nil {
+		s.log("SUBSCRIBE", "ERROR", channel, err.Error(), client)
+	}
 
 	s.log("SUBSCRIBE", "STOP", channel, "", client)
 
@@ -456,5 +498,7 @@ func (s *server) handleSubscribe(conn srt.Conn) {
 
 	fmt.Fprintf(os.Stderr, "%+v\n", stats)
 
-	conn.Close()
+	if closeErr := conn.Close(); closeErr != nil {
+		fmt.Fprintf(os.Stderr, "conn close error (subscribe stop): %v\n", closeErr)
+	}
 }

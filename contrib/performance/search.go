@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -36,10 +37,10 @@ type SearchLoop struct {
 	lastFailedBitrate   int64
 
 	// Status reporting
-	statusInterval  time.Duration
-	currentBitrate  int64  // Current bitrate being tested
-	currentPhase    string // Current phase (ramping, probing, etc.)
-	stopStatusChan  chan struct{}
+	statusInterval time.Duration
+	currentBitrate int64  // Current bitrate being tested
+	currentPhase   string // Current phase (ramping, probing, etc.)
+	stopStatusChan chan struct{}
 
 	// CPU monitoring (optional)
 	cpuMonitor *CPUMonitor
@@ -159,11 +160,11 @@ func (s *SearchLoop) Run(ctx context.Context) SearchResult {
 		if time.Since(s.startTime) > s.config.Timeout {
 			s.log("Timeout after %v", time.Since(s.startTime))
 			return SearchResult{
-				Status:      StatusFailed,
-				Ceiling:     s.low,
-				Proven:      false,
-				FailReason:  fmt.Sprintf("timeout after %v", time.Since(s.startTime)),
-				Artifacts:   s.buildArtifacts(TerminationTimeout),
+				Status:     StatusFailed,
+				Ceiling:    s.low,
+				Proven:     false,
+				FailReason: fmt.Sprintf("timeout after %v", time.Since(s.startTime)),
+				Artifacts:  s.buildArtifacts(TerminationTimeout),
 			}
 		}
 
@@ -182,7 +183,7 @@ func (s *SearchLoop) Run(ctx context.Context) SearchResult {
 					return SearchResult{
 						Status:     StatusAborted,
 						Ceiling:    s.low,
-						FailReason: "cancelled during ramp",
+						FailReason: "canceled during ramp",
 						Artifacts:  s.buildArtifacts(TerminationCancelled),
 					}
 				}
@@ -227,7 +228,7 @@ func (s *SearchLoop) Run(ctx context.Context) SearchResult {
 			return SearchResult{
 				Status:     StatusAborted,
 				Ceiling:    s.low,
-				FailReason: "cancelled",
+				FailReason: "canceled",
 				Artifacts:  s.buildArtifacts(TerminationCancelled),
 			}
 		}
@@ -309,7 +310,9 @@ func (s *SearchLoop) rampToTarget(ctx context.Context, from, to int64) error {
 		}
 
 		// Send heartbeat during ramp
-		_ = s.seeker.Heartbeat(ctx)
+		if err := s.seeker.Heartbeat(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: heartbeat during ramp failed: %v\n", err)
+		}
 
 		time.Sleep(stepDuration)
 	}
@@ -461,17 +464,17 @@ func (s *SearchLoop) log(format string, args ...interface{}) {
 }
 
 // clamp restricts a value to a range.
-func clamp(v, min, max int64) int64 {
-	if v < min {
-		return min
+func clamp(v, minVal, maxVal int64) int64 {
+	if v < minVal {
+		return minVal
 	}
-	if v > max {
-		return max
+	if v > maxVal {
+		return maxVal
 	}
 	return v
 }
 
-// InvariantViolation implements error interface.
+// Error implements the error interface for InvariantViolation.
 func (iv *InvariantViolation) Error() string {
 	return fmt.Sprintf("INVARIANT VIOLATION [%s]: %s", iv.Invariant, iv.Description)
 }

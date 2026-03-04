@@ -39,6 +39,10 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	// Parse all flags (shared + client-specific)
 	common.ParseFlags()
 
@@ -50,10 +54,10 @@ func main() {
 		data, err := json.MarshalIndent(config, "", "  ")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Println(string(data))
-		os.Exit(0)
+		return 0
 	}
 
 	// Setup profiling if requested
@@ -111,7 +115,7 @@ func main() {
 	// ============================================================
 	if err := common.StartMetricsServers(ctx, &wg, *common.PromHTTPAddr, *common.PromUDSPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start metrics server: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// ============================================================
@@ -135,7 +139,7 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: from: %v\n", err)
 		flag.PrintDefaults()
-		os.Exit(1)
+		return 1
 	}
 
 	// Store connection socket ID for metrics lookup (if SRT connection)
@@ -148,7 +152,7 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
 		flag.PrintDefaults()
-		os.Exit(1)
+		return 1
 	}
 
 	// ============================================================
@@ -180,18 +184,20 @@ func main() {
 
 					// Create labeler function for client (reader/writer labels)
 					labeler := func(index int, total int) string {
-						if index == 0 && total == 2 {
+						switch {
+						case index == 0 && total == 2:
 							return "reader"
-						} else if index == 1 && total == 2 {
+						case index == 1 && total == 2:
 							return "writer"
-						} else if total == 1 {
+						case total == 1:
 							// Single connection - determine if reader or writer
 							if _, ok := r.(srt.Conn); ok {
 								return "reader"
 							}
 							return "writer"
+						default:
+							return ""
 						}
-						return ""
 					}
 
 					common.PrintConnectionStatistics(connections, config.StatisticsPrintInterval.String(), labeler)
@@ -261,7 +267,7 @@ func main() {
 			// Check context cancellation first
 			select {
 			case <-ctx.Done():
-				// Context cancelled - exit gracefully
+				// Context canceled - exit gracefully
 				doneChan <- nil
 				return
 			default:
@@ -270,38 +276,40 @@ func main() {
 			// Set read deadline to allow periodic context checks
 			// This prevents Read() from blocking indefinitely
 			if srtConn != nil {
-				srtConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				if deadlineErr := srtConn.SetReadDeadline(time.Now().Add(2 * time.Second)); deadlineErr != nil {
+					fmt.Fprintf(os.Stderr, "SetReadDeadline error: %v\n", deadlineErr)
+				}
 			}
 
 			// Perform the read operation
-			n, err := r.Read(buffer)
+			n, readErr := r.Read(buffer)
 
 			// Handle read result
-			if err != nil {
-				// Check if context was cancelled
+			if readErr != nil {
+				// Check if context was canceled
 				select {
 				case <-ctx.Done():
-					// Context cancelled - exit gracefully (don't report error)
+					// Context canceled - exit gracefully (don't report error)
 					doneChan <- nil
 					return
 				default:
 				}
 
 				// Check if error is a timeout (expected - allows context check)
-				if errors.Is(err, os.ErrDeadlineExceeded) {
+				if errors.Is(readErr, os.ErrDeadlineExceeded) {
 					// Timeout occurred - continue loop to check context again
 					continue
 				}
 
 				// Check for EOF - peer closed connection (expected during shutdown)
-				if errors.Is(err, io.EOF) {
+				if errors.Is(readErr, io.EOF) {
 					// Connection closed by peer - exit gracefully (don't report error)
 					doneChan <- nil
 					return
 				}
 
 				// Check if error is due to connection being closed (expected during shutdown)
-				errStr := err.Error()
+				errStr := readErr.Error()
 				if strings.Contains(errStr, "connection refused") ||
 					strings.Contains(errStr, "use of closed network connection") ||
 					strings.Contains(errStr, "broken pipe") {
@@ -311,11 +319,11 @@ func main() {
 				}
 
 				// Check for net.OpError which indicates connection issues
-				if opErr, ok := err.(*net.OpError); ok {
+				if opErr, ok := readErr.(*net.OpError); ok {
 					if opErr.Err != nil {
-						errStr := opErr.Err.Error()
-						if strings.Contains(errStr, "connection refused") ||
-							strings.Contains(errStr, "broken pipe") {
+						opErrStr := opErr.Err.Error()
+						if strings.Contains(opErrStr, "connection refused") ||
+							strings.Contains(opErrStr, "broken pipe") {
 							// Connection closed during shutdown - exit gracefully (don't report error)
 							doneChan <- nil
 							return
@@ -329,7 +337,7 @@ func main() {
 				}
 
 				// Other error - report it
-				doneChan <- fmt.Errorf("read: %w", err)
+				doneChan <- fmt.Errorf("read: %w", readErr)
 				return
 			}
 
@@ -340,22 +348,22 @@ func main() {
 			// Check context cancellation before write
 			select {
 			case <-ctx.Done():
-				// Context cancelled - exit gracefully
+				// Context canceled - exit gracefully
 				doneChan <- nil
 				return
 			default:
 			}
 
-			if _, err := w.Write(buffer[:n]); err != nil {
-				// Check if context was cancelled or connection closed during shutdown
+			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+				// Check if context was canceled or connection closed during shutdown
 				select {
 				case <-ctx.Done():
-					// Context cancelled - exit gracefully (don't report error)
+					// Context canceled - exit gracefully (don't report error)
 					doneChan <- nil
 					return
 				default:
 					// Check if error is due to connection being closed (expected during shutdown)
-					errStr := err.Error()
+					errStr := writeErr.Error()
 					if strings.Contains(errStr, "connection refused") ||
 						strings.Contains(errStr, "use of closed network connection") ||
 						strings.Contains(errStr, "broken pipe") {
@@ -364,18 +372,18 @@ func main() {
 						return
 					}
 					// Check for net.OpError which indicates connection issues
-					if opErr, ok := err.(*net.OpError); ok {
+					if opErr, ok := writeErr.(*net.OpError); ok {
 						if opErr.Err != nil {
-							errStr := opErr.Err.Error()
-							if strings.Contains(errStr, "connection refused") ||
-								strings.Contains(errStr, "broken pipe") {
+							opErrStr := opErr.Err.Error()
+							if strings.Contains(opErrStr, "connection refused") ||
+								strings.Contains(opErrStr, "broken pipe") {
 								// Connection closed during shutdown - exit gracefully (don't report error)
 								doneChan <- nil
 								return
 							}
 						}
 					}
-					doneChan <- fmt.Errorf("write: %w", err)
+					doneChan <- fmt.Errorf("write: %w", writeErr)
 					return
 				}
 			}
@@ -387,16 +395,16 @@ func main() {
 	// ============================================================
 	var shutdownStart time.Time
 	select {
-	case err := <-doneChan:
+	case doneErr := <-doneChan:
 		shutdownStart = time.Now()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if doneErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", doneErr)
 		} else {
 			fmt.Fprint(os.Stderr, "\n")
 		}
 	case <-ctx.Done():
 		shutdownStart = time.Now()
-		// Context cancelled - graceful shutdown
+		// Context canceled - graceful shutdown
 		fmt.Fprintf(os.Stderr, "\nShutdown signal received\n")
 	}
 
@@ -404,8 +412,8 @@ func main() {
 	// Cleanup
 	// ============================================================
 	// Close connections
-	w.Close()
-	r.Close()
+	_ = w.Close()
+	_ = r.Close()
 
 	// Close logger so its goroutine can exit (channel will close)
 	if logger != nil {
@@ -429,6 +437,8 @@ func main() {
 		elapsedMs := time.Since(shutdownStart).Milliseconds()
 		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
 	}
+
+	return 0
 }
 
 // NullWriter is an io.WriteCloser that discards all data.
@@ -460,19 +470,17 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 		readerOptions := DebugReaderOptions{}
 		parts := strings.SplitN(strings.TrimPrefix(addr, "debug://"), "?", 2)
 		if len(parts) > 1 {
-			options, err := url.ParseQuery(parts[1])
-			if err != nil {
-				return nil, err
+			options, parseErr := url.ParseQuery(parts[1])
+			if parseErr != nil {
+				return nil, parseErr
 			}
 
-			if x, err := strconv.ParseUint(options.Get("bitrate"), 10, 64); err == nil {
+			if x, convErr := strconv.ParseUint(options.Get("bitrate"), 10, 64); convErr == nil {
 				readerOptions.Bitrate = x
 			}
 		}
 
-		r, err := NewDebugReader(readerOptions)
-
-		return r, err
+		return NewDebugReader(ctx, readerOptions)
 	}
 
 	u, err := url.Parse(addr)
@@ -482,8 +490,8 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 
 	if u.Scheme == "srt" {
 		config := srt.DefaultConfig()
-		if err := config.UnmarshalQuery(u.RawQuery); err != nil {
-			return nil, err
+		if unmarshalErr := config.UnmarshalQuery(u.RawQuery); unmarshalErr != nil {
+			return nil, unmarshalErr
 		}
 		// Apply CLI flags (they override URL query parameters)
 		common.ApplyFlagsToConfig(&config)
@@ -491,16 +499,17 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 
 		mode := u.Query().Get("mode")
 
-		if mode == "listener" {
-			ln, err := srt.Listen(ctx, "srt", u.Host, config, wg)
-			if err != nil {
-				return nil, err
+		switch mode {
+		case "listener":
+			ln, listenErr := srt.Listen(ctx, "srt", u.Host, config, wg)
+			if listenErr != nil {
+				return nil, listenErr
 			}
 
 			for {
-				req, err := ln.Accept2()
-				if err != nil {
-					return nil, err
+				req, acceptErr := ln.Accept2()
+				if acceptErr != nil {
+					return nil, acceptErr
 				}
 
 				if config.StreamId != req.StreamId() {
@@ -508,39 +517,41 @@ func openReader(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 					continue
 				}
 
-				if err := req.SetPassphrase(config.Passphrase); err != nil {
+				if passphraseErr := req.SetPassphrase(config.Passphrase); passphraseErr != nil {
 					req.Reject(srt.REJ_BADSECRET)
 					continue
 				}
 
-				conn, err := req.Accept()
-				if err != nil {
+				conn, connErr := req.Accept()
+				if connErr != nil {
 					continue
 				}
 
 				return conn, nil
 			}
-		} else if mode == "caller" || mode == "" {
+
+		case "caller", "":
 			// Default to caller mode if mode not specified
 			// Stream ID is set in config via UnmarshalQuery (from URL query parameter)
-			conn, err := srt.Dial(ctx, "srt", u.Host, config, wg)
-			if err != nil {
-				return nil, err
+			conn, dialErr := srt.Dial(ctx, "srt", u.Host, config, wg)
+			if dialErr != nil {
+				return nil, dialErr
 			}
 
 			return conn, nil
-		} else {
+
+		default:
 			return nil, fmt.Errorf("unsupported mode: %s", mode)
 		}
 	} else if u.Scheme == "udp" {
-		laddr, err := net.ResolveUDPAddr("udp", u.Host)
-		if err != nil {
-			return nil, err
+		laddr, resolveErr := net.ResolveUDPAddr("udp", u.Host)
+		if resolveErr != nil {
+			return nil, resolveErr
 		}
 
-		conn, err := net.ListenUDP("udp", laddr)
-		if err != nil {
-			return nil, err
+		conn, listenErr := net.ListenUDP("udp", laddr)
+		if listenErr != nil {
+			return nil, listenErr
 		}
 
 		return conn, nil
@@ -581,9 +592,9 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 				return nil, fmt.Errorf("io_uring output is only available on Linux")
 			}
 			// Create file first, then wrap with io_uring writer
-			f, err := os.Create(path)
-			if err != nil {
-				return nil, err
+			f, createErr := os.Create(path)
+			if createErr != nil {
+				return nil, createErr
 			}
 			return common.NewIoUringFileWriter(int(f.Fd()))
 		}
@@ -599,8 +610,8 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 
 	if u.Scheme == "srt" {
 		config := srt.DefaultConfig()
-		if err := config.UnmarshalQuery(u.RawQuery); err != nil {
-			return nil, err
+		if unmarshalErr := config.UnmarshalQuery(u.RawQuery); unmarshalErr != nil {
+			return nil, unmarshalErr
 		}
 		// Apply CLI flags (they override URL query parameters)
 		common.ApplyFlagsToConfig(&config)
@@ -608,16 +619,17 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 
 		mode := u.Query().Get("mode")
 
-		if mode == "listener" {
-			ln, err := srt.Listen(ctx, "srt", u.Host, config, wg)
-			if err != nil {
-				return nil, err
+		switch mode {
+		case "listener":
+			ln, listenErr := srt.Listen(ctx, "srt", u.Host, config, wg)
+			if listenErr != nil {
+				return nil, listenErr
 			}
 
 			for {
-				req, err := ln.Accept2()
-				if err != nil {
-					return nil, err
+				req, acceptErr := ln.Accept2()
+				if acceptErr != nil {
+					return nil, acceptErr
 				}
 
 				if config.StreamId != req.StreamId() {
@@ -625,39 +637,41 @@ func openWriter(addr string, logger srt.Logger, ctx context.Context, wg *sync.Wa
 					continue
 				}
 
-				if err := req.SetPassphrase(config.Passphrase); err != nil {
+				if passphraseErr := req.SetPassphrase(config.Passphrase); passphraseErr != nil {
 					req.Reject(srt.REJ_BADSECRET)
 					continue
 				}
 
-				conn, err := req.Accept()
-				if err != nil {
+				conn, connErr := req.Accept()
+				if connErr != nil {
 					continue
 				}
 
 				return conn, nil
 			}
-		} else if mode == "caller" || mode == "" {
+
+		case "caller", "":
 			// Default to caller mode if mode not specified
 			// Stream ID is set in config via UnmarshalQuery (from URL query parameter)
-			conn, err := srt.Dial(ctx, "srt", u.Host, config, wg)
-			if err != nil {
-				return nil, err
+			conn, dialErr := srt.Dial(ctx, "srt", u.Host, config, wg)
+			if dialErr != nil {
+				return nil, dialErr
 			}
 
 			return conn, nil
-		} else {
+
+		default:
 			return nil, fmt.Errorf("unsupported mode: %s", mode)
 		}
 	} else if u.Scheme == "udp" {
-		raddr, err := net.ResolveUDPAddr("udp", u.Host)
-		if err != nil {
-			return nil, err
+		raddr, resolveErr := net.ResolveUDPAddr("udp", u.Host)
+		if resolveErr != nil {
+			return nil, resolveErr
 		}
 
-		conn, err := net.DialUDP("udp", nil, raddr)
-		if err != nil {
-			return nil, err
+		conn, dialErr := net.DialUDP("udp", nil, raddr)
+		if dialErr != nil {
+			return nil, dialErr
 		}
 
 		return conn, nil

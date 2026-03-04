@@ -38,7 +38,7 @@ const (
 	CTRLTYPE_USER      CtrlType = 0x7FFF
 )
 
-// Table 1: SRT Control Packet Types
+// CtrlType represents SRT Control Packet Types (Table 1 in SRT spec).
 type CtrlType uint16
 
 func (h CtrlType) String() string {
@@ -134,7 +134,7 @@ const (
 	SRTFLAG_PACKET_FILTER uint32 = 1 << 7
 )
 
-// Table 5: Handshake Extension Type values
+// CtrlSubType represents Handshake Extension Type values (Table 5 in SRT spec).
 type CtrlSubType uint16
 
 const (
@@ -205,7 +205,7 @@ type Packet interface {
 	// Unmarshal parses the given data into the packet header and its payload. Returns an error on failure.
 	Unmarshal(data []byte) error
 
-	// Dump returns the same as String with an additional hex-dump of the marshalled packet.
+	// Dump returns the same as String with an additional hex-dump of the marshaled packet.
 	Dump() string
 
 	// MarshalCIF writes the byte representation of a control information field as payload
@@ -302,7 +302,11 @@ func newPool() *pool {
 }
 
 func (p *pool) Get() *bytes.Buffer {
-	b := p.pool.Get().(*bytes.Buffer)
+	b, ok := p.pool.Get().(*bytes.Buffer)
+	if !ok {
+		// Pool should only ever contain *bytes.Buffer, this is a programming error
+		panic("pool contained non-*bytes.Buffer value")
+	}
 	b.Reset()
 
 	return b
@@ -312,7 +316,7 @@ func (p *pool) Put(b *bytes.Buffer) {
 	p.pool.Put(b)
 }
 
-var payloadPool *pool = newPool()
+var payloadPool = newPool()
 
 // packetPool pools pkt structs to reduce allocations in the hot path
 var packetPool = sync.Pool{
@@ -352,8 +356,9 @@ var packetPool = sync.Pool{
 // }
 
 // NewPacketFromData creates a packet by COPYING data from rawdata.
-// DEPRECATED: Use NewPacket() + UnmarshalZeroCopy() for zero-copy path.
 // This function is kept for backwards compatibility with existing code.
+//
+// Deprecated: Use NewPacket() + UnmarshalZeroCopy() for zero-copy path.
 func NewPacketFromData(addr net.Addr, rawdata []byte) (Packet, error) {
 	p := NewPacket(addr)
 
@@ -370,7 +375,11 @@ func NewPacketFromData(addr net.Addr, rawdata []byte) (Packet, error) {
 func NewPacket(addr net.Addr) Packet {
 	// Get from pool (hot path - must be fast)
 	// Object is already clean from Decommission()
-	p := packetPool.Get().(*pkt)
+	p, ok := packetPool.Get().(*pkt)
+	if !ok {
+		// Pool should only contain *pkt, this is a programming error
+		panic("packetPool contained non-*pkt value")
+	}
 
 	// Only set the address (required parameter)
 	// All other fields are already reset from Decommission()
@@ -642,7 +651,7 @@ func (p *pkt) Marshal(w io.Writer) error {
 	} else {
 		binary.BigEndian.PutUint32(buffer[0:], p.header.PacketSequenceNumber.Val()) // sequence number
 
-		var field uint32 = 0
+		var field uint32
 
 		field |= ((p.header.PacketPositionFlag.Val() & 0b11) << 6) // 0b11000000
 		if p.header.OrderFlag {
@@ -652,7 +661,7 @@ func (p *pkt) Marshal(w io.Writer) error {
 		if p.header.RetransmittedPacketFlag {
 			field |= (1 << 2) // 0b11111100
 		}
-		field = field << 24 // 0b11111100_00000000_00000000_00000000
+		field <<= 24 // 0b11111100_00000000_00000000_00000000
 		field += (p.header.MessageNumber & 0b00000011_11111111_11111111_11111111)
 
 		binary.BigEndian.PutUint32(buffer[4:], field) // sequence number
@@ -661,15 +670,21 @@ func (p *pkt) Marshal(w io.Writer) error {
 	binary.BigEndian.PutUint32(buffer[8:], p.header.Timestamp)            // timestamp
 	binary.BigEndian.PutUint32(buffer[12:], p.header.DestinationSocketId) // destination socket ID
 
-	w.Write(buffer[0:])
-	w.Write(p.payload.Bytes())
+	if _, err := w.Write(buffer[0:]); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
+	if _, err := w.Write(p.payload.Bytes()); err != nil {
+		return fmt.Errorf("failed to write payload: %w", err)
+	}
 
 	return nil
 }
 
 func (p *pkt) Dump() string {
 	var data bytes.Buffer
-	p.Marshal(&data)
+	if err := p.Marshal(&data); err != nil {
+		return p.String() + "\n[marshal error: " + err.Error() + "]"
+	}
 
 	return p.String() + "\n" + hex.Dump(data.Bytes())
 }
@@ -796,7 +811,9 @@ func (c *CIFHandshake) Unmarshal(data []byte) error {
 	c.HandshakeType = HandshakeType(binary.BigEndian.Uint32(data[20:]))
 	c.SRTSocketId = binary.BigEndian.Uint32(data[24:])
 	c.SynCookie = binary.BigEndian.Uint32(data[28:])
-	c.PeerIP.Unmarshal(data[32:48])
+	if err := c.PeerIP.Unmarshal(data[32:48]); err != nil {
+		return fmt.Errorf("failed to unmarshal PeerIP: %w", err)
+	}
 
 	if c.HandshakeType == HSTYPE_INDUCTION {
 		// Nothing more to unmarshal
@@ -834,7 +851,8 @@ func (c *CIFHandshake) Unmarshal(data []byte) error {
 
 		pivot = pivot[4:]
 
-		if extensionType == EXTTYPE_HSREQ || extensionType == EXTTYPE_HSRSP {
+		switch extensionType {
+		case EXTTYPE_HSREQ, EXTTYPE_HSRSP:
 			// 3.2.1.1.  Handshake Extension Message
 			if extensionLength != 12 || len(pivot) < extensionLength {
 				return fmt.Errorf("invalid extension length of %d bytes (%s)", extensionLength, extensionType.String())
@@ -847,7 +865,7 @@ func (c *CIFHandshake) Unmarshal(data []byte) error {
 			if err := c.SRTHS.Unmarshal(pivot); err != nil {
 				return fmt.Errorf("CIFHandshakeExtension: %w", err)
 			}
-		} else if extensionType == EXTTYPE_KMREQ || extensionType == EXTTYPE_KMRSP {
+		case EXTTYPE_KMREQ, EXTTYPE_KMRSP:
 			// 3.2.1.2.  Key Material Extension Message
 			if len(pivot) < extensionLength {
 				return fmt.Errorf("invalid extension length of %d bytes (%s)", extensionLength, extensionType.String())
@@ -866,14 +884,21 @@ func (c *CIFHandshake) Unmarshal(data []byte) error {
 				c.EncryptionField = 2
 			}
 
-			if c.EncryptionField == 2 && c.SRTKM.KLen != 16 {
-				return fmt.Errorf("invalid key length for AES-128 (%d bit)", c.SRTKM.KLen*8)
-			} else if c.EncryptionField == 3 && c.SRTKM.KLen != 24 {
-				return fmt.Errorf("invalid key length for AES-192 (%d bit)", c.SRTKM.KLen*8)
-			} else if c.EncryptionField == 4 && c.SRTKM.KLen != 32 {
-				return fmt.Errorf("invalid key length for AES-256 (%d bit)", c.SRTKM.KLen*8)
+			switch c.EncryptionField {
+			case 2:
+				if c.SRTKM.KLen != 16 {
+					return fmt.Errorf("invalid key length for AES-128 (%d bit)", c.SRTKM.KLen*8)
+				}
+			case 3:
+				if c.SRTKM.KLen != 24 {
+					return fmt.Errorf("invalid key length for AES-192 (%d bit)", c.SRTKM.KLen*8)
+				}
+			case 4:
+				if c.SRTKM.KLen != 32 {
+					return fmt.Errorf("invalid key length for AES-256 (%d bit)", c.SRTKM.KLen*8)
+				}
 			}
-		} else if extensionType == EXTTYPE_SID {
+		case EXTTYPE_SID:
 			// 3.2.1.3.  Stream ID Extension Message
 			if extensionLength > 512 || len(pivot) < extensionLength {
 				return fmt.Errorf("invalid extension length of %d bytes (%s)", extensionLength, extensionType.String())
@@ -891,7 +916,7 @@ func (c *CIFHandshake) Unmarshal(data []byte) error {
 			}
 
 			c.StreamId = strings.TrimRight(b.String(), "\x00")
-		} else if extensionType == EXTTYPE_CONGESTION {
+		case EXTTYPE_CONGESTION:
 			// ??? Congestion Control Extension message (handshake.md #### Congestion controller)
 			if extensionLength > 4 || len(pivot) < extensionLength {
 				return fmt.Errorf("invalid extension length of %d bytes (%s)", extensionLength, extensionType.String())
@@ -909,11 +934,11 @@ func (c *CIFHandshake) Unmarshal(data []byte) error {
 			}
 
 			c.CongestionCtl = strings.TrimRight(b.String(), "\x00")
-		} else if extensionType == EXTTYPE_FILTER || extensionType == EXTTYPE_GROUP {
+		case EXTTYPE_FILTER, EXTTYPE_GROUP:
 			if len(pivot) < extensionLength {
 				return fmt.Errorf("invalid extension length of %d bytes (%s)", extensionLength, extensionType.String())
 			}
-		} else {
+		default:
 			return fmt.Errorf("unknown extension (%d)", extensionType)
 		}
 
@@ -944,20 +969,20 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 		}
 
 		if c.HasHS {
-			c.ExtensionField = c.ExtensionField | 1
+			c.ExtensionField |= 1
 		}
 
 		if c.HasKM {
 			c.EncryptionField = c.SRTKM.KLen / 8
-			c.ExtensionField = c.ExtensionField | 2
+			c.ExtensionField |= 2
 		}
 
 		if c.HasSID {
-			c.ExtensionField = c.ExtensionField | 4
+			c.ExtensionField |= 4
 		}
 
 		if c.HasCongestionCtl {
-			c.ExtensionField = c.ExtensionField | 4
+			c.ExtensionField |= 4
 		}
 	} else {
 		c.EncryptionField = 0
@@ -975,12 +1000,16 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 	binary.BigEndian.PutUint32(buffer[28:], c.SynCookie)                        // SYN cookie
 	c.PeerIP.Marshal(buffer[32:])                                               // peerIP
 
-	w.Write(buffer[:48])
+	if _, err := w.Write(buffer[:48]); err != nil {
+		return fmt.Errorf("failed to write handshake header: %w", err)
+	}
 
 	if c.HasHS {
 		var data bytes.Buffer
 
-		c.SRTHS.Marshal(&data)
+		if err := c.SRTHS.Marshal(&data); err != nil {
+			return fmt.Errorf("failed to marshal SRTHS: %w", err)
+		}
 
 		if c.IsRequest {
 			binary.BigEndian.PutUint16(buffer[0:], EXTTYPE_HSREQ.Value())
@@ -990,14 +1019,20 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 
 		binary.BigEndian.PutUint16(buffer[2:], 3)
 
-		w.Write(buffer[:4])
-		w.Write(data.Bytes())
+		if _, err := w.Write(buffer[:4]); err != nil {
+			return fmt.Errorf("failed to write SRTHS header: %w", err)
+		}
+		if _, err := w.Write(data.Bytes()); err != nil {
+			return fmt.Errorf("failed to write SRTHS data: %w", err)
+		}
 	}
 
 	if c.HasKM {
 		var data bytes.Buffer
 
-		c.SRTKM.Marshal(&data)
+		if err := c.SRTKM.Marshal(&data); err != nil {
+			return fmt.Errorf("failed to marshal SRTKM: %w", err)
+		}
 
 		if c.IsRequest {
 			binary.BigEndian.PutUint16(buffer[0:], EXTTYPE_KMREQ.Value())
@@ -1007,8 +1042,12 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 
 		binary.BigEndian.PutUint16(buffer[2:], uint16(data.Len()/4))
 
-		w.Write(buffer[:4])
-		w.Write(data.Bytes())
+		if _, err := w.Write(buffer[:4]); err != nil {
+			return fmt.Errorf("failed to write SRTKM header: %w", err)
+		}
+		if _, err := w.Write(data.Bytes()); err != nil {
+			return fmt.Errorf("failed to write SRTKM data: %w", err)
+		}
 	}
 
 	if c.HasSID {
@@ -1024,7 +1063,9 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 		binary.BigEndian.PutUint16(buffer[0:], EXTTYPE_SID.Value())
 		binary.BigEndian.PutUint16(buffer[2:], uint16(streamId.Len()/4))
 
-		w.Write(buffer[:4])
+		if _, err := w.Write(buffer[:4]); err != nil {
+			return fmt.Errorf("failed to write SID header: %w", err)
+		}
 
 		b := streamId.Bytes()
 
@@ -1034,7 +1075,9 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 			buffer[2] = b[i+1]
 			buffer[3] = b[i+0]
 
-			w.Write(buffer[:4])
+			if _, err := w.Write(buffer[:4]); err != nil {
+				return fmt.Errorf("failed to write SID data: %w", err)
+			}
 		}
 	}
 
@@ -1051,7 +1094,9 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 		binary.BigEndian.PutUint16(buffer[0:], EXTTYPE_CONGESTION.Value())
 		binary.BigEndian.PutUint16(buffer[2:], uint16(congestion.Len()/4))
 
-		w.Write(buffer[:4])
+		if _, err := w.Write(buffer[:4]); err != nil {
+			return fmt.Errorf("failed to write congestion header: %w", err)
+		}
 
 		b := congestion.Bytes()
 
@@ -1061,7 +1106,9 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 			buffer[2] = b[i+1]
 			buffer[3] = b[i+0]
 
-			w.Write(buffer[:4])
+			if _, err := w.Write(buffer[:4]); err != nil {
+				return fmt.Errorf("failed to write congestion data: %w", err)
+			}
 		}
 	}
 
@@ -1146,7 +1193,7 @@ func (c *CIFHandshakeExtension) Marshal(w io.Writer) error {
 	var buffer [12]byte
 
 	binary.BigEndian.PutUint32(buffer[0:], c.SRTVersion)
-	var srtFlags uint32 = 0
+	var srtFlags uint32
 
 	if c.SRTFlags.TSBPDSND {
 		srtFlags |= SRTFLAG_TSBPDSND
@@ -1257,17 +1304,17 @@ func (c *CIFKeyMaterialExtension) Unmarshal(data []byte) error {
 		return fmt.Errorf("data too short to unmarshal")
 	}
 
-	c.S = uint8(data[0] & 0b1000_0000 >> 7)
+	c.S = data[0] & 0b1000_0000 >> 7
 	if c.S != 0 {
 		return fmt.Errorf("invalid value for S")
 	}
 
-	c.Version = uint8(data[0] & 0b0111_0000 >> 4)
+	c.Version = data[0] & 0b0111_0000 >> 4
 	if c.Version != 1 {
 		return fmt.Errorf("invalid version")
 	}
 
-	c.PacketType = uint8(data[0] & 0b0000_1111)
+	c.PacketType = data[0] & 0b0000_1111
 	if c.PacketType != 2 {
 		return fmt.Errorf("invalid packet type (%d)", c.PacketType)
 	}
@@ -1277,7 +1324,7 @@ func (c *CIFKeyMaterialExtension) Unmarshal(data []byte) error {
 		return fmt.Errorf("invalid signature (%#08x)", c.Sign)
 	}
 
-	c.Resv1 = uint8(data[3] & 0b1111_1100 >> 2)
+	c.Resv1 = data[3] & 0b1111_1100 >> 2
 	c.KeyBasedEncryption = PacketEncryption(data[3] & 0b0000_0011)
 	if !c.KeyBasedEncryption.IsValid() || c.KeyBasedEncryption == UnencryptedPacket {
 		return fmt.Errorf("invalid extension format (KK must not be 0)")
@@ -1288,14 +1335,14 @@ func (c *CIFKeyMaterialExtension) Unmarshal(data []byte) error {
 		return fmt.Errorf("invalid key encryption key index (%d)", c.KeyEncryptionKeyIndex)
 	}
 
-	c.Cipher = uint8(data[8])
-	c.Authentication = uint8(data[9])
-	c.StreamEncapsulation = uint8(data[10])
+	c.Cipher = data[8]
+	c.Authentication = data[9]
+	c.StreamEncapsulation = data[10]
 	if c.StreamEncapsulation != 2 {
 		return fmt.Errorf("invalid stream encapsulation (%d)", c.StreamEncapsulation)
 	}
 
-	c.Resv2 = uint8(data[11])
+	c.Resv2 = data[11]
 	c.Resv3 = binary.BigEndian.Uint16(data[12:])
 	c.SLen = uint16(data[14]) * 4
 	c.KLen = uint16(data[15]) * 4
@@ -1363,10 +1410,10 @@ func (c *CIFKeyMaterialExtension) Marshal(w io.Writer) error {
 	buffer[3] = b
 	binary.BigEndian.PutUint32(buffer[4:], c.KeyEncryptionKeyIndex)
 
-	buffer[8] = byte(c.Cipher)
-	buffer[9] = byte(c.Authentication)
-	buffer[10] = byte(c.StreamEncapsulation)
-	buffer[11] = byte(c.Resv2)
+	buffer[8] = c.Cipher
+	buffer[9] = c.Authentication
+	buffer[10] = c.StreamEncapsulation
+	buffer[11] = c.Resv2
 
 	binary.BigEndian.PutUint16(buffer[12:], c.Resv3)
 
@@ -1482,12 +1529,17 @@ func (c *CIFACK) Marshal(w io.Writer) error {
 	binary.BigEndian.PutUint32(buffer[20:], c.EstimatedLinkCapacity)
 	binary.BigEndian.PutUint32(buffer[24:], c.ReceivingRate)
 
-	if c.IsLite {
-		w.Write(buffer[0:4])
-	} else if c.IsSmall {
-		w.Write(buffer[0:16])
-	} else {
-		w.Write(buffer[0:])
+	var err error
+	switch {
+	case c.IsLite:
+		_, err = w.Write(buffer[0:4])
+	case c.IsSmall:
+		_, err = w.Write(buffer[0:16])
+	default:
+		_, err = w.Write(buffer[0:])
+	}
+	if err != nil {
+		return fmt.Errorf("failed to write ACK: %w", err)
 	}
 
 	return nil
@@ -1578,13 +1630,17 @@ func (c *CIFNAK) Marshal(w io.Writer) error {
 	for i := 0; i < len(c.LostPacketSequenceNumber); i += 2 {
 		if c.LostPacketSequenceNumber[i] == c.LostPacketSequenceNumber[i+1] {
 			binary.BigEndian.PutUint32(buffer[0:], c.LostPacketSequenceNumber[i].Val())
-			w.Write(buffer[0:4])
+			if _, err := w.Write(buffer[0:4]); err != nil {
+				return fmt.Errorf("failed to write NAK single: %w", err)
+			}
 
 			bytesWritten += 4
 		} else {
 			binary.BigEndian.PutUint32(buffer[0:], c.LostPacketSequenceNumber[i].Val()|0b10000000_00000000_00000000_00000000)
 			binary.BigEndian.PutUint32(buffer[4:], c.LostPacketSequenceNumber[i+1].Val())
-			w.Write(buffer[0:])
+			if _, err := w.Write(buffer[0:]); err != nil {
+				return fmt.Errorf("failed to write NAK range: %w", err)
+			}
 
 			bytesWritten += 8
 		}

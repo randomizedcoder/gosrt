@@ -632,7 +632,7 @@ var ListenerInfoCounterPrefixes = []string{
 	"gosrt_socketid_collision_total",
 }
 
-// Drop counters (may be expected in some tests)
+// DropCounterPrefixes lists drop counters that may be expected in some tests.
 var DropCounterPrefixes = []string{
 	"gosrt_connection_packets_dropped_total",
 }
@@ -817,7 +817,7 @@ func AnalyzeConnectionLifecycle(ts *TestMetricsTimeSeries, config *TestConfig) C
 		closed = int64(getMetricValue(last, "gosrt_connections_closed_total"))
 
 		// Get close reasons - also absolute values
-		reasons := []string{"graceful", "peer_idle_timeout", "context_cancelled", "error"}
+		reasons := []string{"graceful", "peer_idle_timeout", "context_canceled", "error"}
 		for _, reason := range reasons {
 			value := int64(getMetricValueWithLabel(last, "gosrt_connections_closed_by_reason_total", "reason=\""+reason+"\""))
 			if value > 0 {
@@ -1025,12 +1025,13 @@ func ValidatePositiveSignals(ts *TestMetricsTimeSeries, config *TestConfig) Posi
 	// Primary check: Server received packets (from client-generator publishing)
 	// The server receives the data from the publisher
 	serverDataRecv := serverMetrics.TotalPacketsRecv
-	if serverDataRecv >= expected.MinPacketsRecv {
+	switch {
+	case serverDataRecv >= expected.MinPacketsRecv:
 		serverDataFlowOK = true
-	} else if serverMetrics.TotalACKsRecv > 0 {
+	case serverMetrics.TotalACKsRecv > 0:
 		// ACKs are an alternative signal that data is flowing
 		serverDataFlowOK = true
-	} else {
+	default:
 		result.Violations = append(result.Violations, SignalViolation{
 			Signal:    "ServerDataFlow",
 			Component: "server",
@@ -1481,7 +1482,8 @@ func AnalyzeTestMetrics(ts *TestMetricsTimeSeries, config *TestConfig) AnalysisR
 		result.RuntimeStability = AnalyzeRuntimeStabilityForAllComponents(ts, config.TestDuration)
 
 		// Check if any runtime analysis failed
-		for _, rs := range result.RuntimeStability {
+		for i := range result.RuntimeStability {
+			rs := &result.RuntimeStability[i]
 			if !rs.Passed {
 				runtimePassed = false
 				result.TotalViolations += len(rs.Violations)
@@ -1729,7 +1731,8 @@ func PrintAnalysisResult(result AnalysisResult) {
 	if len(result.RuntimeStability) > 0 {
 		fmt.Println("\nRuntime Stability:")
 		allStable := true
-		for _, rs := range result.RuntimeStability {
+		for i := range result.RuntimeStability {
+			rs := &result.RuntimeStability[i]
 			status := "✓ STABLE"
 			if !rs.Passed {
 				status = "✗ UNSTABLE"
@@ -1747,7 +1750,8 @@ func PrintAnalysisResult(result AnalysisResult) {
 		}
 
 		// Print violations if any
-		for _, rs := range result.RuntimeStability {
+		for i := range result.RuntimeStability {
+			rs := &result.RuntimeStability[i]
 			for _, v := range rs.Violations {
 				fmt.Printf("  ✗ [%s] %s\n", rs.Component, v.Message)
 			}
@@ -1936,25 +1940,13 @@ func (r *AnalysisResult) ToJSON() JSONAnalysisResult {
 	// Error analysis
 	jr.ErrorAnalysis = JSONErrorAnalysis{Passed: r.ErrorAnalysis.Passed}
 	for _, v := range r.ErrorAnalysis.Violations {
-		jr.ErrorAnalysis.Violations = append(jr.ErrorAnalysis.Violations, JSONErrorViolation{
-			Counter:   v.Counter,
-			Component: v.Component,
-			Expected:  v.Expected,
-			Actual:    v.Actual,
-			Message:   v.Message,
-		})
+		jr.ErrorAnalysis.Violations = append(jr.ErrorAnalysis.Violations, JSONErrorViolation(v))
 	}
 
 	// Positive signals
 	jr.PositiveSignals = JSONPositiveSignals{Passed: r.PositiveSignals.Passed}
 	for _, v := range r.PositiveSignals.Violations {
-		jr.PositiveSignals.Violations = append(jr.PositiveSignals.Violations, JSONSignalViolation{
-			Signal:    v.Signal,
-			Component: v.Component,
-			Expected:  v.Expected,
-			Actual:    v.Actual,
-			Message:   v.Message,
-		})
+		jr.PositiveSignals.Violations = append(jr.PositiveSignals.Violations, JSONSignalViolation(v))
 	}
 
 	// Statistical validation
@@ -1968,14 +1960,12 @@ func (r *AnalysisResult) ToJSON() JSONAnalysisResult {
 		})
 	}
 	for _, w := range r.StatisticalValidation.Warnings {
-		jr.StatisticalValidation.Warnings = append(jr.StatisticalValidation.Warnings, JSONStatisticalWarning{
-			Metric:  w.Metric,
-			Message: w.Message,
-		})
+		jr.StatisticalValidation.Warnings = append(jr.StatisticalValidation.Warnings, JSONStatisticalWarning(w))
 	}
 
 	// Runtime stability
-	for _, rs := range r.RuntimeStability {
+	for i := range r.RuntimeStability {
+		rs := &r.RuntimeStability[i]
 		jr.RuntimeStability = append(jr.RuntimeStability, JSONRuntimeStability{
 			Component:           rs.Component,
 			Passed:              rs.Passed,
@@ -2162,12 +2152,11 @@ type StatisticalExpectation struct {
 	MinRecoveryRate float64 // Fraction of lost packets successfully recovered
 }
 
-// ObservedStatistics holds computed statistics from metrics
-// See integration_testing_design.md#3-understanding-loss-network-vs-srt for terminology
-// ConnectionAnalysis holds metrics for a single SRT connection endpoint pair
+// ConnectionAnalysis holds metrics for a single SRT connection endpoint pair.
 // This enables independent analysis of each of the two SRT connections:
 // Connection 1: ClientGenerator (publisher) → Server
 // Connection 2: Server → Client (subscriber)
+// See integration_testing_design.md#3-understanding-loss-network-vs-srt for terminology.
 type ConnectionAnalysis struct {
 	Name string // "publisher-to-server" or "server-to-subscriber"
 
@@ -2895,12 +2884,10 @@ func AnalyzeEventLoopHealth(ts *TestMetricsTimeSeries, config *TestConfig) Event
 		result.Violations = append(result.Violations,
 			fmt.Sprintf("EventLoop falling behind: backlog=%d packets, max_acceptable=%d (rate=%.0f pps)",
 				result.RingBacklog, result.MaxAcceptableLag, result.PacketRatePPS))
-	} else {
-		if result.RingBacklog > 0 && result.RingBacklog > result.MaxAcceptableLag/2 {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("Ring backlog elevated: %d packets (within acceptable range but >50%% of max)",
-					result.RingBacklog))
-		}
+	} else if result.RingBacklog > 0 && result.RingBacklog > result.MaxAcceptableLag/2 {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("Ring backlog elevated: %d packets (within acceptable range but >50%% of max)",
+				result.RingBacklog))
 	}
 
 	// Pass if no violations
@@ -3287,14 +3274,14 @@ func analyzeDistribution(values []uint64) DistributionAnalysis {
 	}
 
 	var sum uint64
-	min, max := values[0], values[0]
+	minVal, maxVal := values[0], values[0]
 	for _, v := range values {
 		sum += v
-		if v < min {
-			min = v
+		if v < minVal {
+			minVal = v
 		}
-		if v > max {
-			max = v
+		if v > maxVal {
+			maxVal = v
 		}
 	}
 
@@ -3310,15 +3297,15 @@ func analyzeDistribution(values []uint64) DistributionAnalysis {
 	stdDev := math.Sqrt(variance)
 
 	result := DistributionAnalysis{
-		Min:    min,
-		Max:    max,
+		Min:    minVal,
+		Max:    maxVal,
 		Mean:   mean,
 		StdDev: stdDev,
 	}
 
 	if mean > 0 {
 		result.CoeffVariation = stdDev / mean
-		result.Imbalance = float64(max-min) / mean
+		result.Imbalance = float64(maxVal-minVal) / mean
 	}
 
 	return result

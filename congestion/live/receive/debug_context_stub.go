@@ -47,6 +47,3 @@ func (r *receiver) AssertEventLoopNoLock() {}
 
 // AssertTickWithLock is a no-op in release builds.
 func (r *receiver) AssertTickWithLock() {}
-
-
-

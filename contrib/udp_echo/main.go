@@ -49,12 +49,12 @@ import (
 
 const (
 	// Ring configuration
-	defaultRingSize   = 64   // io_uring ring size (power of 2)
-	maxPacketSize     = 1500 // Maximum UDP packet size
-	defaultBatchSize  = 32   // Batch size for resubmissions (matches gosrt pattern)
-	maxGetSQERetries  = 3    // Retries when GetSQE() returns nil
-	maxSubmitRetries  = 3    // Retries for Submit() on transient errors
-	retryBackoffUs    = 100  // Microseconds between retries
+	defaultRingSize  = 64   // io_uring ring size (power of 2)
+	maxPacketSize    = 1500 // Maximum UDP packet size
+	defaultBatchSize = 32   // Batch size for resubmissions (matches gosrt pattern)
+	maxGetSQERetries = 3    // Retries when GetSQE() returns nil
+	maxSubmitRetries = 3    // Retries for Submit() on transient errors
+	retryBackoffUs   = 100  // Microseconds between retries
 
 	// Timeout for WaitCQETimeout - kernel blocks until completion or timeout
 	// 10ms provides good balance: responsive to completions AND shutdown signals
@@ -69,11 +69,11 @@ const (
 
 // completionInfo tracks pending io_uring operations
 type completionInfo struct {
-	op     int                      // opRecv or opSend
-	buffer []byte                   // Buffer for the operation
-	msg    *syscall.Msghdr          // Msghdr for recv/send
-	iovec  *syscall.Iovec           // Iovec pointing to buffer
-	rsa    *syscall.RawSockaddrAny  // Source address (recv) or dest address (send)
+	op     int                     // opRecv or opSend
+	buffer []byte                  // Buffer for the operation
+	msg    *syscall.Msghdr         // Msghdr for recv/send
+	iovec  *syscall.Iovec          // Iovec pointing to buffer
+	rsa    *syscall.RawSockaddrAny // Source address (recv) or dest address (send)
 }
 
 // echoServer is a simple UDP echo server using io_uring
@@ -142,7 +142,11 @@ func (s *echoServer) run() error {
 	if err := s.createSocket(); err != nil {
 		return fmt.Errorf("failed to create socket: %w", err)
 	}
-	defer s.conn.Close()
+	defer func() {
+		if closeErr := s.conn.Close(); closeErr != nil {
+			log.Printf("Warning: failed to close connection: %v", closeErr)
+		}
+	}()
 
 	log.Printf("UDP echo server listening on %s", s.addr)
 
@@ -230,7 +234,11 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 	// Phase 1: Prepare all SQEs (no Submit yet)
 	for i := 0; i < count; i++ {
 		// Get buffer from pool
-		buffer := s.bufferPool.Get().([]byte)
+		buffer, ok := s.bufferPool.Get().([]byte)
+		if !ok {
+			// Pool should only contain []byte, this is a programming error
+			panic("bufferPool contained non-[]byte value")
+		}
 
 		// Create structures for recvmsg (must stay alive until completion)
 		rsa := new(syscall.RawSockaddrAny)
@@ -330,7 +338,11 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 // submitSendRequest submits a send request to echo data back
 func (s *echoServer) submitSendRequest(data []byte, rsa *syscall.RawSockaddrAny, rsaLen uint32) {
 	// Get buffer from pool and copy data
-	buffer := s.bufferPool.Get().([]byte)
+	buffer, ok := s.bufferPool.Get().([]byte)
+	if !ok {
+		// Pool should only contain []byte, this is a programming error
+		panic("bufferPool contained non-[]byte value")
+	}
 	n := copy(buffer, data)
 
 	// Create structures for sendmsg

@@ -23,24 +23,24 @@ type PacketBatch struct {
 
 // DropTestCase defines parameters for drop tests
 type DropTestCase struct {
-	Name              string
+	Name string
 
 	// CODE_PARAM: Maps to Config.InitialSequenceNumber (critical for wraparound)
-	StartSeq          uint32          // Starting sequence for receiver (default 0)
+	StartSeq uint32 // Starting sequence for receiver (default 0)
 
 	// CODE_PARAM: Maps to Config.TsbpdDelay (affects drop timing)
-	TsbpdDelayUs      uint64          // TSBPD delay (default uses implicit timing)
+	TsbpdDelayUs uint64 // TSBPD delay (default uses implicit timing)
 
-	InitialBatches    []PacketBatch   // Batches to push before ticks
-	TickTimes         []uint64        // Tick times to call
-	MoreBatches       []PacketBatch   // Additional batches after initial ticks
-	MoreTickTimes     []uint64        // Additional tick times
-	DuplicateSeq      uint32          // Sequence to push as duplicate
-	DuplicateTsbpd    uint64          // TSBPD time for duplicate
-	ExpectedDrops     uint64          // Expected PktDrop count
-	ExpectedCP        uint32          // Expected contiguousPoint after test
-	ExpectedLastACK   uint32          // Expected lastACKSequenceNumber
-	ExpectedMaxSeen   uint32          // Expected maxSeenSequenceNumber
+	InitialBatches  []PacketBatch // Batches to push before ticks
+	TickTimes       []uint64      // Tick times to call
+	MoreBatches     []PacketBatch // Additional batches after initial ticks
+	MoreTickTimes   []uint64      // Additional tick times
+	DuplicateSeq    uint32        // Sequence to push as duplicate
+	DuplicateTsbpd  uint64        // TSBPD time for duplicate
+	ExpectedDrops   uint64        // Expected PktDrop count
+	ExpectedCP      uint32        // Expected contiguousPoint after test
+	ExpectedLastACK uint32        // Expected lastACKSequenceNumber
+	ExpectedMaxSeen uint32        // Expected maxSeenSequenceNumber
 }
 
 func TestRecvDrop_Table(t *testing.T) {
@@ -121,10 +121,10 @@ func TestRecvDrop_Table(t *testing.T) {
 			InitialBatches: []PacketBatch{
 				{StartSeq: packet.MAX_SEQUENCENUMBER - 100, Count: 10, TsbpdBase: 0},
 			},
-			TickTimes:       []uint64{200_000},
-			DuplicateSeq:    packet.MAX_SEQUENCENUMBER - 95,
-			DuplicateTsbpd:  6,
-			ExpectedDrops:   1,
+			TickTimes:      []uint64{200_000},
+			DuplicateSeq:   packet.MAX_SEQUENCENUMBER - 95,
+			DuplicateTsbpd: 6,
+			ExpectedDrops:  1,
 			// MAX-100 + 9 = MAX-91
 			ExpectedCP:      packet.MAX_SEQUENCENUMBER - 91,
 			ExpectedLastACK: packet.MAX_SEQUENCENUMBER - 91,
@@ -139,10 +139,10 @@ func TestRecvDrop_Table(t *testing.T) {
 				// Start at MAX, wraps to 0, 1, 2, ... 8
 				{StartSeq: packet.MAX_SEQUENCENUMBER, Count: 10, TsbpdBase: 0},
 			},
-			TickTimes:       []uint64{200_000},
-			DuplicateSeq:    3, // Wrapped sequence
-			DuplicateTsbpd:  5,
-			ExpectedDrops:   1,
+			TickTimes:      []uint64{200_000},
+			DuplicateSeq:   3, // Wrapped sequence
+			DuplicateTsbpd: 5,
+			ExpectedDrops:  1,
 			// MAX + 9 wraps to 8
 			ExpectedCP:      8,
 			ExpectedLastACK: 8,
@@ -157,10 +157,10 @@ func TestRecvDrop_Table(t *testing.T) {
 				// Packets MAX-5 to MAX-5+9 (i.e., MAX-5 to 3 after wrap)
 				{StartSeq: packet.MAX_SEQUENCENUMBER - 5, Count: 10, TsbpdBase: 0},
 			},
-			TickTimes:       []uint64{200_000},
-			DuplicateSeq:    packet.MAX_SEQUENCENUMBER - 3, // Duplicate near MAX
-			DuplicateTsbpd:  3,
-			ExpectedDrops:   1,
+			TickTimes:      []uint64{200_000},
+			DuplicateSeq:   packet.MAX_SEQUENCENUMBER - 3, // Duplicate near MAX
+			DuplicateTsbpd: 3,
+			ExpectedDrops:  1,
 			// After wrap: MAX-5 + 9 packets = seq 3
 			ExpectedCP:      3,
 			ExpectedLastACK: 3,
@@ -238,4 +238,3 @@ func TestRecvDrop_Table(t *testing.T) {
 		})
 	}
 }
-

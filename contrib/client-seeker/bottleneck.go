@@ -42,18 +42,18 @@ func (b BottleneckType) String() string {
 // See: client_seeker_instrumentation_design.md Section 10.5
 type BottleneckDetector struct {
 	// Thresholds (configurable)
-	EfficiencyThreshold    float64 // Below this = bottleneck (default: 0.95)
-	ToolOverheadThreshold  float64 // Above this = tool bottleneck (default: 0.30)
-	WriteBlockedThreshold  float64 // Above this = library bottleneck (default: 0.10)
+	EfficiencyThreshold      float64 // Below this = bottleneck (default: 0.95)
+	ToolOverheadThreshold    float64 // Above this = tool bottleneck (default: 0.30)
+	WriteBlockedThreshold    float64 // Above this = library bottleneck (default: 0.10)
 	TokenStarvationThreshold float64 // Below this = tool bottleneck (default: 0.10)
 }
 
 // NewBottleneckDetector creates a detector with default thresholds.
 func NewBottleneckDetector() *BottleneckDetector {
 	return &BottleneckDetector{
-		EfficiencyThreshold:     0.95, // 95% efficiency
-		ToolOverheadThreshold:   0.30, // 30% time in tool overhead
-		WriteBlockedThreshold:   0.10, // 10% writes blocked
+		EfficiencyThreshold:      0.95, // 95% efficiency
+		ToolOverheadThreshold:    0.30, // 30% time in tool overhead
+		WriteBlockedThreshold:    0.10, // 10% writes blocked
 		TokenStarvationThreshold: 0.10, // 10% token utilization
 	}
 }
@@ -78,12 +78,12 @@ type BottleneckMetrics struct {
 	Efficiency float64 // ActualBps / TargetBps
 
 	// From TokenBucket
-	TotalWaitNs  int64
-	SpinTimeNs   int64
-	BlockedCount int64
+	TotalWaitNs     int64
+	SpinTimeNs      int64
+	BlockedCount    int64
 	TokensAvailable int64
-	TokensMax    int64
-	Mode         string
+	TokensMax       int64
+	Mode            string
 
 	// From Publisher
 	WriteTimeNs       int64

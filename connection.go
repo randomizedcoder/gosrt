@@ -145,6 +145,7 @@ type srtConn struct {
 
 	// Queue for packets that are written with writePacket() and will be send to the network
 	writeQueue  chan packet.Packet
+	writeMu     sync.Mutex // Protects writeBuffer and writeData for concurrent Write() calls
 	writeBuffer bytes.Buffer
 	writeData   []byte
 
@@ -233,8 +234,8 @@ type srtConn struct {
 	// Multi-ring fields (used when IoUringSendRingCount > 1)
 	// Each sendRingState owns its ring, completion map, and ID counter
 	// Note: Per-ring lock needed because sender and completer access concurrently
-	sendRingStates     []*sendRingState // Slice of independent ring states
-	sendRingNextIdx    atomic.Uint32    // Round-robin index for ring selection
+	sendRingStates  []*sendRingState // Slice of independent ring states
+	sendRingNextIdx atomic.Uint32    // Round-robin index for ring selection
 
 	// Shared by both single-ring and multi-ring modes
 	sendCompCtx    context.Context
@@ -470,9 +471,14 @@ func newSRTConn(config srtConnConfig) *srtConn {
 
 	// 4.6.  Too-Late Packet Drop -> 125% of SRT latency, at least 1 second
 	// https://github.com/Haivision/srt/blob/master/docs/API/API-socket-options.md#SRTO_SNDDROPDELAY
-	c.dropThreshold = uint64(float64(c.peerTsbpdDelay)*1.25) + uint64(c.config.SendDropDelay.Microseconds())
-	if c.dropThreshold < uint64(time.Second.Microseconds()) {
-		c.dropThreshold = uint64(time.Second.Microseconds())
+	const oneSecondUs = uint64(1_000_000) // time.Second in microseconds
+	sendDropDelayUs := c.config.SendDropDelay.Microseconds()
+	if sendDropDelayUs < 0 {
+		sendDropDelayUs = 0
+	}
+	c.dropThreshold = uint64(float64(c.peerTsbpdDelay)*1.25) + uint64(sendDropDelayUs)
+	if c.dropThreshold < oneSecondUs {
+		c.dropThreshold = oneSecondUs
 	}
 	c.dropThreshold += 20_000
 
@@ -575,7 +581,10 @@ func (c *srtConn) LocalAddr() net.Addr {
 		return nil
 	}
 
-	addr, _ := net.ResolveUDPAddr("udp", c.localAddr.String())
+	addr, err := net.ResolveUDPAddr("udp", c.localAddr.String())
+	if err != nil {
+		return c.localAddr // Fall back to original address if parsing fails
+	}
 	return addr
 }
 
@@ -584,7 +593,10 @@ func (c *srtConn) RemoteAddr() net.Addr {
 		return nil
 	}
 
-	addr, _ := net.ResolveUDPAddr("udp", c.remoteAddr.String())
+	addr, err := net.ResolveUDPAddr("udp", c.remoteAddr.String())
+	if err != nil {
+		return c.remoteAddr // Fall back to original address if parsing fails
+	}
 	return addr
 }
 

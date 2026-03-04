@@ -31,5 +31,3 @@ func runInTickContext(r *receiver, fn func()) {
 	defer r.ExitTick()
 	fn()
 }
-
-

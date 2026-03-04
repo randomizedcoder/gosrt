@@ -1,3 +1,4 @@
+// Package net provides SRT-specific IP address handling utilities.
 package net
 
 import (

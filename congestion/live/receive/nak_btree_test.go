@@ -27,13 +27,13 @@ func TestNakBtree_BasicOperations(t *testing.T) {
 	require.False(t, nb.Has(300))
 
 	// Min/Max
-	min, ok := nb.Min()
+	minSeq, ok := nb.Min()
 	require.True(t, ok)
-	require.Equal(t, uint32(100), min)
+	require.Equal(t, uint32(100), minSeq)
 
-	max, ok := nb.Max()
+	maxSeq, ok := nb.Max()
 	require.True(t, ok)
-	require.Equal(t, uint32(200), max)
+	require.Equal(t, uint32(200), maxSeq)
 
 	// Delete
 	found := nb.Delete(150)

@@ -36,46 +36,53 @@ func TestEncryption(t *testing.T) {
 
 			streamid := req.StreamId()
 
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
 
 	{
 		// Reject connection if wrong password is set
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
-		config.Passphrase = "barfoobarfoo"
+		wrongPassConfig := DefaultConfig()
+		wrongPassConfig.StreamId = "subscribe"
+		wrongPassConfig.Passphrase = "barfoobarfoo"
 
-		_, err := testDial(t, "127.0.0.1:6003", config)
-		require.Error(t, err)
+		_, dialErr := testDial(t, "127.0.0.1:6003", wrongPassConfig)
+		require.Error(t, dialErr)
 	}
 	// Test transmitting an encrypted message
 
@@ -87,13 +94,13 @@ func TestEncryption(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
-		config.Passphrase = "foobarfoobar"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
+		readerConfig.Passphrase = "foobarfoobar"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", readerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
 		close(readerConnected)
@@ -101,17 +108,17 @@ func TestEncryption(t *testing.T) {
 		buffer := make([]byte, 2048)
 
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader1.Write(buffer[:n])
 			}
 
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
 
-		err = conn.Close()
+		_ = conn.Close()
 	}()
 
 	<-readerConnected
@@ -121,25 +128,25 @@ func TestEncryption(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "publish"
-		config.Passphrase = "foobarfoobar"
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
+		writerConfig.Passphrase = "foobarfoobar"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", writerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
-		n, err := conn.Write([]byte(message))
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		n, writeErr := conn.Write([]byte(message))
+		if !assert.NoError(t, writeErr) {
+			panic(writeErr.Error())
 		}
 		assert.Equal(t, 12, n)
 
 		time.Sleep(3 * time.Second)
 
-		err = conn.Close()
-		assert.NoError(t, err)
+		closeErr := conn.Close()
+		assert.NoError(t, closeErr)
 	}()
 
 	<-writerDone
@@ -175,46 +182,53 @@ func TestEncryptionRetransmit(t *testing.T) {
 
 			streamid := req.StreamId()
 
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
 
 	{
 		// Reject connection if wrong password is set
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
-		config.Passphrase = "barfoobarfoo"
+		wrongPassConfig := DefaultConfig()
+		wrongPassConfig.StreamId = "subscribe"
+		wrongPassConfig.Passphrase = "barfoobarfoo"
 
-		_, err := testDial(t, "127.0.0.1:6003", config)
-		require.Error(t, err)
+		_, dialErr := testDial(t, "127.0.0.1:6003", wrongPassConfig)
+		require.Error(t, dialErr)
 	}
 
 	// Test transmitting an encrypted message
@@ -227,13 +241,13 @@ func TestEncryptionRetransmit(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
-		config.Passphrase = "foobarfoobar"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
+		readerConfig.Passphrase = "foobarfoobar"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", readerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
 		close(readerConnected)
@@ -241,17 +255,17 @@ func TestEncryptionRetransmit(t *testing.T) {
 		buffer := make([]byte, 2048)
 
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader1.Write(buffer[:n])
 			}
 
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
 
-		err = conn.Close()
+		_ = conn.Close()
 	}()
 
 	<-readerConnected
@@ -263,10 +277,10 @@ func TestEncryptionRetransmit(t *testing.T) {
 
 		// Set up packet drop filter BEFORE dialing (to avoid race)
 		counter := 0
-		config := DefaultConfig()
-		config.StreamId = "publish"
-		config.Passphrase = "foobarfoobar"
-		config.SendFilter = func(p packet.Packet) bool {
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
+		writerConfig.Passphrase = "foobarfoobar"
+		writerConfig.SendFilter = func(p packet.Packet) bool {
 			if !p.Header().IsControlPacket {
 				// Drop every 2nd original packet
 				if !p.Header().RetransmittedPacketFlag {
@@ -279,23 +293,23 @@ func TestEncryptionRetransmit(t *testing.T) {
 			return true // Send the packet
 		}
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", writerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
 		for i := 0; i < 5; i++ {
-			n, err := conn.Write([]byte(message))
-			if !assert.NoError(t, err) {
-				panic(err.Error())
+			n, writeErr := conn.Write([]byte(message))
+			if !assert.NoError(t, writeErr) {
+				panic(writeErr.Error())
 			}
 			assert.Equal(t, 12, n)
 		}
 
 		time.Sleep(3 * time.Second)
 
-		err = conn.Close()
-		assert.NoError(t, err)
+		closeErr := conn.Close()
+		assert.NoError(t, closeErr)
 	}()
 
 	<-writerDone
@@ -330,34 +344,41 @@ func TestEncryptionKeySwap(t *testing.T) {
 
 			streamid := req.StreamId()
 
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -372,13 +393,13 @@ func TestEncryptionKeySwap(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
-		config.Passphrase = "foobarfoobar"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
+		readerConfig.Passphrase = "foobarfoobar"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", readerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
 		buffer := make([]byte, 2048)
@@ -386,18 +407,18 @@ func TestEncryptionKeySwap(t *testing.T) {
 		close(readerConnected)
 
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader1.Write(buffer[:n])
 			}
 
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
 
-		err = conn.Close()
-		assert.NoError(t, err)
+		closeErr := conn.Close()
+		assert.NoError(t, closeErr)
 	}()
 
 	<-readerConnected
@@ -407,31 +428,31 @@ func TestEncryptionKeySwap(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "publish"
-		config.Passphrase = "foobarfoobar"
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
+		writerConfig.Passphrase = "foobarfoobar"
 		// Swap encryption key after 50 sent messages
-		config.KMPreAnnounce = 10
-		config.KMRefreshRate = 30
+		writerConfig.KMPreAnnounce = 10
+		writerConfig.KMRefreshRate = 30
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", writerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
 		// Send 150 messages
 		for i := 0; i < 150; i++ {
-			n, err := conn.Write([]byte(message))
-			if !assert.NoError(t, err) {
-				panic(err.Error())
+			n, writeErr := conn.Write([]byte(message))
+			if !assert.NoError(t, writeErr) {
+				panic(writeErr.Error())
 			}
 			assert.Equal(t, 12, n)
 		}
 
 		time.Sleep(3 * time.Second)
 
-		err = conn.Close()
-		assert.NoError(t, err)
+		closeErr := conn.Close()
+		assert.NoError(t, closeErr)
 	}()
 
 	<-writerDone
@@ -458,34 +479,41 @@ func TestStats(t *testing.T) {
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
 
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -501,12 +529,12 @@ func TestStats(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", readerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
 		close(readerConnected)
@@ -514,19 +542,19 @@ func TestStats(t *testing.T) {
 		buffer := make([]byte, 2048)
 
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader1.Write(buffer[:n])
 			}
 
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
 
 		conn.Stats(&statsReader)
 
-		err = conn.Close()
+		_ = conn.Close()
 	}()
 
 	<-readerConnected
@@ -536,17 +564,17 @@ func TestStats(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "publish"
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
 
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		conn, dialErr := testDial(t, "127.0.0.1:6003", writerConfig)
+		if !assert.NoError(t, dialErr) {
+			panic(dialErr.Error())
 		}
 
-		n, err := conn.Write([]byte(message))
-		if !assert.NoError(t, err) {
-			panic(err.Error())
+		n, writeErr := conn.Write([]byte(message))
+		if !assert.NoError(t, writeErr) {
+			panic(writeErr.Error())
 		}
 		assert.Equal(t, 12, n)
 
@@ -554,8 +582,8 @@ func TestStats(t *testing.T) {
 
 		conn.Stats(&statsWriter)
 
-		err = conn.Close()
-		assert.NoError(t, err)
+		closeErr := conn.Close()
+		assert.NoError(t, closeErr)
 	}()
 
 	<-writerDone

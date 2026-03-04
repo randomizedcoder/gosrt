@@ -142,13 +142,13 @@ func TestListenHSV4(t *testing.T) {
 		buffer := make([]byte, MAX_MSS_SIZE)
 		listenWg.Done()
 		for {
-			n, addr, err := pc.ReadFrom(buffer)
-			if err != nil {
+			n, addr, readErr := pc.ReadFrom(buffer)
+			if readErr != nil {
 				return
 			}
 
-			p, err := packet.NewPacketFromData(addr, buffer[:n])
-			if err != nil {
+			p, parseErr := packet.NewPacketFromData(addr, buffer[:n])
+			if parseErr != nil {
 				return
 			}
 
@@ -166,13 +166,15 @@ func TestListenHSV4(t *testing.T) {
 	dialWg.Add(1)
 	go func() {
 		defer dialWg.Done()
-		conn, err := testDial(t, "127.0.0.1:6003", DefaultConfig())
-		if err != nil {
+		conn, dialErr := testDial(t, "127.0.0.1:6003", DefaultConfig())
+		if dialErr != nil {
 			// This is expected when the test closes pc before dial completes
 			return
 		}
 		if conn != nil {
-			conn.Close()
+			if closeErr := conn.Close(); closeErr != nil {
+				t.Logf("conn.Close error (expected during test shutdown): %v", closeErr)
+			}
 		}
 	}()
 
@@ -180,6 +182,7 @@ func TestListenHSV4(t *testing.T) {
 
 	recvcif := &packet.CIFHandshake{}
 	err = p.UnmarshalCIF(recvcif)
+	require.NoError(t, err)
 
 	require.Equal(t, uint32(4), recvcif.Version)
 	require.Equal(t, uint16(0), recvcif.EncryptionField)
@@ -209,7 +212,8 @@ func TestListenHSV4(t *testing.T) {
 
 	sendcif.PeerIP.FromNetAddr(pc.LocalAddr())
 
-	p.MarshalCIF(sendcif)
+	err = p.MarshalCIF(sendcif)
+	require.NoError(t, err)
 
 	var data bytes.Buffer
 
@@ -245,7 +249,8 @@ func TestListenHSV4(t *testing.T) {
 
 	sendcif.PeerIP.FromNetAddr(pc.LocalAddr())
 
-	p.MarshalCIF(sendcif)
+	err = p.MarshalCIF(sendcif)
+	require.NoError(t, err)
 
 	data.Reset()
 
@@ -255,7 +260,7 @@ func TestListenHSV4(t *testing.T) {
 	_, err = pc.WriteTo(data.Bytes(), p.Header().Addr)
 	require.NoError(t, err)
 
-	pc.Close()
+	require.NoError(t, pc.Close())
 	dialWg.Wait()
 }
 
@@ -281,13 +286,13 @@ func TestListenHSV5(t *testing.T) {
 		buffer := make([]byte, MAX_MSS_SIZE)
 		listenWg.Done()
 		for {
-			n, addr, err := pc.ReadFrom(buffer)
-			if err != nil {
+			n, addr, readErr := pc.ReadFrom(buffer)
+			if readErr != nil {
 				return
 			}
 
-			p, err := packet.NewPacketFromData(addr, buffer[:n])
-			if err != nil {
+			p, parseErr := packet.NewPacketFromData(addr, buffer[:n])
+			if parseErr != nil {
 				return
 			}
 
@@ -305,25 +310,29 @@ func TestListenHSV5(t *testing.T) {
 	dialWg.Add(1)
 	go func() {
 		defer dialWg.Done()
-		config := DefaultConfig()
-		config.StreamId = "foobar"
-		conn, err := testDial(t, "127.0.0.1:6003", config)
-		if err != nil {
-			if err == ErrClientClosed {
+		dialConfig := DefaultConfig()
+		dialConfig.StreamId = "foobar"
+		conn, dialErr := testDial(t, "127.0.0.1:6003", dialConfig)
+		if dialErr != nil {
+			if dialErr == ErrClientClosed {
 				return
 			}
 			// This is expected when the test closes pc before dial completes
 			return
 		}
 		if conn != nil {
-			conn.Close()
+			if closeErr := conn.Close(); closeErr != nil {
+				t.Logf("conn.Close error (expected during test shutdown): %v", closeErr)
+			}
 		}
 	}()
 
 	p := <-packets
 
 	recvcif := &packet.CIFHandshake{}
-	err = p.UnmarshalCIF(recvcif)
+	unmarshalErr := p.UnmarshalCIF(recvcif)
+	require.NoError(t, unmarshalErr)
+	require.NoError(t, err)
 
 	require.Equal(t, uint32(4), recvcif.Version)
 	require.Equal(t, uint16(0), recvcif.EncryptionField)
@@ -353,7 +362,8 @@ func TestListenHSV5(t *testing.T) {
 
 	sendcif.PeerIP.FromNetAddr(pc.LocalAddr())
 
-	p.MarshalCIF(sendcif)
+	err = p.MarshalCIF(sendcif)
+	require.NoError(t, err)
 
 	var data bytes.Buffer
 
@@ -389,7 +399,8 @@ func TestListenHSV5(t *testing.T) {
 
 	sendcif.PeerIP.FromNetAddr(pc.LocalAddr())
 
-	p.MarshalCIF(sendcif)
+	err = p.MarshalCIF(sendcif)
+	require.NoError(t, err)
 
 	data.Reset()
 
@@ -399,7 +410,7 @@ func TestListenHSV5(t *testing.T) {
 	_, err = pc.WriteTo(data.Bytes(), p.Header().Addr)
 	require.NoError(t, err)
 
-	pc.Close()
+	require.NoError(t, pc.Close())
 	dialWg.Wait()
 }
 
@@ -440,12 +451,14 @@ func TestListenAsync(t *testing.T) {
 		}()
 
 		go func(streamId string) {
-			config := DefaultConfig()
-			config.StreamId = streamId
-			conn, err := testDial(t, "127.0.0.1:6003", config)
-			require.NoError(t, err)
+			dialConfig := DefaultConfig()
+			dialConfig.StreamId = streamId
+			conn, dialErr := testDial(t, "127.0.0.1:6003", dialConfig)
+			require.NoError(t, dialErr)
 			connectedWg.Done()
-			conn.Close()
+			if closeErr := conn.Close(); closeErr != nil {
+				t.Logf("conn.Close error (expected during test shutdown): %v", closeErr)
+			}
 		}(strconv.Itoa(i))
 	}
 
@@ -473,10 +486,15 @@ func TestListenHSV5MissingExtension(t *testing.T) {
 		}
 	}()
 
-	conn, err := net.Dial("udp", "127.0.0.1:6003")
+	var d net.Dialer
+	conn, err := d.DialContext(context.Background(), "udp", "127.0.0.1:6003")
 	require.NoError(t, err)
 
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error: %v", closeErr)
+		}
+	}()
 
 	// send induction request
 	p := packet.NewPacket(conn.RemoteAddr())
@@ -499,7 +517,8 @@ func TestListenHSV5MissingExtension(t *testing.T) {
 		SynCookie:                   0,
 	}
 	sendcif.PeerIP.FromNetAddr(conn.LocalAddr())
-	p.MarshalCIF(sendcif)
+	err = p.MarshalCIF(sendcif)
+	require.NoError(t, err)
 	var buf bytes.Buffer
 	err = p.Marshal(&buf)
 	require.NoError(t, err)
@@ -532,7 +551,8 @@ func TestListenHSV5MissingExtension(t *testing.T) {
 	sendcif.SynCookie = recvcif.SynCookie
 	sendcif.HasSID = true
 	sendcif.StreamId = "foobar"
-	p.MarshalCIF(sendcif)
+	err = p.MarshalCIF(sendcif)
+	require.NoError(t, err)
 	buf.Reset()
 	err = p.Marshal(&buf)
 	require.NoError(t, err)
@@ -585,10 +605,12 @@ func TestListenParallelRequests(t *testing.T) {
 				// wait for all requests to be pending
 				reqReady.Wait()
 
-				conn, err := req.Accept()
-				require.NoError(t, err)
+				conn, acceptErr := req.Accept()
+				require.NoError(t, acceptErr)
 
-				conn.Close()
+				if closeErr := conn.Close(); closeErr != nil {
+					t.Logf("conn.Close error (expected during test shutdown): %v", closeErr)
+				}
 			}()
 		}
 	}()
@@ -601,14 +623,14 @@ func TestListenParallelRequests(t *testing.T) {
 		go func() {
 			defer clientSideConnReady.Done()
 
-			config := DefaultConfig()
-			config.StreamId = "foobar"
+			dialConfig := DefaultConfig()
+			dialConfig.StreamId = "foobar"
 
-			conn, err := testDial(t, "127.0.0.1:6003", config)
-			require.NoError(t, err)
+			conn, dialErr := testDial(t, "127.0.0.1:6003", dialConfig)
+			require.NoError(t, dialErr)
 
-			err = conn.Close()
-			require.NoError(t, err)
+			closeErr := conn.Close()
+			require.NoError(t, closeErr)
 
 		}()
 	}
@@ -646,10 +668,15 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 	}()
 
 	for i := 0; i < 4; i++ {
-		conn, err := net.Dial("udp", "127.0.0.1:6003")
+		var d net.Dialer
+		conn, err := d.DialContext(context.Background(), "udp", "127.0.0.1:6003")
 		require.NoError(t, err)
 
-		defer conn.Close()
+		defer func(c net.Conn) {
+			if closeErr := c.Close(); closeErr != nil {
+				t.Logf("conn.Close error: %v", closeErr)
+			}
+		}(conn)
 
 		// send induction request
 		p := packet.NewPacket(conn.RemoteAddr())
@@ -672,7 +699,8 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 			SynCookie:                   0,
 		}
 		sendcif.PeerIP.FromNetAddr(conn.LocalAddr())
-		p.MarshalCIF(sendcif)
+		err = p.MarshalCIF(sendcif)
+		require.NoError(t, err)
 		var buf bytes.Buffer
 		err = p.Marshal(&buf)
 		require.NoError(t, err)
@@ -721,7 +749,8 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 		}
 		sendcif.HasSID = true
 		sendcif.StreamId = "foobar"
-		p.MarshalCIF(sendcif)
+		err = p.MarshalCIF(sendcif)
+		require.NoError(t, err)
 		buf.Reset()
 		err = p.Marshal(&buf)
 		require.NoError(t, err)

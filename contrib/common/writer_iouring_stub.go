@@ -48,4 +48,3 @@ func IoUringOutputAvailable() bool {
 
 // Ensure IoUringWriter implements io.WriteCloser
 var _ io.WriteCloser = (*IoUringWriter)(nil)
-

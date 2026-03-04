@@ -1,0 +1,47 @@
+# .golangci-quick.yml
+#
+# Tier 0: Quick Lint (~30 seconds)
+# Used for: Every save, pre-commit, development feedback
+#
+# This is the fastest lint profile - only essential checks that
+# catch obvious issues without the overhead of deeper analysis.
+
+version: "2"
+
+run:
+  timeout: 1m
+  modules-download-mode: readonly
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - errcheck
+    - ineffassign
+    - unused
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+    exclude-functions:
+      - (io.Closer).Close
+      - (*os.File).Close
+
+  govet:
+    enable-all: true
+    settings:
+      shadow:
+        strict: true
+
+issues:
+  max-same-issues: 50
+  exclude-rules:
+    - path: "_test\\.go"
+      linters:
+        - errcheck

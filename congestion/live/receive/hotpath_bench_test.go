@@ -94,22 +94,6 @@ func startDrainGoroutine(recv *receiver, ctx context.Context) {
 	}()
 }
 
-// generateHotPathPackets generates packets with proper TSBPD times
-func generateHotPathPackets(count int, startSeq uint32, nowUs uint64, tsbpdDelayUs uint64) []packet.Packet {
-	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
-	packets := make([]packet.Packet, count)
-
-	for i := 0; i < count; i++ {
-		seq := circular.SeqAdd(startSeq, uint32(i))
-		p := packet.NewPacket(addr)
-		h := p.Header()
-		h.PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
-		h.PktTsbpdTime = nowUs + uint64(i*100) + tsbpdDelayUs // Staggered delivery
-		packets[i] = p
-	}
-	return packets
-}
-
 // ============================================================================
 // PUSH PATH BENCHMARKS
 // ============================================================================

@@ -35,9 +35,9 @@ const (
 // ControlPacket wraps an ACK or NAK for ring transport.
 // This is a value type (not pointer) to avoid allocations in the hot path.
 type ControlPacket struct {
-	Type        ControlPacketType
-	ACKSequence uint32   // For ACK: the acknowledged sequence number
-	NAKCount    int      // For NAK: number of sequences in NAKSequences
+	Type         ControlPacketType
+	ACKSequence  uint32     // For ACK: the acknowledged sequence number
+	NAKCount     int        // For NAK: number of sequences in NAKSequences
 	NAKSequences [32]uint32 // For NAK: up to 32 sequence numbers (inline to avoid allocation)
 	// Note: For NAKs with >32 sequences, multiple ControlPackets are pushed
 }
@@ -143,17 +143,17 @@ func (r *SendControlRing) TryPop() (ControlPacket, bool) {
 	return cp, true
 }
 
-// DrainBatch drains up to max control packets from the ring.
+// DrainBatch drains up to maxCount control packets from the ring.
 // Returns slice of drained packets (may be empty if ring is empty).
 //
 // NOT thread-safe for multiple consumers - designed for single EventLoop consumer.
-func (r *SendControlRing) DrainBatch(max int) []ControlPacket {
-	if max <= 0 {
+func (r *SendControlRing) DrainBatch(maxCount int) []ControlPacket {
+	if maxCount <= 0 {
 		return nil
 	}
 
-	result := make([]ControlPacket, 0, max)
-	for i := 0; i < max; i++ {
+	result := make([]ControlPacket, 0, maxCount)
+	for i := 0; i < maxCount; i++ {
 		cp, ok := r.TryPop()
 		if !ok {
 			break
@@ -173,4 +173,3 @@ func (r *SendControlRing) Len() int {
 func (r *SendControlRing) Shards() int {
 	return r.shards
 }
-

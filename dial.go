@@ -55,8 +55,6 @@ type dialer struct {
 	shutdownLock sync.RWMutex
 	shutdownOnce sync.Once
 
-	stopReader context.CancelFunc
-
 	doneChan chan error
 
 	// Context and waitgroup for graceful shutdown
@@ -82,9 +80,7 @@ type dialer struct {
 	dialerRecvRingStates []*dialerRecvRingState // Slice of independent ring states
 
 	// Shared by both single-ring and multi-ring modes
-	recvCompCtx    context.Context    // Context for completion handler(s)
-	recvCompCancel context.CancelFunc // Cancel function for completion handler(s)
-	recvCompWg     sync.WaitGroup     // WaitGroup for completion handler goroutine(s)
+	recvCompWg sync.WaitGroup // WaitGroup for completion handler goroutine(s)
 }
 
 type connResponse struct {
@@ -136,7 +132,7 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 		localAddr := config.LocalAddr
 		// Add port :0 if not specified (use ephemeral port)
 		if !strings.Contains(localAddr, ":") {
-			localAddr = localAddr + ":0"
+			localAddr += ":0"
 		}
 		laddr, err := net.ResolveUDPAddr("udp", localAddr)
 		if err != nil {
@@ -155,7 +151,9 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 
 	pc, ok := conn.(*net.UDPConn)
 	if !ok {
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			return nil, fmt.Errorf("failed dialing: connection is not a UDP connection (close error: %w)", closeErr)
+		}
 		return nil, fmt.Errorf("failed dialing: connection is not a UDP connection")
 	}
 
@@ -183,11 +181,9 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 
 	// Initialize io_uring receive ring (if enabled)
 	// This is a no-op on non-Linux platforms
+	// Error is logged in initializeIoUringRecv() and we fall back to ReadFrom()
 	ioUringInitialized := false
-	if err := dl.initializeIoUringRecv(); err != nil {
-		// Log error but don't fail - fall back to ReadFrom()
-		// Error is already logged in initializeIoUringRecv() (if logging available)
-	} else {
+	if initErr := dl.initializeIoUringRecv(); initErr == nil {
 		// Check if io_uring was actually initialized (enabled and successful)
 		// Single-ring mode uses dl.recvRing, multi-ring mode uses dl.dialerRecvRingStates
 		ioUringInitialized = (dl.recvRing != nil) || (len(dl.dialerRecvRingStates) > 0)
@@ -196,14 +192,18 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 	// create a new socket ID
 	dl.socketId, err = rand.Uint32()
 	if err != nil {
-		dl.Close()
-		return nil, err
+		if closeErr := dl.Close(); closeErr != nil {
+			return nil, fmt.Errorf("failed to generate socket ID: %w (close error: %v)", err, closeErr)
+		}
+		return nil, fmt.Errorf("failed to generate socket ID: %w", err)
 	}
 
 	seqNum, err := rand.Uint32()
 	if err != nil {
-		dl.Close()
-		return nil, err
+		if closeErr := dl.Close(); closeErr != nil {
+			return nil, fmt.Errorf("failed to generate sequence number: %w (close error: %v)", err, closeErr)
+		}
+		return nil, fmt.Errorf("failed to generate sequence number: %w", err)
 	}
 	dl.initialPacketSequenceNumber = circular.New(seqNum&packet.MAX_SEQUENCENUMBER, packet.MAX_SEQUENCENUMBER)
 
@@ -230,15 +230,21 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 				}
 
 				// Phase 2: Zero-copy - get buffer from shared global pool
-				bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+				bufferPtr, bufferOk := GetRecvBufferPool().Get().(*[]byte)
+				if !bufferOk {
+					// Pool should only contain *[]byte, this is a programming error
+					panic("GetRecvBufferPool contained non-*[]byte value")
+				}
 
-				pc.SetReadDeadline(time.Now().Add(3 * time.Second))
-				n, _, err := pc.ReadFrom(*bufferPtr)
-				if err != nil {
+				if deadlineErr := pc.SetReadDeadline(time.Now().Add(3 * time.Second)); deadlineErr != nil {
+					dl.log("dial:error", func() string { return fmt.Sprintf("SetReadDeadline error: %v", deadlineErr) })
+				}
+				n, _, readErr := pc.ReadFrom(*bufferPtr)
+				if readErr != nil {
 					// Return buffer to pool on read error
 					GetRecvBufferPool().Put(bufferPtr)
 
-					if errors.Is(err, os.ErrDeadlineExceeded) {
+					if errors.Is(readErr, os.ErrDeadlineExceeded) {
 						continue
 					}
 
@@ -255,13 +261,13 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 						return
 					}
 
-					dl.doneChan <- err
+					dl.doneChan <- readErr
 					return
 				}
 
 				// Phase 2: Zero-copy - unmarshal directly referencing the pooled buffer
 				p := packet.NewPacket(dl.remoteAddr)
-				if err := p.UnmarshalZeroCopy(bufferPtr, n, dl.remoteAddr); err != nil {
+				if unmarshalErr := p.UnmarshalZeroCopy(bufferPtr, n, dl.remoteAddr); unmarshalErr != nil {
 					// Parse error - return buffer to pool via DecommissionWithBuffer
 					p.DecommissionWithBuffer(GetRecvBufferPool())
 					continue
@@ -273,7 +279,7 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 				// non-blocking
 				select {
 				case <-dl.ctx.Done():
-					// Context cancelled - return buffer and decommission packet
+					// Context canceled - return buffer and decommission packet
 					p.DecommissionWithBuffer(GetRecvBufferPool())
 					dl.doneChan <- ErrClientClosed
 					return
@@ -289,7 +295,7 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 	}
 
 	// Start reader goroutine with dialer context
-	// Note: reader will exit when dl.ctx is cancelled (via client context cancellation)
+	// Note: reader will exit when dl.ctx is canceled (via client context cancellation)
 	go dl.reader(dl.ctx)
 
 	// Send the initial handshake request
@@ -315,7 +321,7 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 				}
 			}
 		case <-dl.ctx.Done():
-			// Dialer context cancelled - don't send error, let main flow handle it
+			// Dialer context canceled - don't send error, let main flow handle it
 			return
 		}
 	}()
@@ -325,7 +331,9 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 	case response := <-dl.connChan:
 		if response.err != nil {
 			handshakeCancel() // Cancel timeout context
-			dl.Close()
+			if closeErr := dl.Close(); closeErr != nil {
+				return nil, fmt.Errorf("%w (close error: %v)", response.err, closeErr)
+			}
 			return nil, response.err
 		}
 		handshakeCancel() // Cancel timeout context (handshake completed)
@@ -342,12 +350,16 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 		// Timeout occurred - error already sent to connChan by goroutine above
 		// Wait for the error response
 		response := <-dl.connChan
-		dl.Close()
+		if closeErr := dl.Close(); closeErr != nil {
+			return nil, fmt.Errorf("%w (close error: %v)", response.err, closeErr)
+		}
 		return nil, response.err
 	case <-dl.ctx.Done():
-		// Dialer context cancelled
+		// Dialer context canceled
 		handshakeCancel()
-		dl.Close()
+		if closeErr := dl.Close(); closeErr != nil {
+			return nil, fmt.Errorf("%w (close error: %v)", dl.ctx.Err(), closeErr)
+		}
 		return nil, dl.ctx.Err()
 	}
 }
@@ -355,7 +367,9 @@ func Dial(ctx context.Context, network, address string, config Config, shutdownW
 func (dl *dialer) checkConnection() error {
 	select {
 	case err := <-dl.doneChan:
-		dl.Close()
+		if closeErr := dl.Close(); closeErr != nil {
+			return fmt.Errorf("%w (close error: %v)", err, closeErr)
+		}
 		return err
 	default:
 	}

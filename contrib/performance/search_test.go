@@ -72,7 +72,7 @@ func TestSearchLoop_Monotonicity_LowOnlyIncreases(t *testing.T) {
 	result := loop.Run(ctx)
 
 	// Check that low only increased
-	var lastLow int64 = 0
+	var lastLow int64
 	for _, probe := range result.Artifacts.Probes {
 		if probe.Stable {
 			if probe.TargetBitrate < lastLow {
@@ -109,7 +109,7 @@ func TestSearchLoop_Monotonicity_HighOnlyDecreases(t *testing.T) {
 	result := loop.Run(ctx)
 
 	// Verify high only decreased after first failure
-	var firstHigh int64 = config.MaxBitrate
+	var firstHigh = config.MaxBitrate
 	foundFirstFailure := false
 	for _, probe := range result.Artifacts.Probes {
 		if !probe.Stable {
@@ -137,7 +137,7 @@ func TestSearchLoop_Timeout(t *testing.T) {
 		MinBitrate:     50_000_000,
 		MaxBitrate:     500_000_000,
 		StepSize:       10_000_000,
-		Precision:      1_000_000, // Very small precision to prevent quick convergence
+		Precision:      1_000_000,             // Very small precision to prevent quick convergence
 		Timeout:        50 * time.Millisecond, // Very short timeout
 	}
 	timing := DefaultTimingModel()

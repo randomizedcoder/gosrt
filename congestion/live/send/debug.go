@@ -226,6 +226,9 @@ func getGoroutineID() int64 {
 	n := runtime.Stack(buf[:], false)
 	// Format: "goroutine 123 [running]:\n..."
 	var id int64
-	fmt.Sscanf(string(buf[:n]), "goroutine %d ", &id)
+	// Parse goroutine ID from stack trace; returns 0 if parsing fails
+	if _, err := fmt.Sscanf(string(buf[:n]), "goroutine %d ", &id); err != nil {
+		return 0
+	}
 	return id
 }

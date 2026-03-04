@@ -77,7 +77,7 @@ func NewDataGenerator(bucket *TokenBucket, packetSize int) *DataGenerator {
 }
 
 // Generate produces a single packet, waiting for rate limiting.
-// Returns the packet data or error if context is cancelled.
+// Returns the packet data or error if context is canceled.
 //
 // This is the main generation loop entry point - call this repeatedly
 // to generate packets at the configured rate.

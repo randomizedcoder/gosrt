@@ -220,12 +220,42 @@ make test-stream-tier3    # Nightly comprehensive
 
 ## Code Quality
 
+### Tiered Linting
+
+GoSRT uses a tiered linting strategy with golangci-lint as the meta-linter:
+
+```bash
+make lint-quick         # Tier 0: Fast feedback (~30s) - development
+make lint               # Tier 1: PR validation (~2min) - CI gating
+make lint-comprehensive # Tier 2: Full analysis (~10min) - nightly CI
+make lint-fix           # Auto-fix issues where possible
+make lint-new           # Lint only changed files (since last commit)
+```
+
+| Tier | Time | When | Linters |
+|------|------|------|---------|
+| 0 | ~30s | Every save, pre-commit | gofmt, goimports, govet, errcheck, ineffassign, unused + seq-audit |
+| 1 | ~2min | Every PR | Tier 0 + gosec, gosimple, gocritic, revive, contextcheck + metrics-audit |
+| 2 | ~10min | Nightly | Tier 1 + exhaustive, prealloc, gocyclo, funlen, goconst, dupl, misspell |
+
+### Custom Audit Tools
+
 ```bash
 make check              # Static analysis (sequence arithmetic safety)
 make code-audit-seq     # Detect unsafe sequence number patterns
 make audit-metrics      # Verify Prometheus metrics definitions
-make lint               # staticcheck
+make lint-audit-all     # Run all custom audits
 make fmt                # gofmt
+```
+
+### Nix Integration
+
+All lint tiers are runnable via `nix flake check`:
+
+```bash
+nix build .#checks.x86_64-linux.golangci-lint-quick  # Tier 0
+nix build .#checks.x86_64-linux.golangci-lint        # Tier 1 (CI gating)
+nix build .#checks.x86_64-linux.golangci-lint-comprehensive  # Tier 2
 ```
 
 ## CLI Flags System

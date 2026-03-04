@@ -39,7 +39,7 @@ func CountNAKEntries(m *ConnectionMetrics, list []circular.Number, counterType N
 
 	var totalPkts uint64
 
-	for i := 0; i < len(list); i += 2 {
+	for i := 0; i+1 < len(list); i += 2 {
 		start := list[i]
 		end := list[i+1]
 
@@ -51,7 +51,7 @@ func CountNAKEntries(m *ConnectionMetrics, list []circular.Number, counterType N
 			} else {
 				m.CongestionSendNAKSingleRecv.Add(1)
 			}
-			totalPkts += 1
+			totalPkts++
 		} else {
 			// Range NAK entry: multiple packets
 			// RFC SRT Appendix A, Figure 22: bit 0 of first = 1

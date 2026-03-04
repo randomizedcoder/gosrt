@@ -33,15 +33,15 @@ func TestTick_ProcessControlRing_NAKPath(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(100, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
+		InitialSequenceNumber: circular.New(100, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
 		// NOT using EventLoop - Tick mode with control ring
 	}).(*sender)
 
@@ -77,15 +77,15 @@ func TestTick_ProcessControlRing_MultiplePackets(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
 	}).(*sender)
 
 	// Add packets to btree
@@ -113,11 +113,11 @@ func TestTick_ProcessControlRing_NilRing(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
 		// No control ring
 	}).(*sender)
 
@@ -252,15 +252,15 @@ func TestNAK_WithControlRing_Success(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
 	}).(*sender)
 
 	// NAK should push to ring
@@ -278,15 +278,15 @@ func TestNAK_WithControlRing_RingFull(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    4, // Small ring
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   4, // Small ring
 	}).(*sender)
 
 	// Add packets to btree
@@ -426,12 +426,12 @@ func TestPush_PayloadValidation_TooLarge(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:   circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:       m,
-		OnDeliver:               func(p packet.Packet) {},
-		StartTime:               time.Now(),
-		UseBtree:                true,
-		ValidatePayloadSize:     true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		ValidatePayloadSize:   true,
 	}).(*sender)
 
 	// Create packet and manually set a large payload length
@@ -534,16 +534,16 @@ func TestPush_RingMode(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           256,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          256,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Use Push (which goes through pushRing)
@@ -559,17 +559,17 @@ func TestPush_RingFull(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           8, // Small ring
-		SendRingShards:         1,
-		UseSendControlRing:     true,
-		SendControlRingSize:    64,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          8, // Small ring
+		SendRingShards:        1,
+		UseSendControlRing:    true,
+		SendControlRingSize:   64,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Fill ring and cause drops
@@ -895,16 +895,16 @@ func TestFlush_WithRing(t *testing.T) {
 	m := &metrics.ConnectionMetrics{}
 
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:  circular.New(0, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:      m,
-		OnDeliver:              func(p packet.Packet) {},
-		StartTime:              time.Now(),
-		UseBtree:               true,
-		UseSendRing:            true,
-		SendRingSize:           64,
-		UseSendControlRing:     true,
-		SendControlRingSize:    32,
-		UseSendEventLoop:       true,
+		InitialSequenceNumber: circular.New(0, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
+		OnDeliver:             func(p packet.Packet) {},
+		StartTime:             time.Now(),
+		UseBtree:              true,
+		UseSendRing:           true,
+		SendRingSize:          64,
+		UseSendControlRing:    true,
+		SendControlRingSize:   32,
+		UseSendEventLoop:      true,
 	}).(*sender)
 
 	// Add packets to ring and btree
@@ -923,4 +923,3 @@ func TestFlush_WithRing(t *testing.T) {
 
 	require.Equal(t, 0, s.packetBtree.Len())
 }
-

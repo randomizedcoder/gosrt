@@ -65,7 +65,9 @@ func TestProcStatMalformed(t *testing.T) {
 
 // BenchmarkReadProcStat benchmarks full I/O + parsing
 func BenchmarkReadProcStat(b *testing.B) {
-	ReadProcStat() // warm up
+	if _, err := ReadProcStat(); err != nil {
+		b.Fatalf("warm up failed: %v", err)
+	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

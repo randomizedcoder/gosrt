@@ -92,12 +92,16 @@ func (dp *DiagnosticProfiler) CaptureAtFailure(bitrate int64, metrics StabilityM
 }
 
 // captureProfile captures a single profile type.
-func (dp *DiagnosticProfiler) captureProfile(profileType, path string) error {
+func (dp *DiagnosticProfiler) captureProfile(profileType, path string) (err error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close file: %w", cerr)
+		}
+	}()
 
 	switch profileType {
 	case "cpu":
@@ -175,26 +179,26 @@ func (dp *DiagnosticProfiler) CaptureWithDuration(duration time.Duration, bitrat
 		return nil, fmt.Errorf("create cpu profile: %w", err)
 	}
 
-	if err := pprof.StartCPUProfile(cpuFile); err != nil {
-		cpuFile.Close()
-		return nil, fmt.Errorf("start cpu profile: %w", err)
+	if cpuErr := pprof.StartCPUProfile(cpuFile); cpuErr != nil {
+		_ = cpuFile.Close()
+		return nil, fmt.Errorf("start cpu profile: %w", cpuErr)
 	}
 
 	time.Sleep(duration)
 
 	pprof.StopCPUProfile()
-	cpuFile.Close()
+	_ = cpuFile.Close()
 	capture.CPUProfilePath = cpuPath
 
 	// Also capture heap at the end
 	heapPath := filepath.Join(dp.outputDir, fmt.Sprintf("heap_%s_%dMbps.pprof", ts, bitrate/1_000_000))
-	if err := dp.captureProfile("heap", heapPath); err == nil {
+	if heapErr := dp.captureProfile("heap", heapPath); heapErr == nil {
 		capture.HeapProfilePath = heapPath
 	}
 
 	// And goroutines
 	goroutinePath := filepath.Join(dp.outputDir, fmt.Sprintf("goroutine_%s_%dMbps.pprof", ts, bitrate/1_000_000))
-	if err := dp.captureProfile("goroutine", goroutinePath); err == nil {
+	if goroutineErr := dp.captureProfile("goroutine", goroutinePath); goroutineErr == nil {
 		capture.GoroutineProfilePath = goroutinePath
 	}
 

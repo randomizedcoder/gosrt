@@ -133,13 +133,13 @@ func runCryptoKeyTest(t *testing.T, tc CryptoKeyTestCase) {
 
 // KMUnmarshalTestCase tests key material unmarshaling
 type KMUnmarshalTestCase struct {
-	Name             string
-	KeyLength        int
-	Salt             string
-	Wrap             string
-	Passphrase       string
-	KeyEncryption    packet.PacketEncryption
-	ExpectError      bool
+	Name              string
+	KeyLength         int
+	Salt              string
+	Wrap              string
+	Passphrase        string
+	KeyEncryption     packet.PacketEncryption
+	ExpectError       bool
 	ExpectedErrorType error
 }
 
@@ -733,14 +733,14 @@ func TestCrypto_MarshalKM_Errors(t *testing.T) {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
 			km := &packet.CIFKeyMaterialExtension{}
-			err := c.MarshalKM(km, "passphrase123", tc.KeyEncryption)
+			marshalErr := c.MarshalKM(km, "passphrase123", tc.KeyEncryption)
 
 			if tc.ExpectError {
-				require.Error(t, err)
-				require.ErrorIs(t, err, ErrInvalidKey)
+				require.Error(t, marshalErr)
+				require.ErrorIs(t, marshalErr, ErrInvalidKey)
 				t.Logf("✅ %s: rejected as expected", tc.Name)
 			} else {
-				require.NoError(t, err)
+				require.NoError(t, marshalErr)
 				t.Logf("✅ %s: marshaled successfully", tc.Name)
 			}
 		})
@@ -773,4 +773,3 @@ func TestCrypto_Passphrase_Table(t *testing.T) {
 		})
 	}
 }
-

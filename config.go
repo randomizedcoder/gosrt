@@ -652,7 +652,7 @@ type Config struct {
 
 // DefaultConfig is the default configuration for a SRT connection
 // if no individual configuration has been provided.
-var defaultConfig Config = Config{
+var defaultConfig = Config{
 	Congestion:                "live",
 	ConnectionTimeout:         3 * time.Second,
 	DriftTracer:               true,
@@ -711,12 +711,12 @@ var defaultConfig Config = Config{
 	ShutdownDelay:             5 * time.Second,         // 5 seconds
 
 	// NAK btree defaults
-	TickIntervalMs:          10,   // 10ms TSBPD tick
-	PeriodicNakIntervalMs:   20,   // 20ms periodic NAK
-	PeriodicAckIntervalMs:   10,   // 10ms periodic ACK
-	SendDropIntervalMs:      100,  // 100ms sender drop check
-	EventLoopRateIntervalMs: 1000, // 1s rate calculation
-	UseNakBtree:             false, // Auto-set when IoUringRecvEnabled=true
+	TickIntervalMs:           10,    // 10ms TSBPD tick
+	PeriodicNakIntervalMs:    20,    // 20ms periodic NAK
+	PeriodicAckIntervalMs:    10,    // 10ms periodic ACK
+	SendDropIntervalMs:       100,   // 100ms sender drop check
+	EventLoopRateIntervalMs:  1000,  // 1s rate calculation
+	UseNakBtree:              false, // Auto-set when IoUringRecvEnabled=true
 	SuppressImmediateNak:     false, // Auto-set when IoUringRecvEnabled=true
 	NakRecentPercent:         0.10,  // 10% of TSBPD delay
 	NakMergeGap:              3,     // Merge gaps of 3 or less
@@ -764,7 +764,7 @@ var defaultConfig Config = Config{
 	// DISABLED: The lock-free ring now has AutoAdaptive strategy (v1.0.4)
 	// which handles Sleep/Yield switching at the ring level.
 	// Having both layers caused inconsistent performance.
-	UseAdaptiveBackoff:           true, // Adaptive Yield/Sleep for both high and low throughput
+	UseAdaptiveBackoff:           true,            // Adaptive Yield/Sleep for both high and low throughput
 	AdaptiveBackoffIdleThreshold: 1 * time.Second, // 1 second idle before switching to Sleep
 
 	// EventLoop tight loop defaults (eventloop_batch_sizing_design.md)

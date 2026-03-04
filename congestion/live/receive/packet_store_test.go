@@ -195,9 +195,9 @@ func TestPacketStore_IterateFrom_Wraparound(t *testing.T) {
 		}
 
 		// Min should be MAX-2 (the "oldest" in circular order)
-		min := store.Min()
-		require.NotNil(t, min)
-		require.Equal(t, maxSeq-2, min.Header().PacketSequenceNumber.Val(),
+		minPkt := store.Min()
+		require.NotNil(t, minPkt)
+		require.Equal(t, maxSeq-2, minPkt.Header().PacketSequenceNumber.Val(),
 			"Min() should return the circularly-smallest sequence (MAX-2)")
 	})
 

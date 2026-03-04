@@ -39,8 +39,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: config name required\n")
 			fmt.Fprintf(os.Stderr, "Usage: %s graceful-shutdown-sigint-config <config-name>\n", os.Args[0])
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
-			for _, c := range TestConfigs {
-				fmt.Fprintf(os.Stderr, "  %s - %s\n", c.Name, c.Description)
+			for i := range TestConfigs {
+				fmt.Fprintf(os.Stderr, "  %s - %s\n", TestConfigs[i].Name, TestConfigs[i].Description)
 			}
 			os.Exit(1)
 		}
@@ -49,8 +49,8 @@ func main() {
 		if config == nil {
 			fmt.Fprintf(os.Stderr, "Error: unknown configuration: %s\n", configName)
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
-			for _, c := range TestConfigs {
-				fmt.Fprintf(os.Stderr, "  %s - %s\n", c.Name, c.Description)
+			for i := range TestConfigs {
+				fmt.Fprintf(os.Stderr, "  %s - %s\n", TestConfigs[i].Name, TestConfigs[i].Description)
 			}
 			os.Exit(1)
 		}
@@ -60,16 +60,16 @@ func main() {
 		// List all configurations
 		fmt.Println("Available test configurations (clean network):")
 		fmt.Println()
-		for _, c := range TestConfigs {
-			fmt.Printf("  %-35s %s\n", c.Name, c.Description)
+		for i := range TestConfigs {
+			fmt.Printf("  %-35s %s\n", TestConfigs[i].Name, TestConfigs[i].Description)
 		}
 
 	case "list-network-configs":
 		// List network impairment configurations
 		fmt.Println("Available network impairment configurations (require root):")
 		fmt.Println()
-		for _, c := range NetworkTestConfigs {
-			fmt.Printf("  %-45s %s\n", c.Name, c.Description)
+		for i := range NetworkTestConfigs {
+			fmt.Printf("  %-45s %s\n", NetworkTestConfigs[i].Name, NetworkTestConfigs[i].Description)
 		}
 
 	case "network-test":
@@ -79,8 +79,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: config name required\n")
 			fmt.Fprintf(os.Stderr, "Usage: sudo %s network-test <config-name> [-v|--verbose]\n", os.Args[0])
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
-			for _, c := range NetworkTestConfigs {
-				fmt.Fprintf(os.Stderr, "  %-45s %s\n", c.Name, c.Description)
+			for i := range NetworkTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-45s %s\n", NetworkTestConfigs[i].Name, NetworkTestConfigs[i].Description)
 			}
 			os.Exit(1)
 		}
@@ -89,8 +89,8 @@ func main() {
 		if config == nil {
 			fmt.Fprintf(os.Stderr, "Error: unknown network configuration: %s\n", configName)
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
-			for _, c := range NetworkTestConfigs {
-				fmt.Fprintf(os.Stderr, "  %-45s %s\n", c.Name, c.Description)
+			for i := range NetworkTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-45s %s\n", NetworkTestConfigs[i].Name, NetworkTestConfigs[i].Description)
 			}
 			os.Exit(1)
 		}
@@ -112,8 +112,8 @@ func main() {
 		// List parallel comparison test configurations
 		fmt.Println("Available parallel comparison configurations (require root):")
 		fmt.Println()
-		for _, c := range ParallelTestConfigs {
-			fmt.Printf("  %-35s %s\n", c.Name, c.Description)
+		for i := range ParallelTestConfigs {
+			fmt.Printf("  %-35s %s\n", ParallelTestConfigs[i].Name, ParallelTestConfigs[i].Description)
 		}
 
 	case "parallel-test":
@@ -123,8 +123,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: config name required\n")
 			fmt.Fprintf(os.Stderr, "Usage: sudo %s parallel-test <config-name> [-v|--verbose]\n", os.Args[0])
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
-			for _, c := range ParallelTestConfigs {
-				fmt.Fprintf(os.Stderr, "  %-35s %s\n", c.Name, c.Description)
+			for i := range ParallelTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", ParallelTestConfigs[i].Name, ParallelTestConfigs[i].Description)
 			}
 			os.Exit(1)
 		}
@@ -133,8 +133,8 @@ func main() {
 		if config == nil {
 			fmt.Fprintf(os.Stderr, "Error: unknown parallel configuration: %s\n", configName)
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
-			for _, c := range ParallelTestConfigs {
-				fmt.Fprintf(os.Stderr, "  %-35s %s\n", c.Name, c.Description)
+			for i := range ParallelTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", ParallelTestConfigs[i].Name, ParallelTestConfigs[i].Description)
 			}
 			os.Exit(1)
 		}
@@ -156,8 +156,8 @@ func main() {
 		// List isolation test configurations
 		fmt.Println("Available isolation test configurations (require root):")
 		fmt.Println()
-		for _, c := range IsolationTestConfigs {
-			fmt.Printf("  %-35s %s\n", c.Name, c.Description)
+		for i := range IsolationTestConfigs {
+			fmt.Printf("  %-35s %s\n", IsolationTestConfigs[i].Name, IsolationTestConfigs[i].Description)
 		}
 
 	case "isolation-test":
@@ -167,8 +167,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: config name required\n")
 			fmt.Fprintf(os.Stderr, "Usage: sudo %s isolation-test <config-name>\n", os.Args[0])
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
-			for _, c := range IsolationTestConfigs {
-				fmt.Fprintf(os.Stderr, "  %-35s %s\n", c.Name, c.Description)
+			for i := range IsolationTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", IsolationTestConfigs[i].Name, IsolationTestConfigs[i].Description)
 			}
 			os.Exit(1)
 		}
@@ -177,8 +177,8 @@ func main() {
 		if config == nil {
 			fmt.Fprintf(os.Stderr, "Error: unknown isolation configuration: %s\n", configName)
 			fmt.Fprintf(os.Stderr, "\nAvailable configurations:\n")
-			for _, c := range IsolationTestConfigs {
-				fmt.Fprintf(os.Stderr, "  %-35s %s\n", c.Name, c.Description)
+			for i := range IsolationTestConfigs {
+				fmt.Fprintf(os.Stderr, "  %-35s %s\n", IsolationTestConfigs[i].Name, IsolationTestConfigs[i].Description)
 			}
 			os.Exit(1)
 		}
@@ -307,13 +307,14 @@ func testGracefulShutdownSIGINTAllConfigs() {
 	failed := 0
 	var failedConfigs []string
 
-	for i, config := range TestConfigs {
+	for i := range TestConfigs {
+		config := &TestConfigs[i]
 		fmt.Printf("\n--- Configuration %d/%d: %s ---\n", i+1, len(TestConfigs), config.Name)
 		fmt.Printf("Description: %s\n", config.Description)
 		fmt.Printf("Bitrate: %d bps (%.2f Mb/s)\n", config.Bitrate, float64(config.Bitrate)/1_000_000)
 		fmt.Println()
 
-		err := runTestWithConfig(config)
+		err := runTestWithConfig(*config)
 		if err != nil {
 			fmt.Printf("✗ Configuration %s FAILED: %v\n", config.Name, err)
 			failed++
@@ -398,7 +399,8 @@ func testNetworkModeAllConfigs() {
 	failed := 0
 	var failedConfigs []string
 
-	for i, config := range NetworkTestConfigs {
+	for i := range NetworkTestConfigs {
+		config := &NetworkTestConfigs[i]
 		fmt.Printf("\n--- Configuration %d/%d: %s ---\n", i+1, len(NetworkTestConfigs), config.Name)
 		fmt.Printf("Description: %s\n", config.Description)
 		fmt.Printf("Bitrate: %d bps (%.2f Mb/s)\n", config.Bitrate, float64(config.Bitrate)/1_000_000)
@@ -413,7 +415,7 @@ func testNetworkModeAllConfigs() {
 		}
 		fmt.Println()
 
-		err := runTestWithConfig(config)
+		err := runTestWithConfig(*config)
 		if err != nil {
 			fmt.Printf("✗ Configuration %s FAILED: %v\n", config.Name, err)
 			failed++
@@ -475,11 +477,12 @@ func testParallelModeAllConfigs() {
 	failed := 0
 	var failedConfigs []string
 
-	for i, config := range ParallelTestConfigs {
+	for i := range ParallelTestConfigs {
+		config := &ParallelTestConfigs[i]
 		fmt.Printf("\n--- Configuration %d/%d: %s ---\n", i+1, len(ParallelTestConfigs), config.Name)
-		printParallelTestHeader(config)
+		printParallelTestHeader(*config)
 
-		result := runParallelModeTest(config)
+		result := runParallelModeTest(*config)
 		if !result.Passed {
 			fmt.Printf("✗ Configuration %s FAILED\n", config.Name)
 			failed++
@@ -567,15 +570,15 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 	clientGenBin := filepath.Join(baseDir, "contrib", "client-generator", "client-generator")
 	clientBin := filepath.Join(baseDir, "contrib", "client", "client")
 
+	// Create context for test orchestration (before ensureBinaries so it can use context)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Check if binaries exist
-	if err := ensureBinaries(baseDir, serverBin, clientGenBin, clientBin); err != nil {
+	if err := ensureBinaries(ctx, baseDir, serverBin, clientGenBin, clientBin); err != nil {
 		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", err)
 		return false, nil, startTime, time.Now()
 	}
-
-	// Create context for test orchestration
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Get CLI flags for each component
 	serverFlags := config.GetServerFlags()
@@ -600,7 +603,9 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 	}
 	defer func() {
 		if serverCmd.Process != nil {
-			serverCmd.Process.Kill()
+			if killErr := serverCmd.Process.Kill(); killErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to kill server: %v\n", killErr)
+			}
 		}
 	}()
 
@@ -618,7 +623,9 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 	}
 	defer func() {
 		if clientGenCmd.Process != nil {
-			clientGenCmd.Process.Kill()
+			if killErr := clientGenCmd.Process.Kill(); killErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to kill client-generator: %v\n", killErr)
+			}
 		}
 	}()
 
@@ -636,7 +643,9 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 	}
 	defer func() {
 		if clientCmd.Process != nil {
-			clientCmd.Process.Kill()
+			if killErr := clientCmd.Process.Kill(); killErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to kill client: %v\n", killErr)
+			}
 		}
 	}()
 
@@ -658,7 +667,7 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 		// Collect initial metrics
 		fmt.Println("\nCollecting initial metrics...")
-		testMetrics.CollectAllMetrics("startup")
+		testMetrics.CollectAllMetrics(ctx, "startup")
 	}
 
 	// Run for test duration
@@ -674,7 +683,7 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 			select {
 			case <-collectTicker.C:
 				fmt.Println("\nCollecting mid-test metrics...")
-				testMetrics.CollectAllMetrics("mid-test")
+				testMetrics.CollectAllMetrics(ctx, "mid-test")
 			case <-testTimer.C:
 				collectTicker.Stop()
 				break collectLoop
@@ -699,7 +708,7 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 	// Step 2: Wait for metrics to stabilize (ACKs, NAKs stop incrementing)
 	if config.MetricsEnabled {
 		fmt.Println("Waiting for metrics to stabilize...")
-		stabCtx, stabCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stabCtx, stabCancel := context.WithTimeout(ctx, 10*time.Second)
 		result := testMetrics.WaitForStabilization(stabCtx)
 		stabCancel()
 
@@ -717,7 +726,7 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 	// Step 3: Collect pre-shutdown metrics (now accurate after stabilization)
 	if config.MetricsEnabled {
 		fmt.Println("Collecting pre-shutdown metrics...")
-		testMetrics.CollectAllMetrics("pre-shutdown")
+		testMetrics.CollectAllMetrics(ctx, "pre-shutdown")
 	}
 
 	// =================================================================
@@ -736,7 +745,9 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	clientGenDone := make(chan struct{})
 	go func() {
-		clientGenCmd.Wait()
+		if waitErr := clientGenCmd.Wait(); waitErr != nil {
+			fmt.Fprintf(os.Stderr, "client-generator wait: %v\n", waitErr)
+		}
 		close(clientGenDone)
 	}()
 
@@ -768,7 +779,9 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	clientDone := make(chan struct{})
 	go func() {
-		clientCmd.Wait()
+		if waitErr := clientCmd.Wait(); waitErr != nil {
+			fmt.Fprintf(os.Stderr, "client wait: %v\n", waitErr)
+		}
 		close(clientDone)
 	}()
 
@@ -797,7 +810,9 @@ func runTestWithMetrics(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	serverDone := make(chan struct{})
 	go func() {
-		serverCmd.Wait()
+		if waitErr := serverCmd.Wait(); waitErr != nil {
+			fmt.Fprintf(os.Stderr, "server wait: %v\n", waitErr)
+		}
 		close(serverDone)
 	}()
 
@@ -842,7 +857,8 @@ func getBaseDir() string {
 
 // ensureBinaries ensures that all required binaries exist, building them if necessary.
 // Note: If binaries are stale after source changes, run 'make clean' to force rebuild.
-func ensureBinaries(baseDir string, serverBin, clientGenBin, clientBin string) error {
+// The context is used for cancellation of the build process.
+func ensureBinaries(ctx context.Context, baseDir string, serverBin, clientGenBin, clientBin string) error {
 	binaries := []struct {
 		path string
 		pkg  string
@@ -853,14 +869,14 @@ func ensureBinaries(baseDir string, serverBin, clientGenBin, clientBin string) e
 	}
 
 	for _, bin := range binaries {
-		if _, err := os.Stat(bin.path); os.IsNotExist(err) {
+		if _, statErr := os.Stat(bin.path); os.IsNotExist(statErr) {
 			fmt.Printf("Building %s...\n", bin.path)
-			cmd := exec.Command("go", "build", "-o", bin.path, bin.pkg)
+			cmd := exec.CommandContext(ctx, "go", "build", "-o", bin.path, bin.pkg)
 			cmd.Dir = baseDir
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("failed to build %s: %w", bin.path, err)
+			if runErr := cmd.Run(); runErr != nil {
+				return fmt.Errorf("failed to build %s: %w", bin.path, runErr)
 			}
 		}
 	}
@@ -884,8 +900,8 @@ func listMatrixTests() {
 	}
 
 	fmt.Printf("Matrix-Generated Parallel Tests (%d total):\n\n", len(tests))
-	for i, t := range tests {
-		fmt.Printf("  %3d. [%-8s] %-55s %s\n", i+1, tierNames[t.Tier], t.Name, t.Duration)
+	for i := range tests {
+		fmt.Printf("  %3d. [%-8s] %-55s %s\n", i+1, tierNames[tests[i].Tier], tests[i].Name, tests[i].Duration)
 	}
 	fmt.Println()
 	fmt.Println("Use 'matrix-summary' to see counts by tier and category.")
@@ -913,14 +929,14 @@ func listMatrixTestsByTier(maxTier TestTier) {
 	}
 
 	fmt.Printf("%s Matrix Tests (%d tests):\n\n", tierNames[maxTier], len(tests))
-	for i, t := range tests {
-		fmt.Printf("  %3d. %-55s %s\n", i+1, t.Name, t.Duration)
+	for i := range tests {
+		fmt.Printf("  %3d. %-55s %s\n", i+1, tests[i].Name, tests[i].Duration)
 	}
 
 	// Calculate total estimated time
 	var totalDuration time.Duration
-	for _, t := range tests {
-		totalDuration += t.Duration
+	for i := range tests {
+		totalDuration += tests[i].Duration
 	}
 	fmt.Printf("\nEstimated total runtime: %s\n", totalDuration.Round(time.Minute))
 }
@@ -945,8 +961,8 @@ func runMatrixTestsByTier(maxTier TestTier) {
 
 	// Calculate total estimated time
 	var totalDuration time.Duration
-	for _, t := range tests {
-		totalDuration += t.Duration
+	for i := range tests {
+		totalDuration += tests[i].Duration
 	}
 	fmt.Printf("Estimated total runtime: %s\n\n", totalDuration.Round(time.Minute))
 
@@ -956,7 +972,8 @@ func runMatrixTestsByTier(maxTier TestTier) {
 
 	startTime := time.Now()
 
-	for i, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		fmt.Printf("━━━ Test %d/%d: %s ━━━\n", i+1, len(tests), t.Name)
 		fmt.Printf("    %s\n", t.Description)
 		fmt.Printf("    Duration: %s\n\n", t.Duration)
@@ -1036,14 +1053,14 @@ func listCleanMatrixTestsByTier(maxTier TestTier) {
 	}
 
 	fmt.Printf("%s Clean Network Tests (%d tests):\n\n", tierNames[maxTier], len(tests))
-	for i, t := range tests {
-		fmt.Printf("  %3d. %-45s %s\n", i+1, t.Name, t.Duration)
+	for i := range tests {
+		fmt.Printf("  %3d. %-45s %s\n", i+1, tests[i].Name, tests[i].Duration)
 	}
 
 	// Calculate total estimated time
 	var totalDuration time.Duration
-	for _, t := range tests {
-		totalDuration += t.Duration
+	for i := range tests {
+		totalDuration += tests[i].Duration
 	}
 	fmt.Printf("\nEstimated total runtime: %s\n", totalDuration.Round(time.Minute))
 }
@@ -1067,8 +1084,8 @@ func runCleanMatrixTestsByTier(maxTier TestTier) {
 
 	// Calculate total estimated time
 	var totalDuration time.Duration
-	for _, t := range tests {
-		totalDuration += t.Duration
+	for i := range tests {
+		totalDuration += tests[i].Duration
 	}
 	fmt.Printf("Estimated total runtime: %s\n\n", totalDuration.Round(time.Minute))
 
@@ -1078,7 +1095,8 @@ func runCleanMatrixTestsByTier(maxTier TestTier) {
 
 	startTime := time.Now()
 
-	for i, t := range tests {
+	for i := range tests {
+		t := &tests[i]
 		fmt.Printf("━━━ Test %d/%d: %s ━━━\n", i+1, len(tests), t.Name)
 		fmt.Printf("    %s\n", t.Description)
 		fmt.Printf("    Duration: %s\n\n", t.Duration)
@@ -1128,9 +1146,9 @@ func runSpecificCleanMatrixTest(testName string) {
 
 	// Find the test by name
 	var foundTest *GeneratedCleanTest
-	for _, t := range allTests {
-		if t.Name == testName {
-			foundTest = &t
+	for i := range allTests {
+		if allTests[i].Name == testName {
+			foundTest = &allTests[i]
 			break
 		}
 	}
@@ -1138,8 +1156,8 @@ func runSpecificCleanMatrixTest(testName string) {
 	if foundTest == nil {
 		fmt.Fprintf(os.Stderr, "Error: Test '%s' not found\n", testName)
 		fmt.Fprintf(os.Stderr, "\nAvailable tests:\n")
-		for _, t := range allTests {
-			fmt.Fprintf(os.Stderr, "  %s\n", t.Name)
+		for i := range allTests {
+			fmt.Fprintf(os.Stderr, "  %s\n", allTests[i].Name)
 		}
 		os.Exit(1)
 	}

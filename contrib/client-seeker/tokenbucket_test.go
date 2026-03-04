@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -109,7 +110,7 @@ func TestTokenBucket_ConsumeOrWait_ContextCancel(t *testing.T) {
 		t.Error("ConsumeOrWait() error = nil, want context.Canceled")
 	}
 	if elapsed > 200*time.Millisecond {
-		t.Errorf("ConsumeOrWait() took %v, should have cancelled faster", elapsed)
+		t.Errorf("ConsumeOrWait() took %v, should have canceled faster", elapsed)
 	}
 }
 
@@ -134,7 +135,7 @@ func TestTokenBucket_Refill_Accumulator(t *testing.T) {
 
 	// Should have gained ~100KB (10 MB/s * 10ms = 100KB)
 	gained := tb.tokens.Load()
-	expectedMin := int64(90000)   // Allow 10% tolerance
+	expectedMin := int64(90000) // Allow 10% tolerance
 	expectedMax := int64(110000)
 
 	if gained < expectedMin || gained > expectedMax {
@@ -363,7 +364,7 @@ func TestTokenBucket_ConcurrentConsume(t *testing.T) {
 
 	// Run 4 concurrent consumers
 	var wg sync.WaitGroup
-	var totalConsumed int64
+	var totalConsumed atomic.Int64
 	numGoroutines := 4
 	consumePerGoroutine := 1000
 
@@ -375,15 +376,7 @@ func TestTokenBucket_ConcurrentConsume(t *testing.T) {
 				if err := tb.ConsumeOrWait(ctx, 1456); err != nil {
 					return
 				}
-				// Use atomic to safely increment
-				current := totalConsumed
-				for {
-					if current == totalConsumed {
-						totalConsumed = current + 1456
-						break
-					}
-					current = totalConsumed
-				}
+				totalConsumed.Add(1456)
 			}
 		}()
 	}
@@ -391,8 +384,8 @@ func TestTokenBucket_ConcurrentConsume(t *testing.T) {
 	wg.Wait()
 
 	expected := int64(numGoroutines * consumePerGoroutine * 1456)
-	if totalConsumed != expected {
-		t.Errorf("totalConsumed = %d, want %d", totalConsumed, expected)
+	if totalConsumed.Load() != expected {
+		t.Errorf("totalConsumed = %d, want %d", totalConsumed.Load(), expected)
 	}
 }
 
@@ -420,7 +413,9 @@ func BenchmarkTokenBucket_ConsumeOrWait_100Mbps(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tb.ConsumeOrWait(ctx, 1456)
+		if err := tb.ConsumeOrWait(ctx, 1456); err != nil {
+			b.Fatalf("ConsumeOrWait failed: %v", err)
+		}
 	}
 }
 
@@ -435,7 +430,9 @@ func TestTokenBucket_Stats(t *testing.T) {
 
 	// Generate some traffic
 	for i := 0; i < 1000; i++ {
-		tb.ConsumeOrWait(ctx, 1456)
+		if err := tb.ConsumeOrWait(ctx, 1456); err != nil {
+			t.Fatalf("ConsumeOrWait failed: %v", err)
+		}
 	}
 
 	stats := tb.Stats()

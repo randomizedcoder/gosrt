@@ -26,7 +26,7 @@ func (s *sender) Push(p packet.Packet) {
 	// Validate payload size if validation is enabled
 	// Uses local maxPayloadSize constant to avoid import cycle
 	if s.validatePayloadSize && p != nil {
-		if p.Len() < 0 || p.Len() > maxPayloadSize {
+		if p.Len() > maxPayloadSize {
 			s.metrics.SendPayloadSizeErrors.Add(1)
 			p.Decommission() // Return buffer to pool
 			return
@@ -66,7 +66,7 @@ func (s *sender) PushDirect(p packet.Packet) bool {
 
 	// Validate payload size if enabled
 	if s.validatePayloadSize {
-		if p.Len() < 0 || p.Len() > maxPayloadSize {
+		if p.Len() > maxPayloadSize {
 			s.metrics.SendPayloadSizeErrors.Add(1)
 			return false // Don't decommission - caller handles
 		}
@@ -144,7 +144,7 @@ func (s *sender) pushBtree(p packet.Packet) {
 
 	pktLen := p.Len()
 	m.CongestionSendPktBuf.Add(1)
-	m.CongestionSendByteBuf.Add(uint64(pktLen))
+	m.CongestionSendByteBuf.Add(pktLen)
 	m.SendRateBytes.Add(pktLen)
 
 	p.Header().Timestamp = uint32(p.Header().PktTsbpdTime & uint64(packet.MAX_TIMESTAMP))
@@ -269,7 +269,7 @@ func (s *sender) pushList(p packet.Packet) {
 	pktLen := p.Len()
 
 	m.CongestionSendPktBuf.Add(1)
-	m.CongestionSendByteBuf.Add(uint64(pktLen))
+	m.CongestionSendByteBuf.Add(pktLen)
 
 	// Input bandwidth calculation (Phase 1: Lockless - use atomic)
 	s.metrics.SendRateBytes.Add(pktLen)

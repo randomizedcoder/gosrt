@@ -30,9 +30,9 @@ type TsbpdDeliveryTestCase struct {
 	Name string
 
 	// Setup
-	ISN           uint32
-	PacketTsbpd   []uint64 // TSBPD times for packets
-	NowUs         uint64   // Current time
+	ISN         uint32
+	PacketTsbpd []uint64 // TSBPD times for packets
+	NowUs       uint64   // Current time
 
 	// Expected
 	ExpectedDelivered int
@@ -433,4 +433,3 @@ func TestSender_TSBPD_Calculate_DropThreshold(t *testing.T) {
 		})
 	}
 }
-

@@ -329,8 +329,8 @@ func TestEventLoop_FullCycle(t *testing.T) {
 
 	m := &metrics.ConnectionMetrics{}
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(549144712, packet.MAX_SEQUENCENUMBER),
-		ConnectionMetrics:            m,
+		InitialSequenceNumber: circular.New(549144712, packet.MAX_SEQUENCENUMBER),
+		ConnectionMetrics:     m,
 		OnDeliver: func(p packet.Packet) {
 			select {
 			case mu <- struct{}{}:
@@ -436,4 +436,3 @@ func TestEventLoop_ConcurrentPushDrain(t *testing.T) {
 	require.Equal(t, 100, s.packetBtree.Len()+s.packetRing.Len(),
 		"all packets should be either in btree or ring")
 }
-

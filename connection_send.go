@@ -34,11 +34,7 @@ func splitNakList(list []circular.Number, maxBytes int) [][]circular.Number {
 	currentBytes := 0
 
 	// Process pairs (start, end)
-	for i := 0; i < len(list); i += 2 {
-		if i+1 >= len(list) {
-			break // Malformed list, ignore incomplete pair
-		}
-
+	for i := 0; i+1 < len(list); i += 2 {
 		start := list[i]
 		end := list[i+1]
 
@@ -87,7 +83,7 @@ func (c *srtConn) sendNAK(list []circular.Number) {
 			return fmt.Sprintf("NAK list split into %d packets (total %d entries)", len(chunks), len(list)/2)
 		})
 		// Increment split counter metric if available
-		if c.metrics != nil {
+		if c.metrics != nil && len(chunks) > 1 {
 			c.metrics.NakPacketsSplit.Add(uint64(len(chunks) - 1)) // Count extra packets needed
 		}
 	}
@@ -103,7 +99,12 @@ func (c *srtConn) sendNAK(list []circular.Number) {
 		cif := packet.CIFNAK{}
 		cif.LostPacketSequenceNumber = append(cif.LostPacketSequenceNumber, chunk...)
 
-		p.MarshalCIF(&cif)
+		if err := p.MarshalCIF(&cif); err != nil {
+			c.log("control:send:NAK:error", func() string {
+				return fmt.Sprintf("failed to marshal NAK CIF: %v", err)
+			})
+			continue // Skip this NAK packet
+		}
 
 		c.log("control:send:NAK:dump", func() string {
 			if len(chunks) > 1 {
@@ -111,7 +112,7 @@ func (c *srtConn) sendNAK(list []circular.Number) {
 			}
 			return p.Dump()
 		})
-		c.log("control:send:NAK:cif", func() string { return cif.String() })
+		c.log("control:send:NAK:cif", cif.String)
 
 		// Note: NAK send metrics are tracked in the send path:
 		// - io_uring path: connection_linux.go captures controlType before decommission
@@ -186,7 +187,9 @@ func (c *srtConn) sendACK(seq circular.Number, lite bool) {
 		c.ackLock.Unlock()
 
 		// Update ACK btree size metric (gauge)
-		c.metrics.AckBtreeSize.Store(uint64(btreeLen))
+		if btreeLen >= 0 {
+			c.metrics.AckBtreeSize.Store(uint64(btreeLen))
+		}
 
 		// DEBUG: Track Full ACK send timing
 		c.log("control:send:ACK:fullack:debug", func() string {
@@ -198,10 +201,15 @@ func (c *srtConn) sendACK(seq circular.Number, lite bool) {
 	}
 
 	// ACK-8: MarshalCIF outside lock
-	p.MarshalCIF(&cif)
+	if err := p.MarshalCIF(&cif); err != nil {
+		c.log("control:send:ACK:error", func() string {
+			return fmt.Sprintf("failed to marshal ACK CIF: %v", err)
+		})
+		return // Skip this ACK packet
+	}
 
-	c.log("control:send:ACK:dump", func() string { return p.Dump() })
-	c.log("control:send:ACK:cif", func() string { return cif.String() })
+	c.log("control:send:ACK:dump", p.Dump)
+	c.log("control:send:ACK:cif", cif.String)
 
 	// Note: ACK metrics are tracked via packet classifier in send path
 	// No need to increment here - metrics already tracked
@@ -239,14 +247,18 @@ func (c *srtConn) sendShutdown() {
 
 	cif := packet.CIFShutdown{}
 
-	p.MarshalCIF(&cif)
+	if err := p.MarshalCIF(&cif); err != nil {
+		c.log("control:send:shutdown:error", func() string {
+			return fmt.Sprintf("failed to marshal shutdown CIF: %v", err)
+		})
+		return // Skip shutdown packet
+	}
 
-	c.log("control:send:shutdown:dump", func() string { return p.Dump() })
-	c.log("control:send:shutdown:cif", func() string { return cif.String() })
+	c.log("control:send:shutdown:dump", p.Dump)
+	c.log("control:send:shutdown:cif", cif.String)
 
 	// Note: Shutdown metrics are tracked via packet classifier in send path
 	// No need to increment here - metrics already tracked
 
 	c.pop(p)
 }
-

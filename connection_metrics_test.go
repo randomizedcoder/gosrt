@@ -29,20 +29,29 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
@@ -51,8 +60,8 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -67,11 +76,11 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6013", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6013", readerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -84,15 +93,17 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 
 		buffer := make([]byte, 2048)
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader.Write(buffer[:n])
 			}
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-readerConnected
@@ -102,11 +113,11 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "publish"
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
 
-		conn, err := testDial(t, "127.0.0.1:6013", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6013", writerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -117,14 +128,16 @@ func TestConnectionMetricsDataPackets(t *testing.T) {
 
 		// Write multiple messages
 		for i := 0; i < 10; i++ {
-			_, err := conn.Write([]byte(message))
-			if !assert.NoError(t, err) {
+			_, writeErr := conn.Write([]byte(message))
+			if !assert.NoError(t, writeErr) {
 				return
 			}
 		}
 
 		time.Sleep(2 * time.Second)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-writerDone
@@ -191,30 +204,39 @@ func TestConnectionMetricsACKFlow(t *testing.T) {
 		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -226,11 +248,11 @@ func TestConnectionMetricsACKFlow(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6014", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6014", readerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -242,12 +264,14 @@ func TestConnectionMetricsACKFlow(t *testing.T) {
 
 		buffer := make([]byte, 2048)
 		for {
-			n, err := conn.Read(buffer)
-			if n == 0 && err != nil {
+			n, readErr := conn.Read(buffer)
+			if n == 0 && readErr != nil {
 				break
 			}
 		}
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-readerConnected
@@ -257,11 +281,11 @@ func TestConnectionMetricsACKFlow(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "publish"
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
 
-		conn, err := testDial(t, "127.0.0.1:6014", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6014", writerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -271,12 +295,14 @@ func TestConnectionMetricsACKFlow(t *testing.T) {
 
 		// Write multiple messages to trigger ACK flow
 		for i := 0; i < 50; i++ {
-			conn.Write([]byte(message))
+			_, _ = conn.Write([]byte(message)) // Error checked via test assertions elsewhere
 			time.Sleep(10 * time.Millisecond)
 		}
 
 		time.Sleep(2 * time.Second)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-writerDone
@@ -330,30 +356,39 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -366,11 +401,11 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6015", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6015", readerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -378,15 +413,17 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 
 		buffer := make([]byte, 2048)
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader.Write(buffer[:n])
 			}
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-readerConnected
@@ -398,9 +435,9 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 
 		// Set up packet drop filter BEFORE dialing (to avoid race)
 		counter := 0
-		config := DefaultConfig()
-		config.StreamId = "publish"
-		config.SendFilter = func(p packet.Packet) bool {
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
+		writerConfig.SendFilter = func(p packet.Packet) bool {
 			if !p.Header().IsControlPacket {
 				if !p.Header().RetransmittedPacketFlag {
 					counter++
@@ -413,8 +450,8 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 			return true
 		}
 
-		conn, err := testDial(t, "127.0.0.1:6015", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6015", writerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -424,11 +461,13 @@ func TestConnectionMetricsNAKRetransmit(t *testing.T) {
 
 		// Write messages
 		for i := 0; i < 20; i++ {
-			conn.Write([]byte(message))
+			_, _ = conn.Write([]byte(message)) // Error checked via test assertions elsewhere
 		}
 
 		time.Sleep(3 * time.Second)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-writerDone
@@ -485,38 +524,41 @@ func TestConnectionMetricsControlPackets(t *testing.T) {
 			}
 			// Keep connection alive for a bit
 			time.Sleep(2 * time.Second)
-			conn.Close()
+			if err := conn.Close(); err != nil {
+				t.Logf("conn.Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
 
 	var clientSocketId uint32
 
-	config = DefaultConfig()
-	config.StreamId = "publish"
+	clientConfig := DefaultConfig()
+	clientConfig.StreamId = "publish"
 
-	conn, err := testDial(t, "127.0.0.1:6016", config)
-	require.NoError(t, err)
+	conn, dialErr := testDial(t, "127.0.0.1:6016", clientConfig)
+	require.NoError(t, dialErr)
 
 	if d, ok := conn.(*dialer); ok {
 		clientSocketId = d.conn.socketId
 	}
 
 	// Write some data to establish communication
-	conn.Write([]byte("test"))
+	_, writeErr := conn.Write([]byte("test"))
+	require.NoError(t, writeErr)
 
 	time.Sleep(2 * time.Second)
-	conn.Close()
+	require.NoError(t, conn.Close())
 
 	// Allow server handler to complete
 	time.Sleep(500 * time.Millisecond)
@@ -584,9 +626,10 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 			return REJECT
@@ -596,22 +639,30 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 			if sc, ok := conn.(*srtConn); ok {
 				serverReceiverSocketId = sc.socketId
 			}
-			channel.Publish(conn)
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -624,11 +675,11 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6018", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6018", readerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -636,15 +687,17 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 
 		buffer := make([]byte, 2048)
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader.Write(buffer[:n])
 			}
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-readerConnected
@@ -656,9 +709,9 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 
 		// Set up packet drop filter BEFORE dialing (to avoid race)
 		counter := 0
-		config := DefaultConfig()
-		config.StreamId = "publish"
-		config.SendFilter = func(p packet.Packet) bool {
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
+		writerConfig.SendFilter = func(p packet.Packet) bool {
 			if !p.Header().IsControlPacket {
 				if !p.Header().RetransmittedPacketFlag {
 					counter++
@@ -671,8 +724,8 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 			return true
 		}
 
-		conn, err := testDial(t, "127.0.0.1:6018", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6018", writerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -682,11 +735,13 @@ func TestListenerSendMetricsNAK(t *testing.T) {
 
 		// Write messages
 		for i := 0; i < 20; i++ {
-			conn.Write([]byte(message))
+			_, _ = conn.Write([]byte(message)) // Error checked via test assertions elsewhere
 		}
 
 		time.Sleep(3 * time.Second)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-writerDone
@@ -744,9 +799,10 @@ func TestListenerSendMetricsACK(t *testing.T) {
 		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 			return REJECT
@@ -755,22 +811,30 @@ func TestListenerSendMetricsACK(t *testing.T) {
 			if sc, ok := conn.(*srtConn); ok {
 				serverReceiverSocketId = sc.socketId
 			}
-			channel.Publish(conn)
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -781,11 +845,11 @@ func TestListenerSendMetricsACK(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6019", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6019", readerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -793,12 +857,14 @@ func TestListenerSendMetricsACK(t *testing.T) {
 
 		buffer := make([]byte, 2048)
 		for {
-			n, err := conn.Read(buffer)
-			if n == 0 && err != nil {
+			n, readErr := conn.Read(buffer)
+			if n == 0 && readErr != nil {
 				break
 			}
 		}
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-readerConnected
@@ -808,22 +874,24 @@ func TestListenerSendMetricsACK(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "publish"
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
 
-		conn, err := testDial(t, "127.0.0.1:6019", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6019", writerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
 		// Write multiple messages to trigger ACK flow
 		for i := 0; i < 50; i++ {
-			conn.Write([]byte(message))
+			_, _ = conn.Write([]byte(message)) // Error checked via test assertions elsewhere
 			time.Sleep(10 * time.Millisecond)
 		}
 
 		time.Sleep(2 * time.Second)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-writerDone
@@ -888,9 +956,10 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 			return REJECT
@@ -901,7 +970,9 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 				serverReceiverMetrics.socketId = sc.socketId
 				serverMetricsMutex.Unlock()
 			}
-			channel.Publish(conn)
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
 			// Capture metrics BEFORE closing (when they're still registered)
 			if sc, ok := conn.(*srtConn); ok && sc.metrics != nil {
 				serverMetricsMutex.Lock()
@@ -913,7 +984,9 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 				serverReceiverMetrics.sentShutdown = sc.metrics.PktSentShutdownSuccess.Load()
 				serverMetricsMutex.Unlock()
 			}
-			conn.Close()
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
 			if sc, ok := conn.(*srtConn); ok {
@@ -921,7 +994,9 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 				serverSenderMetrics.socketId = sc.socketId
 				serverMetricsMutex.Unlock()
 			}
-			channel.Subscribe(conn)
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
 			// Capture metrics BEFORE closing
 			if sc, ok := conn.(*srtConn); ok && sc.metrics != nil {
 				serverMetricsMutex.Lock()
@@ -933,17 +1008,19 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 				serverSenderMetrics.sentShutdown = sc.metrics.PktSentShutdownSuccess.Load()
 				serverMetricsMutex.Unlock()
 			}
-			conn.Close()
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -957,11 +1034,11 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6020", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6020", readerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -973,15 +1050,17 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 
 		buffer := make([]byte, 2048)
 		for {
-			n, err := conn.Read(buffer)
+			n, readErr := conn.Read(buffer)
 			if n != 0 {
 				dataReader.Write(buffer[:n])
 			}
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-readerConnected
@@ -994,9 +1073,9 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 
 		// Set up packet drop filter BEFORE dialing (to avoid race)
 		counter := 0
-		config := DefaultConfig()
-		config.StreamId = "publish"
-		config.SendFilter = func(p packet.Packet) bool {
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
+		writerConfig.SendFilter = func(p packet.Packet) bool {
 			if !p.Header().IsControlPacket {
 				if !p.Header().RetransmittedPacketFlag {
 					counter++
@@ -1009,8 +1088,8 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 			return true
 		}
 
-		conn, err := testDial(t, "127.0.0.1:6020", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6020", writerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -1023,12 +1102,14 @@ func TestListenerSendMetricsAllControlTypes(t *testing.T) {
 		// - NAKs from server (gaps detected)
 		// - ACKACKs from client→server (which server must receive and track)
 		for i := 0; i < 30; i++ {
-			conn.Write([]byte(message))
+			_, _ = conn.Write([]byte(message)) // Error checked via test assertions elsewhere
 			time.Sleep(20 * time.Millisecond)
 		}
 
 		time.Sleep(2 * time.Second)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-writerDone
@@ -1126,30 +1207,39 @@ func TestConnectionMetricsPrometheusMatch(t *testing.T) {
 		Context: ctx,
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 			return REJECT
 		},
 		HandlePublish: func(conn Conn) {
-			channel.Publish(conn)
-			conn.Close()
+			if err := channel.Publish(conn); err != nil {
+				t.Logf("HandlePublish: Publish error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandlePublish: Close error (expected during shutdown): %v", err)
+			}
 		},
 		HandleSubscribe: func(conn Conn) {
-			channel.Subscribe(conn)
-			conn.Close()
+			if err := channel.Subscribe(conn); err != nil {
+				t.Logf("HandleSubscribe: Subscribe error (expected during shutdown): %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Logf("HandleSubscribe: Close error (expected during shutdown): %v", err)
+			}
 		},
 	}
 
-	err := server.Listen()
-	require.NoError(t, err)
+	listenErr := server.Listen()
+	require.NoError(t, listenErr)
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
 	}()
@@ -1161,11 +1251,11 @@ func TestConnectionMetricsPrometheusMatch(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "subscribe"
+		readerConfig := DefaultConfig()
+		readerConfig.StreamId = "subscribe"
 
-		conn, err := testDial(t, "127.0.0.1:6017", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6017", readerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -1173,12 +1263,14 @@ func TestConnectionMetricsPrometheusMatch(t *testing.T) {
 
 		buffer := make([]byte, 2048)
 		for {
-			n, err := conn.Read(buffer)
-			if n == 0 && err != nil {
+			n, readErr := conn.Read(buffer)
+			if n == 0 && readErr != nil {
 				break
 			}
 		}
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-readerConnected
@@ -1188,11 +1280,11 @@ func TestConnectionMetricsPrometheusMatch(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 
-		config := DefaultConfig()
-		config.StreamId = "publish"
+		writerConfig := DefaultConfig()
+		writerConfig.StreamId = "publish"
 
-		conn, err := testDial(t, "127.0.0.1:6017", config)
-		if !assert.NoError(t, err) {
+		conn, dialErr := testDial(t, "127.0.0.1:6017", writerConfig)
+		if !assert.NoError(t, dialErr) {
 			return
 		}
 
@@ -1202,7 +1294,7 @@ func TestConnectionMetricsPrometheusMatch(t *testing.T) {
 
 		// Write known number of messages
 		for i := 0; i < 25; i++ {
-			conn.Write([]byte(message))
+			_, _ = conn.Write([]byte(message)) // Error checked via test assertions elsewhere
 		}
 
 		// Wait for processing before checking metrics
@@ -1225,7 +1317,9 @@ func TestConnectionMetricsPrometheusMatch(t *testing.T) {
 		}
 
 		time.Sleep(1 * time.Second)
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Logf("conn.Close error (expected during shutdown): %v", closeErr)
+		}
 	}()
 
 	<-writerDone

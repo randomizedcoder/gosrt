@@ -44,6 +44,10 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	// Parse ALL flags (common SRT flags + test flags)
 	common.ParseFlags()
 
@@ -58,12 +62,12 @@ func main() {
 
 	if *flagHelp {
 		printUsage()
-		os.Exit(0)
+		return 0
 	}
 
 	if *flagVersion {
 		fmt.Println("performance v0.2.0 (unified flags)")
-		os.Exit(0)
+		return 0
 	}
 
 	// Create configuration from parsed flags
@@ -72,7 +76,7 @@ func main() {
 	// Validate timing contracts
 	if err := config.Timing.ValidateContracts(); err != nil {
 		fmt.Fprintf(os.Stderr, "Contract violation:\n%v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Print configuration summary
@@ -83,9 +87,25 @@ func main() {
 		common.PrintFlagSummary()
 	}
 
+	// Resolve binary paths (before context setup for early exit if not found)
+	config.ServerBinary = ResolveBinaryPath(config.ServerBinary)
+	config.SeekerBinary = ResolveBinaryPath(config.SeekerBinary)
+
+	// Check binaries exist (before any defers are set up)
+	if _, err := os.Stat(config.ServerBinary); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Server binary not found: %s\n", config.ServerBinary)
+		fmt.Fprintf(os.Stderr, "Build with: make build-performance\n")
+		return 1
+	}
+	if _, err := os.Stat(config.SeekerBinary); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Seeker binary not found: %s\n", config.SeekerBinary)
+		fmt.Fprintf(os.Stderr, "Build with: make build-performance\n")
+		return 1
+	}
+
 	if *flagDryRun {
 		fmt.Println("\n✓ Configuration valid (dry-run mode)")
-		os.Exit(0)
+		return 0
 	}
 
 	// Create context with signal handling
@@ -100,22 +120,6 @@ func main() {
 		cancel()
 	}()
 
-	// Resolve binary paths
-	config.ServerBinary = ResolveBinaryPath(config.ServerBinary)
-	config.SeekerBinary = ResolveBinaryPath(config.SeekerBinary)
-
-	// Check binaries exist
-	if _, err := os.Stat(config.ServerBinary); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Server binary not found: %s\n", config.ServerBinary)
-		fmt.Fprintf(os.Stderr, "Build with: make build-performance\n")
-		os.Exit(1)
-	}
-	if _, err := os.Stat(config.SeekerBinary); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Seeker binary not found: %s\n", config.SeekerBinary)
-		fmt.Fprintf(os.Stderr, "Build with: make build-performance\n")
-		os.Exit(1)
-	}
-
 	// Create process manager
 	pm := NewProcessManager(*config)
 	defer pm.Stop()
@@ -124,7 +128,7 @@ func main() {
 	fmt.Println("\n=== Starting Server ===")
 	if err := pm.StartServer(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start server: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	fmt.Printf("Server started on %s\n", config.ServerAddr)
 
@@ -132,7 +136,7 @@ func main() {
 	fmt.Println("\n=== Starting Client-Seeker ===")
 	if err := pm.StartSeeker(ctx, config.Search.InitialBitrate); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start seeker: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	fmt.Printf("Seeker started at %s\n", FormatBitrate(config.Search.InitialBitrate))
 
@@ -140,7 +144,7 @@ func main() {
 	fmt.Println("\n=== Waiting for Readiness ===")
 	if err := pm.WaitReady(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Readiness check failed: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	fmt.Println("✓ All components ready")
 
@@ -160,11 +164,15 @@ func main() {
 
 	// Create seeker control using ProcessManager's path
 	seekerControl := NewSeekerControl(pm.SeekerControlPath())
-	if err := seekerControl.Connect(); err != nil {
+	if err := seekerControl.Connect(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to connect to seeker control: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
-	defer seekerControl.Close()
+	defer func() {
+		if err := seekerControl.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: error closing seeker control: %v\n", err)
+		}
+	}()
 
 	// Create profiler
 	profiler := NewDiagnosticProfiler(config.ProfileDir, nil)
@@ -204,12 +212,11 @@ func main() {
 		}
 	}
 
-	// Exit with appropriate code
+	// Return with appropriate code
 	if result.Status == StatusSuccess {
-		os.Exit(0)
-	} else {
-		os.Exit(1)
+		return 0
 	}
+	return 1
 }
 
 // printUsage prints usage information.

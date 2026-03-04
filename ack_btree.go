@@ -70,8 +70,8 @@ func (t *ackEntryBtree) Delete(ackNum uint32) *ackEntry {
 // DeleteMin removes and returns the entry with the smallest ACK number.
 // Returns nil if the tree is empty.
 func (t *ackEntryBtree) DeleteMin() *ackEntry {
-	if min, ok := t.tree.DeleteMin(); ok {
-		return min
+	if minEntry, ok := t.tree.DeleteMin(); ok {
+		return minEntry
 	}
 	return nil
 }
@@ -79,11 +79,11 @@ func (t *ackEntryBtree) DeleteMin() *ackEntry {
 // Min returns the entry with the smallest ACK number without removing it.
 // Returns nil if the tree is empty.
 func (t *ackEntryBtree) Min() *ackEntry {
-	min, ok := t.tree.Min()
+	minEntry, ok := t.tree.Min()
 	if !ok {
 		return nil
 	}
-	return min
+	return minEntry
 }
 
 // Len returns the number of entries in the btree.
@@ -97,11 +97,11 @@ func (t *ackEntryBtree) Len() int {
 func (t *ackEntryBtree) ExpireOlderThan(threshold uint32) (int, []*ackEntry) {
 	var removed []*ackEntry
 	for {
-		min, ok := t.tree.Min()
-		if !ok || min.ackNum >= threshold {
+		minEntry, ok := t.tree.Min()
+		if !ok || minEntry.ackNum >= threshold {
 			break
 		}
-		if deleted, ok := t.tree.DeleteMin(); ok {
+		if deleted, deletedOk := t.tree.DeleteMin(); deletedOk {
 			removed = append(removed, deleted)
 		}
 	}
@@ -121,7 +121,11 @@ var globalAckEntryPool = &sync.Pool{
 // GetAckEntry retrieves an ackEntry from the pool.
 // The entry is reset to zero values.
 func GetAckEntry() *ackEntry {
-	entry := globalAckEntryPool.Get().(*ackEntry)
+	entry, ok := globalAckEntryPool.Get().(*ackEntry)
+	if !ok {
+		// Pool should only contain *ackEntry, this is a programming error
+		panic("globalAckEntryPool contained non-*ackEntry value")
+	}
 	entry.ackNum = 0
 	entry.timestamp = time.Time{}
 	return entry

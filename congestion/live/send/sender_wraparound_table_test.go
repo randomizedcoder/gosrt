@@ -181,7 +181,7 @@ func TestSender_Wraparound_Insert(t *testing.T) {
 			if tc.CrossesWrap {
 				// Should find packet at MAX
 				pktAtMax := s.packetBtree.Get(MaxSeq31Bit)
-				if tc.ISN <= MaxSeq31Bit && circular.SeqAdd(tc.ISN, uint32(tc.NumPackets-1)) >= 0 {
+				if tc.ISN <= MaxSeq31Bit {
 					require.NotNil(t, pktAtMax, "should find packet at MAX during wraparound")
 				}
 			}
@@ -272,51 +272,51 @@ func TestSender_Wraparound_IterateFrom(t *testing.T) {
 // TestSender_Wraparound_DeleteBefore tests DeleteBefore across wraparound
 func TestSender_Wraparound_DeleteBefore(t *testing.T) {
 	testCases := []struct {
-		Name               string
-		ISN                uint32
-		NumPackets         int
-		DeleteBefore       uint32
-		ExpectedRemaining  int
+		Name                string
+		ISN                 uint32
+		NumPackets          int
+		DeleteBefore        uint32
+		ExpectedRemaining   int
 		ExpectedMinSeqAfter uint32
 	}{
 		{
-			Name:               "DeleteBefore_NoWrap",
-			ISN:                0,
-			NumPackets:         10,
-			DeleteBefore:       5,
-			ExpectedRemaining:  5, // 5,6,7,8,9
+			Name:                "DeleteBefore_NoWrap",
+			ISN:                 0,
+			NumPackets:          10,
+			DeleteBefore:        5,
+			ExpectedRemaining:   5, // 5,6,7,8,9
 			ExpectedMinSeqAfter: 5,
 		},
 		{
-			Name:               "DeleteBefore_AllPackets",
-			ISN:                0,
-			NumPackets:         10,
-			DeleteBefore:       10,
-			ExpectedRemaining:  0,
+			Name:                "DeleteBefore_AllPackets",
+			ISN:                 0,
+			NumPackets:          10,
+			DeleteBefore:        10,
+			ExpectedRemaining:   0,
 			ExpectedMinSeqAfter: 0, // N/A (empty)
 		},
 		{
-			Name:               "DeleteBefore_None",
-			ISN:                100,
-			NumPackets:         10,
-			DeleteBefore:       50, // Before all packets
-			ExpectedRemaining:  10,
+			Name:                "DeleteBefore_None",
+			ISN:                 100,
+			NumPackets:          10,
+			DeleteBefore:        50, // Before all packets
+			ExpectedRemaining:   10,
 			ExpectedMinSeqAfter: 100,
 		},
 		{
-			Name:               "DeleteBefore_Wrap_DeletePre",
-			ISN:                MaxSeq31Bit - 5,
-			NumPackets:         10,
-			DeleteBefore:       MaxSeq31Bit, // Delete up to MAX (exclusive)
-			ExpectedRemaining:  5,           // MAX, 0, 1, 2, 3
+			Name:                "DeleteBefore_Wrap_DeletePre",
+			ISN:                 MaxSeq31Bit - 5,
+			NumPackets:          10,
+			DeleteBefore:        MaxSeq31Bit, // Delete up to MAX (exclusive)
+			ExpectedRemaining:   5,           // MAX, 0, 1, 2, 3
 			ExpectedMinSeqAfter: MaxSeq31Bit,
 		},
 		{
-			Name:               "DeleteBefore_Wrap_DeletePost",
-			ISN:                MaxSeq31Bit - 5,
-			NumPackets:         10,
-			DeleteBefore:       2, // Delete including wrapped 0,1
-			ExpectedRemaining:  2, // 2, 3
+			Name:                "DeleteBefore_Wrap_DeletePost",
+			ISN:                 MaxSeq31Bit - 5,
+			NumPackets:          10,
+			DeleteBefore:        2, // Delete including wrapped 0,1
+			ExpectedRemaining:   2, // 2, 3
 			ExpectedMinSeqAfter: 2,
 		},
 	}
@@ -364,35 +364,35 @@ func TestSender_Wraparound_DeleteBefore(t *testing.T) {
 // TestSender_Wraparound_Delivery tests delivery across wraparound boundary
 func TestSender_Wraparound_Delivery(t *testing.T) {
 	testCases := []struct {
-		Name              string
-		ISN               uint32
-		NumPackets        int
-		NowUs             uint64
-		ExpectedDelivered int
+		Name               string
+		ISN                uint32
+		NumPackets         int
+		NowUs              uint64
+		ExpectedDelivered  int
 		ExpectedStartPoint uint32
 	}{
 		{
-			Name:              "Deliver_Wrap_All",
-			ISN:               MaxSeq31Bit - 5,
-			NumPackets:        10,
-			NowUs:             1_000_000,
-			ExpectedDelivered: 10,
+			Name:               "Deliver_Wrap_All",
+			ISN:                MaxSeq31Bit - 5,
+			NumPackets:         10,
+			NowUs:              1_000_000,
+			ExpectedDelivered:  10,
 			ExpectedStartPoint: 4, // ISN + 10 wraps to 4
 		},
 		{
-			Name:              "Deliver_At_Max",
-			ISN:               MaxSeq31Bit,
-			NumPackets:        3,
-			NowUs:             1_000_000,
-			ExpectedDelivered: 3,
+			Name:               "Deliver_At_Max",
+			ISN:                MaxSeq31Bit,
+			NumPackets:         3,
+			NowUs:              1_000_000,
+			ExpectedDelivered:  3,
 			ExpectedStartPoint: 2, // MAX, 0, 1 → next is 2
 		},
 		{
-			Name:              "Deliver_Partial_Wrap",
-			ISN:               MaxSeq31Bit - 2,
-			NumPackets:        5,
-			NowUs:             300, // First 4 packets ready (TSBPD 0, 100, 200, 300 are all <= 300)
-			ExpectedDelivered: 4,
+			Name:               "Deliver_Partial_Wrap",
+			ISN:                MaxSeq31Bit - 2,
+			NumPackets:         5,
+			NowUs:              300, // First 4 packets ready (TSBPD 0, 100, 200, 300 are all <= 300)
+			ExpectedDelivered:  4,
 			ExpectedStartPoint: MaxSeq31Bit + 2, // Should be 1 after wrap
 		},
 	}
@@ -410,11 +410,11 @@ func TestSender_Wraparound_Delivery(t *testing.T) {
 					deliveredCount.Add(1)
 					deliveredSeqs = append(deliveredSeqs, p.Header().PacketSequenceNumber.Val())
 				},
-				StartTime:          time.Now(),
-				UseBtree:           true,
-				UseSendRing:        true,
-				UseSendControlRing: true,
-				UseSendEventLoop:   true,
+				StartTime:           time.Now(),
+				UseBtree:            true,
+				UseSendRing:         true,
+				UseSendControlRing:  true,
+				UseSendEventLoop:    true,
 				SendDropThresholdUs: 10_000_000,
 			}).(*sender)
 
@@ -525,12 +525,12 @@ func TestSender_Wraparound_SeqAdd(t *testing.T) {
 	}{
 		{0, 1, 1},
 		{0, 10, 10},
-		{MaxSeq31Bit, 1, 0},                       // Wrap
-		{MaxSeq31Bit, 2, 1},                       // Wrap
-		{MaxSeq31Bit - 1, 2, 0},                   // Wrap
-		{MaxSeq31Bit - 5, 10, 4},                  // Wrap
-		{1000000000, 1000000000, 2000000000},      // Large, no wrap
-		{2000000000, 500000000, 352516352},        // Wraps
+		{MaxSeq31Bit, 1, 0},                  // Wrap
+		{MaxSeq31Bit, 2, 1},                  // Wrap
+		{MaxSeq31Bit - 1, 2, 0},              // Wrap
+		{MaxSeq31Bit - 5, 10, 4},             // Wrap
+		{1000000000, 1000000000, 2000000000}, // Large, no wrap
+		{2000000000, 500000000, 352516352},   // Wraps
 	}
 
 	for _, tc := range testCases {
@@ -562,4 +562,3 @@ func TestSender_Wraparound_CircularComparison(t *testing.T) {
 			"SeqLess(%d, %d) = %v, expected %v", tc.A, tc.B, result, tc.Expected)
 	}
 }
-

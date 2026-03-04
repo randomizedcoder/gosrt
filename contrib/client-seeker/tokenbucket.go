@@ -146,7 +146,7 @@ func (tb *TokenBucket) Consume(bytes int64) bool {
 // ConsumeOrWait blocks until tokens are available, then consumes them.
 // Uses appropriate wait strategy based on RefillMode and wait duration.
 //
-// Returns error if context is cancelled or rate is zero.
+// Returns error if context is canceled or rate is zero.
 func (tb *TokenBucket) ConsumeOrWait(ctx context.Context, bytes int64) error {
 	// Check rate first to fail fast
 	if tb.rate.Load() == 0 {

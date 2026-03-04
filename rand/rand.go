@@ -1,10 +1,12 @@
+// Package rand provides cryptographically secure random number generation for SRT.
 package rand
 
 import "crypto/rand"
 
 var AlphaNumericCharset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-// https://www.calhoun.io/creating-random-strings-in-go/
+// RandomString generates a random string of the given length using characters from charset.
+// Based on https://www.calhoun.io/creating-random-strings-in-go/
 func RandomString(length int, charset string) (string, error) {
 	b := make([]byte, length)
 	for i := range b {
@@ -43,7 +45,8 @@ func Int63() (int64, error) {
 		uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7])), nil
 }
 
-// https://cs.opensource.google/go/go/+/refs/tags/go1.20.4:src/math/rand/rand.go;l=119
+// Int63n returns a random int64 in the range [0, n).
+// Based on https://cs.opensource.google/go/go/+/refs/tags/go1.20.4:src/math/rand/rand.go;l=119
 func Int63n(n int64) (int64, error) {
 	if n&(n-1) == 0 { // n is power of two, can mask
 		r, err := Int63()
@@ -53,14 +56,14 @@ func Int63n(n int64) (int64, error) {
 		return r & (n - 1), nil
 	}
 
-	max := int64((1 << 63) - 1 - (1<<63)%uint64(n))
+	maxVal := int64((1 << 63) - 1 - (1<<63)%uint64(n))
 
 	v, err := Int63()
 	if err != nil {
 		return 0, err
 	}
 
-	for v > max {
+	for v > maxVal {
 		v, err = Int63()
 		if err != nil {
 			return 0, err

@@ -424,7 +424,6 @@ type HighLossWindow struct {
 	WindowStart int     // Index to start high loss
 	WindowEnd   int     // Index to end high loss
 	LossRate    float64 // Loss rate within window (e.g., 0.85 = 85%)
-	seed        int64   // For deterministic testing
 }
 
 func (h HighLossWindow) ShouldDrop(seqIndex int, seq uint32) bool {

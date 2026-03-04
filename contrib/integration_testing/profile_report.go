@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -37,8 +38,8 @@ type ProfileReport struct {
 // PerformanceSummary aggregates key metrics across all profiles
 type PerformanceSummary struct {
 	// CPU metrics
-	CPUTopFunc    string
-	CPUTopPercent float64
+	CPUTopFunc     string
+	CPUTopPercent  float64
 	CPUImprovement float64 // For comparisons
 
 	// Memory metrics
@@ -372,30 +373,37 @@ func GenerateHTMLReport(report *ProfileReport) error {
 		},
 	}
 
-	tmpl, err := template.New("report").Funcs(funcMap).Parse(reportTemplate)
-	if err != nil {
-		return fmt.Errorf("failed to parse template: %w", err)
+	tmpl, parseErr := template.New("report").Funcs(funcMap).Parse(reportTemplate)
+	if parseErr != nil {
+		return fmt.Errorf("failed to parse template: %w", parseErr)
 	}
 
 	reportPath := filepath.Join(report.OutputDir, "report.html")
-	f, err := os.Create(reportPath)
-	if err != nil {
-		return fmt.Errorf("failed to create report file: %w", err)
+	f, createErr := os.Create(reportPath)
+	if createErr != nil {
+		return fmt.Errorf("failed to create report file: %w", createErr)
 	}
-	defer f.Close()
 
-	if err := tmpl.Execute(f, report); err != nil {
-		return fmt.Errorf("failed to execute template: %w", err)
+	if execErr := tmpl.Execute(f, report); execErr != nil {
+		if cerr := f.Close(); cerr != nil {
+			// Log close error but return the original error
+			fmt.Fprintf(os.Stderr, "Warning: failed to close file after execute error: %v\n", cerr)
+		}
+		return fmt.Errorf("failed to execute template: %w", execErr)
+	}
+
+	if closeErr := f.Close(); closeErr != nil {
+		return fmt.Errorf("failed to close report file: %w", closeErr)
 	}
 
 	// Also generate JSON for programmatic access
 	jsonPath := filepath.Join(report.OutputDir, "report.json")
-	jsonData, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to generate JSON report: %v\n", err)
+	jsonData, jsonErr := json.MarshalIndent(report, "", "  ")
+	if jsonErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to generate JSON report: %v\n", jsonErr)
 	} else {
-		if err := os.WriteFile(jsonPath, jsonData, 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to write JSON report: %v\n", err)
+		if writeErr := os.WriteFile(jsonPath, jsonData, 0644); writeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write JSON report: %v\n", writeErr)
 		}
 	}
 
@@ -558,12 +566,12 @@ func (r *ProfileReport) CalculateOverallSummary() {
 	r.OverallSummary = summary
 }
 
-// GenerateFromDirectory creates a report from all profiles in a directory
+// GenerateReportFromDirectory creates a report from all profiles in a directory.
 func GenerateReportFromDirectory(testName, testType, profileDir string, duration time.Duration) (*ProfileReport, error) {
 	report := NewProfileReport(testName, testType, profileDir, duration)
 
 	// Analyze all profiles
-	analyses, err := AnalyzeAllProfiles(profileDir)
+	analyses, err := AnalyzeAllProfiles(context.Background(), profileDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze profiles: %w", err)
 	}
@@ -581,14 +589,14 @@ func GenerateComparisonReport(testName, baselineDir, highperfDir string, duratio
 	report.IsComparison = true
 
 	// Analyze baseline profiles
-	baselineAnalyses, err := AnalyzeAllProfiles(baselineDir)
+	baselineAnalyses, err := AnalyzeAllProfiles(context.Background(), baselineDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze baseline profiles: %w", err)
 	}
 	report.BaselineAnalyses = baselineAnalyses
 
 	// Analyze highperf profiles
-	highperfAnalyses, err := AnalyzeAllProfiles(highperfDir)
+	highperfAnalyses, err := AnalyzeAllProfiles(context.Background(), highperfDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze highperf profiles: %w", err)
 	}
@@ -620,4 +628,3 @@ func GenerateComparisonReport(testName, baselineDir, highperfDir string, duratio
 
 	return report, nil
 }
-

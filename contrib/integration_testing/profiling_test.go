@@ -67,7 +67,11 @@ func TestCreateProfileDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProfileDir failed: %v", err)
 	}
-	defer os.RemoveAll(dir)
+	t.Cleanup(func() {
+		if removeErr := os.RemoveAll(dir); removeErr != nil {
+			t.Logf("Warning: failed to remove test dir: %v", removeErr)
+		}
+	})
 
 	// Verify directory was created
 	info, err := os.Stat(dir)
@@ -153,16 +157,24 @@ func TestGetProfileDuration(t *testing.T) {
 func TestProfilingEnabled(t *testing.T) {
 	// Save original value
 	orig := os.Getenv("PROFILES")
-	defer os.Setenv("PROFILES", orig)
+	t.Cleanup(func() {
+		if err := os.Setenv("PROFILES", orig); err != nil {
+			t.Logf("Warning: failed to restore PROFILES: %v", err)
+		}
+	})
 
 	// Test disabled
-	os.Unsetenv("PROFILES")
+	if err := os.Unsetenv("PROFILES"); err != nil {
+		t.Fatalf("Failed to unset PROFILES: %v", err)
+	}
 	if ProfilingEnabled() {
 		t.Error("ProfilingEnabled() should be false when PROFILES is unset")
 	}
 
 	// Test enabled
-	os.Setenv("PROFILES", "cpu")
+	if err := os.Setenv("PROFILES", "cpu"); err != nil {
+		t.Fatalf("Failed to set PROFILES: %v", err)
+	}
 	if !ProfilingEnabled() {
 		t.Error("ProfilingEnabled() should be true when PROFILES is set")
 	}
@@ -171,10 +183,16 @@ func TestProfilingEnabled(t *testing.T) {
 func TestNewProfileConfig(t *testing.T) {
 	// Save original value
 	orig := os.Getenv("PROFILES")
-	defer os.Setenv("PROFILES", orig)
+	t.Cleanup(func() {
+		if err := os.Setenv("PROFILES", orig); err != nil {
+			t.Logf("Warning: failed to restore PROFILES: %v", err)
+		}
+	})
 
 	// Test disabled
-	os.Unsetenv("PROFILES")
+	if err := os.Unsetenv("PROFILES"); err != nil {
+		t.Fatalf("Failed to unset PROFILES: %v", err)
+	}
 	config, err := NewProfileConfig("Test")
 	if err != nil {
 		t.Fatalf("NewProfileConfig failed: %v", err)
@@ -184,7 +202,9 @@ func TestNewProfileConfig(t *testing.T) {
 	}
 
 	// Test enabled
-	os.Setenv("PROFILES", "cpu,mutex")
+	if setErr := os.Setenv("PROFILES", "cpu,mutex"); setErr != nil {
+		t.Fatalf("Failed to set PROFILES: %v", setErr)
+	}
 	config, err = NewProfileConfig("Test")
 	if err != nil {
 		t.Fatalf("NewProfileConfig failed: %v", err)
@@ -192,7 +212,11 @@ func TestNewProfileConfig(t *testing.T) {
 	if config == nil {
 		t.Fatal("Expected non-nil config when PROFILES is set")
 	}
-	defer os.RemoveAll(config.OutputDir)
+	t.Cleanup(func() {
+		if removeErr := os.RemoveAll(config.OutputDir); removeErr != nil {
+			t.Logf("Warning: failed to remove test dir: %v", removeErr)
+		}
+	})
 
 	if len(config.Profiles) != 2 {
 		t.Errorf("Expected 2 profiles, got %d", len(config.Profiles))

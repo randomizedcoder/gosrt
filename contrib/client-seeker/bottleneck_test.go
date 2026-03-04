@@ -34,7 +34,7 @@ func TestBottleneckDetector_ToolBottleneck_HighOverhead(t *testing.T) {
 	detector := NewBottleneckDetector()
 
 	metrics := BottleneckMetrics{
-		Efficiency:        0.70, // 70% efficiency - bottleneck exists
+		Efficiency:        0.70,     // 70% efficiency - bottleneck exists
 		TotalWaitNs:       40000000, // 40ms wait
 		SpinTimeNs:        30000000, // 30ms spin
 		TokensAvailable:   50000,
@@ -65,13 +65,13 @@ func TestBottleneckDetector_LibraryBottleneck_WriteBlocked(t *testing.T) {
 	detector := NewBottleneckDetector()
 
 	metrics := BottleneckMetrics{
-		Efficiency:        0.70, // 70% efficiency - bottleneck exists
+		Efficiency:        0.70,    // 70% efficiency - bottleneck exists
 		TotalWaitNs:       5000000, // 5ms wait (low overhead)
 		SpinTimeNs:        1000000, // 1ms spin
 		TokensAvailable:   50000,
 		TokensMax:         100000,
 		WriteCount:        1000,
-		WriteBlockedCount: 200, // 20% blocked - high!
+		WriteBlockedCount: 200,       // 20% blocked - high!
 		ElapsedNs:         100000000, // 100ms
 		Mode:              "sleep",
 	}
@@ -96,13 +96,13 @@ func TestBottleneckDetector_ToolBottleneck_TokenStarvation(t *testing.T) {
 	detector := NewBottleneckDetector()
 
 	metrics := BottleneckMetrics{
-		Efficiency:        0.70, // 70% efficiency - bottleneck exists
+		Efficiency:        0.70,    // 70% efficiency - bottleneck exists
 		TotalWaitNs:       5000000, // 5ms wait (low overhead)
 		SpinTimeNs:        1000000, // 1ms spin
 		TokensAvailable:   5000,    // Only 5% available!
 		TokensMax:         100000,
 		WriteCount:        1000,
-		WriteBlockedCount: 5, // Low blocked rate
+		WriteBlockedCount: 5,         // Low blocked rate
 		ElapsedNs:         100000000, // 100ms
 		Mode:              "sleep",
 	}
@@ -123,13 +123,13 @@ func TestBottleneckDetector_Unknown(t *testing.T) {
 	detector := NewBottleneckDetector()
 
 	metrics := BottleneckMetrics{
-		Efficiency:        0.70, // 70% efficiency - bottleneck exists
+		Efficiency:        0.70,    // 70% efficiency - bottleneck exists
 		TotalWaitNs:       5000000, // 5ms wait (low overhead)
 		SpinTimeNs:        1000000, // 1ms spin
 		TokensAvailable:   50000,   // 50% available (not starving)
 		TokensMax:         100000,
 		WriteCount:        1000,
-		WriteBlockedCount: 5, // Low blocked rate
+		WriteBlockedCount: 5,         // Low blocked rate
 		ElapsedNs:         100000000, // 100ms
 		Mode:              "sleep",
 	}
@@ -166,9 +166,9 @@ func TestBottleneckType_String(t *testing.T) {
 func TestBottleneckDetector_CustomThresholds(t *testing.T) {
 	// Test that custom thresholds work
 	detector := &BottleneckDetector{
-		EfficiencyThreshold:     0.90, // More lenient
-		ToolOverheadThreshold:   0.50, // More lenient
-		WriteBlockedThreshold:   0.20, // More lenient
+		EfficiencyThreshold:      0.90, // More lenient
+		ToolOverheadThreshold:    0.50, // More lenient
+		WriteBlockedThreshold:    0.20, // More lenient
 		TokenStarvationThreshold: 0.05, // More strict
 	}
 

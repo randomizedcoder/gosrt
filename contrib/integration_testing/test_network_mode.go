@@ -39,16 +39,16 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	// Setup network namespaces
 	fmt.Println("Setting up network namespaces...")
-	if err := nc.Setup(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error setting up network: %v\n", err)
+	if setupErr := nc.Setup(ctx); setupErr != nil {
+		fmt.Fprintf(os.Stderr, "Error setting up network: %v\n", setupErr)
 		return false, nil, startTime, time.Now()
 	}
 
 	// Ensure cleanup happens even on failure
 	defer func() {
 		fmt.Println("\nCleaning up network namespaces...")
-		if err := nc.Cleanup(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", err)
+		if cleanupErr := nc.Cleanup(ctx); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", cleanupErr)
 		}
 	}()
 
@@ -64,8 +64,8 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 		profile := getLatencyProfileIndex(config.Impairment.LatencyProfile)
 		if profile >= 0 {
 			fmt.Printf("Setting latency profile: %s (profile %d)\n", config.Impairment.LatencyProfile, profile)
-			if err := nc.SetLatencyProfile(ctx, profile); err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting latency: %v\n", err)
+			if latencyErr := nc.SetLatencyProfile(ctx, profile); latencyErr != nil {
+				fmt.Fprintf(os.Stderr, "Error setting latency: %v\n", latencyErr)
 				return false, nil, startTime, time.Now()
 			}
 		}
@@ -80,8 +80,8 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 	clientBin := filepath.Join(baseDir, "contrib", "client", "client")
 
 	// Check if binaries exist
-	if err := ensureBinaries(baseDir, serverBin, clientGenBin, clientBin); err != nil {
-		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", err)
+	if binErr := ensureBinaries(ctx, baseDir, serverBin, clientGenBin, clientBin); binErr != nil {
+		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", binErr)
 		return false, nil, startTime, time.Now()
 	}
 
@@ -138,8 +138,8 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 	if config.Impairment.LossRate > 0 {
 		lossPercent := int(config.Impairment.LossRate * 100)
 		fmt.Printf("Applying %d%% packet loss...\n", lossPercent)
-		if err := nc.SetLoss(ctx, lossPercent); err != nil {
-			fmt.Fprintf(os.Stderr, "Error setting loss: %v\n", err)
+		if lossErr := nc.SetLoss(ctx, lossPercent); lossErr != nil {
+			fmt.Fprintf(os.Stderr, "Error setting loss: %v\n", lossErr)
 			return false, nil, startTime, time.Now()
 		}
 	}
@@ -149,12 +149,14 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 		pattern := getImpairmentPattern(config.Impairment.Pattern)
 		if pattern != nil {
 			fmt.Printf("Starting impairment pattern: %s\n", config.Impairment.Pattern)
-			if err := nc.StartPattern(ctx, *pattern); err != nil {
-				fmt.Fprintf(os.Stderr, "Error starting pattern: %v\n", err)
+			if patternErr := nc.StartPattern(ctx, *pattern); patternErr != nil {
+				fmt.Fprintf(os.Stderr, "Error starting pattern: %v\n", patternErr)
 				return false, nil, startTime, time.Now()
 			}
 			defer func() {
-				_ = nc.StopPattern(ctx)
+				if stopErr := nc.StopPattern(ctx); stopErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to stop pattern: %v\n", stopErr)
+				}
 			}()
 		}
 	}
@@ -172,7 +174,7 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 		// Collect initial metrics
 		fmt.Println("\nCollecting initial metrics...")
-		testMetrics.CollectAllMetrics("startup")
+		testMetrics.CollectAllMetrics(context.Background(), "startup")
 	}
 
 	// Run for test duration
@@ -189,7 +191,7 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 			select {
 			case <-collectTicker.C:
 				fmt.Println("\nCollecting mid-test metrics...")
-				testMetrics.CollectAllMetrics("mid-test")
+				testMetrics.CollectAllMetrics(context.Background(), "mid-test")
 				snapshotCount++
 				// Print verbose delta if enabled
 				if config.VerboseMetrics && snapshotCount >= 2 {
@@ -211,8 +213,8 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	// Step 1: Send SIGUSR1 to client-generator to pause data generation
 	fmt.Println("Sending SIGUSR1 to client-generator (pause data)...")
-	if err := signalProcess(clientGenCmd, syscall.SIGUSR1); err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending SIGUSR1 to client-generator: %v\n", err)
+	if signalErr := signalProcess(clientGenCmd, syscall.SIGUSR1); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Error sending SIGUSR1 to client-generator: %v\n", signalErr)
 		// Non-fatal: continue with shutdown even if pause fails
 	}
 
@@ -237,7 +239,7 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 	// Step 3: Collect pre-shutdown metrics (now accurate after stabilization)
 	if testMetrics != nil {
 		fmt.Println("Collecting pre-shutdown metrics...")
-		testMetrics.CollectAllMetrics("pre-shutdown")
+		testMetrics.CollectAllMetrics(context.Background(), "pre-shutdown")
 	}
 
 	// =================================================================
@@ -248,13 +250,17 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 	// Stop any impairment pattern before shutdown
 	if config.Impairment.Pattern != "" && config.Impairment.Pattern != "clean" {
 		fmt.Println("Stopping impairment pattern...")
-		_ = nc.StopPattern(ctx)
+		if stopErr := nc.StopPattern(ctx); stopErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop pattern: %v\n", stopErr)
+		}
 	}
 
 	// Clear any loss before shutdown
 	if config.Impairment.LossRate > 0 {
 		fmt.Println("Clearing packet loss...")
-		_ = nc.SetLoss(ctx, 0)
+		if lossErr := nc.SetLoss(ctx, 0); lossErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to clear loss: %v\n", lossErr)
+		}
 	}
 
 	// Initiate graceful shutdown sequence
@@ -262,8 +268,8 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	// Send SIGINT to client (subscriber) first
 	fmt.Println("Sending SIGINT to client (subscriber)...")
-	if err := signalProcess(clientCmd, syscall.SIGINT); err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client: %v\n", err)
+	if signalErr := signalProcess(clientCmd, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client: %v\n", signalErr)
 	}
 
 	// Wait for client to exit
@@ -277,8 +283,8 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	// Send SIGINT to client-generator
 	fmt.Println("Sending SIGINT to client-generator (publisher)...")
-	if err := signalProcess(clientGenCmd, syscall.SIGINT); err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client-generator: %v\n", err)
+	if signalErr := signalProcess(clientGenCmd, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Error sending SIGINT to client-generator: %v\n", signalErr)
 	}
 
 	// Wait for client-generator to exit
@@ -292,8 +298,8 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 
 	// Send SIGINT to server
 	fmt.Println("Sending SIGINT to server...")
-	if err := signalProcess(serverCmd, syscall.SIGINT); err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending SIGINT to server: %v\n", err)
+	if signalErr := signalProcess(serverCmd, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Error sending SIGINT to server: %v\n", signalErr)
 	}
 
 	// Wait for server to exit
@@ -308,7 +314,7 @@ func runNetworkModeTest(config TestConfig) (passed bool, metrics *TestMetrics, s
 	// Collect final metrics
 	if testMetrics != nil {
 		fmt.Println("\nCollecting final metrics...")
-		testMetrics.CollectAllMetrics("final")
+		testMetrics.CollectAllMetrics(context.Background(), "final")
 	}
 
 	// Verify all processes exited
@@ -385,8 +391,15 @@ func waitForProcessExit(cmd *exec.Cmd, timeout time.Duration) bool {
 // killProcess kills a process if it's running
 func killProcess(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to kill process: %v\n", killErr)
+		}
+		if waitErr := cmd.Wait(); waitErr != nil {
+			// Wait() after Kill() often returns "signal: killed" - that's expected
+			if !strings.Contains(waitErr.Error(), "killed") {
+				fmt.Fprintf(os.Stderr, "Warning: process wait error: %v\n", waitErr)
+			}
+		}
 	}
 }
 

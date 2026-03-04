@@ -183,6 +183,28 @@ func (c *srtConn) printCloseStatistics() {
 	remainingSeconds := float64(remainingTimeout.Seconds())
 
 	// Build JSON output
+	accumulated := map[string]interface{}{
+		"pkt_sent_data":         stats.Accumulated.PktSent,
+		"pkt_recv_data":         stats.Accumulated.PktRecv,
+		"pkt_sent_ack":          stats.Accumulated.PktSentACK,
+		"pkt_recv_ack":          stats.Accumulated.PktRecvACK,
+		"pkt_sent_nak":          stats.Accumulated.PktSentNAK,
+		"pkt_recv_nak":          stats.Accumulated.PktRecvNAK,
+		"pkt_retrans_total":     stats.Accumulated.PktRetrans,
+		"pkt_recv_loss":         stats.Accumulated.PktRecvLoss,
+		"pkt_recv_retrans_rate": stats.Interval.PktRecvRetrans,
+	}
+
+	if extStats != nil {
+		accumulated["pkt_sent_ackack"] = extStats.PktSentACKACK
+		accumulated["pkt_recv_ackack"] = extStats.PktRecvACKACK
+		accumulated["pkt_retrans_from_nak"] = extStats.PktRetransFromNAK
+	}
+
+	if retransPercent != nil {
+		accumulated["pkt_retrans_percent"] = *retransPercent
+	}
+
 	output := map[string]interface{}{
 		"timestamp":                           time.Now().Format(time.RFC3339Nano),
 		"event":                               "connection_closed",
@@ -191,32 +213,12 @@ func (c *srtConn) printCloseStatistics() {
 		"remote_addr":                         remoteAddr,
 		"connection_duration":                 time.Since(c.start).String(),
 		"peer_idle_timeout_remaining_seconds": remainingSeconds,
-		"accumulated": map[string]interface{}{
-			"pkt_sent_data":         stats.Accumulated.PktSent,
-			"pkt_recv_data":         stats.Accumulated.PktRecv,
-			"pkt_sent_ack":          stats.Accumulated.PktSentACK,
-			"pkt_recv_ack":          stats.Accumulated.PktRecvACK,
-			"pkt_sent_nak":          stats.Accumulated.PktSentNAK,
-			"pkt_recv_nak":          stats.Accumulated.PktRecvNAK,
-			"pkt_retrans_total":     stats.Accumulated.PktRetrans,
-			"pkt_recv_loss":         stats.Accumulated.PktRecvLoss,
-			"pkt_recv_retrans_rate": stats.Interval.PktRecvRetrans,
-		},
+		"accumulated":                         accumulated,
 		"instantaneous": map[string]interface{}{
 			"mbps_sent_rate": stats.Instantaneous.MbpsSentRate,
 			"mbps_recv_rate": stats.Instantaneous.MbpsRecvRate,
 			"ms_rtt":         stats.Instantaneous.MsRTT,
 		},
-	}
-
-	if extStats != nil {
-		output["accumulated"].(map[string]interface{})["pkt_sent_ackack"] = extStats.PktSentACKACK
-		output["accumulated"].(map[string]interface{})["pkt_recv_ackack"] = extStats.PktRecvACKACK
-		output["accumulated"].(map[string]interface{})["pkt_retrans_from_nak"] = extStats.PktRetransFromNAK
-	}
-
-	if retransPercent != nil {
-		output["accumulated"].(map[string]interface{})["pkt_retrans_percent"] = *retransPercent
 	}
 
 	jsonData, err := json.Marshal(output)

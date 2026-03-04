@@ -18,15 +18,15 @@ type Number struct {
 	value     uint32
 }
 
-// New returns a new circular number with the value of x and the maximum of max.
-func New(x, max uint32) Number {
+// New returns a new circular number with the value of x and the maximum of maxVal.
+func New(x, maxVal uint32) Number {
 	c := Number{
 		value:     0,
-		max:       max,
-		threshold: max / 2,
+		max:       maxVal,
+		threshold: maxVal / 2,
 	}
 
-	if x > max {
+	if x > maxVal {
 		return c.Add(x)
 	}
 

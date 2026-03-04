@@ -59,4 +59,3 @@ func ColorizeCode(text, code string) string {
 	}
 	return fmt.Sprintf("%s%s%s", code, text, ColorReset)
 }
-

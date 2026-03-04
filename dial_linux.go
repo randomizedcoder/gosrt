@@ -10,9 +10,9 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/randomizedcoder/giouring"
 	"github.com/randomizedcoder/gosrt/metrics"
 	"github.com/randomizedcoder/gosrt/packet"
-	"github.com/randomizedcoder/giouring"
 )
 
 // Note: ioUringPollInterval is defined in connection_linux.go
@@ -341,7 +341,9 @@ func (dl *dialer) cleanupIoUringRecv() {
 
 	// Close the duplicated file descriptor
 	if dl.recvRingFd > 0 {
-		syscall.Close(dl.recvRingFd)
+		if closeErr := syscall.Close(dl.recvRingFd); closeErr != nil {
+			dl.log("iouring:cleanup", func() string { return fmt.Sprintf("recvRingFd close error: %v", closeErr) })
+		}
 		dl.recvRingFd = -1
 	}
 }
@@ -354,7 +356,11 @@ func (dl *dialer) submitRecvRequest() {
 	}
 
 	// Get buffer from pool (fixed size MSS, no setup needed)
-	bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+	bufferPtr, ok2 := GetRecvBufferPool().Get().(*[]byte)
+	if !ok2 {
+		// Pool should only contain *[]byte, this is a programming error
+		panic("GetRecvBufferPool contained non-*[]byte value")
+	}
 	buffer := *bufferPtr
 
 	// Setup iovec using buffer directly
@@ -626,7 +632,7 @@ func (dl *dialer) getRecvCompletion(ctx context.Context, ring *giouring.Ring) (*
 		// Without this, the handler never gets a chance to resubmit pending requests on timeout.
 		if err == syscall.ETIME {
 			dl.incrementDialerRecvCompletionTimeout(0) // ringIdx=0 for single-ring mode
-			return nil, nil // Return on timeout so handler can flush pending
+			return nil, nil                            // Return on timeout so handler can flush pending
 		}
 
 		// EINTR is normal (interrupted by signal) - retry immediately
@@ -653,7 +659,11 @@ func (dl *dialer) submitRecvRequestBatch(count int) {
 	var requestIDs []uint64
 
 	for i := 0; i < count; i++ {
-		bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+		bufferPtr, poolOK := GetRecvBufferPool().Get().(*[]byte)
+		if !poolOK {
+			// Pool should only contain *[]byte, this is a programming error
+			panic("GetRecvBufferPool contained non-*[]byte value")
+		}
 		buffer := *bufferPtr
 
 		var iovec syscall.Iovec
@@ -961,7 +971,10 @@ func (dl *dialer) submitRecvRequestToRing(state *dialerRecvRingState) {
 	}
 
 	// Get buffer from global pool (see buffers.go - global sync.Pool)
-	bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+	bufferPtr, poolOK := GetRecvBufferPool().Get().(*[]byte)
+	if !poolOK {
+		panic("GetRecvBufferPool contained non-*[]byte value")
+	}
 	buffer := *bufferPtr
 
 	// Setup iovec
@@ -1051,7 +1064,10 @@ func (dl *dialer) submitRecvRequestBatchToRing(state *dialerRecvRingState, count
 
 	// Prepare all SQEs
 	for i := 0; i < count; i++ {
-		bufferPtr := GetRecvBufferPool().Get().(*[]byte)
+		bufferPtr, poolOK := GetRecvBufferPool().Get().(*[]byte)
+		if !poolOK {
+			panic("GetRecvBufferPool contained non-*[]byte value")
+		}
 		buffer := *bufferPtr
 
 		var iovec syscall.Iovec
@@ -1115,11 +1131,9 @@ func (dl *dialer) submitRecvRequestBatchToRing(state *dialerRecvRingState, count
 				GetRecvBufferPool().Put(compInfos[i].buffer)
 			}
 			dl.incrementDialerRecvSubmitError(state.ringIndex)
-		} else {
+		} else if dl.conn != nil && dl.conn.metrics != nil && dl.conn.metrics.IoUringDialerRecvRingMetrics != nil && state.ringIndex < len(dl.conn.metrics.IoUringDialerRecvRingMetrics) {
 			// Success - increment metrics for each request in batch
-			if dl.conn != nil && dl.conn.metrics != nil && dl.conn.metrics.IoUringDialerRecvRingMetrics != nil && state.ringIndex < len(dl.conn.metrics.IoUringDialerRecvRingMetrics) {
-				dl.conn.metrics.IoUringDialerRecvRingMetrics[state.ringIndex].SubmitSuccess.Add(uint64(len(requestIDs)))
-			}
+			dl.conn.metrics.IoUringDialerRecvRingMetrics[state.ringIndex].SubmitSuccess.Add(uint64(len(requestIDs)))
 		}
 	}
 }
@@ -1170,7 +1184,9 @@ func (dl *dialer) cleanupIoUringRecvMultiRing() {
 
 	// Close the duplicated file descriptor
 	if dl.recvRingFd > 0 {
-		syscall.Close(dl.recvRingFd)
+		if closeErr := syscall.Close(dl.recvRingFd); closeErr != nil {
+			dl.log("iouring:cleanup", func() string { return fmt.Sprintf("recvRingFd close error: %v", closeErr) })
+		}
 		dl.recvRingFd = -1
 	}
 }

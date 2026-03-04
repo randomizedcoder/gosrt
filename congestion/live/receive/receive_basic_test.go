@@ -120,7 +120,7 @@ func TestRecvNAK(t *testing.T) {
 			seqACK = seq.Val()
 		},
 		func(list []circular.Number) {
-			seqNAK = []uint32{}
+			seqNAK = make([]uint32, 0, len(list))
 			for _, sn := range list {
 				seqNAK = append(seqNAK, sn.Val())
 			}
@@ -172,7 +172,7 @@ func TestRecvPeriodicNAK(t *testing.T) {
 			seqACK = seq.Val()
 		},
 		func(list []circular.Number) {
-			seqNAK = []uint32{}
+			seqNAK = make([]uint32, 0, len(list))
 			for _, sn := range list {
 				seqNAK = append(seqNAK, sn.Val())
 			}
@@ -230,7 +230,7 @@ func TestRecvACK(t *testing.T) {
 			seqACK = seq.Val()
 		},
 		func(list []circular.Number) {
-			seqNAK = []uint32{}
+			seqNAK = make([]uint32, 0, len(list))
 			for _, sn := range list {
 				seqNAK = append(seqNAK, sn.Val())
 			}

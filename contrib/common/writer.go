@@ -102,4 +102,3 @@ func (w *DirectWriter) Fd() int {
 // Ensure DirectWriter implements io.WriteCloser
 var _ io.WriteCloser = (*DirectWriter)(nil)
 var _ io.WriteCloser = (*NullWriter)(nil)
-

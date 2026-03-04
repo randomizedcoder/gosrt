@@ -191,12 +191,10 @@ func (s *sender) EventLoop(ctx context.Context, wg *sync.WaitGroup) {
 			if !hadActivity {
 				m.SendEventLoopIdleBackoffs.Add(1)
 			}
-		} else {
+		} else if !hadActivity {
 			// Fallback: simple Gosched when no adaptive backoff configured
-			if !hadActivity {
-				m.SendEventLoopIdleBackoffs.Add(1)
-				runtime.Gosched()
-			}
+			m.SendEventLoopIdleBackoffs.Add(1)
+			runtime.Gosched()
 		}
 	}
 }
@@ -335,7 +333,7 @@ func (s *sender) drainRingToBtreeEventLoop() int {
 
 		pktLen := p.Len()
 		m.CongestionSendPktBuf.Add(1)
-		m.CongestionSendByteBuf.Add(uint64(pktLen))
+		m.CongestionSendByteBuf.Add(pktLen)
 		m.SendRateBytes.Add(pktLen)
 
 		// Sequence gap detection: detect if we skipped any sequence numbers
@@ -438,7 +436,7 @@ func (s *sender) drainRingToBtreeEventLoopTight() (int, int) {
 		// 3. Update metrics and insert to btree (same as unbounded version)
 		pktLen := p.Len()
 		m.CongestionSendPktBuf.Add(1)
-		m.CongestionSendByteBuf.Add(uint64(pktLen))
+		m.CongestionSendByteBuf.Add(pktLen)
 		m.SendRateBytes.Add(pktLen)
 
 		// Sequence gap detection
@@ -580,8 +578,8 @@ func (s *sender) deliverReadyPacketsEventLoop(nowUs uint64) (int, time.Duration)
 
 			m.CongestionSendPkt.Add(1)
 			m.CongestionSendPktUnique.Add(1)
-			m.CongestionSendByte.Add(uint64(pktLen))
-			m.CongestionSendByteUnique.Add(uint64(pktLen))
+			m.CongestionSendByte.Add(pktLen)
+			m.CongestionSendByteUnique.Add(pktLen)
 			m.CongestionSendUsSndDuration.Add(uint64(s.pktSndPeriod))
 			m.SendRateBytesSent.Add(pktLen)
 			m.SendFirstTransmit.Add(1) // Track first transmissions
@@ -692,9 +690,9 @@ func (s *sender) dropOldPacketsEventLoop(nowUs uint64) {
 		pktLen := p.Len()
 		// Use helper to increment both granular and aggregate counters
 		// This ensures CongestionSendDataDropTooOld is incremented (shown in Prometheus)
-		metrics.IncrementSendDataDrop(m, metrics.DropReasonTooOldSend, uint64(pktLen))
+		metrics.IncrementSendDataDrop(m, metrics.DropReasonTooOldSend, pktLen)
 		m.CongestionSendPktBuf.Add(^uint64(0))
-		m.CongestionSendByteBuf.Add(^uint64(uint64(pktLen) - 1))
+		m.CongestionSendByteBuf.Add(^(pktLen - 1))
 
 		p.Decommission()
 	}

@@ -24,7 +24,7 @@ import (
 // - Completion handler reads/deletes from completion map
 // See multi_iouring_design.md Section 4.3 for design rationale.
 type sendRingState struct {
-	ring        *giouring.Ring                // io_uring ring
+	ring        *giouring.Ring                 // io_uring ring
 	completions map[uint64]*sendCompletionInfo // Maps request ID to completion info
 	nextID      uint64                         // Request ID counter (atomic for multi-writer)
 	fd          int                            // Socket fd (shared, read-only)
@@ -366,7 +366,7 @@ func (c *srtConn) cleanupIoUring() {
 
 // sendIoUring implements the Linux-specific io_uring send path
 func (c *srtConn) sendIoUring(p packet.Packet) {
-	// Check if connection is shutting down (context cancelled)
+	// Check if connection is shutting down (context canceled)
 	// This prevents accessing the io_uring ring after it's been closed
 	select {
 	case <-c.ctx.Done():
@@ -395,7 +395,11 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 	}
 
 	// Get buffer from per-connection pool (no lock contention, no Reset on critical path!)
-	sendBuffer := c.sendBufferPool.Get().(*bytes.Buffer)
+	sendBuffer, ok := c.sendBufferPool.Get().(*bytes.Buffer)
+	if !ok {
+		// Pool should only contain *bytes.Buffer, this is a programming error
+		panic("sendBufferPool contained non-*bytes.Buffer value")
+	}
 
 	// Marshal packet into buffer
 	if err := p.Marshal(sendBuffer); err != nil {
@@ -407,7 +411,7 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 		}
 		p.Decommission()
 		c.log("connection:send:error", func() string {
-			return fmt.Sprintf("marshalling packet failed: %v", err)
+			return fmt.Sprintf("marshaling packet failed: %v", err)
 		})
 		return
 	}
@@ -599,7 +603,7 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 		// Ring is guaranteed to stay mapped because cleanupIoUring waits for us to exit
 		select {
 		case <-ctx.Done():
-			// Context cancelled - exit gracefully
+			// Context canceled - exit gracefully
 			c.incrementSendCompletionCtxCancelled(0) // ringIdx=0 for single-ring mode
 			return
 		default:
@@ -611,7 +615,7 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 			// EBADF means ring was closed via QueueExit()
 			if err == syscall.EBADF {
 				c.incrementSendCompletionEBADF(0) // ringIdx=0 for single-ring mode
-				return // Ring closed - normal shutdown
+				return                            // Ring closed - normal shutdown
 			}
 
 			// ETIME means timeout expired - loop back to check ctx.Done()
@@ -807,7 +811,7 @@ func (c *srtConn) sendMultiRing(p packet.Packet) {
 			p.Header().IsControlPacket, p.Header().ControlType, len(c.sendRingStates))
 	})
 
-	// Check if connection is shutting down (context cancelled)
+	// Check if connection is shutting down (context canceled)
 	// This prevents accessing the io_uring rings after they're been closed
 	select {
 	case <-c.ctx.Done():
@@ -841,7 +845,7 @@ func (c *srtConn) sendMultiRing(p packet.Packet) {
 // sendIoUringToRing sends a packet using a specific ring (multi-ring mode)
 // Uses per-ring lock since sender and completer access concurrently
 func (c *srtConn) sendIoUringToRing(state *sendRingState, p packet.Packet) {
-	// Check if connection is shutting down (context cancelled)
+	// Check if connection is shutting down (context canceled)
 	// This prevents accessing the io_uring ring after it's been closed
 	select {
 	case <-c.ctx.Done():
@@ -859,7 +863,11 @@ func (c *srtConn) sendIoUringToRing(state *sendRingState, p packet.Packet) {
 	}
 
 	// Get serialization buffer from per-connection pool
-	sendBuffer := c.sendBufferPool.Get().(*bytes.Buffer)
+	sendBuffer, ok := c.sendBufferPool.Get().(*bytes.Buffer)
+	if !ok {
+		// Pool should only contain *bytes.Buffer, this is a programming error
+		panic("sendBufferPool contained non-*bytes.Buffer value")
+	}
 
 	// DEBUG: Check packet state before marshal
 	// This helps diagnose use-after-decommission bugs
@@ -881,7 +889,7 @@ func (c *srtConn) sendIoUringToRing(state *sendRingState, p packet.Packet) {
 		}
 		// Log more details about the failing packet
 		c.log("connection:send:error", func() string {
-			return fmt.Sprintf("marshalling packet failed: %v (ring=%d, isControl=%v, ctrlType=%d)",
+			return fmt.Sprintf("marshaling packet failed: %v (ring=%d, isControl=%v, ctrlType=%d)",
 				err, state.ringIndex, p.Header().IsControlPacket, p.Header().ControlType)
 		})
 		p.Decommission()

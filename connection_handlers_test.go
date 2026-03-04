@@ -84,7 +84,7 @@ func TestHandlePacketDirect_LockFreeMode(t *testing.T) {
 				go func() {
 					defer func() {
 						// Recover from any panic in handlePacket (expected due to minimal setup)
-						recover()
+						_ = recover()
 						done <- true
 					}()
 					c.handlePacketDirect(p)
@@ -108,7 +108,7 @@ func TestHandlePacketDirect_LockFreeMode(t *testing.T) {
 				done := make(chan bool, 1)
 				go func() {
 					defer func() {
-						recover()
+						_ = recover()
 						done <- true
 					}()
 					c.handlePacketDirect(p)
@@ -157,7 +157,7 @@ func TestHandlePacketDirect_NilReceiver(t *testing.T) {
 	done := make(chan bool, 1)
 	go func() {
 		defer func() {
-			recover()
+			_ = recover()
 			done <- true
 		}()
 		c.handlePacketDirect(p)
@@ -193,7 +193,7 @@ func TestHandlePacketDirect_ConcurrentLockFree(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			defer func() {
-				recover() // handlePacket will panic due to minimal setup
+				_ = recover() // handlePacket will panic due to minimal setup
 				completed.Add(1)
 			}()
 

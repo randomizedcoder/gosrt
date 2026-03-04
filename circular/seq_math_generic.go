@@ -28,10 +28,10 @@ type Signed interface {
 // For 16-bit: max = 0xFFFF
 // For 31-bit SRT: max = 0x7FFFFFFF
 // For 32-bit: max = 0xFFFFFFFF
-func SeqLessG[U Unsigned, S Signed](a, b, max U) bool {
+func SeqLessG[U Unsigned, S Signed](a, b, maxVal U) bool {
 	// Mask to valid range
-	a = a & max
-	b = b & max
+	a &= maxVal
+	b &= maxVal
 
 	// Convert to signed for wraparound detection
 	diff := S(a) - S(b)
@@ -39,35 +39,35 @@ func SeqLessG[U Unsigned, S Signed](a, b, max U) bool {
 }
 
 // SeqGreaterG returns true if a > b using signed arithmetic wraparound detection.
-func SeqGreaterG[U Unsigned, S Signed](a, b, max U) bool {
-	a = a & max
-	b = b & max
+func SeqGreaterG[U Unsigned, S Signed](a, b, maxVal U) bool {
+	a &= maxVal
+	b &= maxVal
 
 	diff := S(a) - S(b)
 	return diff > 0
 }
 
 // SeqLessOrEqualG returns true if a <= b.
-func SeqLessOrEqualG[U Unsigned, S Signed](a, b, max U) bool {
-	return !SeqGreaterG[U, S](a, b, max)
+func SeqLessOrEqualG[U Unsigned, S Signed](a, b, maxVal U) bool {
+	return !SeqGreaterG[U, S](a, b, maxVal)
 }
 
 // SeqGreaterOrEqualG returns true if a >= b.
-func SeqGreaterOrEqualG[U Unsigned, S Signed](a, b, max U) bool {
-	return !SeqLessG[U, S](a, b, max)
+func SeqGreaterOrEqualG[U Unsigned, S Signed](a, b, maxVal U) bool {
+	return !SeqLessG[U, S](a, b, maxVal)
 }
 
 // SeqDiffG returns the signed difference (a - b).
-func SeqDiffG[U Unsigned, S Signed](a, b, max U) S {
-	a = a & max
-	b = b & max
+func SeqDiffG[U Unsigned, S Signed](a, b, maxVal U) S {
+	a &= maxVal
+	b &= maxVal
 
 	return S(a) - S(b)
 }
 
 // SeqDistanceG returns the unsigned distance between two sequence numbers.
-func SeqDistanceG[U Unsigned, S Signed](a, b, max U) U {
-	diff := SeqDiffG[U, S](a, b, max)
+func SeqDistanceG[U Unsigned, S Signed](a, b, maxVal U) U {
+	diff := SeqDiffG[U, S](a, b, maxVal)
 	if diff < 0 {
 		return U(-diff)
 	}
@@ -75,13 +75,13 @@ func SeqDistanceG[U Unsigned, S Signed](a, b, max U) U {
 }
 
 // SeqAddG adds delta to a sequence number with wraparound.
-func SeqAddG[U Unsigned](seq, delta, max U) U {
-	return (seq + delta) & max
+func SeqAddG[U Unsigned](seq, delta, maxVal U) U {
+	return (seq + delta) & maxVal
 }
 
 // SeqSubG subtracts delta from a sequence number with wraparound.
-func SeqSubG[U Unsigned](seq, delta, max U) U {
-	return (seq - delta) & max
+func SeqSubG[U Unsigned](seq, delta, maxVal U) U {
+	return (seq - delta) & maxVal
 }
 
 // --- Convenience wrappers for common bit widths ---

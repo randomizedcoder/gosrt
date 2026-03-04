@@ -17,29 +17,29 @@ import (
 
 // ContiguousScanTestCase defines test parameters for contiguousScan tests
 type ContiguousScanTestCase struct {
-	Name              string
-	StartSeq          uint32   // Initial sequence number
-	ContiguousPoint   uint32   // Starting contiguousPoint (0 = use default ISN-1)
-	SetContiguousPt   bool     // Whether to explicitly set contiguousPoint
-	PacketSeqs        []uint32 // Sequences to insert
-	TsbpdTime         uint64   // TSBPD time for packets (0 = use default)
-	SetMockTime       bool     // Whether to set mock time
-	MockTime          uint64   // Mock time value
-	ExpectedOk        bool     // Expected return value
-	ExpectedAckSeq    uint32   // Expected ACK sequence
-	ExpectedCP        uint32   // Expected contiguousPoint after scan
+	Name            string
+	StartSeq        uint32   // Initial sequence number
+	ContiguousPoint uint32   // Starting contiguousPoint (0 = use default ISN-1)
+	SetContiguousPt bool     // Whether to explicitly set contiguousPoint
+	PacketSeqs      []uint32 // Sequences to insert
+	TsbpdTime       uint64   // TSBPD time for packets (0 = use default)
+	SetMockTime     bool     // Whether to set mock time
+	MockTime        uint64   // Mock time value
+	ExpectedOk      bool     // Expected return value
+	ExpectedAckSeq  uint32   // Expected ACK sequence
+	ExpectedCP      uint32   // Expected contiguousPoint after scan
 }
 
 // GapScanTestCase defines test parameters for gapScan tests
 type GapScanTestCase struct {
-	Name             string
-	StartSeq         uint32   // Initial sequence number
-	ContiguousPoint  uint32   // Starting contiguousPoint (0 = use default ISN-1)
-	SetContiguousPt  bool     // Whether to explicitly set contiguousPoint
-	PacketSeqs       []uint32 // Sequences to insert
-	TsbpdTime        uint64   // TSBPD time for packets
-	ExpectedGaps     []uint32 // Expected gap sequences
-	ExpectedCP       uint32   // Expected contiguousPoint after scan
+	Name            string
+	StartSeq        uint32   // Initial sequence number
+	ContiguousPoint uint32   // Starting contiguousPoint (0 = use default ISN-1)
+	SetContiguousPt bool     // Whether to explicitly set contiguousPoint
+	PacketSeqs      []uint32 // Sequences to insert
+	TsbpdTime       uint64   // TSBPD time for packets
+	ExpectedGaps    []uint32 // Expected gap sequences
+	ExpectedCP      uint32   // Expected contiguousPoint after scan
 }
 
 // createTableScanReceiver creates a receiver for table-driven scan tests
@@ -148,78 +148,78 @@ func TestContiguousScan_Table(t *testing.T) {
 
 		// Stale contiguousPoint scenarios
 		{
-			Name:              "StaleCP_BtreeMinAhead",
-			StartSeq:          100,
-			ContiguousPoint:   100,
-			SetContiguousPt:   true,
-			PacketSeqs:        []uint32{300, 301, 302}, // Gap of 200 >= threshold 64
-			TsbpdTime:         1_000_000,
-			ExpectedOk:        true,
-			ExpectedAckSeq:    303,
-			ExpectedCP:        302,
+			Name:            "StaleCP_BtreeMinAhead",
+			StartSeq:        100,
+			ContiguousPoint: 100,
+			SetContiguousPt: true,
+			PacketSeqs:      []uint32{300, 301, 302}, // Gap of 200 >= threshold 64
+			TsbpdTime:       1_000_000,
+			ExpectedOk:      true,
+			ExpectedAckSeq:  303,
+			ExpectedCP:      302,
 		},
 		{
-			Name:              "NormalProgression",
-			StartSeq:          100,
-			ContiguousPoint:   100,
-			SetContiguousPt:   true,
-			PacketSeqs:        []uint32{100, 101, 102, 103, 104},
-			TsbpdTime:         1_000_000,
-			ExpectedOk:        true,
-			ExpectedAckSeq:    105,
-			ExpectedCP:        104,
+			Name:            "NormalProgression",
+			StartSeq:        100,
+			ContiguousPoint: 100,
+			SetContiguousPt: true,
+			PacketSeqs:      []uint32{100, 101, 102, 103, 104},
+			TsbpdTime:       1_000_000,
+			ExpectedOk:      true,
+			ExpectedAckSeq:  105,
+			ExpectedCP:      104,
 		},
 
 		// Stale + Wraparound
 		{
-			Name:              "StaleCP_Wraparound",
-			StartSeq:          maxSeq - 50,
-			ContiguousPoint:   maxSeq - 50,
-			SetContiguousPt:   true,
-			PacketSeqs:        []uint32{100, 101, 102}, // Gap ~150 across boundary
-			TsbpdTime:         1_000_000,
-			ExpectedOk:        true,
-			ExpectedAckSeq:    103,
-			ExpectedCP:        102,
+			Name:            "StaleCP_Wraparound",
+			StartSeq:        maxSeq - 50,
+			ContiguousPoint: maxSeq - 50,
+			SetContiguousPt: true,
+			PacketSeqs:      []uint32{100, 101, 102}, // Gap ~150 across boundary
+			TsbpdTime:       1_000_000,
+			ExpectedOk:      true,
+			ExpectedAckSeq:  103,
+			ExpectedCP:      102,
 		},
 
 		// Small gaps (< threshold) should NOT trigger stale handling
 		{
-			Name:              "SmallGap_NoStaleHandling",
-			StartSeq:          100,
-			ContiguousPoint:   100,
-			SetContiguousPt:   true,
-			PacketSeqs:        []uint32{110, 111, 112}, // Gap of 10 < threshold 64
-			SetMockTime:       true,
-			MockTime:          1_000_000_000,
-			TsbpdTime:         1_001_000_000, // Future TSBPD
-			ExpectedOk:        false,
-			ExpectedAckSeq:    0,
-			ExpectedCP:        100, // Stays unchanged
+			Name:            "SmallGap_NoStaleHandling",
+			StartSeq:        100,
+			ContiguousPoint: 100,
+			SetContiguousPt: true,
+			PacketSeqs:      []uint32{110, 111, 112}, // Gap of 10 < threshold 64
+			SetMockTime:     true,
+			MockTime:        1_000_000_000,
+			TsbpdTime:       1_001_000_000, // Future TSBPD
+			ExpectedOk:      false,
+			ExpectedAckSeq:  0,
+			ExpectedCP:      100, // Stays unchanged
 		},
 		{
-			Name:              "SmallGap_Wraparound_NoStaleHandling",
-			StartSeq:          maxSeq - 5,
-			ContiguousPoint:   maxSeq - 5,
-			SetContiguousPt:   true,
-			PacketSeqs:        []uint32{5, 6, 7}, // Gap ~11 < threshold 64
-			SetMockTime:       true,
-			MockTime:          1_000_000_000,
-			TsbpdTime:         1_001_000_000,
-			ExpectedOk:        false,
-			ExpectedAckSeq:    0,
-			ExpectedCP:        maxSeq - 5,
+			Name:            "SmallGap_Wraparound_NoStaleHandling",
+			StartSeq:        maxSeq - 5,
+			ContiguousPoint: maxSeq - 5,
+			SetContiguousPt: true,
+			PacketSeqs:      []uint32{5, 6, 7}, // Gap ~11 < threshold 64
+			SetMockTime:     true,
+			MockTime:        1_000_000_000,
+			TsbpdTime:       1_001_000_000,
+			ExpectedOk:      false,
+			ExpectedAckSeq:  0,
+			ExpectedCP:      maxSeq - 5,
 		},
 		{
-			Name:              "ExactThreshold_Wraparound",
-			StartSeq:          maxSeq - 32,
-			ContiguousPoint:   maxSeq - 32,
-			SetContiguousPt:   true,
-			PacketSeqs:        []uint32{32, 33, 34}, // Gap exactly 64
-			TsbpdTime:         1_000_000,
-			ExpectedOk:        true,
-			ExpectedAckSeq:    35,
-			ExpectedCP:        34,
+			Name:            "ExactThreshold_Wraparound",
+			StartSeq:        maxSeq - 32,
+			ContiguousPoint: maxSeq - 32,
+			SetContiguousPt: true,
+			PacketSeqs:      []uint32{32, 33, 34}, // Gap exactly 64
+			TsbpdTime:       1_000_000,
+			ExpectedOk:      true,
+			ExpectedAckSeq:  35,
+			ExpectedCP:      34,
 		},
 
 		// ═══════════════════════════════════════════════════════════════════════
@@ -585,4 +585,3 @@ func TestContiguousScan_StaleCP_EmptyBtree_Table(t *testing.T) {
 	require.Equal(t, uint32(303), ackSeq, "Should ACK to 303")
 	require.Equal(t, uint32(302), recv.contiguousPoint.Load())
 }
-

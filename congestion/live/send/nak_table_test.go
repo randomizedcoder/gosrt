@@ -397,10 +397,8 @@ func TestSendNak_StrategyDifference(t *testing.T) {
 	// for the same NAK input when ranges are not in sequence order.
 
 	tc := SendNakTestCase{
-		Name:            "StrategyDifference",
-		TotalPackets:    30,
-		NakRanges:       [][2]uint32{{20, 22}, {5, 7}, {12, 14}}, // Out of sequence order
-		ExpectedRetrans: 9,
+		TotalPackets: 30,
+		NakRanges:    [][2]uint32{{20, 22}, {5, 7}, {12, 14}}, // Out of sequence order
 	}
 
 	var origSeqs, honorSeqs []uint32

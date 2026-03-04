@@ -54,17 +54,17 @@ func (l *logger) HasTopic(topic string) bool {
 		return true
 	}
 
-	len := len(topic)
+	topicLen := len(topic)
 
 	for {
-		i := strings.LastIndexByte(topic[:len], ':')
+		i := strings.LastIndexByte(topic[:topicLen], ':')
 		if i == -1 {
 			break
 		}
 
-		len = i
+		topicLen = i
 
-		if ok := l.topics[topic[:len]]; !ok {
+		if ok := l.topics[topic[:topicLen]]; !ok {
 			continue
 		}
 
@@ -100,7 +100,11 @@ func (l *logger) Print(topic string, socketId uint32, skip int, message func() s
 	func() {
 		defer func() {
 			// Silently recover from panic if channel is closed
-			_ = recover()
+			// The recover() result is intentionally unused - we just want to catch any panic
+			if r := recover(); r != nil {
+				// Panic caught and silently ignored - this is intentional
+				// to prevent crashes when the channel is closed during shutdown
+			}
 		}()
 		select {
 		case l.logQueue <- msg:

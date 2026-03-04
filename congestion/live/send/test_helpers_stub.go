@@ -18,5 +18,3 @@ func runInEventLoopContext(s *sender, fn func()) {
 func runInTickContext(s *sender, fn func()) {
 	fn()
 }
-
-

@@ -72,8 +72,9 @@ func (cs *ControlServer) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to remove existing socket: %w", err)
 	}
 
-	// Create listener
-	listener, err := net.Listen("unix", cs.socketPath)
+	// Create listener using context-aware ListenConfig
+	lc := net.ListenConfig{}
+	listener, err := lc.Listen(ctx, "unix", cs.socketPath)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", cs.socketPath, err)
 	}
@@ -82,13 +83,13 @@ func (cs *ControlServer) Start(ctx context.Context) error {
 	// Ensure socket is cleaned up on exit
 	go func() {
 		<-ctx.Done()
-		cs.Stop()
+		cs.Stop(ctx)
 	}()
 
 	// Accept loop
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
 			// Check if we're shutting down
 			if cs.stopped.Load() {
 				return nil
@@ -98,7 +99,7 @@ func (cs *ControlServer) Start(ctx context.Context) error {
 				return nil
 			default:
 				// Log error but continue accepting
-				fmt.Fprintf(os.Stderr, "control: accept error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "control: accept error: %v\n", acceptErr)
 				continue
 			}
 		}
@@ -111,7 +112,11 @@ func (cs *ControlServer) Start(ctx context.Context) error {
 // handleConnection processes a single client connection.
 // Each connection can send multiple commands (one per line).
 func (cs *ControlServer) handleConnection(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "control: close error: %v\n", err)
+		}
+	}()
 
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
@@ -127,11 +132,14 @@ func (cs *ControlServer) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 
 		// Parse request
-		req, err := ParseRequest(line)
-		if err != nil {
-			resp := NewErrorResponse(err)
-			data, _ := resp.Marshal()
-			conn.Write(data)
+		req, parseErr := ParseRequest(line)
+		if parseErr != nil {
+			resp := NewErrorResponse(parseErr)
+			if data, marshalErr := resp.Marshal(); marshalErr != nil {
+				fmt.Fprintf(os.Stderr, "control: failed to marshal error response: %v\n", marshalErr)
+			} else if _, writeErr := conn.Write(data); writeErr != nil {
+				fmt.Fprintf(os.Stderr, "control: failed to write error response: %v\n", writeErr)
+			}
 			continue
 		}
 
@@ -139,12 +147,18 @@ func (cs *ControlServer) handleConnection(ctx context.Context, conn net.Conn) {
 		resp := cs.handleCommand(req)
 
 		// Send response
-		data, err := resp.Marshal()
-		if err != nil {
-			resp := NewErrorResponse(fmt.Errorf("failed to marshal response: %w", err))
-			data, _ = resp.Marshal()
+		data, marshalErr := resp.Marshal()
+		if marshalErr != nil {
+			errResp := NewErrorResponse(fmt.Errorf("failed to marshal response: %w", marshalErr))
+			if errData, errMarshalErr := errResp.Marshal(); errMarshalErr != nil {
+				fmt.Fprintf(os.Stderr, "control: failed to marshal fallback error response: %v\n", errMarshalErr)
+			} else {
+				data = errData
+			}
 		}
-		conn.Write(data)
+		if _, writeErr := conn.Write(data); writeErr != nil {
+			fmt.Fprintf(os.Stderr, "control: failed to write response: %v\n", writeErr)
+		}
 
 		// Check for stop command
 		if req.Command == CmdStop {
@@ -239,14 +253,20 @@ func (cs *ControlServer) Stats() (packets, bytes uint64) {
 }
 
 // Stop gracefully shuts down the control server.
-func (cs *ControlServer) Stop() {
+// The context parameter is accepted for API consistency with other servers,
+// though it is not currently used since the stop operation is immediate.
+func (cs *ControlServer) Stop(_ context.Context) {
 	cs.stopOnce.Do(func() {
 		cs.stopped.Store(true)
 		if cs.listener != nil {
-			cs.listener.Close()
+			if closeErr := cs.listener.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "control listener close error: %v\n", closeErr)
+			}
 		}
 		// Clean up socket file
-		os.Remove(cs.socketPath)
+		if removeErr := os.Remove(cs.socketPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			fmt.Fprintf(os.Stderr, "control socket cleanup error: %v\n", removeErr)
+		}
 	})
 }
 

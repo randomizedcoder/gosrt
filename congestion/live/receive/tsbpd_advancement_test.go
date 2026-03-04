@@ -395,13 +395,12 @@ func TestTSBPDAdvancement_ExtendedOutage(t *testing.T) {
 	gapStarts := []uint32{1001, 1500, 2000, 3000, 4000}
 	gapSizes := []uint32{400, 400, 800, 800, 800}
 
-	currentSeq := uint32(1001)
 	for i, gapStart := range gapStarts {
 		gapSize := gapSizes[i]
 		gapEnd := gapStart + gapSize - 1
 
-		// Skip the gap
-		currentSeq = gapEnd + 1
+		// Skip the gap, start pushing packets after it
+		gapEndSeq := gapEnd + 1
 
 		// Push some packets after this gap
 		nextGap := uint32(6000)
@@ -409,12 +408,11 @@ func TestTSBPDAdvancement_ExtendedOutage(t *testing.T) {
 			nextGap = gapStarts[i+1]
 		}
 
-		for seq := currentSeq; seq < nextGap && seq < 5500; seq++ {
+		for seq := gapEndSeq; seq < nextGap && seq < 5500; seq++ {
 			tsbpdTime := *mockTime + tsbpdDelayUs + uint64((seq-1001)*100)
 			p := createTestPacket(seq, tsbpdTime)
 			recv.Push(p)
 		}
-		currentSeq = nextGap
 	}
 
 	t.Logf("After sparse arrivals: store size=%d", recv.packetStore.Len())

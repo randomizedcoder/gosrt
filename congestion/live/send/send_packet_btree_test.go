@@ -595,9 +595,9 @@ func TestSendPacketBtree_Wraparound_IterateFrom(t *testing.T) {
 		}
 
 		// Min should be MAX-2 (the "oldest" in circular order)
-		min := bt.Min()
-		require.NotNil(t, min)
-		require.Equal(t, maxSeq-2, min.Header().PacketSequenceNumber.Val(),
+		minPkt := bt.Min()
+		require.NotNil(t, minPkt)
+		require.Equal(t, maxSeq-2, minPkt.Header().PacketSequenceNumber.Val(),
 			"Min() should return the circularly-smallest sequence (MAX-2)")
 	})
 }

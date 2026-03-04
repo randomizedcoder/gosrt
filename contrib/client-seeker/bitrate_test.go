@@ -186,7 +186,9 @@ func TestBitrateManager_Bucket(t *testing.T) {
 	}
 
 	// Changing bitrate should update bucket
-	bm.Set(200_000_000)
+	if err := bm.Set(200_000_000); err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
 	if bucket.Rate() != 200_000_000 {
 		t.Errorf("Bucket.Rate() = %d after Set, want 200000000", bucket.Rate())
 	}

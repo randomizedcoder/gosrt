@@ -187,7 +187,12 @@ func (c *srtConn) sendKMRequest(key packet.PacketEncryption) {
 	p.Header().SubType = packet.EXTTYPE_KMREQ
 	p.Header().Timestamp = c.getTimestampForPacket()
 
-	p.MarshalCIF(cif)
+	if err := p.MarshalCIF(cif); err != nil {
+		c.log("control:send:KMReq:error", func() string {
+			return fmt.Sprintf("failed to marshal KMReq CIF: %v", err)
+		})
+		return
+	}
 
 	c.log("control:send:KMReq:dump", func() string { return p.Dump() })
 	c.log("control:send:KMReq:cif", func() string { return cif.String() })
@@ -197,4 +202,3 @@ func (c *srtConn) sendKMRequest(key packet.PacketEncryption) {
 
 	c.pop(p)
 }
-

@@ -26,4 +26,3 @@ func calculateDropThreshold(nowUs, dropThreshold uint64) (threshold uint64, shou
 func shouldDropPacket(pktTsbpdTime, threshold uint64) bool {
 	return pktTsbpdTime <= threshold
 }
-

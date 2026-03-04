@@ -37,8 +37,8 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 		if mode != PUBLISH && mode != SUBSCRIBE {
 			// Figure out the reason
 			reason := REJ_PEER
-			if req.(*connRequest).rejectionReason > 0 {
-				reason = req.(*connRequest).rejectionReason
+			if cr, ok := req.(*connRequest); ok && cr.rejectionReason > 0 {
+				reason = cr.rejectionReason
 			}
 			req.Reject(reason)
 			continue
@@ -52,4 +52,3 @@ func (ln *listener) Accept(acceptFn AcceptFunc) (Conn, ConnType, error) {
 		return conn, mode, nil
 	}
 }
-

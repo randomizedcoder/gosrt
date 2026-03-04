@@ -1,0 +1,214 @@
+# .golangci.yml
+#
+# Tier 1: Standard Lint (~2 minutes)
+# Used for: Every PR (CI gating)
+#
+# This is the default profile that balances thoroughness with speed.
+# It includes all Tier 0 checks plus security scanning and style checks.
+
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  build-tags:
+    - ""
+    - debug
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  default: none
+  enable:
+    # Tier 0 (always)
+    - govet
+    - errcheck
+    - ineffassign
+    - unused
+    - staticcheck
+    # Tier 1 (CI)
+    - gosec
+    - gocritic
+    - revive
+    - noctx
+    - contextcheck
+    - durationcheck
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # Struct optimization suggestions - not errors
+      settings:
+        shadow:
+          strict: true
+
+    staticcheck:
+      checks:
+        - "all"
+        - "-SA1019"
+
+    gosec:
+      excludes:
+        - G103  # unsafe: required for io_uring
+        - G115  # integer overflow: validated conversions
+        - G204  # subprocess: integration tests
+        - G301  # directory permissions: test output
+        - G304  # file path variable: config loading
+        - G306  # WriteFile permissions: log files
+        - G401  # AES key wrap: RFC 3394
+        - G501  # SHA1 PBKDF2: SRT protocol mandates
+        - G505  # SHA1 import: PBKDF2-SHA1 per SRT spec
+        - G602  # slice bounds: loop conditions ensure safety (i+1 < len pattern)
+
+    gocritic:
+      enabled-checks:
+        - appendAssign
+        - argOrder
+        - badCond
+        - builtinShadow
+        - dupCase
+        - dupSubExpr
+        - nilValReturn
+        - rangeValCopy
+        - sliceClear
+      disabled-checks:
+        - hugeParam
+
+    revive:
+      rules:
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: increment-decrement
+        - name: var-declaration
+
+    gocyclo:
+      min-complexity: 30
+
+    funlen:
+      lines: 100
+      statements: 60
+
+  exclusions:
+    warn-unused: true
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - dupl
+          - funlen
+          - gocyclo
+          - errcheck
+          - unused  # Test helper functions may be kept for future tests
+      # G404: math/rand is acceptable in tests for deterministic/reproducible randomness
+      - path: "_test\\.go"
+        linters:
+          - gosec
+        text: "G404"
+      - path: "tools/"
+        linters:
+          - funlen
+      - path: "contrib/integration_testing/"
+        linters:
+          - gosec
+        text: "G204"
+      - path: "(listen|connection|dial)_linux\\.go"
+        linters:
+          - gosec
+        text: "G103"
+      # G115: Integer overflow conversions - these are intentional in SRT codebase
+      # - Sequence number arithmetic uses intentional overflow (circular package)
+      # - Test code uses safe small-range conversions (loop indices)
+      # - Metrics code uses safe bounded conversions
+      - linters:
+          - gosec
+        text: "G115:"
+      # contextcheck: Context stored in long-lived structs (dialer, listener) is intentional
+      # for graceful shutdown. Context flows correctly through struct fields.
+      - path: "(dial|listen)\\.go"
+        linters:
+          - contextcheck
+      # contextcheck in dial_io.go: handleHandshake accesses dl.ctx internally
+      - path: "dial_io\\.go"
+        linters:
+          - contextcheck
+      # contextcheck in client-seeker metrics: intentional fallback to Background() for shutdown
+      - path: "contrib/client-seeker/metrics\\.go"
+        linters:
+          - contextcheck
+      # contextcheck in common metrics_server: shutdown handlers use Background() after ctx.Done()
+      - path: "contrib/common/metrics_server\\.go"
+        linters:
+          - contextcheck
+      # contextcheck in network_controller: cleanup handlers use Background() after ctx.Done()
+      - path: "contrib/integration_testing/network_controller\\.go"
+        linters:
+          - contextcheck
+      # ST1003: Existing public API names cannot be changed (backwards compatibility)
+      # - socketId/StreamId/etc are established API names in the SRT protocol
+      - linters:
+          - staticcheck
+        text: "ST1003:"
+      # SA9003: Empty branches are intentional (recover() pattern, logging guards)
+      - linters:
+          - staticcheck
+        text: "SA9003:"
+      # revive context-as-argument: Some legacy functions have context as non-first param
+      # These are internal functions where changing signature would cause cascading changes
+      - path: "contrib/(client|client-generator)/.*\\.go"
+        linters:
+          - revive
+        text: "context-as-argument"
+      - path: "congestion/live/receive/.*_test\\.go"
+        linters:
+          - revive
+        text: "context-as-argument"
+      # SA6002: udp_echo is example code where sync.Pool []byte pattern is acceptable
+      - path: "contrib/udp_echo/main\\.go"
+        linters:
+          - staticcheck
+        text: "SA6002"
+      # unused: io_uring instrumentation functions are prepared for future metrics
+      - path: "(connection|dial|listen)_linux\\.go"
+        linters:
+          - unused
+        text: "increment.*Processed|drain.*Completions"
+      # unused: debug helpers kept for development
+      - path: "test_helpers_debug\\.go"
+        linters:
+          - unused
+      # unused: legacy functions explicitly marked for debugging
+      - path: "contrib/client-seeker/generator\\.go"
+        linters:
+          - unused
+        text: "legacyActualBitrate"
+      # unused: integration testing infrastructure may have unused helpers
+      - path: "contrib/integration_testing/"
+        linters:
+          - unused
+      # unused: performance tool infrastructure
+      - path: "contrib/performance/"
+        linters:
+          - unused
+        text: "defaultHighThroughputArgs"
+      # unused: listener sendBrokenLookup is kept for connection error handling
+      - path: "listen_io\\.go"
+        linters:
+          - unused
+
+output:
+  formats:
+    text:
+      print-issued-lines: true
+      print-linter-name: true

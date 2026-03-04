@@ -87,7 +87,7 @@ func (s *sender) drainRingToBtree() {
 
 		pktLen := p.Len()
 		m.CongestionSendPktBuf.Add(1)
-		m.CongestionSendByteBuf.Add(uint64(pktLen))
+		m.CongestionSendByteBuf.Add(pktLen)
 		m.SendRateBytes.Add(pktLen)
 
 		// Insert into btree
@@ -170,8 +170,8 @@ func (s *sender) tickDeliverPacketsBtree(now uint64) {
 		pktLen := p.Len()
 		m.CongestionSendPkt.Add(1)
 		m.CongestionSendPktUnique.Add(1)
-		m.CongestionSendByte.Add(uint64(pktLen))
-		m.CongestionSendByteUnique.Add(uint64(pktLen))
+		m.CongestionSendByte.Add(pktLen)
+		m.CongestionSendByteUnique.Add(pktLen)
 		m.CongestionSendUsSndDuration.Add(uint64(s.pktSndPeriod))
 
 		s.avgPayloadSize = 0.875*s.avgPayloadSize + 0.125*float64(pktLen)
@@ -198,14 +198,17 @@ func (s *sender) tickDeliverPacketsList(now uint64) {
 
 	removeList := make([]*list.Element, 0, s.packetList.Len())
 	for e := s.packetList.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 		if p.Header().PktTsbpdTime <= now {
 			pktLen := p.Len()
 
 			m.CongestionSendPkt.Add(1)
 			m.CongestionSendPktUnique.Add(1)
-			m.CongestionSendByte.Add(uint64(pktLen))
-			m.CongestionSendByteUnique.Add(uint64(pktLen))
+			m.CongestionSendByte.Add(pktLen)
+			m.CongestionSendByteUnique.Add(pktLen)
 			m.CongestionSendUsSndDuration.Add(uint64(s.pktSndPeriod))
 
 			//  5.1.2. SRT's Default LiveCC Algorithm
@@ -263,9 +266,9 @@ func (s *sender) tickDropOldPacketsBtree(now uint64) {
 		s.packetBtree.Delete(p.Header().PacketSequenceNumber.Val())
 
 		pktLen := p.Len()
-		metrics.IncrementSendDataDrop(m, metrics.DropReasonTooOldSend, uint64(pktLen))
+		metrics.IncrementSendDataDrop(m, metrics.DropReasonTooOldSend, pktLen)
 		m.CongestionSendPktBuf.Add(^uint64(0))
-		m.CongestionSendByteBuf.Add(^uint64(uint64(pktLen) - 1))
+		m.CongestionSendByteBuf.Add(^(pktLen - 1))
 
 		p.Decommission()
 	}
@@ -278,14 +281,17 @@ func (s *sender) tickDropOldPacketsList(now uint64) {
 
 	removeList := make([]*list.Element, 0, s.lossList.Len())
 	for e := s.lossList.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 
 		if p.Header().PktTsbpdTime+s.dropThreshold <= now {
 			// Dropped packet because too old (local drop, not a loss)
 			// Note: PktDrop = local drops (too old, errors, etc.)
 			// Note: PktLoss = packets reported as lost via NAK (incremented in nakLocked when NAK received)
 			pktLen := p.Len()
-			metrics.IncrementSendDataDrop(m, metrics.DropReasonTooOldSend, uint64(pktLen))
+			metrics.IncrementSendDataDrop(m, metrics.DropReasonTooOldSend, pktLen)
 
 			removeList = append(removeList, e)
 		}
@@ -293,10 +299,14 @@ func (s *sender) tickDropOldPacketsList(now uint64) {
 
 	// These packets are not needed anymore (too late)
 	for _, e := range removeList {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			s.lossList.Remove(e)
+			continue // Skip invalid element
+		}
 
-		m.CongestionSendPktBuf.Add(^uint64(0))                    // Decrement by 1
-		m.CongestionSendByteBuf.Add(^uint64(uint64(p.Len()) - 1)) // Subtract pktLen
+		m.CongestionSendPktBuf.Add(^uint64(0))      // Decrement by 1
+		m.CongestionSendByteBuf.Add(^(p.Len() - 1)) // Subtract pktLen
 		// PktBuf and ByteBuf are decremented in atomic counters above
 
 		s.lossList.Remove(e)

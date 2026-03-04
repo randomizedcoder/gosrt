@@ -73,8 +73,8 @@ func (s *sender) ackBtree(sequenceNumber circular.Number) {
 	// Decommission removed packets
 	for _, p := range packets {
 		pktLen := p.Len()
-		m.CongestionSendPktBuf.Add(^uint64(0))                   // Decrement by 1
-		m.CongestionSendByteBuf.Add(^uint64(uint64(pktLen) - 1)) // Subtract pktLen
+		m.CongestionSendPktBuf.Add(^uint64(0))     // Decrement by 1
+		m.CongestionSendByteBuf.Add(^(pktLen - 1)) // Subtract pktLen
 		p.Decommission()
 	}
 
@@ -96,7 +96,10 @@ func (s *sender) ackList(sequenceNumber circular.Number) {
 
 	removeList := make([]*list.Element, 0, s.lossList.Len())
 	for e := s.lossList.Front(); e != nil; e = e.Next() {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			continue // Skip invalid element
+		}
 		if p.Header().PacketSequenceNumber.Lt(sequenceNumber) {
 			// Remove packet from buffer because it has been successfully transmitted
 			removeList = append(removeList, e)
@@ -107,10 +110,14 @@ func (s *sender) ackList(sequenceNumber circular.Number) {
 
 	// These packets are not needed anymore (ACK'd)
 	for _, e := range removeList {
-		p := e.Value.(packet.Packet)
+		p, ok := e.Value.(packet.Packet)
+		if !ok {
+			s.lossList.Remove(e)
+			continue // Skip invalid element
+		}
 
-		m.CongestionSendPktBuf.Add(^uint64(0))                    // Decrement by 1
-		m.CongestionSendByteBuf.Add(^uint64(uint64(p.Len()) - 1)) // Subtract pktLen
+		m.CongestionSendPktBuf.Add(^uint64(0))      // Decrement by 1
+		m.CongestionSendByteBuf.Add(^(p.Len() - 1)) // Subtract pktLen
 		// PktBuf and ByteBuf are decremented in atomic counters above
 
 		s.lossList.Remove(e)

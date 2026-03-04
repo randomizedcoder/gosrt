@@ -48,7 +48,13 @@ func writeCounterValue(b *strings.Builder, name string, value uint64, labels ...
 	b.WriteByte(' ')
 
 	// Use scratch buffer from pool for number formatting
-	scratchPtr := scratchPool.Get().(*[]byte)
+	scratchPtr, ok := scratchPool.Get().(*[]byte)
+	if !ok {
+		// Fallback to direct formatting if pool returns wrong type
+		b.WriteString(strconv.FormatUint(value, 10))
+		b.WriteByte('\n')
+		return
+	}
 	scratch := (*scratchPtr)[:0]
 	scratch = strconv.AppendUint(scratch, value, 10)
 	b.Write(scratch)
@@ -92,7 +98,12 @@ func writeGauge(b *strings.Builder, name string, value float64, labels ...string
 	// Format cleanly for Prometheus:
 	// - Whole numbers: 1873920 (not 1873920.000000000)
 	// - Floats with decimals: 0.000233966 (minimal precision needed)
-	scratchPtr := scratchPool.Get().(*[]byte)
+	scratchPtr, ok := scratchPool.Get().(*[]byte)
+	if !ok {
+		// Fallback if pool returns wrong type - allocate new scratch buffer
+		newScratch := make([]byte, 0, 32)
+		scratchPtr = &newScratch
+	}
 	scratch := (*scratchPtr)[:0]
 
 	// Check if value is a whole number (no fractional part)
@@ -240,8 +251,7 @@ func IncrementRecvDataDrop(m *ConnectionMetrics, reason DropReason, pktLen uint6
 // Metrics are guaranteed to be non-nil (initialized in connection.go before NewSender)
 func IncrementSendDataDrop(m *ConnectionMetrics, reason DropReason, pktLen uint64) {
 	// Increment granular counter based on reason (enum comparison is fast)
-	switch reason {
-	case DropReasonTooOldSend:
+	if reason == DropReasonTooOldSend {
 		m.CongestionSendDataDropTooOld.Add(1)
 	}
 

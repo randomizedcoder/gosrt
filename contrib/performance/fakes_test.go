@@ -7,7 +7,7 @@ import (
 
 // FakeSeeker implements Seeker interface for testing.
 type FakeSeeker struct {
-	currentBitrate int64
+	currentBitrate  int64
 	setBitrateCalls []int64
 	heartbeatCalls  int
 	stopCalled      bool
@@ -64,7 +64,7 @@ type FakeGate struct {
 }
 
 type FakeProbeCall struct {
-	Bitrate   int64
+	Bitrate    int64
 	ProbeStart time.Time
 }
 

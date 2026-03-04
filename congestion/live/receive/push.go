@@ -87,11 +87,11 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 	m.RecvRateBytes.Add(pktLen) // Replaces r.rate.bytes += pktLen
 
 	m.CongestionRecvPkt.Add(1)
-	m.CongestionRecvByte.Add(uint64(pktLen))
+	m.CongestionRecvByte.Add(pktLen)
 
 	if pkt.Header().RetransmittedPacketFlag {
 		m.CongestionRecvPktRetrans.Add(1)
-		m.CongestionRecvByteRetrans.Add(uint64(pktLen))
+		m.CongestionRecvByteRetrans.Add(pktLen)
 		m.RecvRateBytesRetrans.Add(pktLen) // Replaces r.rate.bytesRetrans += pktLen
 	}
 
@@ -106,8 +106,8 @@ func (r *receiver) pushLockedNakBtree(pkt packet.Packet) {
 	// contiguous_point_tsbpd_advancement_design.md - Phase 4
 	if circular.SeqLessOrEqual(pkt.Header().PacketSequenceNumber.Val(), r.contiguousPoint.Load()) {
 		m.CongestionRecvPktBelated.Add(1)
-		m.CongestionRecvByteBelated.Add(uint64(pktLen))
-		metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, uint64(pktLen))
+		m.CongestionRecvByteBelated.Add(pktLen)
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonTooOld, pktLen)
 		return
 	}
 
@@ -206,7 +206,7 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 	m.CongestionRecvPkt.Add(1)
 	m.CongestionRecvByte.Add(uint64(pktLen))
 
-	//pkt.PktTsbpdTime = pkt.Timestamp + r.delay
+	// pkt.PktTsbpdTime = pkt.Timestamp + r.delay
 	if pkt.Header().RetransmittedPacketFlag {
 		m.CongestionRecvPktRetrans.Add(1)
 		m.CongestionRecvByteRetrans.Add(uint64(pktLen))
@@ -234,10 +234,12 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 		return
 	}
 
-	if pkt.Header().PacketSequenceNumber.Equals(r.maxSeenSequenceNumber.Inc()) {
+	switch {
+	case pkt.Header().PacketSequenceNumber.Equals(r.maxSeenSequenceNumber.Inc()):
 		// In order, the packet we expected
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
-	} else if pkt.Header().PacketSequenceNumber.Lte(r.maxSeenSequenceNumber) {
+
+	case pkt.Header().PacketSequenceNumber.Lte(r.maxSeenSequenceNumber):
 		// Out of order, is it a missing piece? put it in the correct position
 		if r.packetStore.Has(pkt.Header().PacketSequenceNumber) {
 			// Already received (has been sent more than once), ignoring
@@ -249,7 +251,8 @@ func (r *receiver) pushLockedOriginal(pkt packet.Packet) {
 		r.insertAndUpdateMetrics(pkt, pktLen, false /* isRetransmit */, false /* updateDrainMetric */)
 
 		return
-	} else {
+
+	default:
 		// Too far ahead, there are some missing sequence numbers, immediate NAK report.
 		// TODO: Implement SRTO_LOSSMAXTTL to delay NAK for reordered packets.
 		nakList := []circular.Number{

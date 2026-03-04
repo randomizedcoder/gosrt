@@ -8,70 +8,70 @@ import (
 // TestConfigVariantGetSRTConfig verifies that GetSRTConfig returns correct configurations
 func TestConfigVariantGetSRTConfig(t *testing.T) {
 	tests := []struct {
-		name     string
-		variant  ConfigVariant
-		wantBtree bool
-		wantIoUr  bool
-		wantNakBtree bool
-		wantFastNak bool
+		name              string
+		variant           ConfigVariant
+		wantBtree         bool
+		wantIoUr          bool
+		wantNakBtree      bool
+		wantFastNak       bool
 		wantFastNakRecent bool
 		wantHonorNakOrder bool
 	}{
 		{
-			name:     "Base - list, no io_uring",
-			variant:  ConfigBase,
-			wantBtree: false,
-			wantIoUr:  false,
+			name:         "Base - list, no io_uring",
+			variant:      ConfigBase,
+			wantBtree:    false,
+			wantIoUr:     false,
 			wantNakBtree: false,
 		},
 		{
-			name:     "Btree - btree packet store only",
-			variant:  ConfigBtree,
-			wantBtree: true,
-			wantIoUr:  false,
+			name:         "Btree - btree packet store only",
+			variant:      ConfigBtree,
+			wantBtree:    true,
+			wantIoUr:     false,
 			wantNakBtree: false,
 		},
 		{
-			name:     "IoUr - io_uring only",
-			variant:  ConfigIoUr,
-			wantBtree: false,
-			wantIoUr:  true,
+			name:         "IoUr - io_uring only",
+			variant:      ConfigIoUr,
+			wantBtree:    false,
+			wantIoUr:     true,
 			wantNakBtree: false,
 		},
 		{
-			name:     "NakBtree - NAK btree only (no FastNAK)",
-			variant:  ConfigNakBtree,
-			wantBtree: false,
-			wantIoUr:  true, // io_uring recv is enabled with NAK btree
-			wantNakBtree: true,
-			wantFastNak: false,
+			name:              "NakBtree - NAK btree only (no FastNAK)",
+			variant:           ConfigNakBtree,
+			wantBtree:         false,
+			wantIoUr:          true, // io_uring recv is enabled with NAK btree
+			wantNakBtree:      true,
+			wantFastNak:       false,
 			wantFastNakRecent: false,
 		},
 		{
-			name:     "NakBtreeF - NAK btree + FastNAK",
-			variant:  ConfigNakBtreeF,
-			wantBtree: false,
-			wantIoUr:  true,
-			wantNakBtree: true,
-			wantFastNak: true,
+			name:              "NakBtreeF - NAK btree + FastNAK",
+			variant:           ConfigNakBtreeF,
+			wantBtree:         false,
+			wantIoUr:          true,
+			wantNakBtree:      true,
+			wantFastNak:       true,
 			wantFastNakRecent: false,
 		},
 		{
-			name:     "NakBtreeFr - NAK btree + FastNAK + FastNAKRecent",
-			variant:  ConfigNakBtreeFr,
-			wantBtree: false,
-			wantIoUr:  true,
-			wantNakBtree: true,
-			wantFastNak: true,
+			name:              "NakBtreeFr - NAK btree + FastNAK + FastNAKRecent",
+			variant:           ConfigNakBtreeFr,
+			wantBtree:         false,
+			wantIoUr:          true,
+			wantNakBtree:      true,
+			wantFastNak:       true,
 			wantFastNakRecent: true,
 		},
 		{
-			name:     "Full - everything enabled",
-			variant:  ConfigFull,
-			wantBtree: true,
-			wantIoUr:  true,
-			wantNakBtree: true,
-			wantFastNak: true,
+			name:              "Full - everything enabled",
+			variant:           ConfigFull,
+			wantBtree:         true,
+			wantIoUr:          true,
+			wantNakBtree:      true,
+			wantFastNak:       true,
 			wantFastNakRecent: true,
 			wantHonorNakOrder: true,
 		},
@@ -119,9 +119,9 @@ func TestConfigVariantGetSRTConfig(t *testing.T) {
 // TestRTTProfile verifies RTT profile functions
 func TestRTTProfile(t *testing.T) {
 	tests := []struct {
-		profile    RTTProfile
-		wantMs     int
-		wantName   string
+		profile  RTTProfile
+		wantMs   int
+		wantName string
 	}{
 		{RTT0, 0, "none"},
 		{RTT10, 10, "regional"},
@@ -145,7 +145,7 @@ func TestRTTProfile(t *testing.T) {
 // TestTimerProfile verifies timer profile functions
 func TestTimerProfile(t *testing.T) {
 	tests := []struct {
-		profile TimerProfile
+		profile  TimerProfile
 		wantTick uint64
 		wantNak  uint64
 		wantAck  uint64
@@ -288,4 +288,3 @@ func TestToCliFlagsTimerIntervals(t *testing.T) {
 		}
 	}
 }
-

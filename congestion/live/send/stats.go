@@ -29,10 +29,14 @@ func (s *sender) Stats() congestion.SendStats {
 	} else {
 		// Legacy: linked list mode
 		if s.lossList != nil {
-			max := s.lossList.Back()
-			min := s.lossList.Front()
-			if max != nil && min != nil {
-				msBuf = (max.Value.(packet.Packet).Header().PktTsbpdTime - min.Value.(packet.Packet).Header().PktTsbpdTime) / 1_000
+			maxElem := s.lossList.Back()
+			minElem := s.lossList.Front()
+			if maxElem != nil && minElem != nil {
+				maxPkt, maxOK := maxElem.Value.(packet.Packet)
+				minPkt, minOK := minElem.Value.(packet.Packet)
+				if maxOK && minOK {
+					msBuf = (maxPkt.Header().PktTsbpdTime - minPkt.Header().PktTsbpdTime) / 1_000
+				}
 			}
 		}
 	}

@@ -12,7 +12,7 @@ type CloseReason int
 const (
 	CloseReasonGraceful      CloseReason = iota // Normal shutdown (Close() called)
 	CloseReasonPeerIdle                         // Peer idle timeout expired
-	CloseReasonContextCancel                    // Parent context cancelled
+	CloseReasonContextCancel                    // Parent context canceled
 	CloseReasonError                            // Error during operation
 )
 

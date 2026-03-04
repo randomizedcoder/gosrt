@@ -8,14 +8,14 @@ import (
 type TerminationReason string
 
 const (
-	TerminationSuccess   TerminationReason = "success"    // Found and proved ceiling
-	TerminationTimeout   TerminationReason = "timeout"    // Search timeout exceeded
-	TerminationEOF       TerminationReason = "eof"        // Connection died
-	TerminationWatchdog  TerminationReason = "watchdog"   // Watchdog triggered
-	TerminationCritical  TerminationReason = "critical"   // Critical threshold exceeded
-	TerminationCancelled TerminationReason = "cancelled"  // User cancelled
-	TerminationInvariant TerminationReason = "invariant"  // Invariant violation
-	TerminationError     TerminationReason = "error"      // Unexpected error
+	TerminationSuccess   TerminationReason = "success"   // Found and proved ceiling
+	TerminationTimeout   TerminationReason = "timeout"   // Search timeout exceeded
+	TerminationEOF       TerminationReason = "eof"       // Connection died
+	TerminationWatchdog  TerminationReason = "watchdog"  // Watchdog triggered
+	TerminationCritical  TerminationReason = "critical"  // Critical threshold exceeded
+	TerminationCancelled TerminationReason = "canceled"  // User canceled
+	TerminationInvariant TerminationReason = "invariant" // Invariant violation
+	TerminationError     TerminationReason = "error"     // Unexpected error
 )
 
 // SearchStatus indicates the outcome of a search.
@@ -78,10 +78,10 @@ type StabilityMetrics struct {
 	GeneratorEfficiency float64 // ActualBps / TargetBps from generator
 
 	// TokenBucket metrics (tool overhead)
-	TokenBucketWaitSec  float64 // Total time waiting for tokens
-	TokenBucketSpinSec  float64 // Time spent in spin-wait loops
-	TokenBucketBlocked  int64   // Times consume had to wait
-	TokenBucketMode     int     // 0=sleep, 1=hybrid, 2=spin
+	TokenBucketWaitSec float64 // Total time waiting for tokens
+	TokenBucketSpinSec float64 // Time spent in spin-wait loops
+	TokenBucketBlocked int64   // Times consume had to wait
+	TokenBucketMode    int     // 0=sleep, 1=hybrid, 2=spin
 
 	// Publisher write metrics (library overhead)
 	SRTWriteSec     float64 // Total time in Write() calls
@@ -89,8 +89,8 @@ type StabilityMetrics struct {
 	SRTWriteErrors  int64   // Write errors
 
 	// Bottleneck analysis result
-	BottleneckType   string  // "NONE", "TOOL-LIMITED", "LIBRARY-LIMITED", "UNKNOWN"
-	BottleneckReason string  // Human-readable explanation
+	BottleneckType   string // "NONE", "TOOL-LIMITED", "LIBRARY-LIMITED", "UNKNOWN"
+	BottleneckReason string // Human-readable explanation
 }
 
 // SeekerStatus is the status from the client-seeker.
@@ -106,11 +106,11 @@ type SeekerStatus struct {
 
 // ProbeRecord records a single probe for history.
 type ProbeRecord struct {
-	Number        int           `json:"number"`
-	TargetBitrate int64         `json:"target_bitrate"`
-	Stable        bool          `json:"stable"`
-	Critical      bool          `json:"critical,omitempty"`
-	Duration      time.Duration `json:"duration"`
+	Number        int               `json:"number"`
+	TargetBitrate int64             `json:"target_bitrate"`
+	Stable        bool              `json:"stable"`
+	Critical      bool              `json:"critical,omitempty"`
+	Duration      time.Duration     `json:"duration"`
 	Metrics       *StabilityMetrics `json:"metrics,omitempty"`
 }
 
@@ -135,9 +135,9 @@ type DiagnosticCapture struct {
 
 // CeilingProofData contains data proving the ceiling.
 type CeilingProofData struct {
-	StableRuns     int           `json:"stable_runs"`
-	JitterTestPass bool          `json:"jitter_test_pass"`
-	ProofDuration  time.Duration `json:"proof_duration"`
+	StableRuns     int              `json:"stable_runs"`
+	JitterTestPass bool             `json:"jitter_test_pass"`
+	ProofDuration  time.Duration    `json:"proof_duration"`
 	FinalMetrics   StabilityMetrics `json:"final_metrics"`
 }
 
@@ -195,11 +195,11 @@ type FailureArtifacts struct {
 
 // SearchResult is the final result of a search.
 type SearchResult struct {
-	Status     SearchStatus     `json:"status"`
-	Ceiling    int64            `json:"ceiling"`
-	Proven     bool             `json:"proven"`
-	ProofData  *CeilingProofData `json:"proof_data,omitempty"`
-	Metrics    *StabilityMetrics `json:"metrics,omitempty"`
+	Status    SearchStatus      `json:"status"`
+	Ceiling   int64             `json:"ceiling"`
+	Proven    bool              `json:"proven"`
+	ProofData *CeilingProofData `json:"proof_data,omitempty"`
+	Metrics   *StabilityMetrics `json:"metrics,omitempty"`
 
 	// ALWAYS present, even on failure
 	Artifacts FailureArtifacts `json:"artifacts"`

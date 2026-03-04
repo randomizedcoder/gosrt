@@ -685,12 +685,12 @@ func TestPrometheusEventLoopMetrics(t *testing.T) {
 
 	// Set EventLoop metrics
 	m.EventLoopIterations.Store(100000)
-	m.EventLoopFullACKFires.Store(100)       // 100 Full ACK fires in 1 second
-	m.EventLoopNAKFires.Store(50)            // 50 NAK fires in 1 second
-	m.EventLoopRateFires.Store(10)           // 10 rate fires in 10 seconds
-	m.EventLoopDefaultRuns.Store(99800)      // Most iterations are default
-	m.EventLoopIdleBackoffs.Store(500)       // 500 idle backoffs
-	m.EventLoopControlProcessed.Store(3000)  // 3000 control packets (ACKACK, KEEPALIVE) processed inline
+	m.EventLoopFullACKFires.Store(100)      // 100 Full ACK fires in 1 second
+	m.EventLoopNAKFires.Store(50)           // 50 NAK fires in 1 second
+	m.EventLoopRateFires.Store(10)          // 10 rate fires in 10 seconds
+	m.EventLoopDefaultRuns.Store(99800)     // Most iterations are default
+	m.EventLoopIdleBackoffs.Store(500)      // 500 idle backoffs
+	m.EventLoopControlProcessed.Store(3000) // 3000 control packets (ACKACK, KEEPALIVE) processed inline
 
 	output := getPrometheusOutput(t)
 
@@ -901,8 +901,8 @@ func TestPrometheusIoUringCompletionMetrics(t *testing.T) {
 		`gosrt_iouring_send_completion_ebadf_total{socket_id="0xefef5678",instance="default",ring="0"} 1`,
 		"Send completion EBADF should be exported with ring label")
 	require.Contains(t, output,
-		`gosrt_iouring_send_completion_ctx_cancelled_total{socket_id="0xefef5678",instance="default",ring="0"} 1`,
-		"Send completion ctx cancelled should be exported with ring label")
+		`gosrt_iouring_send_completion_ctx_canceled_total{socket_id="0xefef5678",instance="default",ring="0"} 1`,
+		"Send completion ctx canceled should be exported with ring label")
 
 	// Verify ring count gauges are present
 	require.Contains(t, output, `gosrt_iouring_send_ring_count{socket_id="0xefef5678",instance="default"} 1`,
@@ -1036,13 +1036,13 @@ func TestPrometheusRecvControlRingMetrics(t *testing.T) {
 	defer UnregisterConnection(socketId, CloseReasonGraceful)
 
 	// Set receiver control ring metrics - simulate typical operation
-	m.RecvControlRingPushedACKACK.Store(1000)     // 1000 ACKACKs pushed
-	m.RecvControlRingPushedKEEPALIVE.Store(100)   // 100 KEEPALIVEs pushed
-	m.RecvControlRingDroppedACKACK.Store(2)       // 2 ACKACKs dropped (ring full fallback)
-	m.RecvControlRingDroppedKEEPALIVE.Store(0)    // 0 KEEPALIVEs dropped
-	m.RecvControlRingDrained.Store(5000)          // 5000 drain operations
-	m.RecvControlRingProcessed.Store(1098)        // 1098 total processed
-	m.RecvControlRingProcessedACKACK.Store(998)   // 998 ACKACKs processed
+	m.RecvControlRingPushedACKACK.Store(1000)      // 1000 ACKACKs pushed
+	m.RecvControlRingPushedKEEPALIVE.Store(100)    // 100 KEEPALIVEs pushed
+	m.RecvControlRingDroppedACKACK.Store(2)        // 2 ACKACKs dropped (ring full fallback)
+	m.RecvControlRingDroppedKEEPALIVE.Store(0)     // 0 KEEPALIVEs dropped
+	m.RecvControlRingDrained.Store(5000)           // 5000 drain operations
+	m.RecvControlRingProcessed.Store(1098)         // 1098 total processed
+	m.RecvControlRingProcessedACKACK.Store(998)    // 998 ACKACKs processed
 	m.RecvControlRingProcessedKEEPALIVE.Store(100) // 100 KEEPALIVEs processed
 
 	output := getPrometheusOutput(t)
@@ -1253,9 +1253,9 @@ func BenchmarkPrometheusOutputSize(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-				rec := httptest.NewRecorder()
-				handler.ServeHTTP(rec, req)
+				benchReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+				benchRec := httptest.NewRecorder()
+				handler.ServeHTTP(benchRec, benchReq)
 			}
 		})
 	}

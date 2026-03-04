@@ -28,8 +28,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/randomizedcoder/gosrt/contrib/common"
 	"github.com/pkg/profile"
+	"github.com/randomizedcoder/gosrt/contrib/common"
 )
 
 var (
@@ -222,8 +222,8 @@ func main() {
 
 			// Start publisher (sends data from generator to SRT)
 			go func() {
-				if err := pub.Run(ctx, gen); err != nil {
-					fmt.Fprintf(os.Stderr, "Publisher error: %v\n", err)
+				if runErr := pub.Run(ctx, gen); runErr != nil {
+					fmt.Fprintf(os.Stderr, "Publisher error: %v\n", runErr)
 					cs.SetConnectionAlive(false)
 				}
 			}()
@@ -240,13 +240,15 @@ func main() {
 
 		// Close publisher
 		if pub != nil {
-			pub.Close()
+			if closeErr := pub.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "publisher close error: %v\n", closeErr)
+			}
 			pub.WaitWithTimeout(5 * time.Second)
 		}
 	}
 
 	// Cleanup
-	cs.Stop()
-	metricsServer.Stop()
+	cs.Stop(ctx)
+	metricsServer.Stop(ctx)
 	fmt.Fprintf(os.Stderr, "Shutdown complete\n")
 }

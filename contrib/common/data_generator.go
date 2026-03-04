@@ -44,9 +44,9 @@ type DataGenerator struct {
 
 	// High-rate optimization: time-based pacing
 	highRateMode  bool
-	intervalNanos int64     // Expected interval between packets in nanoseconds
-	startTimeNano int64     // Start time in nanoseconds (for pacing calculation)
-	packetCount   uint64    // Non-atomic, only accessed from Read()
+	intervalNanos int64  // Expected interval between packets in nanoseconds
+	startTimeNano int64  // Start time in nanoseconds (for pacing calculation)
+	packetCount   uint64 // Non-atomic, only accessed from Read()
 
 	// Statistics (atomic for thread safety)
 	packetsGenerated atomic.Uint64
@@ -118,7 +118,7 @@ func NewDataGenerator(ctx context.Context, bitrate uint64, payloadSize uint32) *
 // 2. Waits for the rate limiter (blocking, but context-aware) - unless unlimited mode
 // 3. Copies pre-filled payload to the buffer (single memcpy)
 //
-// Returns io.EOF when the context is cancelled.
+// Returns io.EOF when the context is canceled.
 func (g *DataGenerator) Read(p []byte) (int, error) {
 	// Check for cancellation (non-blocking)
 	select {
@@ -295,4 +295,3 @@ func NewDataGeneratorUnlimited(ctx context.Context, payloadSize uint32) *DataGen
 		targetBitrate: 0,
 	}
 }
-

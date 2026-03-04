@@ -141,7 +141,7 @@ func TestWaitForStabilizationImmediate(t *testing.T) {
 		DataSent: 100,
 		DataRecv: 100,
 	}
-	getter := func() (StabilizationMetrics, error) {
+	getter := func(_ context.Context) (StabilizationMetrics, error) {
 		return stableMetrics, nil
 	}
 
@@ -163,7 +163,7 @@ func TestWaitForStabilizationImmediate(t *testing.T) {
 func TestWaitForStabilizationChangingThenStable(t *testing.T) {
 	// Getter that changes for the first few calls then stabilizes
 	var callCount atomic.Int32
-	getter := func() (StabilizationMetrics, error) {
+	getter := func(_ context.Context) (StabilizationMetrics, error) {
 		count := callCount.Add(1)
 		if count < 5 {
 			// Changing
@@ -194,7 +194,7 @@ func TestWaitForStabilizationChangingThenStable(t *testing.T) {
 func TestWaitForStabilizationTimeout(t *testing.T) {
 	// Getter that never stabilizes
 	var counter atomic.Uint64
-	getter := func() (StabilizationMetrics, error) {
+	getter := func(_ context.Context) (StabilizationMetrics, error) {
 		return StabilizationMetrics{
 			DataSent: counter.Add(1),
 		}, nil
@@ -217,7 +217,7 @@ func TestWaitForStabilizationTimeout(t *testing.T) {
 func TestWaitForStabilizationContextCancelled(t *testing.T) {
 	// Getter that never stabilizes
 	var counter atomic.Uint64
-	getter := func() (StabilizationMetrics, error) {
+	getter := func(_ context.Context) (StabilizationMetrics, error) {
 		return StabilizationMetrics{
 			DataSent: counter.Add(1),
 		}, nil
@@ -247,7 +247,7 @@ func TestWaitForStabilizationMultipleGetters(t *testing.T) {
 	// Two getters that stabilize at different times
 	var counter1, counter2 atomic.Int32
 
-	getter1 := func() (StabilizationMetrics, error) {
+	getter1 := func(_ context.Context) (StabilizationMetrics, error) {
 		count := counter1.Add(1)
 		if count < 3 {
 			return StabilizationMetrics{DataSent: uint64(count)}, nil
@@ -255,7 +255,7 @@ func TestWaitForStabilizationMultipleGetters(t *testing.T) {
 		return StabilizationMetrics{DataSent: 100}, nil
 	}
 
-	getter2 := func() (StabilizationMetrics, error) {
+	getter2 := func(_ context.Context) (StabilizationMetrics, error) {
 		count := counter2.Add(1)
 		if count < 5 {
 			return StabilizationMetrics{DataRecv: uint64(count)}, nil
@@ -328,18 +328,20 @@ func TestNewHTTPGetter(t *testing.T) {
 	// Create a test server that returns stabilization metrics
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte(`data_sent=1000
+		if _, err := w.Write([]byte(`data_sent=1000
 data_recv=950
 ack_sent=100
 ack_recv=95
 nak_sent=10
 nak_recv=8
-`))
+`)); err != nil {
+			t.Logf("w.Write error: %v", err)
+		}
 	}))
 	defer server.Close()
 
 	getter := NewHTTPGetter(server.URL + "/stabilize")
-	m, err := getter()
+	m, err := getter(context.Background())
 
 	require.NoError(t, err)
 	require.Equal(t, uint64(1000), m.DataSent)

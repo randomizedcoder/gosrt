@@ -18,9 +18,10 @@ func TestServer(t *testing.T) {
 		HandleConnect: func(req ConnRequest) ConnType {
 			streamid := req.StreamId()
 
-			if streamid == "publish" {
+			switch streamid {
+			case "publish":
 				return PUBLISH
-			} else if streamid == "subscribe" {
+			case "subscribe":
 				return SUBSCRIBE
 			}
 
@@ -36,11 +37,11 @@ func TestServer(t *testing.T) {
 	defer server.Shutdown()
 
 	go func() {
-		err := server.Serve()
-		if err == ErrServerClosed {
+		serveErr := server.Serve()
+		if serveErr == ErrServerClosed {
 			return
 		}
-		require.NoError(t, err)
+		require.NoError(t, serveErr)
 	}()
 
 	config := DefaultConfig()

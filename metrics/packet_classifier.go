@@ -28,12 +28,13 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 		// For parse errors, we typically don't have packet info
 		if !success {
 			// If we have a specific drop reason, use it; otherwise default to parse error
-			if dropReason == DropReasonParse {
+			switch {
+			case dropReason == DropReasonParse:
 				m.PktRecvErrorParse.Add(1)
-			} else if dropReason != 0 {
+			case dropReason != 0:
 				// Unknown drop reason when we have no packet
 				m.PktRecvErrorUnknown.Add(1)
-			} else {
+			default:
 				// No drop reason specified - assume parse error (most common when p == nil)
 				m.PktRecvErrorParse.Add(1)
 			}
@@ -42,7 +43,7 @@ func IncrementRecvMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 	}
 
 	h := p.Header()
-	pktLen := uint64(p.Len())
+	pktLen := p.Len()
 
 	if !success {
 		// Track error/drop using granular counters
@@ -165,12 +166,13 @@ func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 		// No packet - can't classify type, but track error
 		if !success {
 			// If we have a specific drop reason, use it; otherwise default to marshal error
-			if dropReason == DropReasonMarshal {
+			switch {
+			case dropReason == DropReasonMarshal:
 				m.PktSentErrorMarshal.Add(1)
-			} else if dropReason != 0 {
+			case dropReason != 0:
 				// Unknown drop reason when we have no packet
 				m.PktSentErrorUnknown.Add(1)
-			} else {
+			default:
 				// No drop reason specified - assume marshal error (most common when p == nil)
 				m.PktSentErrorMarshal.Add(1)
 			}
@@ -179,7 +181,7 @@ func IncrementSendMetrics(m *ConnectionMetrics, p packet.Packet, isIoUring bool,
 	}
 
 	h := p.Header()
-	pktLen := uint64(p.Len())
+	pktLen := p.Len()
 
 	if !success {
 		// Track error/drop using granular counters

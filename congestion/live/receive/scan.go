@@ -176,8 +176,8 @@ func (r *receiver) contiguousScanWithTime(now uint64) (ok bool, ackSeq uint32, s
 				// e.g., if lastContiguous=4 and seq=7, then packets 5,6 are skipped
 				expected := circular.SeqAdd(lastContiguous, 1)
 				if circular.SeqLess(expected, seq) {
-					gapSize := circular.SeqSub(seq, expected)
-					totalSkipped += uint64(gapSize)
+					innerGapSize := circular.SeqSub(seq, expected)
+					totalSkipped += uint64(innerGapSize)
 				}
 				// TSBPD expired - advance past gap to this packet
 				lastContiguous = seq
@@ -291,14 +291,6 @@ func (r *receiver) gapScan() ([]uint32, []uint64) {
 			seq := h.PacketSequenceNumber.Val()
 			pktTsbpd := h.PktTsbpdTime
 
-			// Stop if too recent - per ack_optimization_plan.md Section 3.2:
-			// Packets beyond tooRecentThreshold are in the "TOO RECENT" zone.
-			// Gaps leading to "too recent" packets might be reordering, not loss.
-			// We wait until packets age enough before considering them lost.
-			if pktTsbpd > tooRecentThreshold {
-				return false
-			}
-
 			// Skip packets at or before contiguous point
 			// MUST use circular.SeqLessOrEqual for 31-bit wraparound!
 			if circular.SeqLessOrEqual(seq, startSeq) {
@@ -308,6 +300,11 @@ func (r *receiver) gapScan() ([]uint32, []uint64) {
 				return true
 			}
 
+			// CRITICAL FIX: Detect gaps BEFORE checking "too recent" threshold.
+			// This ensures that gaps leading up to "too recent" packets are still
+			// detected and NAKed. Previously, the "too recent" check came first,
+			// causing gaps just before "too recent" packets to never be detected.
+			//
 			// Record gaps between expectedSeq and seq
 			// Use circular.SeqLess to handle wraparound in gap detection
 			if expectedSeq != seq && circular.SeqLess(expectedSeq, seq) {
@@ -321,25 +318,26 @@ func (r *receiver) gapScan() ([]uint32, []uint64) {
 
 					// Estimate TSBPD using linear interpolation or fallback
 					var estTsbpd uint64
-					if lowerTsbpd > 0 && upperTsbpd > 0 {
+					switch {
+					case lowerTsbpd > 0 && upperTsbpd > 0:
 						// Have both boundaries - use linear interpolation
 						estTsbpd = estimateTsbpdForSeq(expectedSeq, lowerSeq, lowerTsbpd, upperSeq, upperTsbpd)
 						if r.metrics != nil {
 							r.metrics.NakTsbpdEstBoundary.Add(1)
 						}
-					} else if upperTsbpd > 0 {
+					case upperTsbpd > 0:
 						// Only upper boundary - use fallback
 						estTsbpd = r.estimateTsbpdFallback(expectedSeq, upperSeq, upperTsbpd)
 						if r.metrics != nil {
 							r.metrics.NakTsbpdEstEWMA.Add(1)
 						}
-					} else if lowerTsbpd > 0 {
+					case lowerTsbpd > 0:
 						// Only lower boundary - use fallback
 						estTsbpd = r.estimateTsbpdFallback(expectedSeq, lowerSeq, lowerTsbpd)
 						if r.metrics != nil {
 							r.metrics.NakTsbpdEstEWMA.Add(1)
 						}
-					} else {
+					default:
 						// No boundaries (shouldn't happen) - use conservative estimate
 						estTsbpd = now + r.tsbpdDelay
 						if r.metrics != nil {
@@ -350,6 +348,17 @@ func (r *receiver) gapScan() ([]uint32, []uint64) {
 					gapTsbpds = append(gapTsbpds, estTsbpd)
 					expectedSeq = circular.SeqAdd(expectedSeq, 1)
 				}
+			}
+
+			// Check if this packet is "too recent" (might still be reordered)
+			// Per ack_optimization_plan.md Section 3.2: packets beyond tooRecentThreshold
+			// are in the "TOO RECENT" zone.
+			//
+			// NOTE: We've already detected any gaps leading TO this packet above.
+			// Now we decide whether to STOP scanning. If this packet is "too recent",
+			// we stop here - but we've already recorded the gaps up to this point.
+			if pktTsbpd > tooRecentThreshold {
+				return false // Stop iteration (but gaps up to this packet already recorded)
 			}
 
 			// This packet is present - if no gaps before it, advance contiguousPoint

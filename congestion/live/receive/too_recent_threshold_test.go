@@ -208,11 +208,12 @@ func TestTooRecentThreshold_Timeline(t *testing.T) {
 		tsbpdTimeMs := pkt.tsbpdTime / 1000
 
 		var actualStatus string
-		if now > pkt.tsbpdTime {
+		switch {
+		case now > pkt.tsbpdTime:
 			actualStatus = "TSBPD-expired"
-		} else if pkt.tsbpdTime > threshold {
+		case pkt.tsbpdTime > threshold:
 			actualStatus = "too-recent"
-		} else {
+		default:
 			actualStatus = "scannable"
 		}
 

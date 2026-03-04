@@ -16,7 +16,9 @@ func getUDPConnFD(pc *net.UDPConn) (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	defer file.Close()
+	// Close error ignored: this releases Go's file handle reference, not the
+	// underlying socket FD (which we duplicated). Errors are not actionable.
+	defer func() { _ = file.Close() }()
 
 	fd := int(file.Fd())
 	// Duplicate the FD so we own it

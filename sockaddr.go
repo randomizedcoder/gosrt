@@ -67,4 +67,3 @@ func convertUDPAddrToSockaddr(addr net.Addr, out *syscall.RawSockaddrAny) uint32
 
 	return 0
 }
-

@@ -68,7 +68,7 @@ func (dl *dialer) send(p packet.Packet) {
 
 	if err := p.Marshal(&dl.sndData); err != nil {
 		p.Decommission()
-		dl.log("packet:send:error", func() string { return "marshalling packet failed" })
+		dl.log("packet:send:error", func() string { return "marshaling packet failed" })
 		// Try to find connection for metrics tracking
 		dl.connLock.RLock()
 		conn := dl.conn
@@ -194,7 +194,9 @@ func (dl *dialer) Close() error {
 
 		dl.connLock.RLock()
 		if dl.conn != nil {
-			dl.conn.Close() // Connection will call connWg.Done() when done (Phase 5)
+			if closeErr := dl.conn.Close(); closeErr != nil {
+				dl.log("dial:close", func() string { return fmt.Sprintf("connection close error: %v", closeErr) })
+			}
 		}
 		dl.connLock.RUnlock()
 
@@ -237,7 +239,9 @@ func (dl *dialer) Close() error {
 		dl.cleanupIoUringRecv()
 
 		dl.log("dial", func() string { return "closing socket" })
-		dl.pc.Close()
+		if closeErr := dl.pc.Close(); closeErr != nil {
+			dl.log("dial:close", func() string { return fmt.Sprintf("socket close error: %v", closeErr) })
+		}
 
 		select {
 		case <-dl.doneChan:
@@ -254,8 +258,8 @@ func (dl *dialer) Close() error {
 }
 
 func (dl *dialer) Read(p []byte) (n int, err error) {
-	if err := dl.checkConnection(); err != nil {
-		return 0, err
+	if checkErr := dl.checkConnection(); checkErr != nil {
+		return 0, checkErr
 	}
 
 	dl.connLock.RLock()
@@ -284,8 +288,8 @@ func (dl *dialer) ReadPacket() (packet.Packet, error) {
 }
 
 func (dl *dialer) Write(p []byte) (n int, err error) {
-	if err := dl.checkConnection(); err != nil {
-		return 0, err
+	if checkErr := dl.checkConnection(); checkErr != nil {
+		return 0, checkErr
 	}
 
 	dl.connLock.RLock()
@@ -357,4 +361,3 @@ func (dl *dialer) log(topic string, message func() string) {
 
 	dl.config.Logger.Print(topic, dl.socketId, 2, message)
 }
-

@@ -19,7 +19,7 @@ import (
 // - Server goroutine: tracked with wg.Add(1) and defer wg.Done()
 //
 // Parameters:
-//   - ctx: Parent context - when cancelled, triggers graceful shutdown of servers
+//   - ctx: Parent context - when canceled, triggers graceful shutdown of servers
 //   - wg: WaitGroup to track server goroutines
 //   - httpAddr: TCP address (e.g., ":9090") - empty string means no TCP listener
 //   - udsPath: Unix socket path - empty string means no UDS listener
@@ -65,7 +65,7 @@ func startHTTPMetricsServer(ctx context.Context, wg *sync.WaitGroup, addr string
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Shutdown watcher - triggers clean shutdown when context cancelled
+	// Shutdown watcher - triggers clean shutdown when context canceled
 	// NOTE: This is fire-and-forget (no wg.Add) per the design pattern
 	go func() {
 		<-ctx.Done()
@@ -97,8 +97,9 @@ func startUDSMetricsServer(ctx context.Context, wg *sync.WaitGroup, socketPath s
 		return fmt.Errorf("failed to remove existing socket file: %w", err)
 	}
 
-	// Create Unix socket listener
-	listener, err := net.Listen("unix", socketPath)
+	// Create Unix socket listener using context-aware ListenConfig
+	lc := net.ListenConfig{}
+	listener, err := lc.Listen(ctx, "unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("failed to create Unix socket listener: %w", err)
 	}
@@ -110,19 +111,19 @@ func startUDSMetricsServer(ctx context.Context, wg *sync.WaitGroup, socketPath s
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Shutdown watcher - triggers clean shutdown when context cancelled
+	// Shutdown watcher - triggers clean shutdown when context canceled
 	// Also cleans up the socket file
 	// NOTE: This is fire-and-forget (no wg.Add) per the design pattern
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := promSrv.Shutdown(shutdownCtx); err != nil {
-			fmt.Fprintf(os.Stderr, "Prometheus UDS server shutdown error: %v\n", err)
+		if shutdownErr := promSrv.Shutdown(shutdownCtx); shutdownErr != nil {
+			fmt.Fprintf(os.Stderr, "Prometheus UDS server shutdown error: %v\n", shutdownErr)
 		}
 		// Clean up socket file after server shutdown
-		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Failed to remove socket file %s: %v\n", socketPath, err)
+		if removeErr := os.Remove(socketPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			fmt.Fprintf(os.Stderr, "Failed to remove socket file %s: %v\n", socketPath, removeErr)
 		}
 	}()
 
@@ -131,8 +132,8 @@ func startUDSMetricsServer(ctx context.Context, wg *sync.WaitGroup, socketPath s
 	go func() {
 		defer wg.Done()
 		fmt.Fprintf(os.Stderr, "Prometheus metrics UDS server started on %s\n", socketPath)
-		if err := promSrv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "Prometheus UDS server error: %v\n", err)
+		if serveErr := promSrv.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "Prometheus UDS server error: %v\n", serveErr)
 		}
 	}()
 

@@ -20,7 +20,7 @@ type DebugReaderOptions struct {
 	Bitrate uint64
 }
 
-func NewDebugReader(options DebugReaderOptions) (Reader, error) {
+func NewDebugReader(ctx context.Context, options DebugReaderOptions) (Reader, error) {
 	r := &debugReader{
 		bytesPerSec: options.Bitrate / 8,
 	}
@@ -31,28 +31,28 @@ func NewDebugReader(options DebugReaderOptions) (Reader, error) {
 
 	r.data = make(chan byte, r.bytesPerSec)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	derivedCtx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel
 
-	go r.generator(ctx)
+	go r.generator(derivedCtx)
 
 	return r, nil
 }
 
 func (r *debugReader) Read(p []byte) (int, error) {
-	len := len(p)
+	bufLen := len(p)
 
-	if len == 0 {
+	if bufLen == 0 {
 		return 0, nil
 	}
 
-	var i int = 0
+	var i = 0
 
 	for b := range r.data {
 		p[i] = b
 
-		i += 1
-		if i == len {
+		i++
+		if i == bufLen {
 			break
 		}
 	}
@@ -80,9 +80,9 @@ func (r *debugReader) generator(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for i := uint64(0); i < r.bytesPerSec/10; i += 1 {
+			for i := uint64(0); i < r.bytesPerSec/10; i++ {
 				r.data <- s[pivot]
-				pivot += 1
+				pivot++
 				if pivot >= len(s) {
 					pivot = 0
 				}

@@ -19,9 +19,9 @@ type CPUMonitor struct {
 	seekerPID int
 
 	// Last sample for delta calculation
-	lastSystemCPU SystemCPUSample
-	lastServerCPU ProcessCPUSample
-	lastSeekerCPU ProcessCPUSample
+	lastSystemCPU  SystemCPUSample
+	lastServerCPU  ProcessCPUSample
+	lastSeekerCPU  ProcessCPUSample
 	lastSampleTime time.Time
 
 	// Current usage (updated atomically for thread-safe reads)
@@ -277,7 +277,11 @@ func readSystemCPU() SystemCPUSample {
 	if err != nil {
 		return SystemCPUSample{}
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close proc file: %v\n", closeErr)
+		}
+	}()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -308,7 +312,11 @@ func readPerCoreCPU(numCores int) []SystemCPUSample {
 	if err != nil {
 		return result
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close proc file: %v\n", closeErr)
+		}
+	}()
 
 	scanner := bufio.NewScanner(f)
 	coreIdx := 0
@@ -339,7 +347,11 @@ func readProcessCPU(pid int) ProcessCPUSample {
 	if err != nil {
 		return ProcessCPUSample{}
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close proc file: %v\n", closeErr)
+		}
+	}()
 
 	scanner := bufio.NewScanner(f)
 	if scanner.Scan() {
@@ -378,7 +390,10 @@ func calculateSystemUsage(prev, curr SystemCPUSample) float64 {
 }
 
 func parseUint(s string) uint64 {
-	v, _ := strconv.ParseUint(s, 10, 64)
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0
+	}
 	return v
 }
 
@@ -395,7 +410,11 @@ func getNumCPUs() int {
 	if err != nil {
 		return 1
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close proc file: %v\n", closeErr)
+		}
+	}()
 
 	count := 0
 	scanner := bufio.NewScanner(f)

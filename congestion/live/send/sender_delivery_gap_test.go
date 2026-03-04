@@ -137,9 +137,12 @@ func TestDelivery_FullFlowWithRing(t *testing.T) {
 
 	start := time.Now()
 	s := NewSender(SendConfig{
-		InitialSequenceNumber:        circular.New(1000, packet.MAX_SEQUENCENUMBER), // Non-zero ISN
-		ConnectionMetrics:            m,
-		OnDeliver:                    func(p packet.Packet) { mu.Add(1); deliveredSeqs = append(deliveredSeqs, p.Header().PacketSequenceNumber.Val()) },
+		InitialSequenceNumber: circular.New(1000, packet.MAX_SEQUENCENUMBER), // Non-zero ISN
+		ConnectionMetrics:     m,
+		OnDeliver: func(p packet.Packet) {
+			mu.Add(1)
+			deliveredSeqs = append(deliveredSeqs, p.Header().PacketSequenceNumber.Val())
+		},
 		StartTime:                    start,
 		UseBtree:                     true,
 		BtreeDegree:                  32,
@@ -382,4 +385,3 @@ func TestDelivery_ConcurrentPushAndDrop(t *testing.T) {
 	require.Equal(t, uint64(0), m.SendRingDrainSeqGap.Load(),
 		"CRITICAL: No sequence gaps should occur during drain")
 }
-

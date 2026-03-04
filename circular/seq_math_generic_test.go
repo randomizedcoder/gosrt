@@ -409,7 +409,7 @@ func TestAllBitWidthsWraparound(t *testing.T) {
 	// 16-bit: gap of ~6 (0.01% of 65535)
 	gap16 := uint16(6)
 	a16 := MaxSeqNumber16 - gap16
-	b16 := uint16(gap16)
+	b16 := gap16
 	if !SeqLess16(a16, b16) {
 		t.Errorf("16-bit wraparound failed: SeqLess16(%d, %d) = false, want true", a16, b16)
 	}
@@ -539,7 +539,7 @@ func BenchmarkSeqDiff_Generic64(b *testing.B) {
 }
 
 func BenchmarkSeqLess_Wraparound_64(b *testing.B) {
-	x := uint64(MaxSeqNumber64 - 100)
+	x := MaxSeqNumber64 - 100
 	y := uint64(100)
 
 	b.ResetTimer()

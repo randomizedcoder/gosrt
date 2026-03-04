@@ -35,10 +35,17 @@ func (r *receiver) Tick(now uint64) {
 	// - If ACK runs first, NAK would miss gaps in expired regions
 	// - Running NAK first ensures gaps are detected before ACK skips them
 	//
-	// NAK: Use periodicNAK() which dispatches to the correct implementation:
-	// - periodicNakBtree() when useNakBtree=true (has NAK btree, merge gap, etc.)
-	// - periodicNakOriginal() otherwise
-	if list := r.periodicNAK(now); len(list) != 0 {
+	// NAK: Call locked wrapper when using NAK btree (Tick mode needs lock).
+	// - periodicNakBtreeLocked() acquires r.lock.RLock for btree access
+	// - periodicNakOriginal() has internal locking
+	// EventLoop mode calls periodicNAK() directly (single-threaded, no lock needed).
+	var list []circular.Number
+	if r.useNakBtree {
+		list = r.periodicNakBtreeLocked(now)
+	} else {
+		list = r.periodicNAK(now)
+	}
+	if len(list) != 0 {
 		// Count NAK entries using shared helper before sending.
 		// This ensures 100% consistency with how the sender counts received NAKs.
 		// RFC SRT Appendix A:
@@ -141,7 +148,10 @@ func (r *receiver) processOnePacket() bool {
 		return false // Ring empty
 	}
 
-	p := item.(packet.Packet)
+	p, ok := item.(packet.Packet)
+	if !ok {
+		return false // Invalid item
+	}
 	h := p.Header()
 	seq := h.PacketSequenceNumber
 	pktLen := p.Len()
@@ -165,14 +175,14 @@ func (r *receiver) processOnePacket() bool {
 
 	// Already acknowledged
 	if seq.Lt(r.lastACKSequenceNumber) {
-		metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, uint64(pktLen))
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonAlreadyAcked, pktLen)
 		r.releasePacketFully(p)
 		return true
 	}
 
 	// Duplicate: already in store
 	if r.packetStore.Has(seq) {
-		metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, uint64(pktLen))
+		metrics.IncrementRecvDataDrop(m, metrics.DropReasonDuplicate, pktLen)
 		r.releasePacketFully(p)
 		return true
 	}
@@ -222,8 +232,8 @@ func (r *receiver) deliverReadyPacketsWithTime(now uint64) int {
 		func(p packet.Packet) {
 			// Update metrics
 			pktLen := p.Len()
-			m.CongestionRecvPktBuf.Add(^uint64(0))                   // Decrement by 1
-			m.CongestionRecvByteBuf.Add(^uint64(uint64(pktLen) - 1)) // Subtract pktLen
+			m.CongestionRecvPktBuf.Add(^uint64(0))     // Decrement by 1
+			m.CongestionRecvByteBuf.Add(^(pktLen - 1)) // Subtract pktLen
 
 			// Note: lastDeliveredSequenceNumber removed in Phase 4 - using contiguousPoint instead
 			// contiguousPoint is already updated by contiguousScan()

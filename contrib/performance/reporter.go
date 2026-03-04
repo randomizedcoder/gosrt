@@ -145,7 +145,7 @@ func (r *ProgressReporter) printTerminalReport(result SearchResult) {
 	fmt.Printf("║    Total Probes:   %d\n", len(r.probes))
 	fmt.Printf("║    Total Time:     %v\n", time.Since(r.startTime).Round(time.Second))
 
-	if result.Artifacts.Probes != nil && len(result.Artifacts.Probes) > 0 {
+	if len(result.Artifacts.Probes) > 0 {
 		lastProbe := result.Artifacts.Probes[len(result.Artifacts.Probes)-1]
 		fmt.Printf("║    Final Bounds:   [%s, %s)\n",
 			FormatBitrate(lastProbe.TargetBitrate), FormatBitrate(result.Ceiling))
@@ -161,9 +161,10 @@ func (r *ProgressReporter) printTerminalReport(result SearchResult) {
 		if h.Triggered {
 			triggeredCount++
 			icon := "🔴"
-			if h.Confidence == "MEDIUM" {
+			switch h.Confidence {
+			case "MEDIUM":
 				icon = "🟡"
-			} else if h.Confidence == "LOW" {
+			case "LOW":
 				icon = "🟠"
 			}
 
@@ -231,7 +232,9 @@ func (r *ProgressReporter) printJSONReport(result SearchResult) {
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(report)
+	if err := enc.Encode(report); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to encode JSON report: %v\n", err)
+	}
 }
 
 // collectHypothesisEvidence analyzes probe results for bottleneck evidence.
@@ -350,8 +353,8 @@ func LoadProbes(path string) ([]ProbeRecord, error) {
 		return nil, fmt.Errorf("read probes: %w", err)
 	}
 	var probes []ProbeRecord
-	if err := json.Unmarshal(data, &probes); err != nil {
-		return nil, fmt.Errorf("unmarshal probes: %w", err)
+	if unmarshalErr := json.Unmarshal(data, &probes); unmarshalErr != nil {
+		return nil, fmt.Errorf("unmarshal probes: %w", unmarshalErr)
 	}
 	return probes, nil
 }

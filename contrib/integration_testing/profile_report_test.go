@@ -157,14 +157,14 @@ func TestGenerateHTMLReport(t *testing.T) {
 
 	// Check HTML file exists
 	htmlPath := filepath.Join(tmpDir, "report.html")
-	if _, err := os.Stat(htmlPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(htmlPath); os.IsNotExist(statErr) {
 		t.Error("HTML report was not created")
 	}
 
 	// Check HTML content
-	htmlContent, err := os.ReadFile(htmlPath)
-	if err != nil {
-		t.Fatalf("Failed to read HTML report: %v", err)
+	htmlContent, readErr := os.ReadFile(htmlPath)
+	if readErr != nil {
+		t.Fatalf("Failed to read HTML report: %v", readErr)
 	}
 
 	htmlStr := string(htmlContent)
@@ -180,13 +180,13 @@ func TestGenerateHTMLReport(t *testing.T) {
 
 	// Check JSON file exists
 	jsonPath := filepath.Join(tmpDir, "report.json")
-	if _, err := os.Stat(jsonPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(jsonPath); os.IsNotExist(statErr) {
 		t.Error("JSON report was not created")
 	}
 
 	// Check summary file exists
 	summaryPath := filepath.Join(tmpDir, "summary.txt")
-	if _, err := os.Stat(summaryPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(summaryPath); os.IsNotExist(statErr) {
 		t.Error("Summary file was not created")
 	}
 }
@@ -250,14 +250,14 @@ func TestGenerateTextSummary(t *testing.T) {
 	summaryPath := filepath.Join(tmpDir, "test_summary.txt")
 
 	report := &ProfileReport{
-		TestName:  "TestSummary",
-		Timestamp: time.Now(),
-		OutputDir: tmpDir,
+		TestName:     "TestSummary",
+		Timestamp:    time.Now(),
+		OutputDir:    tmpDir,
 		IsComparison: true,
 		OverallSummary: &PerformanceSummary{
-			CPUImprovement:  35.0,
-			MemImprovement:  20.0,
-			LockImprovement: 50.0,
+			CPUImprovement:   35.0,
+			MemImprovement:   20.0,
+			LockImprovement:  50.0,
 			BlockImprovement: 25.0,
 		},
 		Recommendations: []string{
@@ -327,4 +327,3 @@ func TestZeroCopyAssessment(t *testing.T) {
 		t.Error("Second candidate should be reusable")
 	}
 }
-

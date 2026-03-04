@@ -1,4 +1,4 @@
-// Package congestions provides interfaces and types congestion control implementations for SRT
+// Package congestion provides interfaces and types for congestion control implementations in SRT.
 package congestion
 
 import (
@@ -78,7 +78,7 @@ type Receiver interface {
 	// Flush flushes all queued packages.
 	Flush()
 
-	// Push pushed a recieved packet to the receiver queue.
+	// Push pushes a received packet to the receiver queue.
 	Push(pkt packet.Packet)
 
 	// Tick gets called from a connection in order to proceed with queued packets. The provided value for
@@ -145,7 +145,7 @@ type SendStats struct {
 	PktRetransRate float64 // Retransmission rate: bytesRetrans / bytesSent * 100 (NOT loss rate)
 }
 
-// ReceiveStats are collected statistics from a reciever
+// ReceiveStats are collected statistics from a receiver
 type ReceiveStats struct {
 	Pkt  uint64
 	Byte uint64

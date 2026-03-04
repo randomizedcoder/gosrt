@@ -69,7 +69,12 @@ func (r *receiver) consolidateNakBtree() []circular.Number {
 	}
 
 	// Get pooled slice for intermediate entries
-	entriesPtr := nakEntryPool.Get().(*[]NAKEntry)
+	entriesPtr, ok := nakEntryPool.Get().(*[]NAKEntry)
+	if !ok {
+		// Fallback: allocate a new slice if pool returns wrong type
+		fallbackSlice := make([]NAKEntry, 0, 128)
+		entriesPtr = &fallbackSlice
+	}
 	entries := *entriesPtr
 
 	// Defer: return entries to pool AFTER entriesToNakList() consumes it

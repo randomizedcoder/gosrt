@@ -100,5 +100,3 @@ func (c *srtConn) InTick() bool {
 	}
 	return c.debugCtx.inTick.Load()
 }
-
-
