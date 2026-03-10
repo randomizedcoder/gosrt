@@ -145,16 +145,6 @@ func (g *DataGenerator) instantaneousBitrate() float64 {
 	return float64(windowBytes*8) / windowDur.Seconds()
 }
 
-// legacyActualBitrate returns the measured bitrate since start (for debugging).
-func (g *DataGenerator) legacyActualBitrate() float64 {
-	bytes := g.bytesSent.Load()
-	duration := time.Since(g.startTime)
-	if duration.Seconds() > 0 {
-		return float64(bytes*8) / duration.Seconds()
-	}
-	return 0
-}
-
 // Reset clears the statistics and restarts the timer.
 func (g *DataGenerator) Reset() {
 	g.packetsSent.Store(0)

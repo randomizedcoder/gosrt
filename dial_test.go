@@ -125,7 +125,8 @@ func TestDialV4(t *testing.T) {
 				return
 			}
 
-			p, _ := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
+			p := packet.NewPacket(pc.RemoteAddr())
+			_ = p.Unmarshal(buffer[:n])
 
 			packets <- p
 		}
@@ -264,7 +265,8 @@ func TestDialV5(t *testing.T) {
 				return
 			}
 
-			p, _ := packet.NewPacketFromData(pc.RemoteAddr(), buffer[:n])
+			p := packet.NewPacket(pc.RemoteAddr())
+			_ = p.Unmarshal(buffer[:n])
 
 			packets <- p
 		}
@@ -399,8 +401,8 @@ func TestDialV5MissingExtension(t *testing.T) {
 		if ioErr != nil {
 			return // goroutine can't use require
 		}
-		p, parseErr := packet.NewPacketFromData(addr, buf[:n])
-		if parseErr != nil {
+		p := packet.NewPacket(addr)
+		if parseErr := p.Unmarshal(buf[:n]); parseErr != nil {
 			return
 		}
 		recvcif := &packet.CIFHandshake{}
@@ -444,8 +446,8 @@ func TestDialV5MissingExtension(t *testing.T) {
 		if ioErr != nil {
 			return
 		}
-		p, parseErr = packet.NewPacketFromData(addr, buf[:n])
-		if parseErr != nil {
+		p = packet.NewPacket(addr)
+		if parseErr := p.Unmarshal(buf[:n]); parseErr != nil {
 			return
 		}
 		recvcif = &packet.CIFHandshake{}

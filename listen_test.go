@@ -147,8 +147,8 @@ func TestListenHSV4(t *testing.T) {
 				return
 			}
 
-			p, parseErr := packet.NewPacketFromData(addr, buffer[:n])
-			if parseErr != nil {
+			p := packet.NewPacket(addr)
+			if parseErr := p.Unmarshal(buffer[:n]); parseErr != nil {
 				return
 			}
 
@@ -291,8 +291,8 @@ func TestListenHSV5(t *testing.T) {
 				return
 			}
 
-			p, parseErr := packet.NewPacketFromData(addr, buffer[:n])
-			if parseErr != nil {
+			p := packet.NewPacket(addr)
+			if parseErr := p.Unmarshal(buffer[:n]); parseErr != nil {
 				return
 			}
 
@@ -531,7 +531,8 @@ func TestListenHSV5MissingExtension(t *testing.T) {
 	n, err := conn.Read(inbuf)
 	require.NoError(t, err)
 
-	p, err = packet.NewPacketFromData(conn.RemoteAddr(), inbuf[:n])
+	p = packet.NewPacket(conn.RemoteAddr())
+	err = p.Unmarshal(inbuf[:n])
 	require.NoError(t, err)
 
 	recvcif := &packet.CIFHandshake{}
@@ -564,7 +565,8 @@ func TestListenHSV5MissingExtension(t *testing.T) {
 	n, err = conn.Read(inbuf)
 	require.NoError(t, err)
 
-	p, err = packet.NewPacketFromData(conn.RemoteAddr(), inbuf[:n])
+	p = packet.NewPacket(conn.RemoteAddr())
+	err = p.Unmarshal(inbuf[:n])
 	require.NoError(t, err)
 
 	recvcif = &packet.CIFHandshake{}
@@ -713,7 +715,8 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 		n, err := conn.Read(inbuf)
 		require.NoError(t, err)
 
-		p, err = packet.NewPacketFromData(conn.RemoteAddr(), inbuf[:n])
+		p = packet.NewPacket(conn.RemoteAddr())
+		err = p.Unmarshal(inbuf[:n])
 		require.NoError(t, err)
 
 		recvcif := &packet.CIFHandshake{}

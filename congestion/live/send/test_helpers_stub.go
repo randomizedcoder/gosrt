@@ -12,9 +12,3 @@ package send
 func runInEventLoopContext(s *sender, fn func()) {
 	fn()
 }
-
-// runInTickContext is a no-op wrapper in release builds.
-// Just calls the function directly (context tracking is disabled).
-func runInTickContext(s *sender, fn func()) {
-	fn()
-}

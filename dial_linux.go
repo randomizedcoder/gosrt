@@ -120,18 +120,6 @@ func (dl *dialer) incrementDialerRecvCompletionError(ringIdx int) {
 	}
 }
 
-func (dl *dialer) incrementDialerRecvPacketsProcessed(ringIdx int) {
-	if dl.conn != nil && dl.conn.metrics != nil && dl.conn.metrics.IoUringDialerRecvRingMetrics != nil && ringIdx < len(dl.conn.metrics.IoUringDialerRecvRingMetrics) {
-		dl.conn.metrics.IoUringDialerRecvRingMetrics[ringIdx].PacketsProcessed.Add(1)
-	}
-}
-
-func (dl *dialer) incrementDialerRecvBytesProcessed(ringIdx int, bytes uint64) {
-	if dl.conn != nil && dl.conn.metrics != nil && dl.conn.metrics.IoUringDialerRecvRingMetrics != nil && ringIdx < len(dl.conn.metrics.IoUringDialerRecvRingMetrics) {
-		dl.conn.metrics.IoUringDialerRecvRingMetrics[ringIdx].BytesProcessed.Add(bytes)
-	}
-}
-
 // initializeIoUringRecv initializes the io_uring receive ring(s) for the dialer
 // When IoUringRecvRingCount > 1, creates multiple independent rings for parallel processing.
 // See multi_iouring_design.md Section 4.2 for design rationale.
@@ -779,57 +767,6 @@ func (dl *dialer) recvCompletionHandler(ctx context.Context) {
 		if pendingResubmits >= batchSize {
 			dl.submitRecvRequestBatch(pendingResubmits)
 			pendingResubmits = 0
-		}
-	}
-}
-
-// drainRecvCompletions drains remaining completions during shutdown
-func (dl *dialer) drainRecvCompletions() {
-	ring, ok := dl.recvRing.(*giouring.Ring)
-	if !ok || ring == nil {
-		return
-	}
-
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
-
-	for {
-		select {
-		case <-timeout.C:
-			return
-
-		default:
-			cqe, err := ring.PeekCQE()
-			if err != nil {
-				if err == syscall.EAGAIN {
-					dl.recvCompLock.Lock()
-					empty := len(dl.recvCompletions) == 0
-					dl.recvCompLock.Unlock()
-
-					if empty {
-						return
-					}
-
-					time.Sleep(10 * time.Millisecond)
-					continue
-				}
-				return
-			}
-
-			requestID := cqe.UserData
-
-			dl.recvCompLock.Lock()
-			compInfo, exists := dl.recvCompletions[requestID]
-			if !exists {
-				dl.recvCompLock.Unlock()
-				ring.CQESeen(cqe)
-				continue
-			}
-			delete(dl.recvCompletions, requestID)
-			dl.recvCompLock.Unlock()
-
-			GetRecvBufferPool().Put(compInfo.buffer)
-			ring.CQESeen(cqe)
 		}
 	}
 }

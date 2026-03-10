@@ -60,15 +60,43 @@ func (c *srtConn) Read(b []byte) (int, error) {
 
 // WritePacket writes a packet to the write queue. Packets on the write queue
 // will be sent to the peer of the connection. Only data packets will be sent.
+//
+// WritePacket copies the packet data and pushes a new packet directly to the
+// sender, bypassing Write()'s writeBuffer copy path. The caller retains
+// ownership of the original packet and may Decommission() it after this returns.
 func (c *srtConn) WritePacket(p packet.Packet) error {
 	if p.Header().IsControlPacket {
-		// Ignore control packets
 		return nil
 	}
 
-	_, err := c.Write(p.Data())
-	if err != nil {
-		return err
+	select {
+	case <-c.ctx.Done():
+		return io.EOF
+	default:
+	}
+
+	// Create a new packet with data copied from the source.
+	// Uses NewPacket + SetData(p.Data()) instead of Clone() because Clone()
+	// copies p.payload.Bytes() which is empty when data lives in recvBuffer
+	// (zero-copy recv path). p.Data() always returns the correct data.
+	outPkt := packet.NewPacket(nil)
+	outPkt.SetData(p.Data())
+	outPkt.Header().IsControlPacket = false
+	outPkt.Header().PktTsbpdTime = c.getTimestamp()
+
+	if c.snd.UseRing() {
+		if !c.snd.PushDirect(outPkt) {
+			outPkt.Decommission()
+			c.metrics.SendRingDropped.Add(1)
+			return io.EOF
+		}
+	} else {
+		select {
+		case c.writeQueue <- outPkt:
+		default:
+			outPkt.Decommission()
+			return io.EOF
+		}
 	}
 
 	return nil

@@ -220,9 +220,9 @@ func TestDetectGaps_TooRecentThresholdExact(t *testing.T) {
 
 	// Code uses: if h.PktTsbpdTime > params.tooRecentThreshold
 	// So: TSBPD <= threshold → scan, TSBPD > threshold → stop
-	r.packetStore.Insert(createNakPhasesTestPacket(100, threshold-1))    // Below threshold - SCAN
-	r.packetStore.Insert(createNakPhasesTestPacket(101, threshold))      // At threshold - SCAN (not >)
-	r.packetStore.Insert(createNakPhasesTestPacket(102, threshold+1))    // Above threshold - STOP
+	r.packetStore.Insert(createNakPhasesTestPacket(100, threshold-1)) // Below threshold - SCAN
+	r.packetStore.Insert(createNakPhasesTestPacket(101, threshold))   // At threshold - SCAN (not >)
+	r.packetStore.Insert(createNakPhasesTestPacket(102, threshold+1)) // Above threshold - STOP
 	r.contiguousPoint.Store(99)
 
 	params := &nakScanParams{

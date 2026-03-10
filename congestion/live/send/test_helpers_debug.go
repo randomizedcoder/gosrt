@@ -23,11 +23,3 @@ func runInEventLoopContext(s *sender, fn func()) {
 	defer s.ExitEventLoop()
 	fn()
 }
-
-// runInTickContext wraps a function call with Tick context.
-// Use this in tests that call Tick-only (locking) functions.
-func runInTickContext(s *sender, fn func()) {
-	s.EnterTick()
-	defer s.ExitTick()
-	fn()
-}

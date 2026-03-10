@@ -4,6 +4,7 @@
 /contrib/client-generator/client-generator
 /contrib/client-seeker/client-seeker
 /contrib/performance/performance
+/contrib/client-udp/client-udp
 
 # Root-level binaries (from legacy builds)
 /server

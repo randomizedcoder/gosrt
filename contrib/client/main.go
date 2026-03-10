@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,48 +45,21 @@ func run() int {
 	// Parse all flags (shared + client-specific)
 	common.ParseFlags()
 
-	// Test mode: print config and exit
-	if *testflags {
-		config := srt.DefaultConfig()
-		common.ApplyFlagsToConfig(&config)
-		// Print config as JSON
-		data, err := json.MarshalIndent(config, "", "  ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
-			return 1
+	// Validate flag dependencies and auto-enable required flags
+	if warnings := common.ValidateFlagDependencies(); len(warnings) > 0 {
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "⚠ %s\n", w)
 		}
-		fmt.Println(string(data))
-		return 0
+	}
+
+	// Test mode: print config and exit
+	if exitCode, handled := common.HandleTestFlags(*testflags, nil); handled {
+		return exitCode
 	}
 
 	// Setup profiling if requested
-	var p func(*profile.Profile)
-	switch *profileFlag {
-	case "cpu":
-		p = profile.CPUProfile
-	case "mem":
-		p = profile.MemProfile
-	case "allocs":
-		p = profile.MemProfileAllocs
-	case "heap":
-		p = profile.MemProfileHeap
-	case "rate":
-		p = profile.MemProfileRate(2048)
-	case "mutex":
-		p = profile.MutexProfile
-	case "block":
-		p = profile.BlockProfile
-	case "thread":
-		p = profile.ThreadcreationProfile
-	case "trace":
-		p = profile.TraceProfile
-	default:
-	}
-
-	// Store profile so we can stop it explicitly on signal
-	var prof interface{ Stop() }
-	if p != nil {
-		prof = profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p)
+	if p := common.ProfileOption(*profileFlag); p != nil {
+		prof := profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p)
 		defer prof.Stop()
 	}
 
@@ -121,16 +93,7 @@ func run() int {
 	// ============================================================
 	// Start Logger Goroutine (if enabled)
 	// ============================================================
-	if logger != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for m := range logger.Listen() {
-				fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n",
-					m.SocketId, m.Topic, m.File, m.Line, m.Message)
-			}
-		}()
-	}
+	srt.RunLoggerOutput(logger, &wg)
 
 	// ============================================================
 	// Open Reader and Writer
@@ -158,53 +121,32 @@ func run() int {
 	// ============================================================
 	// Start Statistics Ticker (if enabled)
 	// ============================================================
-	if config.StatisticsPrintInterval > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(config.StatisticsPrintInterval)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					var connections []srt.Conn
-
-					// Check if reader is an SRT connection
-					if srtconn, ok := r.(srt.Conn); ok {
-						connections = append(connections, srtconn)
-					}
-
-					// Check if writer is an SRT connection (and not NullWriter)
-					if srtconn, ok := w.(srt.Conn); ok {
-						connections = append(connections, srtconn)
-					}
-
-					// Create labeler function for client (reader/writer labels)
-					labeler := func(index int, total int) string {
-						switch {
-						case index == 0 && total == 2:
-							return "reader"
-						case index == 1 && total == 2:
-							return "writer"
-						case total == 1:
-							// Single connection - determine if reader or writer
-							if _, ok := r.(srt.Conn); ok {
-								return "reader"
-							}
-							return "writer"
-						default:
-							return ""
-						}
-					}
-
-					common.PrintConnectionStatistics(connections, config.StatisticsPrintInterval.String(), labeler)
-				}
+	srt.StartStatisticsTicker(ctx, &wg, config.StatisticsPrintInterval,
+		func() []srt.Conn {
+			var connections []srt.Conn
+			if srtconn, ok := r.(srt.Conn); ok {
+				connections = append(connections, srtconn)
 			}
-		}()
-	}
+			if srtconn, ok := w.(srt.Conn); ok {
+				connections = append(connections, srtconn)
+			}
+			return connections
+		},
+		func(index int, total int) string {
+			switch {
+			case index == 0 && total == 2:
+				return "reader"
+			case index == 1 && total == 2:
+				return "writer"
+			case total == 1:
+				if _, ok := r.(srt.Conn); ok {
+					return "reader"
+				}
+				return "writer"
+			default:
+				return ""
+			}
+		})
 
 	// ============================================================
 	// Create Client Metrics (lock-free atomic counters)
@@ -212,38 +154,23 @@ func run() int {
 	// Application-level metrics for basic byte/packet counting
 	clientMetrics := &metrics.ConnectionMetrics{}
 
-	// Start throughput stats display loop (uses shared common function)
-	// Shows receive stats: bytes, packets, gaps, NAKs, skips (true losses), and retransmits
-	// Recovery rate = (gaps - skips) / gaps = % of gaps successfully retransmitted
-	// Use instance name from config if set, otherwise default to "SUB"
-	instanceLabel := "SUB"
-	if config.InstanceName != "" {
-		instanceLabel = config.InstanceName
-	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		common.RunThroughputDisplayWithLabelAndColor(ctx, *common.StatsPeriod, instanceLabel, *common.OutputColor, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
-			// Get gaps, NAKs, skips, and retransmit counts from the actual connection's metrics
+	// Start throughput stats display loop
+	common.StartThroughputDisplay(ctx, &wg, *common.StatsPeriod,
+		"SUB", config.InstanceName, *common.OutputColor, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
 			var gaps, naks, skips, retrans uint64
 			if socketId := connSocketId.Load(); socketId != 0 {
-				// Query the actual connection metrics
 				conns := metrics.GetConnections()
 				if connInfo, ok := conns[socketId]; ok && connInfo != nil && connInfo.Metrics != nil {
-					gaps = connInfo.Metrics.CongestionRecvPktLoss.Load()          // Sequence gaps detected
-					naks = connInfo.Metrics.CongestionRecvNAKPktsTotal.Load()     // NAK packets sent
-					skips = connInfo.Metrics.CongestionRecvPktSkippedTSBPD.Load() // TRUE losses (TSBPD expired)
+					gaps = connInfo.Metrics.CongestionRecvPktLoss.Load()
+					naks = connInfo.Metrics.CongestionRecvNAKPktsTotal.Load()
+					skips = connInfo.Metrics.CongestionRecvPktSkippedTSBPD.Load()
 					retrans = connInfo.Metrics.CongestionRecvPktRetrans.Load()
 				}
 			}
 			return clientMetrics.ByteRecvDataSuccess.Load(),
 				clientMetrics.PktRecvDataSuccess.Load(),
-				gaps,
-				naks,
-				skips,
-				retrans
+				gaps, naks, skips, retrans
 		})
-	}()
 
 	// ============================================================
 	// Main Read/Write Loop
@@ -309,30 +236,16 @@ func run() int {
 				}
 
 				// Check if error is due to connection being closed (expected during shutdown)
-				errStr := readErr.Error()
-				if strings.Contains(errStr, "connection refused") ||
-					strings.Contains(errStr, "use of closed network connection") ||
-					strings.Contains(errStr, "broken pipe") {
-					// Connection closed during shutdown - exit gracefully (don't report error)
+				if srt.IsConnectionClosedError(readErr) {
 					doneChan <- nil
 					return
 				}
 
-				// Check for net.OpError which indicates connection issues
-				if opErr, ok := readErr.(*net.OpError); ok {
-					if opErr.Err != nil {
-						opErrStr := opErr.Err.Error()
-						if strings.Contains(opErrStr, "connection refused") ||
-							strings.Contains(opErrStr, "broken pipe") {
-							// Connection closed during shutdown - exit gracefully (don't report error)
-							doneChan <- nil
-							return
-						}
-						// Check if it's a timeout error
-						if errors.Is(opErr.Err, os.ErrDeadlineExceeded) {
-							// Timeout occurred - continue loop to check context again
-							continue
-						}
+				// Check for net.OpError timeout
+				var opErr *net.OpError
+				if errors.As(readErr, &opErr) && opErr.Err != nil {
+					if errors.Is(opErr.Err, os.ErrDeadlineExceeded) {
+						continue
 					}
 				}
 
@@ -358,30 +271,12 @@ func run() int {
 				// Check if context was canceled or connection closed during shutdown
 				select {
 				case <-ctx.Done():
-					// Context canceled - exit gracefully (don't report error)
 					doneChan <- nil
 					return
 				default:
-					// Check if error is due to connection being closed (expected during shutdown)
-					errStr := writeErr.Error()
-					if strings.Contains(errStr, "connection refused") ||
-						strings.Contains(errStr, "use of closed network connection") ||
-						strings.Contains(errStr, "broken pipe") {
-						// Connection closed during shutdown - exit gracefully (don't report error)
+					if srt.IsConnectionClosedError(writeErr) {
 						doneChan <- nil
 						return
-					}
-					// Check for net.OpError which indicates connection issues
-					if opErr, ok := writeErr.(*net.OpError); ok {
-						if opErr.Err != nil {
-							opErrStr := opErr.Err.Error()
-							if strings.Contains(opErrStr, "connection refused") ||
-								strings.Contains(opErrStr, "broken pipe") {
-								// Connection closed during shutdown - exit gracefully (don't report error)
-								doneChan <- nil
-								return
-							}
-						}
 					}
 					doneChan <- fmt.Errorf("write: %w", writeErr)
 					return
@@ -423,34 +318,9 @@ func run() int {
 	// ============================================================
 	// Wait for All Goroutines with Timeout
 	// ============================================================
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		elapsedMs := time.Since(shutdownStart).Milliseconds()
-		fmt.Fprintf(os.Stderr, "Graceful shutdown complete after %dms\n", elapsedMs)
-	case <-time.After(config.ShutdownDelay):
-		elapsedMs := time.Since(shutdownStart).Milliseconds()
-		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
-	}
+	common.WaitForShutdown(&wg, shutdownStart, config.ShutdownDelay)
 
 	return 0
-}
-
-// NullWriter is an io.WriteCloser that discards all data.
-// Useful for profiling and testing SRT connections without output overhead.
-type NullWriter struct{}
-
-func (n *NullWriter) Write(p []byte) (int, error) {
-	return len(p), nil
-}
-
-func (n *NullWriter) Close() error {
-	return nil
 }
 
 func openReader(addr string, logger srt.Logger, ctx context.Context, wg *sync.WaitGroup) (io.ReadCloser, error) {

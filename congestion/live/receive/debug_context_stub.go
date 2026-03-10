@@ -13,10 +13,13 @@
 package receive
 
 // debugContext is empty in release builds (zero size).
+// Used in debug builds for lock-free context assertions.
 type debugContext struct{}
 
 // initDebugContext is a no-op in release builds.
-func (r *receiver) initDebugContext() {}
+func (r *receiver) initDebugContext() {
+	_ = r.debugCtx // field used in debug builds
+}
 
 // EnterEventLoop is a no-op in release builds.
 func (r *receiver) EnterEventLoop() {}

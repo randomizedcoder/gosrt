@@ -358,4 +358,4 @@ func Listen(ctx context.Context, network, address string, config Config, shutdow
 
 // Note: Accept2() and Accept() are in listen_accept.go
 // Note: markDone, error, handleShutdown, getConnections, isShutdown, Close, Addr are in listen_lifecycle.go
-// Note: reader, send, sendWithMetrics, sendBrokenLookup, log are in listen_io.go
+// Note: reader, send, sendWithMetrics, log are in listen_io.go

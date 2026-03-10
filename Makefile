@@ -24,8 +24,8 @@ export GOEXPERIMENT
 
 all: build
 
-## build: Build all main binaries (client, server, client-generator)
-build: client server client-generator
+## build: Build all main binaries (client, server, client-generator, client-udp)
+build: client server client-generator client-udp
 
 ## check: Run all static analysis checks (code-audit, lint)
 ## This prevents unsafe patterns from being introduced
@@ -61,7 +61,7 @@ test-quick:
 
 ## test-flags: Run flags integration tests (bash script)
 ## Tests that CLI flags are correctly parsed and applied to config
-test-flags: client server
+test-flags: client server client-udp
 	@./contrib/common/test_flags.sh
 
 ## test-adaptive-backoff: Run adaptive backoff unit tests
@@ -832,7 +832,8 @@ build-debug:
 	cd contrib/server && CGO_ENABLED=0 go build -tags debug -o server-debug -gcflags="all=-N -l" -a
 	cd contrib/client && CGO_ENABLED=0 go build -tags debug -o client-debug -gcflags="all=-N -l" -a
 	cd contrib/client-generator && CGO_ENABLED=0 go build -tags debug -o client-generator-debug -gcflags="all=-N -l" -a
-	@echo "✅ Debug binaries built (use server-debug, client-debug, client-generator-debug)"
+	cd contrib/client-udp && CGO_ENABLED=0 go build -tags debug -o client-udp-debug -gcflags="all=-N -l" -a
+	@echo "✅ Debug binaries built (use server-debug, client-debug, client-generator-debug, client-udp-debug)"
 
 ## verify-lockfree-context: Verify all context assertions compile correctly
 ## Checks both debug builds (with asserts) and release builds (with stubs)
@@ -1000,6 +1001,14 @@ client-generator:
 ## client-generator-debug: Build client-generator binary with debug symbols and no inlining (for profiling)
 client-generator-debug:
 	cd contrib/client-generator && CGO_ENABLED=0 go build -o client-generator-debug -gcflags="all=-N -l" -a
+
+## client-udp: Build client-udp binary (UDP-to-SRT bridge via io_uring, Linux only)
+client-udp:
+	cd contrib/client-udp && CGO_ENABLED=0 go build -o client-udp -ldflags="-s -w" -a
+
+## client-udp-debug: Build client-udp binary with debug symbols and no inlining (for profiling)
+client-udp-debug:
+	cd contrib/client-udp && CGO_ENABLED=0 go build -o client-udp-debug -gcflags="all=-N -l" -a
 
 ## ============================================================================
 ## PERFORMANCE TESTING (No sudo required!)

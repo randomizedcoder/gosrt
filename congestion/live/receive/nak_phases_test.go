@@ -98,6 +98,12 @@ func TestNakScanParamsStruct(t *testing.T) {
 	if !params.firstScanEver {
 		t.Error("firstScanEver should be true")
 	}
+	if params.btreeMinSeq != 100 {
+		t.Errorf("btreeMinSeq = %d, want 100", params.btreeMinSeq)
+	}
+	if params.btreeMinTsbpd != 4000000 {
+		t.Errorf("btreeMinTsbpd = %d, want 4000000", params.btreeMinTsbpd)
+	}
 }
 
 // TestNakScanResultStruct tests the nakScanResult struct.

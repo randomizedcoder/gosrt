@@ -5,7 +5,6 @@ import (
 	"math"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -1090,30 +1089,6 @@ func getMetricWithTypeLabel(metrics map[string]float64, prefix string, typeLabel
 	return sum
 }
 
-// sumMetricsByPrefix sums all metrics matching a prefix
-func sumMetricsByPrefix(metrics map[string]float64, prefix string) float64 {
-	var sum float64
-	for key, val := range metrics {
-		// Check if the base metric name matches
-		normKey := NormalizeMetricKeyForComparison(key)
-		baseName := strings.TrimPrefix(normKey, "gosrt_connection_")
-		baseName = strings.TrimPrefix(baseName, "congestion_")
-
-		// Extract just the metric name without labels
-		if idx := strings.Index(baseName, "{"); idx > 0 {
-			baseName = baseName[:idx]
-		}
-		if idx := strings.Index(baseName, " "); idx > 0 {
-			baseName = baseName[:idx]
-		}
-
-		if strings.Contains(baseName, prefix) || strings.HasPrefix(baseName, prefix) {
-			sum += val
-		}
-	}
-	return sum
-}
-
 func printComparisonSummary(baseline, highperf *TestMetrics, testDuration time.Duration) {
 	fmt.Println()
 	fmt.Printf("%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", colorCyan, colorReset)
@@ -1176,23 +1151,4 @@ func printComparisonSummary(baseline, highperf *TestMetrics, testDuration time.D
 	}
 
 	fmt.Printf("\n%s%s=== Overall: %s ===%s\n", colorBold, overallColor, overallStatus, colorReset)
-}
-
-// formatDuration formats a duration for display
-func formatDuration(d time.Duration) string {
-	if d < 0 {
-		d = -d
-	}
-
-	hours := int(d.Hours())
-	minutes := int(d.Minutes()) % 60
-	seconds := int(d.Seconds()) % 60
-
-	if hours > 0 {
-		return strconv.Itoa(hours) + "h" + strconv.Itoa(minutes) + "m" + strconv.Itoa(seconds) + "s"
-	}
-	if minutes > 0 {
-		return strconv.Itoa(minutes) + "m" + strconv.Itoa(seconds) + "s"
-	}
-	return strconv.Itoa(seconds) + "s"
 }

@@ -70,7 +70,8 @@ const (
 // completionInfo tracks pending io_uring operations
 type completionInfo struct {
 	op     int                     // opRecv or opSend
-	buffer []byte                  // Buffer for the operation
+	bufPtr *[]byte                 // Pool pointer (for returning to pool without allocation)
+	buffer []byte                  // Slice of bufPtr's data
 	msg    *syscall.Msghdr         // Msghdr for recv/send
 	iovec  *syscall.Iovec          // Iovec pointing to buffer
 	rsa    *syscall.RawSockaddrAny // Source address (recv) or dest address (send)
@@ -114,7 +115,8 @@ func main() {
 		completions: make(map[uint64]*completionInfo),
 		bufferPool: sync.Pool{
 			New: func() interface{} {
-				return make([]byte, maxPacketSize)
+				b := make([]byte, maxPacketSize)
+				return &b
 			},
 		},
 	}
@@ -224,6 +226,7 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 	// Track what we've prepared for cleanup on error
 	type pendingRequest struct {
 		requestID uint64
+		bufPtr    *[]byte
 		buffer    []byte
 		rsa       *syscall.RawSockaddrAny
 		msg       *syscall.Msghdr
@@ -233,12 +236,12 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 
 	// Phase 1: Prepare all SQEs (no Submit yet)
 	for i := 0; i < count; i++ {
-		// Get buffer from pool
-		buffer, ok := s.bufferPool.Get().([]byte)
+		// Get buffer from pool (stored as *[]byte to avoid sync.Pool allocation)
+		bufPtr, ok := s.bufferPool.Get().(*[]byte)
 		if !ok {
-			// Pool should only contain []byte, this is a programming error
-			panic("bufferPool contained non-[]byte value")
+			panic("bufferPool contained non-*[]byte value")
 		}
+		buffer := *bufPtr
 
 		// Create structures for recvmsg (must stay alive until completion)
 		rsa := new(syscall.RawSockaddrAny)
@@ -261,6 +264,7 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 		s.nextID++
 		s.completions[requestID] = &completionInfo{
 			op:     opRecv,
+			bufPtr: bufPtr,
 			buffer: buffer,
 			msg:    msg,
 			iovec:  iovec,
@@ -286,7 +290,7 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 			s.compLock.Lock()
 			delete(s.completions, requestID)
 			s.compLock.Unlock()
-			s.bufferPool.Put(buffer)
+			s.bufferPool.Put(bufPtr)
 			log.Printf("Warning: ring full after %d retries, submitted %d/%d requests", maxGetSQERetries, i, count)
 			break
 		}
@@ -298,6 +302,7 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 		// Track for potential cleanup
 		pending = append(pending, pendingRequest{
 			requestID: requestID,
+			bufPtr:    bufPtr,
 			buffer:    buffer,
 			rsa:       rsa,
 			msg:       msg,
@@ -328,7 +333,7 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 			s.compLock.Lock()
 			for _, req := range pending {
 				delete(s.completions, req.requestID)
-				s.bufferPool.Put(req.buffer)
+				s.bufferPool.Put(req.bufPtr)
 			}
 			s.compLock.Unlock()
 		}
@@ -337,12 +342,12 @@ func (s *echoServer) submitRecvRequestBatch(count int) {
 
 // submitSendRequest submits a send request to echo data back
 func (s *echoServer) submitSendRequest(data []byte, rsa *syscall.RawSockaddrAny, rsaLen uint32) {
-	// Get buffer from pool and copy data
-	buffer, ok := s.bufferPool.Get().([]byte)
+	// Get buffer from pool (stored as *[]byte to avoid sync.Pool allocation)
+	bufPtr, ok := s.bufferPool.Get().(*[]byte)
 	if !ok {
-		// Pool should only contain []byte, this is a programming error
-		panic("bufferPool contained non-[]byte value")
+		panic("bufferPool contained non-*[]byte value")
 	}
+	buffer := *bufPtr
 	n := copy(buffer, data)
 
 	// Create structures for sendmsg
@@ -368,6 +373,7 @@ func (s *echoServer) submitSendRequest(data []byte, rsa *syscall.RawSockaddrAny,
 	// Store completion info
 	s.completions[requestID] = &completionInfo{
 		op:     opSend,
+		bufPtr: bufPtr,
 		buffer: buffer,
 		msg:    msg,
 		iovec:  iovec,
@@ -381,7 +387,7 @@ func (s *echoServer) submitSendRequest(data []byte, rsa *syscall.RawSockaddrAny,
 		s.compLock.Lock()
 		delete(s.completions, requestID)
 		s.compLock.Unlock()
-		s.bufferPool.Put(buffer)
+		s.bufferPool.Put(bufPtr)
 		log.Println("Warning: ring full, could not submit send request")
 		return
 	}
@@ -395,7 +401,7 @@ func (s *echoServer) submitSendRequest(data []byte, rsa *syscall.RawSockaddrAny,
 		s.compLock.Lock()
 		delete(s.completions, requestID)
 		s.compLock.Unlock()
-		s.bufferPool.Put(buffer)
+		s.bufferPool.Put(bufPtr)
 		log.Printf("Warning: submit failed: %v", err)
 	}
 }
@@ -504,14 +510,14 @@ func (s *echoServer) handleRecvCompletion(cqe *giouring.CompletionQueueEvent, co
 		// Receive error
 		errno := syscall.Errno(-cqe.Res)
 		log.Printf("Recv error: %v", errno)
-		s.bufferPool.Put(compInfo.buffer)
+		s.bufferPool.Put(compInfo.bufPtr)
 		// Signal caller to resubmit (will be batched)
 		return true
 	}
 
 	bytesReceived := int(cqe.Res)
 	if bytesReceived == 0 {
-		s.bufferPool.Put(compInfo.buffer)
+		s.bufferPool.Put(compInfo.bufPtr)
 		return true // Resubmit needed
 	}
 
@@ -524,7 +530,7 @@ func (s *echoServer) handleRecvCompletion(cqe *giouring.CompletionQueueEvent, co
 	s.submitSendRequest(compInfo.buffer[:bytesReceived], compInfo.rsa, compInfo.msg.Namelen)
 
 	// Return recv buffer to pool
-	s.bufferPool.Put(compInfo.buffer)
+	s.bufferPool.Put(compInfo.bufPtr)
 
 	// Signal caller to schedule a resubmit (will be batched)
 	// This maintains the "pre-populated" ring state
@@ -542,7 +548,7 @@ func (s *echoServer) handleSendCompletion(cqe *giouring.CompletionQueueEvent, co
 	}
 
 	// Return buffer to pool
-	s.bufferPool.Put(compInfo.buffer)
+	s.bufferPool.Put(compInfo.bufPtr)
 	// Note: compInfo.rsa was shared with the recv, already freed
 }
 

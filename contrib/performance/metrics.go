@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -84,7 +85,14 @@ func (mc *MetricsCollector) scrapeAndParse(ctx context.Context, socketPath strin
 		Timeout: 2 * time.Second,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost/metrics", nil)
+	// Validate metrics URL (gosec G704: SSRF protection)
+	const metricsURL = "http://localhost/metrics"
+	parsedURL, parseErr := url.Parse(metricsURL)
+	if parseErr != nil || parsedURL.Scheme != "http" || (parsedURL.Hostname() != "localhost" && parsedURL.Hostname() != "127.0.0.1") {
+		return m, fmt.Errorf("invalid metrics URL: must be http://localhost")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", parsedURL.String(), nil)
 	if err != nil {
 		return m, err
 	}

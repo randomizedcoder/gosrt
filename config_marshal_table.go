@@ -12,13 +12,13 @@ import (
 
 // FieldParser defines how a single URL query parameter is parsed into Config.
 type FieldParser struct {
-	Key   string                       // Query parameter key (e.g., "latency")
-	Parse func(*Config, string) error  // Parse function
+	Key   string                      // Query parameter key (e.g., "latency")
+	Parse func(*Config, string) error // Parse function
 }
 
 // FieldSerializer defines how a single Config field is serialized to URL query.
 type FieldSerializer struct {
-	Key       string                             // Query parameter key
+	Key       string                                // Query parameter key
 	Serialize func(*Config, *Config) (string, bool) // Returns (value, shouldInclude)
 }
 
@@ -418,8 +418,8 @@ func (c *Config) unmarshalQueryTable(query string) error {
 			continue
 		}
 		if parser, ok := fieldParserMap[key]; ok {
-			if err := parser(c, values[0]); err != nil {
-				return err
+			if parseErr := parser(c, values[0]); parseErr != nil {
+				return parseErr
 			}
 		}
 	}

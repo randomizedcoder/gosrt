@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -71,34 +70,12 @@ func NewPublisher(targetURL string) *Publisher {
 
 // Connect establishes the SRT connection.
 func (p *Publisher) Connect(ctx context.Context) error {
-	u, err := url.Parse(p.targetURL)
-	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
-	}
-
-	if u.Scheme != "srt" {
-		return fmt.Errorf("unsupported scheme: %s (expected srt)", u.Scheme)
-	}
-
-	// Build config from flags
 	config := srt.DefaultConfig()
 	common.ApplyFlagsToConfig(&config)
 
-	// Set stream ID from URL path
-	streamID := u.Path
-	if streamID == "" {
-		streamID = "/"
-	}
-	// Ensure it starts with "publish:" prefix for server
-	if !strings.HasPrefix(streamID, "publish:") {
-		streamID = "publish:" + streamID
-	}
-	config.StreamId = streamID
-
 	p.config = config
 
-	// Dial the server
-	conn, err := srt.Dial(ctx, "srt", u.Host, config, p.wg)
+	conn, err := srt.DialPublisher(ctx, p.targetURL, config, p.wg)
 	if err != nil {
 		p.lastError.Store(err)
 		return fmt.Errorf("dial failed: %w", err)

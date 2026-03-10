@@ -13,10 +13,13 @@
 package send
 
 // debugContext is empty in release builds (zero size).
+// Used in debug builds for lock-free context assertions.
 type debugContext struct{}
 
 // initDebugContext is a no-op in release builds.
-func (s *sender) initDebugContext() {}
+func (s *sender) initDebugContext() {
+	_ = s.debug // field used in debug builds
+}
 
 // EnterEventLoop is a no-op in release builds.
 func (s *sender) EnterEventLoop() {}

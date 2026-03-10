@@ -87,21 +87,12 @@ func run() int {
 	}
 
 	// Test mode: print config and exit
-	if *testflags {
-		config := srt.DefaultConfig()
-		common.ApplyFlagsToConfig(&config)
-		// Handle server-specific passphrase flag (overrides shared passphrase-flag if set)
+	if exitCode, handled := common.HandleTestFlags(*testflags, func(c *srt.Config) {
 		if common.FlagSet["passphrase"] {
-			config.Passphrase = *passphrase
+			c.Passphrase = *passphrase
 		}
-		// Print config as JSON
-		data, err := json.MarshalIndent(config, "", "  ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
-			return 1
-		}
-		fmt.Println(string(data))
-		return 0
+	}); handled {
+		return exitCode
 	}
 
 	// Set server fields from flags
@@ -146,30 +137,7 @@ func run() int {
 	}
 
 	// Setup profiling if requested (after early exits)
-	var p func(*profile.Profile)
-	switch *profileFlag {
-	case "cpu":
-		p = profile.CPUProfile
-	case "mem":
-		p = profile.MemProfile
-	case "allocs":
-		p = profile.MemProfileAllocs
-	case "heap":
-		p = profile.MemProfileHeap
-	case "rate":
-		p = profile.MemProfileRate(2048)
-	case "mutex":
-		p = profile.MutexProfile
-	case "block":
-		p = profile.BlockProfile
-	case "thread":
-		p = profile.ThreadcreationProfile
-	case "trace":
-		p = profile.TraceProfile
-	default:
-	}
-
-	if p != nil {
+	if p := common.ProfileOption(*profileFlag); p != nil {
 		defer profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p).Stop()
 	}
 
@@ -193,39 +161,13 @@ func run() int {
 	// ============================================================
 	// Start Logger Goroutine (if enabled)
 	// ============================================================
-	if config.Logger != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for m := range config.Logger.Listen() {
-				fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n",
-					m.SocketId, m.Topic, m.File, m.Line, m.Message)
-			}
-		}()
-	}
+	srt.RunLoggerOutput(config.Logger, &wg)
 
 	// ============================================================
 	// Start Statistics Ticker (if enabled)
 	// ============================================================
-	if config.StatisticsPrintInterval > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(config.StatisticsPrintInterval)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					connections := s.server.GetConnections()
-					common.PrintConnectionStatistics(connections,
-						config.StatisticsPrintInterval.String(), nil)
-				}
-			}
-		}()
-	}
+	srt.StartStatisticsTicker(ctx, &wg, config.StatisticsPrintInterval,
+		func() []srt.Conn { return s.server.GetConnections() }, nil)
 
 	// ============================================================
 	// Setup and Start SRT Server
@@ -277,20 +219,7 @@ func run() int {
 	// ============================================================
 	// Wait for All Goroutines with Timeout
 	// ============================================================
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		elapsedMs := time.Since(shutdownStart).Milliseconds()
-		fmt.Fprintf(os.Stderr, "Graceful shutdown complete after %dms\n", elapsedMs)
-	case <-time.After(config.ShutdownDelay):
-		elapsedMs := time.Since(shutdownStart).Milliseconds()
-		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
-	}
+	common.WaitForShutdown(&wg, shutdownStart, config.ShutdownDelay)
 
 	return exitCode
 }

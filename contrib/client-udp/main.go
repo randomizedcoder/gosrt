@@ -23,12 +23,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -124,30 +122,18 @@ func main() {
 }
 
 func run() int {
-	// Parse all flags (shared + client-udp-specific)
 	common.ParseFlags()
 
-	// Validate flag dependencies and auto-enable required flags
 	if warnings := common.ValidateFlagDependencies(); len(warnings) > 0 {
 		for _, w := range warnings {
 			fmt.Fprintf(os.Stderr, "⚠ %s\n", w)
 		}
 	}
 
-	// Test mode: print config and exit (before profiler starts)
-	if *testflags {
-		config := srt.DefaultConfig()
-		common.ApplyFlagsToConfig(&config)
-		data, err := json.MarshalIndent(config, "", "  ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
-			return 1
-		}
-		fmt.Println(string(data))
-		return 0
+	if exitCode, handled := common.HandleTestFlags(*testflags, nil); handled {
+		return exitCode
 	}
 
-	// Validate required flags
 	if len(*from) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: -from is required\n")
 		flag.PrintDefaults()
@@ -159,81 +145,32 @@ func run() int {
 		return 1
 	}
 
-	// Setup profiling if requested
-	var p func(*profile.Profile)
-	switch *profileFlag {
-	case "cpu":
-		p = profile.CPUProfile
-	case "mem":
-		p = profile.MemProfile
-	case "allocs":
-		p = profile.MemProfileAllocs
-	case "heap":
-		p = profile.MemProfileHeap
-	case "rate":
-		p = profile.MemProfileRate(2048)
-	case "mutex":
-		p = profile.MutexProfile
-	case "block":
-		p = profile.BlockProfile
-	case "thread":
-		p = profile.ThreadcreationProfile
-	case "trace":
-		p = profile.TraceProfile
-	default:
-	}
-
-	var prof interface{ Stop() }
-	if p != nil {
-		prof = profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p)
+	if p := common.ProfileOption(*profileFlag); p != nil {
+		prof := profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p)
 		defer prof.Stop()
 	}
-	_ = prof
 
 	var logger srt.Logger
 	if len(*logtopics) != 0 {
 		logger = srt.NewLogger(strings.Split(*logtopics, ","))
 	}
 
-	// Get config for statistics interval and shutdown delay
 	config := srt.DefaultConfig()
 	common.ApplyFlagsToConfig(&config)
 
-	// Create context that cancels on signal
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	common.SetupPauseHandler(&paused, "stopping UDP receive")
 
-	// SIGUSR1 handler for graceful quiesce
-	pauseChan := make(chan os.Signal, 1)
-	signal.Notify(pauseChan, syscall.SIGUSR1)
-	go func() {
-		<-pauseChan
-		fmt.Fprintf(os.Stderr, "\nPAUSE signal received - stopping UDP receive\n")
-		paused.Store(true)
-	}()
-
-	// Single waitgroup for all goroutines
 	var wg sync.WaitGroup
 
-	// Start Prometheus Metrics Server(s) (if configured)
 	if err := common.StartMetricsServers(ctx, &wg, *common.PromHTTPAddr, *common.PromUDSPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start metrics server: %v\n", err)
 		return 1
 	}
 
-	// Start Logger Goroutine (if enabled)
-	if logger != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for m := range logger.Listen() {
-				fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n",
-					m.SocketId, m.Topic, m.File, m.Line, m.Message)
-			}
-		}()
-	}
+	srt.RunLoggerOutput(logger, &wg)
 
-	// Open SRT connection to server
 	conn, err := openWriter(ctx, *to, logger, &wg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: to: %v\n", err)
@@ -241,45 +178,16 @@ func run() int {
 		return 1
 	}
 
-	// Store connection socket ID for metrics lookup
 	var connSocketId atomic.Uint32
 	connSocketId.Store(conn.SocketId())
 
-	// Start Statistics Ticker (if enabled)
-	if config.StatisticsPrintInterval > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(config.StatisticsPrintInterval)
-			defer ticker.Stop()
+	srt.StartStatisticsTicker(ctx, &wg, config.StatisticsPrintInterval,
+		func() []srt.Conn { return []srt.Conn{conn} },
+		func(index int, total int) string { return "udp-srt" })
 
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					connections := []srt.Conn{conn}
-					labeler := func(index int, total int) string {
-						return "udp-srt"
-					}
-					common.PrintConnectionStatistics(connections, config.StatisticsPrintInterval.String(), labeler)
-				}
-			}
-		}()
-	}
-
-	// Create Client Metrics (lock-free atomic counters)
 	clientMetrics := &metrics.ConnectionMetrics{}
-
-	// Start throughput stats display loop
-	instanceLabel := "UDP-SRT"
-	if config.InstanceName != "" {
-		instanceLabel = config.InstanceName
-	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		common.RunThroughputDisplayWithLabelAndColor(ctx, *common.StatsPeriod, instanceLabel, *common.OutputColor, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
+	common.StartThroughputDisplay(ctx, &wg, *common.StatsPeriod,
+		"UDP-SRT", config.InstanceName, *common.OutputColor, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
 			var naksRecv, retrans uint64
 			if socketId := connSocketId.Load(); socketId != 0 {
 				conns := metrics.GetConnections()
@@ -290,19 +198,44 @@ func run() int {
 			}
 			return clientMetrics.ByteSentDataSuccess.Load(),
 				clientMetrics.PktSentDataSuccess.Load(),
-				0, // gaps (N/A for sender)
-				naksRecv,
-				0, // skips (N/A for sender)
-				retrans
+				0, naksRecv, 0, retrans
 		})
-	}()
 
-	// Create lock-free ring for io_uring recv -> SRT write handoff
+	u, ringErr := newUdpToSrt(clientMetrics)
+	if ringErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", ringErr)
+		return 1
+	}
+
+	if socketErr := u.createSocket(*from); socketErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to create UDP socket: %v\n", socketErr)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stderr, "UDP listening on %s\n", *from)
+
+	if ringInitErr := u.initIoUring(); ringInitErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to init io_uring: %v\n", ringInitErr)
+		_ = io.Closer(u.conn).Close()
+		return 1
+	}
+
+	totalCapacity := uint64(*pktRingSize) * uint64(*pktShards)
+	fmt.Fprintf(os.Stderr, "io_uring initialized (ring_size=%d, batch_size=%d)\n", u.ioRingSz, u.batchSz)
+	fmt.Fprintf(os.Stderr, "Packet ring: capacity=%d, shards=%d\n", totalCapacity, *pktShards)
+	fmt.Fprintf(os.Stderr, "Streaming to %s\n", *to)
+
+	u.runMainLoop(ctx, conn, &wg, logger, config)
+
+	return 0
+}
+
+// newUdpToSrt creates the lock-free ring and initializes the udpToSrt bridge.
+func newUdpToSrt(clientMetrics *metrics.ConnectionMetrics) (*udpToSrt, error) {
 	totalCapacity := uint64(*pktRingSize) * uint64(*pktShards)
 	packetRing, ringErr := ring.NewShardedRing(totalCapacity, uint64(*pktShards))
 	if ringErr != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create packet ring: %v\n", ringErr)
-		return 1
+		return nil, fmt.Errorf("failed to create packet ring: %v", ringErr)
 	}
 
 	writeConfig := ring.WriteConfig{
@@ -314,8 +247,7 @@ func run() int {
 		BackoffMultiplier:  2.0,
 	}
 
-	// Create udpToSrt struct
-	u := &udpToSrt{
+	return &udpToSrt{
 		ioRingSz:    uint32(*ioRingSize),
 		batchSz:     *batchSize,
 		completions: make(map[uint64]*completionInfo),
@@ -328,31 +260,13 @@ func run() int {
 		packetRing:    packetRing,
 		writeConfig:   writeConfig,
 		clientMetrics: clientMetrics,
-	}
+	}, nil
+}
 
-	// Create UDP socket
-	if socketErr := u.createSocket(*from); socketErr != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create UDP socket: %v\n", socketErr)
-		return 1
-	}
-
-	fmt.Fprintf(os.Stderr, "UDP listening on %s\n", *from)
-
-	// Initialize io_uring
-	if ringInitErr := u.initIoUring(); ringInitErr != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to init io_uring: %v\n", ringInitErr)
-		_ = io.Closer(u.conn).Close()
-		return 1
-	}
-
-	fmt.Fprintf(os.Stderr, "io_uring initialized (ring_size=%d, batch_size=%d)\n", u.ioRingSz, u.batchSz)
-	fmt.Fprintf(os.Stderr, "Packet ring: capacity=%d, shards=%d\n", totalCapacity, *pktShards)
-	fmt.Fprintf(os.Stderr, "Streaming to %s\n", *to)
-
-	// Pre-populate ring with receive requests
+// runMainLoop starts goroutines, waits for completion or cancellation, and cleans up.
+func (u *udpToSrt) runMainLoop(ctx context.Context, conn srt.Conn, wg *sync.WaitGroup, logger srt.Logger, config srt.Config) {
 	u.submitRecvRequestBatch(int(u.ioRingSz / 2))
 
-	// Start completion handler goroutine
 	doneChan := make(chan error, 10)
 
 	wg.Add(1)
@@ -361,14 +275,12 @@ func run() int {
 		u.completionHandler(ctx)
 	}()
 
-	// Start SRT write loop goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		u.srtWriteLoop(ctx, conn, doneChan)
 	}()
 
-	// Wait for completion or context cancellation
 	var shutdownStart time.Time
 	select {
 	case doneErr := <-doneChan:
@@ -383,7 +295,6 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "\nShutdown signal received\n")
 	}
 
-	// Cleanup
 	_ = io.Closer(conn).Close()
 	_ = io.Closer(u.conn).Close()
 	u.ioRing.QueueExit()
@@ -392,23 +303,7 @@ func run() int {
 		logger.Close()
 	}
 
-	// Wait for all goroutines with timeout
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		elapsedMs := time.Since(shutdownStart).Milliseconds()
-		fmt.Fprintf(os.Stderr, "Graceful shutdown complete after %dms\n", elapsedMs)
-	case <-time.After(config.ShutdownDelay):
-		elapsedMs := time.Since(shutdownStart).Milliseconds()
-		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
-	}
-
-	return 0
+	common.WaitForShutdown(wg, shutdownStart, config.ShutdownDelay)
 }
 
 // createSocket creates and binds a UDP socket for io_uring.
@@ -682,22 +577,9 @@ func (u *udpToSrt) srtWriteLoop(ctx context.Context, conn srt.Conn, doneChan cha
 				doneChan <- nil
 				return
 			default:
-				errStr := writeErr.Error()
-				if strings.Contains(errStr, "connection refused") ||
-					strings.Contains(errStr, "use of closed network connection") ||
-					strings.Contains(errStr, "broken pipe") {
+				if srt.IsConnectionClosedError(writeErr) {
 					doneChan <- nil
 					return
-				}
-				if opErr, isOpErr := writeErr.(*net.OpError); isOpErr {
-					if opErr.Err != nil {
-						opErrStr := opErr.Err.Error()
-						if strings.Contains(opErrStr, "connection refused") ||
-							strings.Contains(opErrStr, "broken pipe") {
-							doneChan <- nil
-							return
-						}
-					}
 				}
 				doneChan <- fmt.Errorf("write: %w", writeErr)
 				return
@@ -712,37 +594,12 @@ func (u *udpToSrt) srtWriteLoop(ctx context.Context, conn srt.Conn, doneChan cha
 
 // openWriter opens an SRT connection based on the URL scheme.
 func openWriter(ctx context.Context, address string, logger srt.Logger, wg *sync.WaitGroup) (srt.Conn, error) {
-	u, err := url.Parse(address)
-	if err != nil {
-		return nil, fmt.Errorf("invalid address: %w", err)
+	config := srt.DefaultConfig()
+	common.ApplyFlagsToConfig(&config)
+
+	if logger != nil {
+		config.Logger = logger
 	}
 
-	switch u.Scheme {
-	case "srt":
-		config := srt.DefaultConfig()
-		common.ApplyFlagsToConfig(&config)
-
-		if logger != nil {
-			config.Logger = logger
-		}
-
-		// Set stream ID in config before dialing
-		streamID := u.Path
-		if streamID == "" {
-			streamID = "/"
-		}
-		if !strings.HasPrefix(streamID, "publish:") {
-			streamID = "publish:" + streamID
-		}
-		config.StreamId = streamID
-
-		conn, dialErr := srt.Dial(ctx, "srt", u.Host, config, wg)
-		if dialErr != nil {
-			return nil, fmt.Errorf("dial: %w", dialErr)
-		}
-
-		return conn, nil
-	default:
-		return nil, fmt.Errorf("unsupported scheme: %s (expected srt://)", u.Scheme)
-	}
+	return srt.DialPublisher(ctx, address, config, wg)
 }

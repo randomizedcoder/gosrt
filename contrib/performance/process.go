@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -223,76 +224,6 @@ func baselineArgs() []string {
 	}
 }
 
-// defaultHighThroughputArgs returns default SRT configuration for high-throughput testing.
-// These match ConfigFullELLockFree + WithUltraHighThroughput from isolation tests.
-// Used when no SRT flags are explicitly set.
-func defaultHighThroughputArgs() []string {
-	return []string{
-		// Note: baseline args (conntimeo, peeridletimeo, tlpktdrop) are added separately
-
-		// Buffer configuration (WithUltraHighThroughput)
-		"-fc", "102400",
-		"-rcvbuf", "67108864",
-		"-sndbuf", "67108864",
-		"-latency", "5000",
-		"-rcvlatency", "5000",
-		"-peerlatency", "5000",
-
-		// io_uring configuration (WithMultipleRecvRings)
-		"-iouringenabled",
-		"-iouringrecvenabled",
-		"-iouringrecvringcount", "2",
-		"-iouringrecvringsize", "16384",
-		"-iouringrecvbatchsize", "1024",
-
-		// Lock-free packet ring (WithPacketRing + WithUltraHighThroughput)
-		"-usepacketring",
-		"-packetringsize", "16384",
-		"-packetringshards", "8",
-		"-packetringmaxretries", "100",
-		"-packetringbackoffduration", "50µs",
-
-		// Receiver EventLoop (WithEventLoop)
-		"-useeventloop",
-		"-eventlooprateinterval", "1s",
-		"-backoffcoldstartpkts", "1000",
-		"-backoffminsleep", "10µs",
-		"-backoffmaxsleep", "1ms",
-
-		// Completely lock-free receiver (WithRecvControlRing)
-		"-userecvcontrolring",
-		"-recvcontrolringsize", "128",
-		"-recvcontrolringshards", "1",
-
-		// Sender btree (WithSendBtree)
-		"-usesendbtree",
-		"-sendbtreesize", "32",
-
-		// Sender ring (WithSendRing + WithUltraHighThroughput)
-		"-usesendring",
-		"-sendringsize", "8192",
-		"-sendringshards", "4",
-
-		// Sender control ring + event loop (WithSendControlRing + WithSendEventLoop)
-		"-usesendcontrolring",
-		"-sendcontrolringsize", "256",
-		"-sendcontrolringshards", "2",
-		"-usesendeventloop",
-		"-sendeventloopbackoffminsleep", "100µs",
-		"-sendeventloopbackoffmaxsleep", "1ms",
-		"-sendtsbpdsleepfactor", "0.90",
-
-		// NAK and packet reordering (HighPerfSRTConfig base)
-		"-packetreorderalgorithm", "btree",
-		"-btreedegree", "32",
-		"-usenakbtree",
-		"-fastnakenabled",
-		"-fastnakrecentenabled",
-		"-honornakorder",
-		"-nakrecentpercent", "0.10",
-	}
-}
-
 // WaitReady waits for all processes to be ready.
 func (pm *ProcessManager) WaitReady(ctx context.Context) error {
 	timeout := 30 * time.Second
@@ -387,7 +318,14 @@ func (pm *ProcessManager) probeSocket(ctx context.Context, socketPath string) bo
 		Timeout: 1 * time.Second,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost/metrics", nil)
+	// Validate metrics URL (gosec G704: SSRF protection)
+	const metricsURL = "http://localhost/metrics"
+	parsedURL, parseErr := url.Parse(metricsURL)
+	if parseErr != nil || parsedURL.Scheme != "http" || (parsedURL.Hostname() != "localhost" && parsedURL.Hostname() != "127.0.0.1") {
+		return false
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", parsedURL.String(), nil)
 	if err != nil {
 		return false
 	}

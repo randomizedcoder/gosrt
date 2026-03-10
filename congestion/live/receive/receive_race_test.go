@@ -30,28 +30,6 @@ import (
 // RACE TEST INFRASTRUCTURE
 // ============================================================================
 
-// raceTestConfig defines configuration for race tests.
-type raceTestConfig struct {
-	ReceiverConfig ReceiverConfig
-	Producers      int           // Number of concurrent producer goroutines
-	PacketsPerProd int           // Packets per producer
-	Duration       time.Duration // Test duration (for time-based tests)
-	WithTicker     bool          // Run Tick() concurrently
-	TickInterval   time.Duration // Interval between Tick() calls
-}
-
-// defaultRaceConfig returns a default race test configuration.
-func defaultRaceConfig(cfg ReceiverConfig) raceTestConfig {
-	return raceTestConfig{
-		ReceiverConfig: cfg,
-		Producers:      4,
-		PacketsPerProd: 1000,
-		Duration:       2 * time.Second,
-		WithTicker:     false,
-		TickInterval:   10 * time.Millisecond,
-	}
-}
-
 // createRaceReceiver creates a receiver configured for race testing.
 func createRaceReceiver(t *testing.T, cfg ReceiverConfig, startSeq uint32) (*receiver, *raceMetrics) {
 	testMetrics := &metrics.ConnectionMetrics{

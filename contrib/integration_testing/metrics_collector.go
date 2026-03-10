@@ -132,11 +132,8 @@ func parsePrometheusMetrics(raw string) map[string]float64 {
 		name := parts[0]
 		valueStr := parts[1]
 
-		// Handle labels: extract metric name without labels for lookup
-		if idx := strings.Index(name, "{"); idx != -1 {
-			// Keep full name with labels as key
-			// This allows distinguishing metrics with different labels
-		}
+		// Name already includes labels (e.g., "metric{label=val}") which
+		// allows distinguishing metrics with different labels.
 
 		value, err := strconv.ParseFloat(valueStr, 64)
 		if err != nil {
