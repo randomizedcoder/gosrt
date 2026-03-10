@@ -674,25 +674,6 @@ func generateMatrixStream(addr net.Addr, profile StreamProfile, startSeq uint32)
 	}
 }
 
-// runNakCycles runs multiple NAK cycles to ensure all gaps are detected.
-//
-// With the unified contiguousPoint approach (Phase 14), NAK scanning only processes
-// packets in a specific time window:
-//   - Not TSBPD-expired: now < PktTsbpdTime
-//   - Not too recent: PktTsbpdTime <= now + TsbpdDelay * NakRecentPercent
-//
-// This means valid tick time for a packet is:
-//
-//	PktTsbpdTime - TsbpdDelay * NakRecentPercent <= now < PktTsbpdTime
-//
-// The window is only NakRecentPercent wide (typically 10% = 12ms for 120ms TSBPD).
-// To scan ALL packets, we slide through the stream in small steps.
-func runNakCycles(recv *receiver, streamEndTimeUs uint64, profile StreamProfile, cycles int) {
-	// Legacy function for backward compatibility - uses real time
-	var dummyMockTime uint64
-	runNakCyclesWithMockTime(recv, &dummyMockTime, streamEndTimeUs, profile, cycles)
-}
-
 func runNakCyclesWithMockTime(recv *receiver, mockTime *uint64, streamEndTimeUs uint64, profile StreamProfile, cycles int) {
 	// Stream timing:
 	// - First packet arrival: 1_000_000 µs (1 second)

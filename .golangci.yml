@@ -63,6 +63,7 @@ linters:
         - G103  # unsafe: required for io_uring
         - G115  # integer overflow: validated conversions
         - G204  # subprocess: integration tests
+        - G702  # subprocess taint: integration tests execute configured binaries
         - G301  # directory permissions: test output
         - G304  # file path variable: config loading
         - G306  # WriteFile permissions: log files
@@ -70,6 +71,9 @@ linters:
         - G501  # SHA1 PBKDF2: SRT protocol mandates
         - G505  # SHA1 import: PBKDF2-SHA1 per SRT spec
         - G602  # slice bounds: loop conditions ensure safety (i+1 < len pattern)
+        - G703  # path traversal taint: CLI tools use caller-supplied paths by design
+        - G704  # SSRF taint: metrics clients connect to local/configured endpoints
+        - G705  # XSS taint: CLI tools write to buffers/stderr, not HTTP responses
 
     gocritic:
       enabled-checks:
@@ -174,39 +178,14 @@ linters:
         linters:
           - revive
         text: "context-as-argument"
-      # SA6002: udp_echo is example code where sync.Pool []byte pattern is acceptable
-      - path: "contrib/udp_echo/main\\.go"
-        linters:
-          - staticcheck
-        text: "SA6002"
-      # unused: io_uring instrumentation functions are prepared for future metrics
-      - path: "(connection|dial|listen)_linux\\.go"
-        linters:
-          - unused
-        text: "increment.*Processed|drain.*Completions"
       # unused: debug helpers kept for development
       - path: "test_helpers_debug\\.go"
         linters:
           - unused
-      # unused: legacy functions explicitly marked for debugging
-      - path: "contrib/client-seeker/generator\\.go"
-        linters:
-          - unused
-        text: "legacyActualBitrate"
       # unused: integration testing infrastructure may have unused helpers
       - path: "contrib/integration_testing/"
         linters:
           - unused
-      # unused: performance tool infrastructure
-      - path: "contrib/performance/"
-        linters:
-          - unused
-        text: "defaultHighThroughputArgs"
-      # unused: listener sendBrokenLookup is kept for connection error handling
-      - path: "listen_io\\.go"
-        linters:
-          - unused
-
 output:
   formats:
     text:

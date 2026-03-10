@@ -102,8 +102,7 @@ func (l *logger) Print(topic string, socketId uint32, skip int, message func() s
 			// Silently recover from panic if channel is closed
 			// The recover() result is intentionally unused - we just want to catch any panic
 			if r := recover(); r != nil {
-				// Panic caught and silently ignored - this is intentional
-				// to prevent crashes when the channel is closed during shutdown
+				_ = r // Silently ignore - prevents crashes when channel is closed during shutdown
 			}
 		}()
 		select {

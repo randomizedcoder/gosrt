@@ -10,7 +10,7 @@ import (
 // FlagApplicator defines how a single CLI flag is applied to srt.Config.
 // The table-driven approach reduces cyclomatic complexity from 116 to ~5.
 type FlagApplicator struct {
-	Name  string                  // Flag name (must match flag definition)
+	Name  string                   // Flag name (must match flag definition)
 	Apply func(config *srt.Config) // Function to apply the flag value to config
 }
 

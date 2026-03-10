@@ -34,8 +34,3 @@ func (c *srtConn) sendIoUring(p packet.Packet) {
 func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 	// io_uring is only available on Linux
 }
-
-// drainCompletions is a stub for non-Linux platforms
-func (c *srtConn) drainCompletions() {
-	// io_uring is only available on Linux
-}

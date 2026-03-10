@@ -316,13 +316,13 @@ func (r *receiver) String(t uint64) string {
 	var b strings.Builder
 
 	// Note: lastDelivered replaced with contiguousPoint in Phase 4
-	b.WriteString(fmt.Sprintf("maxSeen=%d lastACK=%d contiguousPoint=%d\n", r.maxSeenSequenceNumber.Val(), r.lastACKSequenceNumber.Val(), r.contiguousPoint.Load()))
+	fmt.Fprintf(&b, "maxSeen=%d lastACK=%d contiguousPoint=%d\n", r.maxSeenSequenceNumber.Val(), r.lastACKSequenceNumber.Val(), r.contiguousPoint.Load())
 
 	r.lock.RLock()
 	r.packetStore.Iterate(func(p packet.Packet) bool {
 		// Cache header pointer to avoid multiple function calls (optimization: reduce Header() overhead)
 		h := p.Header()
-		b.WriteString(fmt.Sprintf("   %d @ %d (in %d)\n", h.PacketSequenceNumber.Val(), h.PktTsbpdTime, int64(h.PktTsbpdTime)-int64(t)))
+		fmt.Fprintf(&b, "   %d @ %d (in %d)\n", h.PacketSequenceNumber.Val(), h.PktTsbpdTime, int64(h.PktTsbpdTime)-int64(t))
 		return true // Continue
 	})
 	r.lock.RUnlock()

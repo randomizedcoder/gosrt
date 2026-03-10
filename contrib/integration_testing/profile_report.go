@@ -379,7 +379,7 @@ func GenerateHTMLReport(report *ProfileReport) error {
 	}
 
 	reportPath := filepath.Join(report.OutputDir, "report.html")
-	f, createErr := os.Create(reportPath)
+	f, createErr := os.Create(filepath.Clean(reportPath))
 	if createErr != nil {
 		return fmt.Errorf("failed to create report file: %w", createErr)
 	}
@@ -402,7 +402,7 @@ func GenerateHTMLReport(report *ProfileReport) error {
 	if jsonErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to generate JSON report: %v\n", jsonErr)
 	} else {
-		if writeErr := os.WriteFile(jsonPath, jsonData, 0644); writeErr != nil {
+		if writeErr := os.WriteFile(filepath.Clean(jsonPath), jsonData, 0644); writeErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to write JSON report: %v\n", writeErr)
 		}
 	}

@@ -122,69 +122,6 @@ func (ln *listener) sendWithMetrics(p packet.Packet, m *metrics.ConnectionMetric
 	}
 }
 
-// sendBrokenLookup is the OLD BROKEN implementation for testing error detection.
-// This uses the wrong lookup key (DestinationSocketId instead of local socketId).
-// DO NOT USE IN PRODUCTION - only for verifying error counters work.
-func (ln *listener) sendBrokenLookup(p packet.Packet) {
-	ln.sndMutex.Lock()
-	defer ln.sndMutex.Unlock()
-
-	ln.sndData.Reset()
-
-	if err := p.Marshal(&ln.sndData); err != nil {
-		p.Decommission()
-		ln.log("packet:send:error", func() string { return "marshaling packet failed" })
-		// Try to find connection for metrics tracking - THIS IS THE BUG!
-		// DestinationSocketId is the PEER's socket ID, but ln.conns is keyed by LOCAL socket ID
-		h := p.Header()
-		if h != nil {
-			val, ok := ln.conns.Load(h.DestinationSocketId) // WRONG KEY!
-			if !ok {
-				// Counter to detect this bug
-				metrics.GetListenerMetrics().SendConnLookupNotFound.Add(1)
-			} else if conn, isConn := val.(*srtConn); isConn && conn != nil && conn.metrics != nil {
-				metrics.IncrementSendMetrics(conn.metrics, p, false, false, metrics.DropReasonMarshal)
-			}
-		}
-		return
-	}
-
-	buffer := ln.sndData.Bytes()
-
-	ln.log("packet:send:dump", func() string { return p.Dump() })
-
-	// Write the packet's contents to the wire
-	_, writeErr := ln.pc.WriteTo(buffer, p.Header().Addr)
-	if writeErr != nil {
-		ln.log("packet:send:error", func() string { return fmt.Sprintf("failed to write packet to network: %v", writeErr) })
-		// Try to find connection for metrics tracking - THIS IS THE BUG!
-		h := p.Header()
-		if h != nil {
-			val, ok := ln.conns.Load(h.DestinationSocketId) // WRONG KEY!
-			if !ok {
-				metrics.GetListenerMetrics().SendConnLookupNotFound.Add(1)
-			} else if conn, isConn := val.(*srtConn); isConn && conn != nil && conn.metrics != nil {
-				metrics.IncrementSendMetrics(conn.metrics, p, false, false, metrics.DropReasonWrite)
-			}
-		}
-	} else {
-		// Success - try to find connection for metrics tracking - THIS IS THE BUG!
-		h := p.Header()
-		if h != nil {
-			val, ok := ln.conns.Load(h.DestinationSocketId) // WRONG KEY!
-			if !ok {
-				metrics.GetListenerMetrics().SendConnLookupNotFound.Add(1)
-			} else if conn, isConn := val.(*srtConn); isConn && conn != nil && conn.metrics != nil {
-				metrics.IncrementSendMetrics(conn.metrics, p, false, true, 0)
-			}
-		}
-	}
-
-	if p.Header().IsControlPacket {
-		p.Decommission()
-	}
-}
-
 func (ln *listener) log(topic string, message func() string) {
 	if ln.config.Logger == nil {
 		return

@@ -5,7 +5,7 @@ import "fmt"
 // ConfigValidator defines a single validation rule for Config.
 // The table-driven approach reduces cyclomatic complexity and improves testability.
 type ConfigValidator struct {
-	Name     string             // Descriptive name for the validator
+	Name     string              // Descriptive name for the validator
 	Validate func(*Config) error // Validation function
 }
 

@@ -252,12 +252,12 @@ func TestConfigValidators_Individual(t *testing.T) {
 			name:      "PacketRing_enabled_valid",
 			validator: validatePacketRingConfig,
 			config: Config{
-				UsePacketRing:            true,
-				PacketRingSize:           1024,
-				PacketRingShards:         4,
-				PacketRingMaxRetries:     10,
+				UsePacketRing:             true,
+				PacketRingSize:            1024,
+				PacketRingShards:          4,
+				PacketRingMaxRetries:      10,
 				PacketRingBackoffDuration: time.Millisecond,
-				PacketRingMaxBackoffs:    5,
+				PacketRingMaxBackoffs:     5,
 			},
 			wantErr: false,
 		},
@@ -304,11 +304,11 @@ func TestConfigValidators_Individual(t *testing.T) {
 			name:      "EventLoop_valid",
 			validator: validateEventLoopConfig,
 			config: Config{
-				UseEventLoop:         true,
-				UsePacketRing:        true,
+				UseEventLoop:          true,
+				UsePacketRing:         true,
 				EventLoopRateInterval: time.Second,
-				BackoffMinSleep:      time.Microsecond,
-				BackoffMaxSleep:      time.Millisecond,
+				BackoffMinSleep:       time.Microsecond,
+				BackoffMaxSleep:       time.Millisecond,
 			},
 			wantErr: false,
 		},
@@ -316,11 +316,11 @@ func TestConfigValidators_Individual(t *testing.T) {
 			name:      "EventLoop_min_greater_than_max",
 			validator: validateEventLoopConfig,
 			config: Config{
-				UseEventLoop:         true,
-				UsePacketRing:        true,
+				UseEventLoop:          true,
+				UsePacketRing:         true,
 				EventLoopRateInterval: time.Second,
-				BackoffMinSleep:      time.Second,
-				BackoffMaxSleep:      time.Millisecond,
+				BackoffMinSleep:       time.Second,
+				BackoffMaxSleep:       time.Millisecond,
 			},
 			wantErr:   true,
 			errSubstr: "BackoffMinSleep",
@@ -362,9 +362,9 @@ func TestValidate_DefaultConfig(t *testing.T) {
 // TestValidate_RequiredSettings verifies required settings are applied.
 func TestValidate_RequiredSettings(t *testing.T) {
 	config := DefaultConfig()
-	config.Congestion = ""     // Will be overwritten
-	config.NAKReport = false   // Will be overwritten
-	config.TSBPDMode = false   // Will be overwritten
+	config.Congestion = ""   // Will be overwritten
+	config.NAKReport = false // Will be overwritten
+	config.TSBPDMode = false // Will be overwritten
 
 	err := config.Validate()
 	if err != nil {

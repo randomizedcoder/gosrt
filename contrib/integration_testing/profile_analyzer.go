@@ -512,7 +512,7 @@ func (r *ComparisonResult) FormatComparison() string {
 func AnalyzeAllProfiles(ctx context.Context, profileDir string) ([]*ProfileAnalysis, error) {
 	var analyses []*ProfileAnalysis
 
-	err := filepath.Walk(profileDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(filepath.Clean(profileDir), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}

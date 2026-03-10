@@ -2,12 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -55,17 +52,8 @@ func run() int {
 	}
 
 	// Test mode: print config and exit (before profiler starts)
-	if *testflags {
-		config := srt.DefaultConfig()
-		common.ApplyFlagsToConfig(&config)
-		// Print config as JSON
-		data, err := json.MarshalIndent(config, "", "  ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error marshaling config: %v\n", err)
-			return 1
-		}
-		fmt.Println(string(data))
-		return 0
+	if exitCode, handled := common.HandleTestFlags(*testflags, nil); handled {
+		return exitCode
 	}
 
 	// Validate required flags before starting profiler
@@ -76,36 +64,10 @@ func run() int {
 	}
 
 	// Setup profiling if requested
-	var p func(*profile.Profile)
-	switch *profileFlag {
-	case "cpu":
-		p = profile.CPUProfile
-	case "mem":
-		p = profile.MemProfile
-	case "allocs":
-		p = profile.MemProfileAllocs
-	case "heap":
-		p = profile.MemProfileHeap
-	case "rate":
-		p = profile.MemProfileRate(2048)
-	case "mutex":
-		p = profile.MutexProfile
-	case "block":
-		p = profile.BlockProfile
-	case "thread":
-		p = profile.ThreadcreationProfile
-	case "trace":
-		p = profile.TraceProfile
-	default:
-	}
-
-	var prof interface{ Stop() }
-	if p != nil {
-		prof = profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p)
+	if p := common.ProfileOption(*profileFlag); p != nil {
+		prof := profile.Start(profile.ProfilePath(*profilePath), profile.NoShutdownHook, p)
 		defer prof.Stop()
 	}
-	// Silence unused variable warning when profiling is not enabled
-	_ = prof
 
 	var logger srt.Logger
 
@@ -126,13 +88,7 @@ func run() int {
 	// ============================================================
 	// SIGUSR1 handler for graceful quiesce (pause data generation)
 	// ============================================================
-	pauseChan := make(chan os.Signal, 1)
-	signal.Notify(pauseChan, syscall.SIGUSR1)
-	go func() {
-		<-pauseChan
-		fmt.Fprintf(os.Stderr, "\nPAUSE signal received - stopping data generation\n")
-		paused.Store(true)
-	}()
+	common.SetupPauseHandler(&paused, "stopping data generation")
 
 	// Single waitgroup for all goroutines
 	var wg sync.WaitGroup
@@ -148,16 +104,7 @@ func run() int {
 	// ============================================================
 	// Start Logger Goroutine (if enabled)
 	// ============================================================
-	if logger != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for m := range logger.Listen() {
-				fmt.Fprintf(os.Stderr, "%#08x %s (in %s:%d)\n%s \n",
-					m.SocketId, m.Topic, m.File, m.Line, m.Message)
-			}
-		}()
-	}
+	srt.RunLoggerOutput(logger, &wg)
 
 	// ============================================================
 	// Open Writer (SRT connection to server)
@@ -178,35 +125,14 @@ func run() int {
 	// ============================================================
 	// Start Statistics Ticker (if enabled)
 	// ============================================================
-	if config.StatisticsPrintInterval > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ticker := time.NewTicker(config.StatisticsPrintInterval)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					var connections []srt.Conn
-
-					// Check if writer is an SRT connection
-					if srtconn, ok := w.(srt.Conn); ok {
-						connections = append(connections, srtconn)
-					}
-
-					// Create labeler function for client-generator (publisher label)
-					labeler := func(index int, total int) string {
-						return "publisher"
-					}
-
-					common.PrintConnectionStatistics(connections, config.StatisticsPrintInterval.String(), labeler)
-				}
+	srt.StartStatisticsTicker(ctx, &wg, config.StatisticsPrintInterval,
+		func() []srt.Conn {
+			if srtconn, ok := w.(srt.Conn); ok {
+				return []srt.Conn{srtconn}
 			}
-		}()
-	}
+			return nil
+		},
+		func(index int, total int) string { return "publisher" })
 
 	// ============================================================
 	// Create Client Metrics (lock-free atomic counters)
@@ -214,39 +140,21 @@ func run() int {
 	// Application-level metrics for basic byte/packet counting
 	clientMetrics := &metrics.ConnectionMetrics{}
 
-	// Start throughput stats display loop (uses shared common function)
-	// Shows send stats: bytes, packets, gaps=0, NAKs received, skips=0, and retransmits
-	// Note: For senders, gaps and skips are 0 (these are receiver-side metrics)
-	// Use instance name from config if set, otherwise default to "PUB"
-	instanceLabel := "PUB"
-	if config.InstanceName != "" {
-		instanceLabel = config.InstanceName
-	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		common.RunThroughputDisplayWithLabelAndColor(ctx, *common.StatsPeriod, instanceLabel, *common.OutputColor, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
-			// Get NAK received and retransmit count from the actual connection's metrics (if available)
+	// Start throughput stats display loop
+	common.StartThroughputDisplay(ctx, &wg, *common.StatsPeriod,
+		"PUB", config.InstanceName, *common.OutputColor, func() (uint64, uint64, uint64, uint64, uint64, uint64) {
 			var naksRecv, retrans uint64
 			if socketId := connSocketId.Load(); socketId != 0 {
-				// Query the actual connection metrics
 				conns := metrics.GetConnections()
 				if connInfo, ok := conns[socketId]; ok && connInfo != nil && connInfo.Metrics != nil {
-					naksRecv = connInfo.Metrics.CongestionSendNAKPktsRecv.Load() // NAKs received from receiver
+					naksRecv = connInfo.Metrics.CongestionSendNAKPktsRecv.Load()
 					retrans = connInfo.Metrics.PktRetransFromNAK.Load()
 				}
 			}
-			// Sender doesn't have gaps/skips - those are receiver metrics
-			// Return 0 for gaps and skips, which gives recovery=100%
-			// For NAKs, show NAKs received (from receiver side)
 			return clientMetrics.ByteSentDataSuccess.Load(),
 				clientMetrics.PktSentDataSuccess.Load(),
-				0, // gaps (N/A for sender)
-				naksRecv,
-				0, // skips (N/A for sender)
-				retrans
+				0, naksRecv, 0, retrans
 		})
-	}()
 
 	// ============================================================
 	// Main Write Loop
@@ -321,26 +229,9 @@ func run() int {
 					doneChan <- nil
 					return
 				default:
-					// Check if error is due to connection being closed (expected during shutdown)
-					errStr := writeErr.Error()
-					if strings.Contains(errStr, "connection refused") ||
-						strings.Contains(errStr, "use of closed network connection") ||
-						strings.Contains(errStr, "broken pipe") {
-						// Connection closed during shutdown - exit gracefully (don't report error)
+					if srt.IsConnectionClosedError(writeErr) {
 						doneChan <- nil
 						return
-					}
-					// Check for net.OpError which indicates connection issues
-					if opErr, ok := writeErr.(*net.OpError); ok {
-						if opErr.Err != nil {
-							opErrStr := opErr.Err.Error()
-							if strings.Contains(opErrStr, "connection refused") ||
-								strings.Contains(opErrStr, "broken pipe") {
-								// Connection closed during shutdown - exit gracefully (don't report error)
-								doneChan <- nil
-								return
-							}
-						}
 					}
 					doneChan <- fmt.Errorf("write: %w", writeErr)
 					return
@@ -385,61 +276,26 @@ func run() int {
 	// ============================================================
 	// Wait for All Goroutines with Timeout
 	// ============================================================
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		elapsedMs := time.Since(shutdownStart).Milliseconds()
-		fmt.Fprintf(os.Stderr, "Graceful shutdown complete after %dms\n", elapsedMs)
-	case <-time.After(config.ShutdownDelay):
-		elapsedMs := time.Since(shutdownStart).Milliseconds()
-		fmt.Fprintf(os.Stderr, "Shutdown timed out after %s (elapsed: %dms)\n", config.ShutdownDelay, elapsedMs)
-	}
+	common.WaitForShutdown(&wg, shutdownStart, config.ShutdownDelay)
 
 	return 0
 }
 
 // openWriter opens a writer based on the URL scheme
 func openWriter(address string, logger srt.Logger, ctx context.Context, wg *sync.WaitGroup) (io.WriteCloser, error) {
-	u, err := url.Parse(address)
+	config := srt.DefaultConfig()
+	common.ApplyFlagsToConfig(&config)
+
+	if logger != nil {
+		config.Logger = logger
+	}
+
+	conn, err := srt.DialPublisher(ctx, address, config, wg)
 	if err != nil {
-		return nil, fmt.Errorf("invalid address: %w", err)
+		return nil, err
 	}
 
-	switch u.Scheme {
-	case "srt":
-		config := srt.DefaultConfig()
-		common.ApplyFlagsToConfig(&config)
-
-		if logger != nil {
-			config.Logger = logger
-		}
-
-		// Set stream ID in config before dialing
-		// Server expects "publish:/path/to/stream" format
-		streamID := u.Path
-		if streamID == "" {
-			streamID = "/"
-		}
-		// Ensure it starts with "publish:" prefix
-		if !strings.HasPrefix(streamID, "publish:") {
-			streamID = "publish:" + streamID
-		}
-		config.StreamId = streamID
-
-		conn, dialErr := srt.Dial(ctx, "srt", u.Host, config, wg)
-		if dialErr != nil {
-			return nil, fmt.Errorf("dial: %w", dialErr)
-		}
-
-		return conn, nil
-	default:
-		return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
-	}
+	return conn, nil
 }
 
 // newDataGenerator creates a rate-limited data generator using the efficient

@@ -5,6 +5,7 @@
 CLIENT_BIN="./contrib/client/client"
 SERVER_BIN="./contrib/server/server"
 CLIENTGEN_BIN="./contrib/client-generator/client-generator"
+CLIENTUDP_BIN="./contrib/client-udp/client-udp"
 
 # Colors for output
 RED='\033[0;31m'
@@ -112,6 +113,11 @@ fi
 if [ ! -f "$CLIENTGEN_BIN" ]; then
 	echo -e "${YELLOW}Warning: $CLIENTGEN_BIN not found. Building...${NC}"
 	cd "$(dirname "$CLIENTGEN_BIN")" && make client-generator && cd - > /dev/null
+fi
+
+if [ ! -f "$CLIENTUDP_BIN" ]; then
+	echo -e "${YELLOW}Warning: $CLIENTUDP_BIN not found. Building...${NC}"
+	cd "$(dirname "$CLIENTUDP_BIN")" && make client-udp && cd - > /dev/null
 fi
 
 echo "Testing CLI flags functionality"
@@ -307,6 +313,24 @@ run_test "Client-generator lock-free ring" "-usepacketring -packetringsize 2048"
 
 # Test 57: Client-generator event loop config (Phase 4)
 run_test "Client-generator event loop" "-usepacketring -useeventloop" '"UsePacketRing" *: *true.*"UseEventLoop" *: *true' "$CLIENTGEN_BIN"
+
+echo ""
+echo "--- Client-UDP Tests ---"
+echo ""
+
+# Client-udp config flags
+run_test "Client-udp latency flag" "-latency 200" '"Latency" *: *200000000' "$CLIENTUDP_BIN"
+run_test "Client-udp InstanceName" "-name TestUDP" '"InstanceName" *: *"TestUDP"' "$CLIENTUDP_BIN"
+run_test "Client-udp fc flag" "-fc 51200" '"FC" *: *51200' "$CLIENTUDP_BIN"
+run_test "Client-udp lock-free ring" "-usepacketring -packetringsize 2048" '"UsePacketRing" *: *true.*"PacketRingSize" *: *2048' "$CLIENTUDP_BIN"
+run_test "Client-udp event loop" "-usepacketring -useeventloop" '"UsePacketRing" *: *true.*"UseEventLoop" *: *true' "$CLIENTUDP_BIN"
+
+# Client-udp help flags (component-specific)
+test_help_flag "Client-udp -from flag exists" "-from" "$CLIENTUDP_BIN"
+test_help_flag "Client-udp -to flag exists" "-to" "$CLIENTUDP_BIN"
+test_help_flag "Client-udp -ioringsize flag exists" "-ioringsize" "$CLIENTUDP_BIN"
+test_help_flag "Client-udp -batchsize flag exists" "-batchsize" "$CLIENTUDP_BIN"
+test_help_flag "Client-udp -profile flag exists" "-profile" "$CLIENTUDP_BIN"
 
 # Test 58: Full lockless pipeline config (Phase 3 + Phase 4)
 run_test "Full lockless pipeline" "-usepacketring -useeventloop -packetringsize 2048 -backoffminsleep 5us" '"UsePacketRing" *: *true.*"UseEventLoop" *: *true.*"PacketRingSize" *: *2048.*"BackoffMinSleep" *: *5000' "$SERVER_BIN"

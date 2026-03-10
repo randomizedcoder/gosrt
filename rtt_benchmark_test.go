@@ -532,12 +532,8 @@ func TestRTTLastSample(t *testing.T) {
 			t.Errorf("RTTLastSample() after %v = %d, want %d", tt.sample, gotRaw, tt.wantRaw)
 		}
 
-		// Verify smoothed RTT is different from raw
+		// Verify smoothed RTT (may equal raw on first sample, diverges with EWMA)
 		smoothedRTT := r.RTT()
-		if smoothedRTT == float64(tt.wantRaw) {
-			// They could be equal if this is the first sample, but after multiple
-			// samples they should diverge due to EWMA
-		}
 
 		t.Logf("Sample: %v → Raw: %d µs, Smoothed: %.0f µs",
 			tt.sample, gotRaw, smoothedRTT)

@@ -120,18 +120,6 @@ func (c *srtConn) incrementSendCompletionSuccess(ringIdx int) {
 	}
 }
 
-func (c *srtConn) incrementSendPacketsProcessed(ringIdx int) {
-	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
-		c.metrics.IoUringSendRingMetrics[ringIdx].PacketsProcessed.Add(1)
-	}
-}
-
-func (c *srtConn) incrementSendBytesProcessed(ringIdx int, bytes uint64) {
-	if c.metrics != nil && c.metrics.IoUringSendRingMetrics != nil && ringIdx < len(c.metrics.IoUringSendRingMetrics) {
-		c.metrics.IoUringSendRingMetrics[ringIdx].BytesProcessed.Add(bytes)
-	}
-}
-
 // ioUringWaitTimeout is the timeout for WaitCQETimeout when waiting for completions.
 // The kernel blocks until either:
 //  1. A completion arrives (returns immediately - zero latency!)
@@ -349,8 +337,7 @@ func (c *srtConn) cleanupIoUring() {
 		c.sendRing = nil
 	}
 
-	// Note: drainCompletions() is NOT called here because the ring is already closed.
-	// The completion handler processes all pending CQEs until it receives EBADF from
+	// Note: The completion handler processes all pending CQEs until it receives EBADF from
 	// WaitCQE(), so there's nothing left to drain. Calling PeekCQE() after QueueExit()
 	// would cause a segfault.
 
@@ -699,79 +686,6 @@ func (c *srtConn) sendCompletionHandler(ctx context.Context) {
 		c.sendBufferPool.Put(buffer)
 		// No extra flag check needed here - ctx.Done() at top of loop is sufficient
 		// With 10ms WaitCQETimeout, we'll check context within 10ms anyway
-	}
-}
-
-// drainCompletions processes any remaining completions during shutdown
-func (c *srtConn) drainCompletions() {
-	ring, ok := c.sendRing.(*giouring.Ring)
-	if !ok || ring == nil {
-		return
-	}
-
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
-
-	for {
-		select {
-		case <-timeout.C:
-			// Timeout - give up on remaining completions
-			c.log("connection:send:drain", func() string {
-				return "timeout draining completions"
-			})
-			return
-
-		default:
-			// Try to get completion (non-blocking)
-			cqe, err := ring.PeekCQE()
-			if err != nil {
-				// EBADF means ring was closed via QueueExit() - exit immediately
-				// This is the normal case when drainCompletions is called during shutdown
-				if err == syscall.EBADF {
-					return
-				}
-
-				if err == syscall.EAGAIN {
-					// No completions available - check if map is empty
-					c.sendCompLock.RLock()
-					empty := len(c.sendCompletions) == 0
-					c.sendCompLock.RUnlock()
-
-					if empty {
-						return // All completions processed
-					}
-
-					// Wait a bit before checking again
-					time.Sleep(10 * time.Millisecond)
-					continue
-				}
-
-				// Other error
-				c.log("connection:send:drain:error", func() string {
-					return fmt.Sprintf("error peeking completion: %v", err)
-				})
-				return
-			}
-
-			// Process completion
-			requestID := cqe.UserData
-
-			c.sendCompLock.Lock()
-			compInfo, exists := c.sendCompletions[requestID]
-			if !exists {
-				c.sendCompLock.Unlock()
-				ring.CQESeen(cqe)
-				continue
-			}
-			delete(c.sendCompletions, requestID)
-			c.sendCompLock.Unlock()
-
-			// Cleanup
-			compInfo.buffer.Reset() // Reset before putting back
-			c.sendBufferPool.Put(compInfo.buffer)
-
-			ring.CQESeen(cqe)
-		}
 	}
 }
 

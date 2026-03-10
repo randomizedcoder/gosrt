@@ -77,44 +77,12 @@ func main() {
 		initialBitrate = 100_000_000 // Default 100 Mb/s
 	}
 
-	// Create context with signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Create context that cancels on signal
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// Handle signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-sigChan
-		fmt.Fprintf(os.Stderr, "\nReceived signal %v, shutting down...\n", sig)
-		cancel()
-	}()
-
-	// Setup profiling if requested (same as server/client-generator/client)
-	var p func(*profile.Profile)
-	switch *flagProfile {
-	case "cpu":
-		p = profile.CPUProfile
-	case "mem":
-		p = profile.MemProfile
-	case "allocs":
-		p = profile.MemProfileAllocs
-	case "heap":
-		p = profile.MemProfileHeap
-	case "rate":
-		p = profile.MemProfileRate(2048)
-	case "mutex":
-		p = profile.MutexProfile
-	case "block":
-		p = profile.BlockProfile
-	case "thread":
-		p = profile.ThreadcreationProfile
-	case "trace":
-		p = profile.TraceProfile
-	default:
-	}
-
-	if p != nil {
+	// Setup profiling if requested
+	if p := common.ProfileOption(*flagProfile); p != nil {
 		defer profile.Start(profile.ProfilePath(*flagProfilePath), profile.NoShutdownHook, p).Stop()
 	}
 
@@ -151,7 +119,7 @@ func main() {
 		SafeBitrate: *flagWatchdogSafe,
 		StopTimeout: *flagWatchdogStop,
 	}
-	watchdog := NewWatchdog(watchdogConfig, cs, bm, cancel)
+	watchdog := NewWatchdog(watchdogConfig, cs, bm, stop)
 
 	// Create Publisher (if -target specified)
 	var pub *Publisher
@@ -166,7 +134,7 @@ func main() {
 	go func() {
 		if err := cs.Start(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Control server error: %v\n", err)
-			cancel()
+			stop()
 		}
 	}()
 
@@ -215,7 +183,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nConnecting to SRT server...\n")
 		if err := pub.Connect(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to connect: %v\n", err)
-			cancel()
+			stop()
 		} else {
 			fmt.Fprintf(os.Stderr, "Connected! Socket ID: %d\n", pub.SocketID())
 			cs.SetConnectionAlive(true)

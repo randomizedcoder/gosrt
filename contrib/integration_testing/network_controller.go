@@ -428,11 +428,14 @@ func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern
 				fmt.Printf("[PATTERN] Event #%d: Applying %d%% loss at %v (latency profile %d)\n",
 					eventCount, nextEvent.LossPercent, time.Now().Format("15:04:05.000"), nc.CurrentLatencyProfile)
 			}
-			// Use inline bash with CURRENT_LATENCY_PROFILE set explicitly
-			script := fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent %d",
-				nc.ScriptDir, nc.CurrentLatencyProfile, nextEvent.LossPercent)
-			cmd := exec.CommandContext(ctx, "bash", "-c", script)
-			cmd.Env = nc.buildScriptEnv()
+			// Use inline bash with variables passed via environment (not interpolated into script)
+			cmd := exec.CommandContext(ctx, "bash", "-c",
+				"source \"${SCRIPT_DIR}/lib.sh\" && CURRENT_LATENCY_PROFILE=${LATENCY_PROFILE} && set_loss_percent ${LOSS_PERCENT}")
+			cmd.Env = append(nc.buildScriptEnv(),
+				"SCRIPT_DIR="+nc.ScriptDir,
+				"LATENCY_PROFILE="+strconv.Itoa(nc.CurrentLatencyProfile),
+				"LOSS_PERCENT="+strconv.Itoa(nextEvent.LossPercent),
+			)
 			if output, err := cmd.CombinedOutput(); err != nil {
 				fmt.Fprintf(os.Stderr, "[PATTERN] ERROR applying %d%% loss: %v\nOutput: %s\n", nextEvent.LossPercent, err, string(output))
 			}
@@ -449,10 +452,13 @@ func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern
 			}
 			nc.mu.Lock()
 			if nc.isSetup {
-				script := fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent 0",
-					nc.ScriptDir, nc.CurrentLatencyProfile)
-				cmd := exec.CommandContext(ctx, "bash", "-c", script)
-				cmd.Env = nc.buildScriptEnv()
+				cmd := exec.CommandContext(ctx, "bash", "-c",
+					"source \"${SCRIPT_DIR}/lib.sh\" && CURRENT_LATENCY_PROFILE=${LATENCY_PROFILE} && set_loss_percent ${LOSS_PERCENT}")
+				cmd.Env = append(nc.buildScriptEnv(),
+					"SCRIPT_DIR="+nc.ScriptDir,
+					"LATENCY_PROFILE="+strconv.Itoa(nc.CurrentLatencyProfile),
+					"LOSS_PERCENT=0",
+				)
 				if output, err := cmd.CombinedOutput(); err != nil {
 					fmt.Fprintf(os.Stderr, "[PATTERN] ERROR clearing loss on exit: %v\nOutput: %s\n", err, string(output))
 				}
@@ -470,10 +476,13 @@ func (nc *NetworkController) runPattern(ctx context.Context, pattern LossPattern
 				fmt.Printf("[PATTERN] Event #%d: Clearing loss at %v (after %v)\n",
 					eventCount, time.Now().Format("15:04:05.000"), nextEvent.Duration)
 			}
-			script := fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent 0",
-				nc.ScriptDir, nc.CurrentLatencyProfile)
-			cmd := exec.CommandContext(ctx, "bash", "-c", script)
-			cmd.Env = nc.buildScriptEnv()
+			cmd := exec.CommandContext(ctx, "bash", "-c",
+				"source \"${SCRIPT_DIR}/lib.sh\" && CURRENT_LATENCY_PROFILE=${LATENCY_PROFILE} && set_loss_percent ${LOSS_PERCENT}")
+			cmd.Env = append(nc.buildScriptEnv(),
+				"SCRIPT_DIR="+nc.ScriptDir,
+				"LATENCY_PROFILE="+strconv.Itoa(nc.CurrentLatencyProfile),
+				"LOSS_PERCENT=0",
+			)
 			if output, err := cmd.CombinedOutput(); err != nil {
 				fmt.Fprintf(os.Stderr, "[PATTERN] ERROR clearing loss: %v\nOutput: %s\n", err, string(output))
 			}
@@ -669,10 +678,13 @@ func (nc *NetworkController) SetLossParallel(ctx context.Context, lossPercent in
 	// Source lib.sh and call set_loss_percent_parallel
 	// IMPORTANT: Pass CURRENT_LATENCY_PROFILE explicitly because bash variable
 	// doesn't persist across invocations (each bash -c creates fresh environment)
-	script := fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent_parallel %d",
-		nc.ScriptDir, nc.CurrentLatencyProfile, lossPercent)
-	cmd := exec.CommandContext(ctx, "bash", "-c", script)
-	cmd.Env = nc.buildScriptEnv()
+	cmd := exec.CommandContext(ctx, "bash", "-c",
+		"source \"${SCRIPT_DIR}/lib.sh\" && CURRENT_LATENCY_PROFILE=${LATENCY_PROFILE} && set_loss_percent_parallel ${LOSS_PERCENT}")
+	cmd.Env = append(nc.buildScriptEnv(),
+		"SCRIPT_DIR="+nc.ScriptDir,
+		"LATENCY_PROFILE="+strconv.Itoa(nc.CurrentLatencyProfile),
+		"LOSS_PERCENT="+strconv.Itoa(lossPercent),
+	)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -789,10 +801,13 @@ func (nc *NetworkController) runPatternParallel(ctx context.Context, pattern Los
 
 		nc.mu.Lock()
 		// IMPORTANT: Pass CURRENT_LATENCY_PROFILE explicitly
-		script := fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent_parallel %d",
-			nc.ScriptDir, nc.CurrentLatencyProfile, event.LossPercent)
-		cmd := exec.CommandContext(ctx, "bash", "-c", script)
-		cmd.Env = nc.buildScriptEnv()
+		cmd := exec.CommandContext(ctx, "bash", "-c",
+			"source \"${SCRIPT_DIR}/lib.sh\" && CURRENT_LATENCY_PROFILE=${LATENCY_PROFILE} && set_loss_percent_parallel ${LOSS_PERCENT}")
+		cmd.Env = append(nc.buildScriptEnv(),
+			"SCRIPT_DIR="+nc.ScriptDir,
+			"LATENCY_PROFILE="+strconv.Itoa(nc.CurrentLatencyProfile),
+			"LOSS_PERCENT="+strconv.Itoa(event.LossPercent),
+		)
 		if err := cmd.Run(); err != nil {
 			if nc.Verbose {
 				fmt.Fprintf(os.Stderr, "[PATTERN] ERROR applying parallel loss: %v\n", err)
@@ -811,10 +826,12 @@ func (nc *NetworkController) runPatternParallel(ctx context.Context, pattern Los
 		case <-ctx.Done():
 			// Clear loss before exiting
 			nc.mu.Lock()
-			clearScript := fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent_parallel 0",
-				nc.ScriptDir, nc.CurrentLatencyProfile)
-			clearCmd := exec.CommandContext(context.Background(), "bash", "-c", clearScript)
-			clearCmd.Env = nc.buildScriptEnv()
+			clearCmd := exec.CommandContext(context.Background(), "bash", "-c",
+				"source \"${SCRIPT_DIR}/lib.sh\" && CURRENT_LATENCY_PROFILE=${LATENCY_PROFILE} && set_loss_percent_parallel 0")
+			clearCmd.Env = append(nc.buildScriptEnv(),
+				"SCRIPT_DIR="+nc.ScriptDir,
+				"LATENCY_PROFILE="+strconv.Itoa(nc.CurrentLatencyProfile),
+			)
 			if err := clearCmd.Run(); err != nil {
 				fmt.Fprintf(os.Stderr, "[PATTERN] Error clearing loss on exit: %v\n", err)
 			}
@@ -832,10 +849,12 @@ func (nc *NetworkController) runPatternParallel(ctx context.Context, pattern Los
 
 		nc.mu.Lock()
 		// IMPORTANT: Pass CURRENT_LATENCY_PROFILE explicitly
-		script = fmt.Sprintf("source %s/lib.sh && CURRENT_LATENCY_PROFILE=%d && set_loss_percent_parallel 0",
-			nc.ScriptDir, nc.CurrentLatencyProfile)
-		cmd = exec.CommandContext(ctx, "bash", "-c", script)
-		cmd.Env = nc.buildScriptEnv()
+		cmd = exec.CommandContext(ctx, "bash", "-c",
+			"source \"${SCRIPT_DIR}/lib.sh\" && CURRENT_LATENCY_PROFILE=${LATENCY_PROFILE} && set_loss_percent_parallel 0")
+		cmd.Env = append(nc.buildScriptEnv(),
+			"SCRIPT_DIR="+nc.ScriptDir,
+			"LATENCY_PROFILE="+strconv.Itoa(nc.CurrentLatencyProfile),
+		)
 		if err := cmd.Run(); err != nil {
 			if nc.Verbose {
 				fmt.Fprintf(os.Stderr, "[PATTERN] ERROR clearing parallel loss: %v\n", err)
@@ -865,20 +884,6 @@ func (nc *NetworkController) buildScriptEnv() []string {
 
 // runScript executes a script with the TEST_ID environment variable
 func (nc *NetworkController) runScript(ctx context.Context, script string, args ...string) error {
-	scriptPath := filepath.Join(nc.ScriptDir, script)
-	cmd := exec.CommandContext(ctx, scriptPath, args...)
-	cmd.Env = nc.buildScriptEnv()
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s failed: %w\nOutput: %s", script, err, string(output))
-	}
-
-	return nil
-}
-
-// runScriptUnlocked is like runScript but assumes the mutex is already held
-func (nc *NetworkController) runScriptUnlocked(ctx context.Context, script string, args ...string) error {
 	scriptPath := filepath.Join(nc.ScriptDir, script)
 	cmd := exec.CommandContext(ctx, scriptPath, args...)
 	cmd.Env = nc.buildScriptEnv()

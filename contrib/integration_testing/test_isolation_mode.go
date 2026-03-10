@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -602,8 +603,17 @@ func printPrometheusMetrics(label string, udsPath string) {
 		Timeout: 5 * time.Second,
 	}
 
+	// Validate metrics URL (gosec G704: SSRF protection)
+	const metricsURL = "http://localhost/metrics"
+	parsedURL, parseErr := url.Parse(metricsURL)
+	if parseErr != nil || parsedURL.Scheme != "http" || (parsedURL.Hostname() != "localhost" && parsedURL.Hostname() != "127.0.0.1") {
+		fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
+		fmt.Println("(invalid metrics URL: must be http://localhost)")
+		return
+	}
+
 	// Fetch metrics using context-aware request
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost/metrics", nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, parsedURL.String(), nil)
 	if err != nil {
 		fmt.Printf("\n=== PROMETHEUS METRICS (%s) ===\n", label)
 		fmt.Printf("(error creating request: %v)\n", err)

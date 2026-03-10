@@ -821,20 +821,6 @@ func (ln *listener) incrementListenerRecvSubmitRetries(ringIdx int) {
 	}
 }
 
-func (ln *listener) incrementListenerRecvPacketsProcessed(ringIdx int) {
-	lm := metrics.GetListenerMetrics()
-	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
-		lm.IoUringRecvRingMetrics[ringIdx].PacketsProcessed.Add(1)
-	}
-}
-
-func (ln *listener) incrementListenerRecvBytesProcessed(ringIdx int, bytes uint64) {
-	lm := metrics.GetListenerMetrics()
-	if lm.IoUringRecvRingMetrics != nil && ringIdx < len(lm.IoUringRecvRingMetrics) {
-		lm.IoUringRecvRingMetrics[ringIdx].BytesProcessed.Add(bytes)
-	}
-}
-
 // submitRecvRequestBatch submits multiple receive requests in a batch
 // This is more efficient than calling submitRecvRequest() multiple times
 // Reduces syscall overhead by batching multiple submissions together
@@ -968,9 +954,6 @@ func (ln *listener) recvCompletionHandler(ctx context.Context) {
 			if pendingResubmits > 0 {
 				ln.submitRecvRequestBatch(pendingResubmits)
 			}
-			// Skip drainRecvCompletions - it takes too long (5s timeout) and
-			// the ring will be closed by cleanupIoUringRecv() anyway.
-			// ln.drainRecvCompletions()
 			return
 		default:
 		}
@@ -999,75 +982,6 @@ func (ln *listener) recvCompletionHandler(ctx context.Context) {
 		if pendingResubmits >= batchSize {
 			ln.submitRecvRequestBatch(pendingResubmits)
 			pendingResubmits = 0
-		}
-	}
-}
-
-// drainRecvCompletions drains remaining completions during shutdown
-func (ln *listener) drainRecvCompletions() {
-	ring, ok := ln.recvRing.(*giouring.Ring)
-	if !ok || ring == nil {
-		return
-	}
-
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
-
-	for {
-		select {
-		case <-timeout.C:
-			// Timeout - give up on remaining completions
-			// Don't log during shutdown if logger might be closed
-			if !ln.isShutdown() {
-				ln.log("listen:recv:drain", func() string {
-					return "timeout draining receive completions"
-				})
-			}
-			return
-
-		default:
-			// Try to get completion (non-blocking, same pattern as send path)
-			cqe, err := ring.PeekCQE()
-			if err != nil {
-				if err == syscall.EAGAIN {
-					// No completions available - check if map is empty
-					ln.recvCompLock.Lock()
-					empty := len(ln.recvCompletions) == 0
-					ln.recvCompLock.Unlock()
-
-					if empty {
-						return // All completions processed
-					}
-
-					// Wait a bit before checking again
-					time.Sleep(10 * time.Millisecond)
-					continue
-				}
-
-				// Other error
-				ln.log("listen:recv:drain:error", func() string {
-					return fmt.Sprintf("error peeking completion: %v", err)
-				})
-				return
-			}
-
-			// Process completion (same pattern as send path)
-			requestID := cqe.UserData
-
-			ln.recvCompLock.Lock()
-			compInfo, exists := ln.recvCompletions[requestID]
-			if !exists {
-				ln.recvCompLock.Unlock()
-				ring.CQESeen(cqe)
-				continue
-			}
-			delete(ln.recvCompletions, requestID)
-			ln.recvCompLock.Unlock()
-
-			// Cleanup (no reset needed - kernel overwrites on next use)
-			GetRecvBufferPool().Put(compInfo.buffer)
-
-			ring.CQESeen(cqe)
 		}
 	}
 }
