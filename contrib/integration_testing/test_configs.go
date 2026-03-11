@@ -2280,6 +2280,40 @@ var ParallelTestConfigs = []ParallelTestConfig{
 		CollectInterval: 2 * time.Second,
 		ProfileDuration: 5 * time.Minute,
 	},
+
+	// ========================================================================
+	// FFMPEG PUBLISHER PARALLEL TESTS
+	// ========================================================================
+	// These tests exercise the real-world ingest path:
+	// ffmpeg (testsrc MPEG-TS) -> UDP -> client-udp -> SRT -> server -> SRT -> client
+	// 4 processes per pipeline x 2 pipelines = 8 processes total.
+
+	{
+		Name:          "Parallel-FFmpeg-Clean-5M-Base-vs-Full",
+		Description:   "FFmpeg->client-udp: Baseline vs HighPerf at 5 Mb/s (clean network)",
+		PublisherType: PublisherTypeFFmpegUDP,
+		Baseline: PipelineConfig{
+			PublisherIP:  "10.1.1.2",
+			ServerIP:     "10.2.1.2",
+			SubscriberIP: "10.1.2.2",
+			ServerPort:   6000,
+			StreamID:     "test-stream-baseline",
+			SRT:          BaselineSRTConfig,
+		},
+		HighPerf: PipelineConfig{
+			PublisherIP:  "10.1.1.3",
+			ServerIP:     "10.2.1.3",
+			SubscriberIP: "10.1.2.3",
+			ServerPort:   6001,
+			StreamID:     "test-stream-highperf",
+			SRT:          HighPerfSRTConfig,
+		},
+		Bitrate:         5_000_000,
+		TestDuration:    60 * time.Second,
+		ConnectionWait:  5 * time.Second,
+		CollectInterval: 2 * time.Second,
+		ProfileDuration: 5 * time.Minute,
+	},
 }
 
 // GetParallelTestConfigByName finds a parallel test configuration by name

@@ -1033,6 +1033,44 @@ type ParallelTestConfig struct {
 	// Verbose output
 	VerboseMetrics bool // Print detailed metrics deltas
 	VerboseNetwork bool // Print network controller logs
+
+	// Publisher type selection
+	PublisherType PublisherType          // "" = client-generator (default), "ffmpeg" = ffmpeg→client-udp
+	FFmpegConfig  *FFmpegPublisherConfig // nil = use defaults (only when PublisherType == "ffmpeg")
+}
+
+// PublisherType selects the data source for parallel tests.
+type PublisherType string
+
+const (
+	// PublisherTypeClientGen uses client-generator (synthetic data source). Default.
+	PublisherTypeClientGen PublisherType = ""
+	// PublisherTypeFFmpegUDP uses ffmpeg → client-udp (real-world ingest path).
+	PublisherTypeFFmpegUDP PublisherType = "ffmpeg"
+)
+
+// FFmpegPublisherConfig holds settings for the ffmpeg → client-udp publisher pipeline.
+type FFmpegPublisherConfig struct {
+	BaselineUDPPort int    // UDP port for baseline pipeline (default 5000)
+	HighPerfUDPPort int    // UDP port for highperf pipeline (default 5001)
+	Resolution      string // Video resolution (default "640x360")
+	Framerate       int    // Video framerate (default 25)
+	Encoder         string // Video encoder (default "libx264")
+	Preset          string // Encoder preset (default "ultrafast")
+	PktSize         int    // RTP packet size (default 1316)
+}
+
+// DefaultFFmpegPublisherConfig returns sensible defaults for ffmpeg publisher tests.
+func DefaultFFmpegPublisherConfig() *FFmpegPublisherConfig {
+	return &FFmpegPublisherConfig{
+		BaselineUDPPort: 5000,
+		HighPerfUDPPort: 5001,
+		Resolution:      "640x360",
+		Framerate:       25,
+		Encoder:         "libx264",
+		Preset:          "ultrafast",
+		PktSize:         1316,
+	}
 }
 
 // BaselineSRTConfig is the standard configuration: linked list, no io_uring
@@ -1170,6 +1208,82 @@ func (c *ParallelTestConfig) GetAllUDSPaths(testID string) map[string]string {
 		"server_highperf":    fmt.Sprintf("/tmp/srt_server_highperf_%s.sock", testID),
 		"clientgen_baseline": fmt.Sprintf("/tmp/srt_clientgen_baseline_%s.sock", testID),
 		"clientgen_highperf": fmt.Sprintf("/tmp/srt_clientgen_highperf_%s.sock", testID),
+		"client_baseline":    fmt.Sprintf("/tmp/srt_client_baseline_%s.sock", testID),
+		"client_highperf":    fmt.Sprintf("/tmp/srt_client_highperf_%s.sock", testID),
+	}
+}
+
+// getFFmpegConfig returns the FFmpegPublisherConfig, using defaults if nil.
+func (c *ParallelTestConfig) getFFmpegConfig() *FFmpegPublisherConfig {
+	if c.FFmpegConfig != nil {
+		return c.FFmpegConfig
+	}
+	return DefaultFFmpegPublisherConfig()
+}
+
+// GetBaselineClientUDPFlags returns CLI flags for the baseline client-udp process.
+func (c *ParallelTestConfig) GetBaselineClientUDPFlags(testID string) []string {
+	cfg := c.getFFmpegConfig()
+	return c.getClientUDPFlags(c.Baseline, "baseline", testID, cfg.BaselineUDPPort)
+}
+
+// GetHighPerfClientUDPFlags returns CLI flags for the high-perf client-udp process.
+func (c *ParallelTestConfig) GetHighPerfClientUDPFlags(testID string) []string {
+	cfg := c.getFFmpegConfig()
+	return c.getClientUDPFlags(c.HighPerf, "highperf", testID, cfg.HighPerfUDPPort)
+}
+
+func (c *ParallelTestConfig) getClientUDPFlags(p PipelineConfig, label, testID string, udpPort int) []string {
+	udsPath := fmt.Sprintf("/tmp/srt_clientudp_%s_%s.sock", label, testID)
+	publisherURL := fmt.Sprintf("srt://%s/%s", p.GetServerAddr(), p.StreamID)
+	flags := []string{
+		"-from", fmt.Sprintf(":%d", udpPort),
+		"-to", publisherURL,
+		"-promuds", udsPath,
+		"-name", label + "-cudp",
+	}
+	if color := getPipelineColor(label); color != "" {
+		flags = append(flags, "-color", color)
+	}
+	flags = append(flags, p.SRT.ToCliFlags()...)
+	return flags
+}
+
+// GetBaselineFFmpegArgs returns ffmpeg command-line arguments for the baseline pipeline.
+func (c *ParallelTestConfig) GetBaselineFFmpegArgs() []string {
+	cfg := c.getFFmpegConfig()
+	return c.getFFmpegArgs(cfg.BaselineUDPPort, cfg)
+}
+
+// GetHighPerfFFmpegArgs returns ffmpeg command-line arguments for the highperf pipeline.
+func (c *ParallelTestConfig) GetHighPerfFFmpegArgs() []string {
+	cfg := c.getFFmpegConfig()
+	return c.getFFmpegArgs(cfg.HighPerfUDPPort, cfg)
+}
+
+func (c *ParallelTestConfig) getFFmpegArgs(udpPort int, cfg *FFmpegPublisherConfig) []string {
+	bitrateStr := strconv.FormatInt(c.Bitrate, 10)
+	return []string{
+		"-re",
+		"-f", "lavfi",
+		"-i", fmt.Sprintf("testsrc=size=%s:rate=%d", cfg.Resolution, cfg.Framerate),
+		"-c:v", cfg.Encoder,
+		"-preset", cfg.Preset,
+		"-tune", "zerolatency",
+		"-b:v", bitrateStr,
+		"-f", "rtp",
+		fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=%d", udpPort, cfg.PktSize),
+	}
+}
+
+// GetAllUDSPathsFFmpeg returns all 6 UDS paths for ffmpeg publisher mode metrics collection.
+// Uses clientudp_ prefix instead of clientgen_ for the publisher component.
+func (c *ParallelTestConfig) GetAllUDSPathsFFmpeg(testID string) map[string]string {
+	return map[string]string{
+		"server_baseline":    fmt.Sprintf("/tmp/srt_server_baseline_%s.sock", testID),
+		"server_highperf":    fmt.Sprintf("/tmp/srt_server_highperf_%s.sock", testID),
+		"clientgen_baseline": fmt.Sprintf("/tmp/srt_clientudp_baseline_%s.sock", testID),
+		"clientgen_highperf": fmt.Sprintf("/tmp/srt_clientudp_highperf_%s.sock", testID),
 		"client_baseline":    fmt.Sprintf("/tmp/srt_client_baseline_%s.sock", testID),
 		"client_highperf":    fmt.Sprintf("/tmp/srt_client_highperf_%s.sock", testID),
 	}

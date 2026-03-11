@@ -295,6 +295,20 @@ test-parallel-sender-all: integration-testing client server client-generator
 	@echo ""
 	@echo "All Lockless Sender tests complete!"
 
+## test-parallel-ffmpeg: FFmpeg->client-udp parallel test (clean, 5 Mb/s)
+## sudo make test-parallel-ffmpeg
+test-parallel-ffmpeg: integration-testing client server client-udp
+	@echo "Running FFmpeg->client-udp parallel test: clean network, 5 Mb/s"
+	@cd contrib/integration_testing && ./integration_testing parallel-test Parallel-FFmpeg-Clean-5M-Base-vs-Full
+
+## test-cleanroom: Clean room integration test (no sudo, loopback, ffmpeg required)
+## Full pipeline: ffmpeg -> client-udp -> server -> client on 127.10.10.10
+## make test-cleanroom
+test-cleanroom: integration-testing client server client-udp
+	@echo "Running clean room integration test (no sudo required)"
+	@echo "Pipeline: ffmpeg -> client-udp -> server -> client on 127.10.10.10"
+	@cd contrib/integration_testing && ./integration_testing cleanroom-test
+
 ## test-isolation-list: List available isolation test configurations
 test-isolation-list:
 	@cd contrib/integration_testing && go run . list-isolation-configs
@@ -1134,6 +1148,9 @@ nixshell:
 .PHONY: test-parallel-list test-parallel test-parallel-all integration-testing
 .PHONY: test-parallel-sender test-parallel-sender-full test-parallel-sender-high
 .PHONY: test-parallel-sender-loss test-parallel-sender-starlink test-parallel-sender-all
+.PHONY: test-parallel-ffmpeg
+# Clean room testing targets (no root needed)
+.PHONY: test-cleanroom
 # Isolation testing targets (require root)
 .PHONY: test-isolation-list test-isolation test-isolation-all test-isolation-strategies
 .PHONY: test-isolation-sender-list test-isolation-sender-phases test-isolation-sender-server

@@ -11,12 +11,15 @@ import (
 	"time"
 )
 
-// ParallelProcessSet holds the 3 processes for one pipeline
+// ParallelProcessSet holds the processes for one pipeline.
+// ClientGen is client-generator (default) or client-udp (ffmpeg mode).
+// FFmpeg is non-nil only in ffmpeg publisher mode.
 type ParallelProcessSet struct {
-	Label     string // "baseline" or "highperf"
-	Server    *exec.Cmd
-	ClientGen *exec.Cmd
-	Client    *exec.Cmd
+	Label     string    // "baseline" or "highperf"
+	Server    *exec.Cmd // SRT server
+	ClientGen *exec.Cmd // client-generator OR client-udp (depending on PublisherType)
+	FFmpeg    *exec.Cmd // ffmpeg process (nil for client-generator mode)
+	Client    *exec.Cmd // SRT subscriber client
 }
 
 // ParallelTestResult holds the results from both pipelines
@@ -684,21 +687,41 @@ func printParallelConfigOnly(config ParallelTestConfig) {
 	printParallelTestHeader(config)
 
 	baselineServerFlags := config.GetBaselineServerFlags(placeholderTestID)
-	baselineClientGenFlags := config.GetBaselineClientGeneratorFlags(placeholderTestID)
 	baselineClientFlags := config.GetBaselineClientFlags(placeholderTestID)
 	highperfServerFlags := config.GetHighPerfServerFlags(placeholderTestID)
-	highperfClientGenFlags := config.GetHighPerfClientGeneratorFlags(placeholderTestID)
 	highperfClientFlags := config.GetHighPerfClientFlags(placeholderTestID)
 
-	fmt.Println("CLI Flags (Baseline):")
-	fmt.Printf("  Server:           %s\n", strings.Join(baselineServerFlags, " "))
-	fmt.Printf("  Client-Generator: %s\n", strings.Join(baselineClientGenFlags, " "))
-	fmt.Printf("  Client:           %s\n", strings.Join(baselineClientFlags, " "))
-	fmt.Println()
-	fmt.Println("CLI Flags (HighPerf):")
-	fmt.Printf("  Server:           %s\n", strings.Join(highperfServerFlags, " "))
-	fmt.Printf("  Client-Generator: %s\n", strings.Join(highperfClientGenFlags, " "))
-	fmt.Printf("  Client:           %s\n", strings.Join(highperfClientFlags, " "))
+	if config.PublisherType == PublisherTypeFFmpegUDP {
+		baselineClientUDPFlags := config.GetBaselineClientUDPFlags(placeholderTestID)
+		highperfClientUDPFlags := config.GetHighPerfClientUDPFlags(placeholderTestID)
+		baselineFFmpegArgs := config.GetBaselineFFmpegArgs()
+		highperfFFmpegArgs := config.GetHighPerfFFmpegArgs()
+
+		fmt.Println("CLI Flags (Baseline):")
+		fmt.Printf("  Server:     %s\n", strings.Join(baselineServerFlags, " "))
+		fmt.Printf("  Client-UDP: %s\n", strings.Join(baselineClientUDPFlags, " "))
+		fmt.Printf("  FFmpeg:     ffmpeg %s\n", strings.Join(baselineFFmpegArgs, " "))
+		fmt.Printf("  Client:     %s\n", strings.Join(baselineClientFlags, " "))
+		fmt.Println()
+		fmt.Println("CLI Flags (HighPerf):")
+		fmt.Printf("  Server:     %s\n", strings.Join(highperfServerFlags, " "))
+		fmt.Printf("  Client-UDP: %s\n", strings.Join(highperfClientUDPFlags, " "))
+		fmt.Printf("  FFmpeg:     ffmpeg %s\n", strings.Join(highperfFFmpegArgs, " "))
+		fmt.Printf("  Client:     %s\n", strings.Join(highperfClientFlags, " "))
+	} else {
+		baselineClientGenFlags := config.GetBaselineClientGeneratorFlags(placeholderTestID)
+		highperfClientGenFlags := config.GetHighPerfClientGeneratorFlags(placeholderTestID)
+
+		fmt.Println("CLI Flags (Baseline):")
+		fmt.Printf("  Server:           %s\n", strings.Join(baselineServerFlags, " "))
+		fmt.Printf("  Client-Generator: %s\n", strings.Join(baselineClientGenFlags, " "))
+		fmt.Printf("  Client:           %s\n", strings.Join(baselineClientFlags, " "))
+		fmt.Println()
+		fmt.Println("CLI Flags (HighPerf):")
+		fmt.Printf("  Server:           %s\n", strings.Join(highperfServerFlags, " "))
+		fmt.Printf("  Client-Generator: %s\n", strings.Join(highperfClientGenFlags, " "))
+		fmt.Printf("  Client:           %s\n", strings.Join(highperfClientFlags, " "))
+	}
 }
 
 // printParallelTestHeader prints the header for a parallel test
@@ -715,8 +738,605 @@ func printParallelTestHeader(config ParallelTestConfig) {
 		fmt.Printf("Latency Profile: %s\n", config.Impairment.LatencyProfile)
 	}
 	fmt.Println()
+	if config.PublisherType == PublisherTypeFFmpegUDP {
+		fmt.Println("Publisher: ffmpeg -> client-udp -> SRT")
+	} else {
+		fmt.Println("Publisher: client-generator (synthetic)")
+	}
 	fmt.Println("Pipelines:")
 	fmt.Println("  Baseline: list + no io_uring")
 	fmt.Println("  HighPerf: btree + io_uring")
 	fmt.Println()
+}
+
+// checkFFmpegAvailable verifies that ffmpeg is installed and in PATH.
+func checkFFmpegAvailable() error {
+	_, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return fmt.Errorf("ffmpeg not found in PATH; install with: sudo apt install ffmpeg")
+	}
+	return nil
+}
+
+// runParallelModeTestFFmpeg runs a parallel comparison test using ffmpeg → client-udp as the publisher.
+// Pipeline: ffmpeg (testsrc MPEG-TS) → UDP → client-udp → SRT → server → SRT → client
+// 4 processes per pipeline × 2 pipelines = 8 processes total.
+func runParallelModeTestFFmpeg(config ParallelTestConfig) ParallelTestResult {
+	result := ParallelTestResult{
+		StartTime: time.Now(),
+		Passed:    false,
+	}
+
+	// Verify we're running as root (required for network namespaces)
+	if os.Geteuid() != 0 {
+		fmt.Fprintf(os.Stderr, "Error: Parallel tests require root privileges\n")
+		fmt.Fprintf(os.Stderr, "Run with: sudo %s ...\n", os.Args[0])
+		result.EndTime = time.Now()
+		return result
+	}
+
+	// Check ffmpeg availability
+	if err := checkFFmpegAvailable(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+
+	// Check for profiling mode
+	var profileConfig *ProfileConfig
+	if ProfilingEnabled() {
+		var err error
+		profileConfig, err = NewProfileConfig(config.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating profile config: %v\n", err)
+			result.EndTime = time.Now()
+			return result
+		}
+		if profileConfig != nil {
+			profileConfig.PrintProfilingInfo()
+		}
+	}
+
+	// Create network controller
+	nc, err := NewNetworkController(NetworkControllerConfig{
+		TestID:  fmt.Sprintf("test_%d", os.Getpid()),
+		Verbose: config.VerboseNetwork,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating network controller: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+
+	// Create context for test
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Setup network namespaces
+	fmt.Println("Setting up network namespaces...")
+	if setupErr := nc.Setup(ctx); setupErr != nil {
+		fmt.Fprintf(os.Stderr, "Error setting up network: %v\n", setupErr)
+		result.EndTime = time.Now()
+		return result
+	}
+
+	// Ensure cleanup happens even on failure
+	defer func() {
+		fmt.Println("\nCleaning up network namespaces...")
+		if cleanupErr := nc.Cleanup(ctx); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", cleanupErr)
+		}
+	}()
+
+	// Setup parallel IPs (.3 addresses for HighPerf pipeline)
+	fmt.Println("Setting up parallel IPs for dual-pipeline test...")
+	if ipErr := nc.SetupParallelIPs(ctx); ipErr != nil {
+		fmt.Fprintf(os.Stderr, "Error setting up parallel IPs: %v\n", ipErr)
+		result.EndTime = time.Now()
+		return result
+	}
+
+	// Start packet captures if configured via environment variables
+	tcpdumpConfig := GetTcpdumpConfigFromEnv()
+	if tcpdumpConfig.HasAnyCapture() {
+		fmt.Println("Starting packet captures (TCPDUMP_* enabled)...")
+		if tcpdumpErr := nc.StartTcpdumpFromConfig(ctx, tcpdumpConfig); tcpdumpErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: tcpdump start failed: %v\n", tcpdumpErr)
+		} else {
+			if tcpdumpConfig.PublisherFile != "" {
+				fmt.Printf("  Publisher (client-udp): %s\n", tcpdumpConfig.PublisherFile)
+			}
+			if tcpdumpConfig.ServerFile != "" {
+				fmt.Printf("  Server: %s\n", tcpdumpConfig.ServerFile)
+			}
+			if tcpdumpConfig.SubscriberFile != "" {
+				fmt.Printf("  Subscriber (Client): %s\n", tcpdumpConfig.SubscriberFile)
+			}
+		}
+		fmt.Println()
+	}
+
+	// Print network status
+	fmt.Println("\nNetwork Topology (Parallel Mode - FFmpeg Publisher):")
+	fmt.Printf("  Baseline Pipeline:\n")
+	fmt.Printf("    FFmpeg -> UDP :%d -> client-udp -> SRT -> Server %s:%d -> Client %s\n",
+		config.getFFmpegConfig().BaselineUDPPort,
+		config.Baseline.ServerIP, config.Baseline.ServerPort, config.Baseline.SubscriberIP)
+	fmt.Printf("    Stream ID:  %s\n", config.Baseline.StreamID)
+	fmt.Printf("  HighPerf Pipeline:\n")
+	fmt.Printf("    FFmpeg -> UDP :%d -> client-udp -> SRT -> Server %s:%d -> Client %s\n",
+		config.getFFmpegConfig().HighPerfUDPPort,
+		config.HighPerf.ServerIP, config.HighPerf.ServerPort, config.HighPerf.SubscriberIP)
+	fmt.Printf("    Stream ID:  %s\n", config.HighPerf.StreamID)
+	fmt.Println()
+
+	// Apply initial latency profile if configured
+	if config.Impairment.LatencyProfile != "" {
+		profile := getLatencyProfileIndex(config.Impairment.LatencyProfile)
+		if profile >= 0 {
+			fmt.Printf("Setting latency profile: %s (profile %d)\n", config.Impairment.LatencyProfile, profile)
+			if latencyErr := nc.SetLatencyProfile(ctx, profile); latencyErr != nil {
+				fmt.Fprintf(os.Stderr, "Error setting latency: %v\n", latencyErr)
+				result.EndTime = time.Now()
+				return result
+			}
+		}
+	}
+
+	// Get the base directory and build paths to binaries
+	// FFmpeg mode uses: server + client-udp + client (no client-generator)
+	baseDir := getBaseDir()
+	var serverBin, clientUDPBin, clientBin string
+	if profileConfig != nil {
+		serverBin = filepath.Join(baseDir, "contrib", "server", "server-debug")
+		clientUDPBin = filepath.Join(baseDir, "contrib", "client-udp", "client-udp-debug")
+		clientBin = filepath.Join(baseDir, "contrib", "client", "client-debug")
+	} else {
+		serverBin = filepath.Join(baseDir, "contrib", "server", "server")
+		clientUDPBin = filepath.Join(baseDir, "contrib", "client-udp", "client-udp")
+		clientBin = filepath.Join(baseDir, "contrib", "client", "client")
+	}
+
+	// Check if binaries exist
+	if binErr := ensureBinaries(ctx, baseDir, serverBin, clientUDPBin, clientBin); binErr != nil {
+		fmt.Fprintf(os.Stderr, "Error building binaries: %v\n", binErr)
+		result.EndTime = time.Now()
+		return result
+	}
+
+	// Build CLI flags for both pipelines
+	baselineServerFlags := config.GetBaselineServerFlags(nc.TestID)
+	baselineClientUDPFlags := config.GetBaselineClientUDPFlags(nc.TestID)
+	baselineClientFlags := config.GetBaselineClientFlags(nc.TestID)
+
+	highperfServerFlags := config.GetHighPerfServerFlags(nc.TestID)
+	highperfClientUDPFlags := config.GetHighPerfClientUDPFlags(nc.TestID)
+	highperfClientFlags := config.GetHighPerfClientFlags(nc.TestID)
+
+	baselineFFmpegArgs := config.GetBaselineFFmpegArgs()
+	highperfFFmpegArgs := config.GetHighPerfFFmpegArgs()
+
+	// Add profiling flags if enabled
+	if profileConfig != nil && len(profileConfig.Profiles) > 0 {
+		profileType := profileConfig.Profiles[0]
+		fmt.Printf("Enabling %s profiling for server, client-udp, and client components\n\n", profileType)
+
+		// Baseline pipeline profiling
+		if args, profileErr := profileConfig.GetProfileArgs("baseline_server", profileType); profileErr == nil && args != nil {
+			baselineServerFlags = append(baselineServerFlags, args...)
+		}
+		if args, profileErr := profileConfig.GetProfileArgs("baseline_cudp", profileType); profileErr == nil && args != nil {
+			baselineClientUDPFlags = append(baselineClientUDPFlags, args...)
+		}
+		if args, profileErr := profileConfig.GetProfileArgs("baseline_client", profileType); profileErr == nil && args != nil {
+			baselineClientFlags = append(baselineClientFlags, args...)
+		}
+
+		// HighPerf pipeline profiling
+		if args, profileErr := profileConfig.GetProfileArgs("highperf_server", profileType); profileErr == nil && args != nil {
+			highperfServerFlags = append(highperfServerFlags, args...)
+		}
+		if args, profileErr := profileConfig.GetProfileArgs("highperf_cudp", profileType); profileErr == nil && args != nil {
+			highperfClientUDPFlags = append(highperfClientUDPFlags, args...)
+		}
+		if args, profileErr := profileConfig.GetProfileArgs("highperf_client", profileType); profileErr == nil && args != nil {
+			highperfClientFlags = append(highperfClientFlags, args...)
+		}
+	}
+
+	// Print CLI flags for debugging
+	fmt.Println("CLI Flags (Baseline):")
+	fmt.Printf("  Server:     %s\n", strings.Join(baselineServerFlags, " "))
+	fmt.Printf("  Client-UDP: %s\n", strings.Join(baselineClientUDPFlags, " "))
+	fmt.Printf("  FFmpeg:     ffmpeg %s\n", strings.Join(baselineFFmpegArgs, " "))
+	fmt.Printf("  Client:     %s\n", strings.Join(baselineClientFlags, " "))
+	fmt.Println()
+	fmt.Println("CLI Flags (HighPerf):")
+	fmt.Printf("  Server:     %s\n", strings.Join(highperfServerFlags, " "))
+	fmt.Printf("  Client-UDP: %s\n", strings.Join(highperfClientUDPFlags, " "))
+	fmt.Printf("  FFmpeg:     ffmpeg %s\n", strings.Join(highperfFFmpegArgs, " "))
+	fmt.Printf("  Client:     %s\n", strings.Join(highperfClientFlags, " "))
+	fmt.Println()
+
+	// Initialize process sets
+	baseline := &ParallelProcessSet{Label: "baseline"}
+	highperf := &ParallelProcessSet{Label: "highperf"}
+
+	// Start all servers first
+	fmt.Println("Starting servers in namespace...")
+
+	baseline.Server, err = startProcessInNamespace(ctx, nc.NamespaceServer, serverBin, baselineServerFlags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting baseline server: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+	defer killProcess(baseline.Server)
+
+	highperf.Server, err = startProcessInNamespace(ctx, nc.NamespaceServer, serverBin, highperfServerFlags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting highperf server: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+	defer killProcess(highperf.Server)
+
+	// Wait for servers to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Start client-udp processes (these listen on UDP and connect to SRT server)
+	fmt.Println("Starting client-udp processes in namespace...")
+
+	baseline.ClientGen, err = startProcessInNamespace(ctx, nc.NamespacePublisher, clientUDPBin, baselineClientUDPFlags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting baseline client-udp: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+	defer killProcess(baseline.ClientGen)
+
+	highperf.ClientGen, err = startProcessInNamespace(ctx, nc.NamespacePublisher, clientUDPBin, highperfClientUDPFlags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting highperf client-udp: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+	defer killProcess(highperf.ClientGen)
+
+	// Wait for client-udp SRT connections to establish
+	time.Sleep(1 * time.Second)
+
+	// Start ffmpeg processes (these send MPEG-TS over UDP to client-udp)
+	fmt.Println("Starting ffmpeg processes in namespace...")
+
+	baseline.FFmpeg, err = startProcessInNamespace(ctx, nc.NamespacePublisher, "ffmpeg", baselineFFmpegArgs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting baseline ffmpeg: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+	defer killProcess(baseline.FFmpeg)
+
+	highperf.FFmpeg, err = startProcessInNamespace(ctx, nc.NamespacePublisher, "ffmpeg", highperfFFmpegArgs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting highperf ffmpeg: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+	defer killProcess(highperf.FFmpeg)
+
+	// Wait for ffmpeg to start generating data
+	time.Sleep(500 * time.Millisecond)
+
+	// Start all clients (subscribers)
+	fmt.Println("Starting clients in namespace...")
+
+	baseline.Client, err = startProcessInNamespace(ctx, nc.NamespaceSubscriber, clientBin, baselineClientFlags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting baseline client: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+	defer killProcess(baseline.Client)
+
+	highperf.Client, err = startProcessInNamespace(ctx, nc.NamespaceSubscriber, clientBin, highperfClientFlags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting highperf client: %v\n", err)
+		result.EndTime = time.Now()
+		return result
+	}
+	defer killProcess(highperf.Client)
+
+	// Wait for all connections to establish
+	fmt.Printf("Waiting %v for all connections to establish...\n", config.ConnectionWait)
+	time.Sleep(config.ConnectionWait)
+
+	// Apply impairment settings
+	if config.Impairment.LossRate > 0 {
+		lossPercent := int(config.Impairment.LossRate * 100)
+		fmt.Printf("Applying %d%% packet loss (both pipelines)...\n", lossPercent)
+		if lossErr := nc.SetLossParallel(ctx, lossPercent); lossErr != nil {
+			fmt.Fprintf(os.Stderr, "Error setting loss: %v\n", lossErr)
+			result.EndTime = time.Now()
+			return result
+		}
+	}
+
+	// Start impairment pattern if configured
+	if config.Impairment.Pattern != "" && config.Impairment.Pattern != "clean" {
+		pattern := getImpairmentPattern(config.Impairment.Pattern)
+		if pattern != nil {
+			fmt.Printf("Starting impairment pattern: %s (both pipelines)\n", config.Impairment.Pattern)
+			if patternErr := nc.StartPatternParallel(ctx, *pattern); patternErr != nil {
+				fmt.Fprintf(os.Stderr, "Error starting pattern: %v\n", patternErr)
+				result.EndTime = time.Now()
+				return result
+			}
+			defer func() {
+				if stopErr := nc.StopPatternParallel(ctx); stopErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to stop parallel pattern: %v\n", stopErr)
+				}
+			}()
+		}
+	}
+
+	// Initialize metrics collection for both pipelines
+	// client-udp UDS fills the ClientGenerator slot in TestMetrics
+	udsPaths := config.GetAllUDSPathsFFmpeg(nc.TestID)
+
+	baselineServerEndpoint := MetricsEndpoint{UDSPath: udsPaths["server_baseline"]}
+	baselineClientGenEndpoint := MetricsEndpoint{UDSPath: udsPaths["clientgen_baseline"]}
+	baselineClientEndpoint := MetricsEndpoint{UDSPath: udsPaths["client_baseline"]}
+	result.BaselineMetrics = NewTestMetrics(baselineServerEndpoint, baselineClientGenEndpoint, baselineClientEndpoint)
+
+	highperfServerEndpoint := MetricsEndpoint{UDSPath: udsPaths["server_highperf"]}
+	highperfClientGenEndpoint := MetricsEndpoint{UDSPath: udsPaths["clientgen_highperf"]}
+	highperfClientEndpoint := MetricsEndpoint{UDSPath: udsPaths["client_highperf"]}
+	result.HighPerfMetrics = NewTestMetrics(highperfServerEndpoint, highperfClientGenEndpoint, highperfClientEndpoint)
+
+	// Collect initial metrics
+	fmt.Println("\nCollecting initial metrics (both pipelines)...")
+	result.BaselineMetrics.CollectAllMetrics(context.Background(), "startup")
+	result.HighPerfMetrics.CollectAllMetrics(context.Background(), "startup")
+
+	// Run for test duration
+	fmt.Printf("All 8 processes started. Running for %v...\n", config.TestDuration)
+
+	// Periodically collect metrics during test
+	if config.CollectInterval > 0 {
+		collectTicker := time.NewTicker(config.CollectInterval)
+		testTimer := time.NewTimer(config.TestDuration)
+
+		snapshotCount := 1
+	collectLoop:
+		for {
+			select {
+			case <-collectTicker.C:
+				fmt.Println("\nCollecting mid-test metrics (both pipelines)...")
+				result.BaselineMetrics.CollectAllMetrics(context.Background(), "mid-test")
+				result.HighPerfMetrics.CollectAllMetrics(context.Background(), "mid-test")
+				snapshotCount++
+
+				// Print verbose delta if enabled
+				if config.VerboseMetrics && snapshotCount >= 2 {
+					fmt.Println("  [Baseline]")
+					result.BaselineMetrics.PrintVerboseMetricsDelta(snapshotCount-2, snapshotCount-1)
+					fmt.Println("  [HighPerf]")
+					result.HighPerfMetrics.PrintVerboseMetricsDelta(snapshotCount-2, snapshotCount-1)
+				}
+			case <-testTimer.C:
+				collectTicker.Stop()
+				break collectLoop
+			}
+		}
+	} else {
+		time.Sleep(config.TestDuration)
+	}
+
+	// =================================================================
+	// QUIESCE PHASE: Pause data flow and wait for metrics to stabilize
+	// =================================================================
+	fmt.Println("\n--- Quiesce Phase (Both Pipelines) ---")
+
+	// Send SIGUSR1 to both client-udp processes to pause data
+	fmt.Println("Sending SIGUSR1 to both client-udp processes (pause data)...")
+	if signalErr := signalProcess(baseline.ClientGen, syscall.SIGUSR1); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to send SIGUSR1 to baseline client-udp: %v\n", signalErr)
+	}
+	if signalErr := signalProcess(highperf.ClientGen, syscall.SIGUSR1); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to send SIGUSR1 to highperf client-udp: %v\n", signalErr)
+	}
+
+	// Send SIGINT to ffmpeg processes (they don't need to run during quiesce)
+	fmt.Println("Sending SIGINT to ffmpeg processes...")
+	if signalErr := signalProcess(baseline.FFmpeg, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal baseline ffmpeg: %v\n", signalErr)
+	}
+	if signalErr := signalProcess(highperf.FFmpeg, syscall.SIGINT); signalErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal highperf ffmpeg: %v\n", signalErr)
+	}
+	// Wait briefly for ffmpeg to stop
+	waitForProcessExit(baseline.FFmpeg, 3*time.Second)
+	waitForProcessExit(highperf.FFmpeg, 3*time.Second)
+
+	// Wait for both pipelines to stabilize
+	fmt.Println("Waiting for metrics to stabilize...")
+	stabCtx, stabCancel := context.WithTimeout(ctx, 10*time.Second)
+
+	baselineStab := result.BaselineMetrics.WaitForStabilization(stabCtx)
+	highperfStab := result.HighPerfMetrics.WaitForStabilization(stabCtx)
+	stabCancel()
+
+	if baselineStab.Stable {
+		fmt.Printf("Baseline stabilized in %v\n", baselineStab.Elapsed.Round(time.Millisecond))
+	} else {
+		fmt.Printf("Warning: Baseline stabilization timeout: %v\n", baselineStab.Error)
+	}
+	if highperfStab.Stable {
+		fmt.Printf("HighPerf stabilized in %v\n", highperfStab.Elapsed.Round(time.Millisecond))
+	} else {
+		fmt.Printf("Warning: HighPerf stabilization timeout: %v\n", highperfStab.Error)
+	}
+
+	// Collect pre-shutdown metrics
+	fmt.Println("Collecting pre-shutdown metrics...")
+	result.BaselineMetrics.CollectAllMetrics(context.Background(), "pre-shutdown")
+	result.HighPerfMetrics.CollectAllMetrics(context.Background(), "pre-shutdown")
+
+	// =================================================================
+	// SHUTDOWN PHASE: Gracefully stop all 8 processes
+	// =================================================================
+	fmt.Println("\n--- Shutdown Phase ---")
+
+	// Stop impairment pattern
+	if config.Impairment.Pattern != "" && config.Impairment.Pattern != "clean" {
+		fmt.Println("Stopping impairment pattern...")
+		if stopErr := nc.StopPatternParallel(ctx); stopErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop impairment pattern: %v\n", stopErr)
+		}
+	}
+
+	// Clear loss
+	if config.Impairment.LossRate > 0 {
+		fmt.Println("Clearing packet loss...")
+		if lossErr := nc.SetLossParallel(ctx, 0); lossErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to clear packet loss: %v\n", lossErr)
+		}
+	}
+
+	// Shutdown all processes
+	fmt.Println("\nInitiating parallel shutdown sequence (8 processes)...")
+	allPassed := shutdownParallelPipelinesFFmpeg(baseline, highperf)
+
+	// Collect final metrics
+	fmt.Println("\nCollecting final metrics...")
+	result.BaselineMetrics.CollectAllMetrics(context.Background(), "final")
+	result.HighPerfMetrics.CollectAllMetrics(context.Background(), "final")
+
+	// Generate profile comparison report if profiling was enabled
+	if profileConfig != nil {
+		generateParallelProfileReport(config.Name, profileConfig, config.TestDuration)
+	}
+
+	result.Passed = allPassed
+	result.EndTime = time.Now()
+	return result
+}
+
+// shutdownParallelPipelinesFFmpeg shuts down both ffmpeg-publisher pipelines gracefully.
+// Order: Clients (5s) -> FFmpegs (SIGINT, 3s) -> ClientUDPs (SIGINT, 8s) -> Servers (10s)
+func shutdownParallelPipelinesFFmpeg(baseline, highperf *ParallelProcessSet) bool {
+	allPassed := true
+
+	// 1. Shutdown clients first (subscribers)
+	fmt.Println("Sending SIGINT to clients...")
+	if err := signalProcess(baseline.Client, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal baseline client: %v\n", err)
+	}
+	if err := signalProcess(highperf.Client, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal highperf client: %v\n", err)
+	}
+
+	baselineClientExited := waitForProcessExit(baseline.Client, 5*time.Second)
+	highperfClientExited := waitForProcessExit(highperf.Client, 5*time.Second)
+
+	if baselineClientExited {
+		fmt.Println("  Baseline client exited gracefully")
+	} else {
+		fmt.Println("  Baseline client did not exit gracefully")
+		killProcess(baseline.Client)
+		allPassed = false
+	}
+	if highperfClientExited {
+		fmt.Println("  HighPerf client exited gracefully")
+	} else {
+		fmt.Println("  HighPerf client did not exit gracefully")
+		killProcess(highperf.Client)
+		allPassed = false
+	}
+
+	// 2. Shutdown ffmpeg processes (may already be stopped from quiesce phase)
+	fmt.Println("Sending SIGINT to ffmpeg processes...")
+	if baseline.FFmpeg != nil {
+		if err := signalProcess(baseline.FFmpeg, syscall.SIGINT); err != nil {
+			// ffmpeg may already be stopped from quiesce phase
+			fmt.Fprintf(os.Stderr, "  Note: baseline ffmpeg signal: %v\n", err)
+		}
+	}
+	if highperf.FFmpeg != nil {
+		if err := signalProcess(highperf.FFmpeg, syscall.SIGINT); err != nil {
+			fmt.Fprintf(os.Stderr, "  Note: highperf ffmpeg signal: %v\n", err)
+		}
+	}
+
+	if baseline.FFmpeg != nil {
+		if waitForProcessExit(baseline.FFmpeg, 3*time.Second) {
+			fmt.Println("  Baseline ffmpeg exited")
+		} else {
+			killProcess(baseline.FFmpeg)
+		}
+	}
+	if highperf.FFmpeg != nil {
+		if waitForProcessExit(highperf.FFmpeg, 3*time.Second) {
+			fmt.Println("  HighPerf ffmpeg exited")
+		} else {
+			killProcess(highperf.FFmpeg)
+		}
+	}
+
+	// 3. Shutdown client-udp processes (publishers)
+	fmt.Println("Sending SIGINT to client-udp processes...")
+	if err := signalProcess(baseline.ClientGen, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal baseline client-udp: %v\n", err)
+	}
+	if err := signalProcess(highperf.ClientGen, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal highperf client-udp: %v\n", err)
+	}
+
+	baselineClientUDPExited := waitForProcessExit(baseline.ClientGen, 8*time.Second)
+	highperfClientUDPExited := waitForProcessExit(highperf.ClientGen, 8*time.Second)
+
+	if baselineClientUDPExited {
+		fmt.Println("  Baseline client-udp exited gracefully")
+	} else {
+		fmt.Println("  Baseline client-udp did not exit gracefully")
+		killProcess(baseline.ClientGen)
+		allPassed = false
+	}
+	if highperfClientUDPExited {
+		fmt.Println("  HighPerf client-udp exited gracefully")
+	} else {
+		fmt.Println("  HighPerf client-udp did not exit gracefully")
+		killProcess(highperf.ClientGen)
+		allPassed = false
+	}
+
+	// 4. Shutdown servers
+	fmt.Println("Sending SIGINT to servers...")
+	if err := signalProcess(baseline.Server, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal baseline server: %v\n", err)
+	}
+	if err := signalProcess(highperf.Server, syscall.SIGINT); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to signal highperf server: %v\n", err)
+	}
+
+	baselineServerExited := waitForProcessExit(baseline.Server, 10*time.Second)
+	highperfServerExited := waitForProcessExit(highperf.Server, 10*time.Second)
+
+	if baselineServerExited {
+		fmt.Println("  Baseline server exited gracefully")
+	} else {
+		fmt.Println("  Baseline server did not exit gracefully")
+		killProcess(baseline.Server)
+		allPassed = false
+	}
+	if highperfServerExited {
+		fmt.Println("  HighPerf server exited gracefully")
+	} else {
+		fmt.Println("  HighPerf server did not exit gracefully")
+		killProcess(highperf.Server)
+		allPassed = false
+	}
+
+	return allPassed
 }
