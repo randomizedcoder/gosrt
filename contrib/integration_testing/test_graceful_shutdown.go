@@ -269,6 +269,9 @@ func main() {
 		// Run all clean network tests (no root needed)
 		runCleanMatrixTestsByTier(TierNightly)
 
+	case "cleanroom-test":
+		runCleanroomTest()
+
 	default:
 		// Check if it's a specific clean matrix test name
 		if strings.HasPrefix(testName, "Int-Clean-") {
@@ -288,6 +291,8 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint-all          Run graceful shutdown test with all configurations\n")
 	fmt.Fprintf(os.Stderr, "  graceful-shutdown-sigint-config NAME  Run graceful shutdown test with specific config\n")
 	fmt.Fprintf(os.Stderr, "  list-configs                          List all clean network configurations\n")
+	fmt.Fprintf(os.Stderr, "\nClean Room Tests (no root, loopback, ffmpeg required):\n")
+	fmt.Fprintf(os.Stderr, "  cleanroom-test                        Full pipeline: ffmpeg->client-udp->server->client (no sudo!)\n")
 	fmt.Fprintf(os.Stderr, "\nNetwork Impairment Tests (require root):\n")
 	fmt.Fprintf(os.Stderr, "  network-test NAME                     Run network impairment test with specific config\n")
 	fmt.Fprintf(os.Stderr, "  network-test-all                      Run all network impairment tests\n")
@@ -471,7 +476,13 @@ func testNetworkModeAllConfigs() {
 func testParallelModeWithConfig(config ParallelTestConfig) {
 	printParallelTestHeader(config)
 
-	result := runParallelModeTest(config)
+	var result ParallelTestResult
+	switch config.PublisherType {
+	case PublisherTypeFFmpegUDP:
+		result = runParallelModeTestFFmpeg(config)
+	default:
+		result = runParallelModeTest(config)
+	}
 
 	if !result.Passed {
 		fmt.Fprintf(os.Stderr, "Test FAILED: parallel execution failed\n")
@@ -506,7 +517,13 @@ func testParallelModeAllConfigs() {
 		fmt.Printf("\n--- Configuration %d/%d: %s ---\n", i+1, len(ParallelTestConfigs), config.Name)
 		printParallelTestHeader(*config)
 
-		result := runParallelModeTest(*config)
+		var result ParallelTestResult
+		switch config.PublisherType {
+		case PublisherTypeFFmpegUDP:
+			result = runParallelModeTestFFmpeg(*config)
+		default:
+			result = runParallelModeTest(*config)
+		}
 		if !result.Passed {
 			fmt.Printf("✗ Configuration %s FAILED\n", config.Name)
 			failed++
@@ -882,25 +899,30 @@ func getBaseDir() string {
 // ensureBinaries ensures that all required binaries exist, building them if necessary.
 // Note: If binaries are stale after source changes, run 'make clean' to force rebuild.
 // The context is used for cancellation of the build process.
-func ensureBinaries(ctx context.Context, baseDir string, serverBin, clientGenBin, clientBin string) error {
-	binaries := []struct {
-		path string
-		pkg  string
-	}{
-		{serverBin, "./contrib/server"},
-		{clientGenBin, "./contrib/client-generator"},
-		{clientBin, "./contrib/client"},
-	}
+// Binary paths are expected to be under contrib/<component>/<binary-name>.
+func ensureBinaries(ctx context.Context, baseDir string, binaryPaths ...string) error {
+	for _, binPath := range binaryPaths {
+		if binPath == "" {
+			continue
+		}
+		if _, statErr := os.Stat(binPath); os.IsNotExist(statErr) {
+			// Derive the Go package path from the binary path.
+			// e.g., .../contrib/server/server -> ./contrib/server
+			// e.g., .../contrib/client-udp/client-udp-debug -> ./contrib/client-udp
+			dir := filepath.Dir(binPath)
+			rel, relErr := filepath.Rel(baseDir, dir)
+			if relErr != nil {
+				return fmt.Errorf("failed to compute relative path for %s: %w", binPath, relErr)
+			}
+			pkg := "./" + rel
 
-	for _, bin := range binaries {
-		if _, statErr := os.Stat(bin.path); os.IsNotExist(statErr) {
-			fmt.Printf("Building %s...\n", bin.path)
-			cmd := exec.CommandContext(ctx, "go", "build", "-o", bin.path, bin.pkg)
+			fmt.Printf("Building %s...\n", binPath)
+			cmd := exec.CommandContext(ctx, "go", "build", "-o", binPath, pkg)
 			cmd.Dir = baseDir
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if runErr := cmd.Run(); runErr != nil {
-				return fmt.Errorf("failed to build %s: %w", bin.path, runErr)
+				return fmt.Errorf("failed to build %s: %w", binPath, runErr)
 			}
 		}
 	}
